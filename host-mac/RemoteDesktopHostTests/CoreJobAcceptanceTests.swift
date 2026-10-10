@@ -176,6 +176,47 @@ final class CoreJobAcceptanceTests: XCTestCase {
         ], label: "Send email"), expected: expected))
     }
 
+    func testGmailAcceptanceAttachmentOracleRequiresOneExactNameAndRoundedVisibleSize() {
+        let exact = Self.gmailAttachmentFactsMatch(groupText: "Attachment: Board Review.pptx (3K)",
+            linkLabels: ["Board Review.pptx (3K)"], removeButtonLabels: ["Remove attachment"],
+            expectedName: "Board Review.pptx", expectedBytes: 2_793)
+        XCTAssertTrue(exact.nameMatches)
+        XCTAssertTrue(exact.sizeVisible)
+        XCTAssertTrue(exact.singleAttachment)
+        XCTAssertFalse(Self.gmailAttachmentFactsMatch(groupText: "Attachment: Board Review.pptx (3K)",
+            linkLabels: ["Board Review.pptx (3K)", "Board Review.pptx (3K)"],
+            removeButtonLabels: ["Remove attachment"], expectedName: "Board Review.pptx",
+            expectedBytes: 2_793).singleAttachment)
+        XCTAssertFalse(Self.gmailAttachmentFactsMatch(groupText: "Attachment: Board Review.pptx (3K)",
+            linkLabels: ["Board Review.pptx final (3K)"], removeButtonLabels: ["Remove attachment"],
+            expectedName: "Board Review.pptx", expectedBytes: 2_793).nameMatches)
+        let wrongSize = Self.gmailAttachmentFactsMatch(groupText: "Attachment: Board Review.pptx (3K)",
+            linkLabels: ["Board Review.pptx (4K)"], removeButtonLabels: ["Remove attachment"],
+            expectedName: "Board Review.pptx", expectedBytes: 2_793)
+        XCTAssertTrue(wrongSize.nameMatches)
+        XCTAssertFalse(wrongSize.sizeVisible)
+        let missingRemoval = Self.gmailAttachmentFactsMatch(groupText: "Attachment: Board Review.pptx (3K)",
+            linkLabels: ["Board Review.pptx (3K)"], removeButtonLabels: [],
+            expectedName: "Board Review.pptx", expectedBytes: 2_793)
+        XCTAssertFalse(missingRemoval.singleAttachment)
+        XCTAssertFalse(missingRemoval.sizeVisible)
+        let duplicateRemoval = Self.gmailAttachmentFactsMatch(groupText: "Attachment: Board Review.pptx (3K)",
+            linkLabels: ["Board Review.pptx (3K)"],
+            removeButtonLabels: ["Remove attachment", "Remove attachment"],
+            expectedName: "Board Review.pptx", expectedBytes: 2_793)
+        XCTAssertFalse(duplicateRemoval.singleAttachment)
+        XCTAssertFalse(duplicateRemoval.sizeVisible)
+        XCTAssertFalse(Self.gmailAttachmentFactsMatch(groupText: "Attachment: Board Review.pptx final (3K)",
+            linkLabels: ["Board Review.pptx (3K)"], removeButtonLabels: ["Remove attachment"],
+            expectedName: "Board Review.pptx", expectedBytes: 2_793).nameMatches)
+        XCTAssertFalse(Self.gmailAttachmentFactsMatch(groupText: "Attachment: Board Review.pptx (3K)",
+            linkLabels: ["Board Review.pptx (3K)"], removeButtonLabels: ["Remove attachment"], groupCount: 2,
+            expectedName: "Board Review.pptx", expectedBytes: 2_793).singleAttachment)
+        XCTAssertFalse(Self.gmailAttachmentFactsMatch(groupText: "Attachment: board review.pptx (3K)",
+            linkLabels: ["Board Review.pptx (3K)"], removeButtonLabels: ["Remove attachment"],
+            expectedName: "Board Review.pptx", expectedBytes: 2_793).nameMatches)
+    }
+
     func testGmailAcceptanceSanitizesSessionValidationPhase() {
         for phase in ["capture", "target", "sheet", "focus", "complete"] {
             XCTAssertEqual(Self.sanitizedSessionValidationPhase(phase), phase)
@@ -201,6 +242,53 @@ final class CoreJobAcceptanceTests: XCTestCase {
         XCTAssertEqual(Self.sanitizedSessionCaptureAXErrorCode("-25202"), -25_202)
         XCTAssertNil(Self.sanitizedSessionCaptureAXErrorCode("-999999"))
         XCTAssertNil(Self.sanitizedSessionCaptureAXErrorCode("private text"))
+    }
+
+    func testGmailAcceptanceSanitizesDesktopRevalidationEvidence() {
+        let diagnostic = Self.sanitizedDesktopRevalidationDiagnostic([
+            "blockedAt": "editor-settle-timeout", "sampleCount": "13", "tokenChangeCount": "2",
+            "nilSampleCount": "1", "elapsedMs": "3250", "quietMs": "10",
+            "pointerTargetFrame": "recipient@example.com", "sampleCountExtra": "500000",
+            "approvedVisualContinuationFailure": "desktopFailure",
+            "approvedVisualContinuationDesktopFailure": "scopedSurfaceChanged",
+        ])
+        XCTAssertEqual(diagnostic["blockedAt"] as? String, "editor-settle-timeout")
+        XCTAssertEqual(diagnostic["sampleCount"] as? Int, 13)
+        XCTAssertEqual(diagnostic["tokenChangeCount"] as? Int, 2)
+        XCTAssertEqual(diagnostic["nilSampleCount"] as? Int, 1)
+        XCTAssertEqual(diagnostic["elapsedMs"] as? Int, 3_250)
+        XCTAssertEqual(diagnostic["quietMs"] as? Int, 10)
+        XCTAssertNil(diagnostic["pointerTargetFrame"])
+        XCTAssertNil(diagnostic["sampleCountExtra"])
+        XCTAssertEqual(diagnostic["approvedVisualContinuationFailure"] as? String, "desktopFailure")
+        XCTAssertEqual(diagnostic["approvedVisualContinuationDesktopFailure"] as? String, "scopedSurfaceChanged")
+        XCTAssertTrue(Self.sanitizedDesktopRevalidationDiagnostic([
+            "blockedAt": "recipient@example.com", "sampleCount": "999999"
+        ]).isEmpty)
+        let rejected = Self.sanitizedDesktopRevalidationDiagnostic([
+            "approvedVisualContinuationFailure": "recipient@example.com",
+            "approvedVisualContinuationDesktopFailure": "private text",
+        ])
+        XCTAssertNil(rejected["approvedVisualContinuationFailure"])
+        XCTAssertNil(rejected["approvedVisualContinuationDesktopFailure"])
+    }
+
+    func testGmailSavedRecipientRetryRequiresPreMenuMissingState() {
+        for phase in ["subject_ancestor_chip_missing", "chip_reacquisition_compose_unavailable",
+            "chip_reacquisition_chip_missing", "chip_reacquisition_metadata_changed"] {
+            XCTAssertTrue(Self.gmailSavedRecipientProofRetryEligible(["recipient_proof_diagnostic": [
+                "phase": phase, "opened_menu_count": 0, "menu_scan_nodes_visited": 0,
+                "preexisting_menu_count": 0,
+            ]]))
+        }
+        let rejectedDiagnostics: [[String: Any]] = [
+            ["phase": "subject_ancestor_chip_ambiguous", "opened_menu_count": 0, "menu_scan_nodes_visited": 0],
+            ["phase": "subject_ancestor_chip_missing", "opened_menu_count": 1, "menu_scan_nodes_visited": 0],
+            ["phase": "subject_ancestor_chip_missing", "opened_menu_count": 0, "menu_scan_nodes_visited": 1],
+        ]
+        for diagnostic in rejectedDiagnostics {
+            XCTAssertFalse(Self.gmailSavedRecipientProofRetryEligible(["recipient_proof_diagnostic": diagnostic]))
+        }
     }
 
     func testGmailAcceptanceDoesNotTreatComposeURLParametersAsFieldEvidence() {
@@ -241,8 +329,16 @@ final class CoreJobAcceptanceTests: XCTestCase {
 
     func testGmailAcceptanceDraftRecoveryRequiresOneExactSubjectRowAndCompleteScan() {
         let subject = "Remote Desktop acceptance [token]"
+        XCTAssertEqual(Self.gmailPrimaryDraftCellText(value: "", descendantStaticTexts: ["", subject, "body"]),
+            subject)
+        XCTAssertEqual(Self.gmailPrimaryDraftCellText(value: "Sender", descendantStaticTexts: [subject]), "Sender")
+        XCTAssertEqual(Self.gmailPrimaryDraftCellText(value: nil, descendantStaticTexts: ["Sender", subject]), "Sender")
         XCTAssertEqual(Self.gmailUniqueDraftSubjectRowIndex(
             cellValuesByRow: [["Other draft"], [subject]], scanComplete: true, subject: subject), 1)
+        XCTAssertNil(Self.gmailUniqueDraftSubjectRowIndex(
+            cellValuesByRow: [[Self.gmailPrimaryDraftCellText(value: "", descendantStaticTexts: [subject])],
+                [Self.gmailPrimaryDraftCellText(value: "", descendantStaticTexts: [subject])]],
+            scanComplete: true, subject: subject))
         XCTAssertNil(Self.gmailUniqueDraftSubjectRowIndex(
             cellValuesByRow: [[subject], [subject]], scanComplete: true, subject: subject))
         XCTAssertNil(Self.gmailUniqueDraftSubjectRowIndex(
@@ -250,6 +346,121 @@ final class CoreJobAcceptanceTests: XCTestCase {
         XCTAssertNil(Self.gmailUniqueDraftSubjectRowIndex(
             cellValuesByRow: [["Remote Desktop acceptance [other-token]"], ["body contains \(subject)"]],
             scanComplete: true, subject: subject))
+    }
+
+    func testGmailDraftsListingPolicyRequiresTheObservedSelectedAccountWithoutComposeID() {
+        XCTAssertTrue(Self.gmailIsOwnedDraftsListingURL(
+            "https://mail.google.com/mail/u/0/#drafts", expectedAccountIndex: 0))
+        XCTAssertTrue(Self.gmailIsOwnedDraftsListingURL(
+            "https://mail.google.com/mail/u/0/#drafts?view=all", expectedAccountIndex: 0))
+        XCTAssertTrue(Self.gmailIsOwnedDraftsListingURL(
+            "https://mail.google.com/mail/u/0/#drafts?view=all%20drafts", expectedAccountIndex: 0))
+        XCTAssertFalse(Self.gmailIsOwnedDraftsListingURL(
+            "https://mail.google.com/mail/u/0/#inbox", expectedAccountIndex: 0))
+        XCTAssertFalse(Self.gmailIsOwnedDraftsListingURL(
+            "https://mail.google.com/mail/u/0/#drafts?compose=FMfcgzQX_ownedDraft123", expectedAccountIndex: 0))
+        XCTAssertFalse(Self.gmailIsOwnedDraftsListingURL(
+            "https://mail.google.com/mail/u/0/#drafts?view=%ZZ", expectedAccountIndex: 0))
+        XCTAssertFalse(Self.gmailIsOwnedDraftsListingURL(
+            "https://mail.google.com/mail/u/1/#drafts", expectedAccountIndex: 0))
+        XCTAssertFalse(Self.gmailIsOwnedDraftsListingURL(
+            "https://mail.google.com.evil.invalid/mail/u/0/#drafts", expectedAccountIndex: 0))
+        XCTAssertTrue(Self.gmailIsOwnedOpaqueDraftComposeURL(
+            "https://mail.google.com/mail/u/0/#drafts?compose=FMfcgzQX_ownedDraft1234567890", expectedAccountIndex: 0))
+        XCTAssertFalse(Self.gmailIsOwnedOpaqueDraftComposeURL(
+            "https://mail.google.com/mail/u/0/?fs=1&to=someone@example.com#drafts", expectedAccountIndex: 0))
+        XCTAssertFalse(Self.gmailIsOwnedOpaqueDraftComposeURL(
+            "https://mail.google.com/mail/u/1/#drafts?compose=FMfcgzQX_ownedDraft1234567890", expectedAccountIndex: 0))
+    }
+
+    func testGmailRecipientContextClickPointRequiresFinitePositiveBoundsInsideRetainedWindow() {
+        let window = CGRect(x: 10, y: 20, width: 900, height: 700)
+        let chip = CGRect(x: 100, y: 120, width: 140, height: 24)
+        XCTAssertEqual(Self.gmailContextClickPoint(chipBounds: chip, windowBounds: window),
+            CGPoint(x: 170, y: 132))
+        for invalid in [CGRect.zero, CGRect(x: 100, y: 120, width: -1, height: 24),
+                        CGRect(x: CGFloat.nan, y: 120, width: 140, height: 24),
+                        CGRect(x: 890, y: 120, width: 40, height: 24)] {
+            XCTAssertNil(Self.gmailContextClickPoint(chipBounds: invalid, windowBounds: window))
+        }
+        XCTAssertNil(Self.gmailContextClickPoint(chipBounds: chip, windowBounds: .zero))
+    }
+
+    func testOptInGmailDraftRowCaptureProbe() async throws {
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["RUN_GMAIL_DRAFT_ROW_CAPTURE_PROBE"] == "1" else {
+            throw XCTSkip("Opt-in: set RUN_GMAIL_DRAFT_ROW_CAPTURE_PROBE=1")
+        }
+        guard let expectedPath = environment["GMAIL_DRAFT_ROW_CAPTURE_PROBE_EXPECTED_PATH"],
+              let resultPath = environment["GMAIL_DRAFT_ROW_CAPTURE_PROBE_RESULT_PATH"],
+              let probeSubject = environment["GMAIL_DRAFT_ROW_CAPTURE_PROBE_SUBJECT"] else {
+            throw HarnessError.prerequisite("The opt-in Gmail row probe requires expected, result, and subject paths")
+        }
+        let expected = try JSONDecoder().decode(Expected.self,
+            from: Data(contentsOf: URL(fileURLWithPath: expectedPath)))
+        guard expected.job == "gmail", expected.subject == probeSubject else {
+            throw HarnessError.prerequisite("The opt-in Gmail row probe subject does not match expected.json")
+        }
+        var evidence: [String: Any] = [:]
+        await Self.captureGmailDraft(expected: expected, evidence: &evidence, verifySavedDraft: true)
+        let output: [String: Any] = [
+            "capture_status": evidence["capture_status"] ?? NSNull(),
+            "saved_oracle_status": evidence["saved_oracle_status"] ?? NSNull(),
+            "saved_draft_count": evidence["saved_draft_count"] ?? NSNull(),
+            "account_identity_verified": evidence["account_identity_verified"] ?? false,
+            "draft_row_capture_probe": evidence["draft_row_capture_probe"] ?? NSNull(),
+            "product_draft_row_probe_diagnostic": evidence["product_draft_row_probe_diagnostic"] ?? NSNull(),
+            "product_draft_row_probe_cell_found": evidence["product_draft_row_probe_cell_found"] ?? false,
+            "product_draft_row_probe_ambiguous": evidence["product_draft_row_probe_ambiguous"] ?? false,
+        ]
+        try Self.write(output, to: URL(fileURLWithPath: resultPath))
+        XCTAssertEqual(evidence["saved_oracle_status"] as? String, "probe-unique-exact-subject-row-found",
+            "The read-only Gmail row probe did not find one exact subject row: \(output)")
+        XCTAssertEqual(evidence["saved_draft_count"] as? Int, 1,
+            "The read-only Gmail row probe did not identify exactly one subject row: \(output)")
+        XCTAssertTrue(evidence["product_draft_row_probe_cell_found"] as? Bool == true,
+            "The product Gmail row helper did not identify the exact subject cell: \(output)")
+        XCTAssertFalse(evidence["product_draft_row_probe_ambiguous"] as? Bool == true,
+            "The product Gmail row helper treated one native cell alias as duplicate subject rows: \(output)")
+    }
+
+    func testOptInGmailExistingDraftRecipientCaptureProbe() async throws {
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["RUN_GMAIL_EXISTING_DRAFT_RECIPIENT_PROBE"] == "1" else {
+            throw XCTSkip("Opt-in: set RUN_GMAIL_EXISTING_DRAFT_RECIPIENT_PROBE=1")
+        }
+        guard let expectedPath = environment["GMAIL_EXISTING_DRAFT_RECIPIENT_PROBE_EXPECTED_PATH"],
+              let resultPath = environment["GMAIL_EXISTING_DRAFT_RECIPIENT_PROBE_RESULT_PATH"],
+              let probeSubject = environment["GMAIL_EXISTING_DRAFT_RECIPIENT_PROBE_SUBJECT"] else {
+            throw HarnessError.prerequisite("The existing-draft recipient probe requires expected, result, and subject paths")
+        }
+        let expected = try JSONDecoder().decode(Expected.self,
+            from: Data(contentsOf: URL(fileURLWithPath: expectedPath)))
+        guard expected.job == "gmail", expected.subject == probeSubject else {
+            throw HarnessError.prerequisite("The recipient probe subject does not match expected.json")
+        }
+        var evidence: [String: Any] = [:]
+        await Self.captureGmailDraft(expected: expected, evidence: &evidence)
+        let output: [String: Any] = [
+            "capture_status": evidence["capture_status"] ?? NSNull(),
+            "existing_draft_url_verified": evidence["existing_draft_recipient_probe_url_verified"] ?? false,
+            "account_identity_verified": evidence["account_identity_verified"] ?? false,
+            "compose_count": evidence["compose_count"] ?? 0,
+            "compose_identity_verified": evidence["compose_identity_verified"] ?? false,
+            "subject_matches": evidence["subject_matches"] ?? false,
+            "body_matches": evidence["body_matches"] ?? false,
+            "recipient_matches": evidence["recipient_matches"] ?? false,
+            "recipient_proof_diagnostic": evidence["recipient_proof_diagnostic"] ?? NSNull(),
+        ]
+        try Self.write(output, to: URL(fileURLWithPath: resultPath))
+        XCTAssertTrue(evidence["existing_draft_recipient_probe_url_verified"] as? Bool == true,
+            "The read-only recipient probe requires the existing opaque compose URL: \(output)")
+        XCTAssertTrue(evidence["account_identity_verified"] as? Bool == true,
+            "The recipient probe could not verify the selected account: \(output)")
+        XCTAssertEqual(evidence["compose_count"] as? Int, 1,
+            "The recipient probe requires one current compose: \(output)")
+        XCTAssertTrue(evidence["recipient_matches"] as? Bool == true,
+            "The exact Copy-address proof did not verify the recipient: \(output)")
     }
 
     private static func standaloneGmailFacts(subject: String, recipient: String, body: String) -> [GmailAXFact] {
@@ -312,12 +523,147 @@ final class CoreJobAcceptanceTests: XCTestCase {
             bodyFields.count == 1 && bodyFields.first?.value == body)
     }
 
+    private static func gmailAttachmentFactsMatch(groupText: String, linkLabels: [String],
+        removeButtonLabels: [String], groupCount: Int = 1, expectedName: String, expectedBytes: Int)
+        -> (nameMatches: Bool, sizeVisible: Bool, singleAttachment: Bool) {
+        let groupMatches = gmailAttachmentGroupNamesMatch(groupText: groupText, expectedName: expectedName)
+        let acceptedSizes = gmailVisibleAttachmentSizeLabels(expectedBytes)
+        let nameLabels = linkLabels.filter {
+            guard $0.hasPrefix("\(expectedName) ("), $0.hasSuffix(")") else { return false }
+            let size = String($0.dropFirst(expectedName.count + 2).dropLast())
+            return size.range(of: #"^[0-9]+(?:\.[0-9]+)? ?(?:K|KB|KiB|M|MB|MiB|G|GB|GiB)$"#,
+                options: [.regularExpression, .caseInsensitive]) != nil
+        }
+        let exactSizeLabels = nameLabels.filter { label in
+            acceptedSizes.contains { label == "\(expectedName) (\($0))" }
+        }
+        let exactRemoveLabels = removeButtonLabels.filter {
+            ["Remove attachment", "Remove \(expectedName)"].contains($0)
+        }
+        let nameMatches = groupMatches && linkLabels.count == 1 && nameLabels.count == 1
+        let uniqueAttachment = groupCount == 1 && nameMatches
+            && removeButtonLabels.count == 1 && exactRemoveLabels.count == 1
+        return (nameMatches, uniqueAttachment && exactSizeLabels.count == 1, uniqueAttachment)
+    }
+
+    private static func gmailAttachmentGroupNamesMatch(groupText: String, expectedName: String) -> Bool {
+        let pattern = #"(?:^|\s)(?i:Attachment): "# + NSRegularExpression.escapedPattern(for: expectedName)
+            + #"(?: \([0-9]+(?:\.[0-9]+)? ?(?:K|KB|KiB|M|MB|MiB|G|GB|GiB)\))?(?:\.|\s*$)"#
+        return groupText.range(of: pattern, options: [.regularExpression]) != nil
+    }
+
+    private static func gmailVisibleAttachmentSizeLabels(_ byteCount: Int) -> Set<String> {
+        guard byteCount >= 0 else { return [] }
+        let binaryRounded = Int((Double(byteCount) / 1_024).rounded())
+        let decimalRounded = Int((Double(byteCount) / 1_000).rounded())
+        let binaryTenth = (Double(byteCount) / 1_024 * 10).rounded() / 10
+        let decimalTenth = (Double(byteCount) / 1_000 * 10).rounded() / 10
+        let formatter = ByteCountFormatter()
+        formatter.countStyle = .file
+        var labels: Set<String> = [formatter.string(fromByteCount: Int64(byteCount))]
+        for amount in Set([binaryRounded, decimalRounded]) {
+            for unit in ["K", "KB", "KiB"] {
+                labels.insert("\(amount)\(unit)")
+                labels.insert("\(amount) \(unit)")
+            }
+        }
+        for amount in Set([binaryTenth, decimalTenth]) {
+            let number = String(format: "%.1f", amount)
+            for unit in ["K", "KB", "KiB"] {
+                labels.insert("\(number)\(unit)")
+                labels.insert("\(number) \(unit)")
+            }
+        }
+        return labels
+    }
+
     private static func gmailUniqueDraftSubjectRowIndex(cellValuesByRow: [[String]], scanComplete: Bool,
         subject: String) -> Int? {
         guard scanComplete else { return nil }
         let exactRows = cellValuesByRow.enumerated().filter { _, cells in cells.contains(subject) }
         guard exactRows.count == 1 else { return nil }
         return exactRows[0].offset
+    }
+
+    private static func gmailPrimaryDraftCellText(value: String?, descendantStaticTexts: [String]) -> String {
+        if let value, !value.isEmpty { return value }
+        return descendantStaticTexts.first(where: { !$0.isEmpty }) ?? ""
+    }
+
+    private static func gmailContextClickPoint(chipBounds: CGRect, windowBounds: CGRect) -> CGPoint? {
+        func valid(_ rect: CGRect) -> Bool {
+            !rect.isNull && !rect.isInfinite && !rect.isEmpty
+                && rect.size.width > 0 && rect.size.height > 0
+                && [rect.minX, rect.minY, rect.width, rect.height].allSatisfy { $0.isFinite && abs($0) <= 1_000_000 }
+        }
+        guard valid(chipBounds), valid(windowBounds), windowBounds.contains(chipBounds) else { return nil }
+        let point = CGPoint(x: chipBounds.midX, y: chipBounds.midY)
+        return windowBounds.contains(point) ? point : nil
+    }
+
+    private static func gmailIsOwnedDraftsListingURL(_ rawURL: String, expectedAccountIndex: Int) -> Bool {
+        guard rawURL.range(of: #"%(?![0-9A-Fa-f]{2})"#, options: .regularExpression) == nil,
+              let components = URLComponents(string: rawURL), components.scheme?.lowercased() == "https",
+              components.host?.lowercased() == "mail.google.com", components.user == nil,
+              components.password == nil, components.port == nil,
+              ComputerUseGmailAccountDirectory.accountIndex(from: rawURL) == expectedAccountIndex,
+              components.path == "/mail/u/\(expectedAccountIndex)/",
+              !(components.queryItems ?? []).contains(where: { $0.name == "compose" }),
+              let fragment = components.fragment else { return false }
+        let parts = fragment.split(separator: "?", maxSplits: 1, omittingEmptySubsequences: false)
+        guard let route = parts.first, route == "drafts" || route == "drafts/" else { return false }
+        if parts.count > 1 {
+            guard let fragmentComponents = URLComponents(string: "https://mail.google.com/?\(parts[1])"),
+                  let fragmentQuery = fragmentComponents.queryItems else { return false }
+            if fragmentQuery.contains(where: { $0.name == "compose" }) { return false }
+        }
+        return true
+    }
+
+    private static func gmailIsOwnedOpaqueDraftComposeURL(_ rawURL: String, expectedAccountIndex: Int) -> Bool {
+        guard rawURL.range(of: #"%(?![0-9A-Fa-f]{2})"#, options: .regularExpression) == nil,
+              let components = URLComponents(string: rawURL), components.scheme?.lowercased() == "https",
+              components.host?.lowercased() == "mail.google.com", components.user == nil,
+              components.password == nil, components.port == nil,
+              ComputerUseGmailAccountDirectory.accountIndex(from: rawURL) == expectedAccountIndex,
+              components.path == "/mail/u/\(expectedAccountIndex)/",
+              !(components.queryItems ?? []).contains(where: { $0.name == "compose" }),
+              let fragment = components.fragment else { return false }
+        let parts = fragment.split(separator: "?", maxSplits: 1, omittingEmptySubsequences: false)
+        guard parts.count == 2, parts[0] == "drafts",
+              let query = URLComponents(string: "https://mail.google.com/?\(parts[1])")?.queryItems else { return false }
+        let composeItems = query.filter { $0.name == "compose" }
+        guard composeItems.count == 1, let token = composeItems[0].value else { return false }
+        return token.range(of: #"^[A-Za-z0-9_-]{16,}$"#, options: .regularExpression) != nil
+    }
+
+    // A product-observed bookmark can recover navigation after a native panel
+    // interrupts the independent reader. It must never supply acceptance proof.
+    private static func gmailRecoveryMetadata(verifiedURL: URL?) -> [String: Any] {
+        guard let url = verifiedURL,
+              let accountIndex = ComputerUseGmailAccountDirectory.accountIndex(from: url.absoluteString),
+              gmailIsOwnedOpaqueDraftComposeURL(url.absoluteString, expectedAccountIndex: accountIndex) else {
+            return [:]
+        }
+        return ["recovery_compose_url": url.absoluteString,
+            "recovery_subject_verified": true, "gmail_account_index": accountIndex]
+    }
+
+    func testGmailRecoveryBookmarkDoesNotSupplyIndependentDraftProof() {
+        let url = URL(string: "https://mail.google.com/mail/u/0/#drafts?compose=FMfcgzQX_ownedDraft1234567890")!
+        let evidence = Self.gmailRecoveryMetadata(verifiedURL: url)
+        XCTAssertEqual(evidence["recovery_compose_url"] as? String, url.absoluteString)
+        XCTAssertEqual(evidence["gmail_account_index"] as? Int, 0)
+        XCTAssertEqual(evidence["recovery_subject_verified"] as? Bool, true)
+        for key in ["subject_matches", "saved_subject_matches", "saved_draft_count", "compose_count",
+                    "saved_draft_url", "compose_url", "attachment_matches"] {
+            XCTAssertNil(evidence[key])
+        }
+        for invalid in [nil, URL(string: "https://mail.google.com/mail/u/0/#drafts"),
+                        URL(string: "https://mail.google.com.evil.invalid/mail/u/0/#drafts?compose=FMfcgzQX_ownedDraft1234567890"),
+                        URL(string: "https://mail.google.com/mail/u/0/#drafts?compose=FMfcgzQX_ownedDraft1234567890&compose=otherDraft1234567890")] {
+            XCTAssertTrue(Self.gmailRecoveryMetadata(verifiedURL: invalid).isEmpty)
+        }
     }
 
     private enum GmailPreferencePreflight: Equatable {
@@ -608,6 +954,9 @@ final class CoreJobAcceptanceTests: XCTestCase {
                 if expected.send_approval_check != true {
                     await Self.captureGmailDraft(expected: expected, evidence: &gmail, verifySavedDraft: true)
                 }
+                gmail.merge(Self.gmailRecoveryMetadata(
+                    verifiedURL: gmailVisualLoader?.defaultBrowserExecutor?.gmailVerifiedComposeURLForRecovery),
+                    uniquingKeysWith: { independent, _ in independent })
                 let productFieldDiagnostic = Self.sanitizedGmailFieldDiagnostic(from: gmailVisualLoader)
                 if !productFieldDiagnostic.isEmpty {
                     gmail["product_field_diagnostic"] = productFieldDiagnostic
@@ -631,6 +980,9 @@ final class CoreJobAcceptanceTests: XCTestCase {
                 if expected.send_approval_check != true {
                     await Self.captureGmailDraft(expected: expected, evidence: &gmail)
                 }
+                gmail.merge(Self.gmailRecoveryMetadata(
+                    verifiedURL: gmailVisualLoader?.defaultBrowserExecutor?.gmailVerifiedComposeURLForRecovery),
+                    uniquingKeysWith: { independent, _ in independent })
                 let productFieldDiagnostic = Self.sanitizedGmailFieldDiagnostic(from: gmailVisualLoader)
                 if !productFieldDiagnostic.isEmpty {
                     gmail["product_field_diagnostic"] = productFieldDiagnostic
@@ -699,6 +1051,9 @@ final class CoreJobAcceptanceTests: XCTestCase {
         if let code = Self.sanitizedSessionCaptureAXErrorCode(raw["sessionCaptureAXErrorCode"]) {
             result["sessionCaptureAXErrorCode"] = code
         }
+        for (key, value) in Self.sanitizedDesktopRevalidationDiagnostic(raw) {
+            result[key] = value
+        }
         let sessionFailures: Set<String> = ["changedTaskOrGoal", "targetLost", "ambiguousWindows",
             "noNewFocusedWindow", "existingWindowsChanged", "interrupted", "journalUncertain",
             "authenticationHandoff", "browserAutomationPermissionRequired"]
@@ -717,6 +1072,60 @@ final class CoreJobAcceptanceTests: XCTestCase {
             result["lastSessionFailureForDiagnostics"] = failure
         }
         return result
+    }
+
+    private static func sanitizedDesktopRevalidationDiagnostic(_ raw: [String: String]) -> [String: Any] {
+        let blockedStages: Set<String> = [
+            "scope-wait-active-app-before-check", "scope-wait-deadline", "scope-wait-active-app-after-check",
+            "initial-editor-sample-active-app-before-check", "initial-editor-sample-active-app-after-check",
+            "initial-editor-sample-scope-invalid", "settle-active-app-before-editor-sample",
+            "settle-active-app-after-pre-sample-scope", "settle-scope-invalid-before-editor-sample",
+            "settle-active-app-before-post-sample-check", "settle-active-app-after-post-sample-scope",
+            "settle-scope-invalid-after-editor-sample", "editor-settle-timeout", "editor-settle-deadline-reobserve", "screen-consent-recognition",
+            "typing-target-unavailable", "approval-fingerprint-preparation", "approval-fingerprint-dispatch",
+        ]
+        var result: [String: Any] = [:]
+        if let stage = raw["blockedAt"], blockedStages.contains(stage) {
+            result["blockedAt"] = stage
+        }
+        for key in ["sampleCount", "tokenChangeCount", "nilSampleCount"] {
+            if let value = raw[key], let count = Int(value), (0...4_096).contains(count) {
+                result[key] = count
+            }
+        }
+        for key in ["elapsedMs", "quietMs"] {
+            if let value = raw[key], let milliseconds = Int(value), (0...120_000).contains(milliseconds) {
+                result[key] = milliseconds
+            }
+        }
+        let continuationFailures: Set<String> = ["sessionAuthenticationHandoff", "desktopFailure", "sessionFailure",
+            "browserFailure", "hostFailure", "other"]
+        if let failure = raw["approvedVisualContinuationFailure"], continuationFailures.contains(failure) {
+            result["approvedVisualContinuationFailure"] = failure
+        }
+        let desktopFailures: Set<String> = ["changedTask", "recoveredTask", "changedScreen", "scopedSurfaceChanged",
+            "completionUnverified", "unsupportedAction", "invalidApproval", "stepLimit", "authentication"]
+        if let failure = raw["approvedVisualContinuationDesktopFailure"], desktopFailures.contains(failure) {
+            result["approvedVisualContinuationDesktopFailure"] = failure
+        }
+        return result
+    }
+
+    private static func gmailSavedRecipientProofRetryEligible(_ evidence: [String: Any]) -> Bool {
+        guard let diagnostic = evidence["recipient_proof_diagnostic"] as? [String: Any],
+              let phase = diagnostic["phase"] as? String,
+              ["subject_ancestor_chip_missing", "chip_reacquisition_compose_unavailable",
+               "chip_reacquisition_chip_missing", "chip_reacquisition_metadata_changed"].contains(phase),
+              diagnostic["opened_menu_count"] as? Int == 0,
+              diagnostic["menu_scan_nodes_visited"] as? Int == 0,
+              diagnostic["preexisting_menu_count"] as? Int == 0 else { return false }
+        if let counts = diagnostic["subject_ancestor_candidate_counts"] as? [Int], counts.contains(where: { $0 > 1 }) {
+            return false
+        }
+        if let counts = diagnostic["recipient_reacquisition_candidate_counts"] as? [Int], counts.contains(where: { $0 > 1 }) {
+            return false
+        }
+        return true
     }
 
     private static func sanitizedSessionValidationPhase(_ raw: String?) -> String? {
@@ -1115,15 +1524,33 @@ final class CoreJobAcceptanceTests: XCTestCase {
     }
 
     private static func captureGmailDraft(expected: Expected, evidence: inout [String: Any],
-                                          verifySavedDraft: Bool = false) async {
+                                          verifySavedDraft: Bool = false,
+                                          requiredComposeURL: String? = nil,
+                                          requiredApplication: ComputerUseApplicationIdentity? = nil,
+                                          requiredWindowID: String? = nil,
+                                          readinessDeadline: ContinuousClock.Instant? = nil) async {
+        var recipientMenuEffectAttempted = false
+        func boundedDeadline(after duration: Duration) -> ContinuousClock.Instant {
+            let requested = ContinuousClock.now.advanced(by: duration)
+            // After opening a menu, finish its independently bounded proof and
+            // dismissal even if the pre-action readiness deadline has expired.
+            return recipientMenuEffectAttempted ? requested : min(requested, readinessDeadline ?? requested)
+        }
         guard let name = expected.attachment_name, let recipient = expected.to,
               let subject = expected.subject, let body = expected.body else {
             evidence["capture_status"] = "missing-expected-gmail-fields"
             return
         }
+        let probeEnvironment = ProcessInfo.processInfo.environment
+        let draftRowProbeEnabled = verifySavedDraft
+            && probeEnvironment["RUN_GMAIL_DRAFT_ROW_CAPTURE_PROBE"] == "1"
+            && probeEnvironment["GMAIL_DRAFT_ROW_CAPTURE_PROBE_SUBJECT"] == subject
+        let existingDraftRecipientProbeEnabled = !verifySavedDraft
+            && probeEnvironment["RUN_GMAIL_EXISTING_DRAFT_RECIPIENT_PROBE"] == "1"
+            && probeEnvironment["GMAIL_EXISTING_DRAFT_RECIPIENT_PROBE_SUBJECT"] == subject
         var captured: (ComputerUseApplicationIdentity, ComputerUseDefaultBrowserSession.Window,
                        ComputerUseDefaultBrowserPageReader.Observation)?
-        let loadDeadline = ContinuousClock.now.advanced(by: .seconds(5))
+        let loadDeadline = boundedDeadline(after: .seconds(5))
         while ContinuousClock.now < loadDeadline, !Task.isCancelled {
             if let (_, application, _) = ComputerUseDefaultBrowserTarget.currentDefaultHandlerForegroundWindow(),
                let snapshot = try? ComputerUseDefaultBrowserSession.captureWindowsForApplication(application),
@@ -1142,6 +1569,12 @@ final class CoreJobAcceptanceTests: XCTestCase {
             evidence["capture_status"] = "no-focused-default-browser-page"
             return
         }
+        if let requiredApplication, application != requiredApplication
+            || requiredWindowID.map({ window.id != $0 }) == true {
+            evidence["capture_status"] = "recipient-retry-window-changed"
+            evidence["account_identity_verified"] = false
+            return
+        }
         let host = URLComponents(string: page.url)?.host?.lowercased() ?? ""
         evidence["browser_bundle_id"] = application.bundleIdentifier
         evidence["url_host"] = host
@@ -1151,11 +1584,85 @@ final class CoreJobAcceptanceTests: XCTestCase {
             evidence["capture_status"] = "focused-page-is-not-gmail"
             return
         }
-        func value(_ attribute: String, _ element: AXUIElement) -> CFTypeRef? {
-            AXUIElementSetMessagingTimeout(element, 0.1)
+        guard let expectedAccount = expected.to,
+              let accountIndex = ComputerUseGmailAccountDirectory.accountIndex(from: page.url) else {
+            evidence["account_identity_verified"] = false
+            evidence["capture_status"] = "gmail-account-unverified"
+            return
+        }
+        if let requiredComposeURL,
+           (page.url != requiredComposeURL
+            || !Self.gmailIsOwnedOpaqueDraftComposeURL(page.url, expectedAccountIndex: accountIndex)) {
+            evidence["capture_status"] = "recipient-retry-compose-url-changed"
+            evidence["account_identity_verified"] = false
+            return
+        }
+        let account = ComputerUseGmailAccountDirectory.Account(email: expectedAccount, displayName: "",
+            index: accountIndex)
+        let reader = ComputerUseDefaultBrowserPageReader()
+        var accountRevalidationFailed = false
+        var revalidatedWindowBounds = window.identity.bounds
+        let revalidateAccountPage: @MainActor () throws -> Void = {
+            guard !Task.isCancelled,
+                  let snapshot = try? ComputerUseDefaultBrowserSession.captureWindowsForApplication(application),
+                  snapshot.application == application,
+                  snapshot.focusedWindowID == window.id,
+                  !snapshot.hasSheets, !snapshot.hasUnrecognizedSheets, snapshot.fileOpenPanel == nil,
+                  snapshot.windows.filter({ $0.id == window.id }).count == 1,
+                  let currentWindow = snapshot.windows.first(where: { $0.id == window.id }),
+                  CFEqual(currentWindow.accessibilityElement, window.accessibilityElement),
+                  let currentURL = try? reader.readRetainedPageURL(window: currentWindow.accessibilityElement,
+                    application: application, mayAct: { !Task.isCancelled }),
+                  currentURL == page.url else {
+                accountRevalidationFailed = true
+                throw HarnessError.missingEvidence("The owned Gmail page changed during the independent account proof")
+            }
+            revalidatedWindowBounds = currentWindow.identity.bounds
+        }
+        let accountLabel: String?
+        do {
+            accountLabel = try ComputerUseGmailRecipientVerifier.accountControlLabel(
+                window: window.accessibilityElement, application: application, revalidate: revalidateAccountPage)
+        } catch {
+            evidence["account_identity_verified"] = false
+            evidence["capture_status"] = accountRevalidationFailed ? "gmail-account-page-changed" : "gmail-account-unverified"
+            return
+        }
+        let windowTitle: String?
+        do {
+            windowTitle = try ComputerUseGmailAccountDirectory.observedWindowTitle(
+                window: window.accessibilityElement, application: application, revalidate: revalidateAccountPage)
+        } catch {
+            evidence["account_identity_verified"] = false
+            evidence["capture_status"] = accountRevalidationFailed ? "gmail-account-page-changed" : "gmail-account-unverified"
+            return
+        }
+        guard ComputerUseGmailAccountDirectory.confirmsActiveAccount(currentURL: page.url,
+                windowTitle: windowTitle, accountControlLabel: accountLabel, expected: account),
+              let finalURL = try? reader.readRetainedPageURL(window: window.accessibilityElement,
+                application: application, mayAct: { !Task.isCancelled }), finalURL == page.url else {
+            evidence["account_identity_verified"] = false
+            evidence["capture_status"] = "gmail-account-unverified"
+            return
+        }
+        evidence["account_identity_verified"] = true
+        evidence["gmail_account_index"] = accountIndex
+        func value(_ attribute: String, _ element: AXUIElement, timeout: Float = 0.1) -> CFTypeRef? {
+            AXUIElementSetMessagingTimeout(element, timeout)
             var result: CFTypeRef?
             guard AXUIElementCopyAttributeValue(element, attribute as CFString, &result) == .success else { return nil }
             return result
+        }
+        func axBounds(_ element: AXUIElement) -> CGRect? {
+            guard let rawPosition = value(kAXPositionAttribute as String, element, timeout: 0.5),
+                  let rawSize = value(kAXSizeAttribute as String, element, timeout: 0.5),
+                  CFGetTypeID(rawPosition) == AXValueGetTypeID(),
+                  CFGetTypeID(rawSize) == AXValueGetTypeID() else { return nil }
+            var origin = CGPoint.zero
+            var size = CGSize.zero
+            guard AXValueGetValue(unsafeBitCast(rawPosition, to: AXValue.self), .cgPoint, &origin),
+                  AXValueGetValue(unsafeBitCast(rawSize, to: AXValue.self), .cgSize, &size) else { return nil }
+            return CGRect(origin: origin, size: size)
         }
         struct Node {
             let element: AXUIElement
@@ -1165,7 +1672,7 @@ final class CoreJobAcceptanceTests: XCTestCase {
             var queue = [root]
             var visited: [AXUIElement] = []
             var result: [Node] = []
-            let deadline = ContinuousClock.now.advanced(by: .seconds(2))
+            let deadline = boundedDeadline(after: .seconds(2))
             while !queue.isEmpty, visited.count < limit, ContinuousClock.now < deadline, !Task.isCancelled {
                 let element = queue.removeFirst()
                 guard !visited.contains(where: { CFEqual($0, element) }) else { continue }
@@ -1185,47 +1692,69 @@ final class CoreJobAcceptanceTests: XCTestCase {
             guard queue.isEmpty, ContinuousClock.now < deadline, !Task.isCancelled else { return nil }
             return result
         }
-        func discoverComposers(_ root: AXUIElement) -> [Node]? {
+        func pruneDiscoverySubtree(_ element: AXUIElement, role: String) -> Bool {
+            if ["AXSheet", "AXToolbar", "AXSecureTextField"].contains(role) { return true }
+            if value(kAXHiddenAttribute as String, element) as? Bool == true
+                || value("AXProtectedContent", element) as? Bool == true { return true }
+            if role == "AXTextField" || role == "AXTextArea" {
+                return value(kAXSubroleAttribute as String, element) as? String == "AXSecureTextField"
+            }
+            return false
+        }
+        let composerScanNodeLimit = 512
+        let composerScanDuration = Duration.seconds(3)
+        func discoverComposers(_ root: AXUIElement, visitedCount: inout Int,
+            incompleteReason: inout String) -> [Node]? {
             var queue = [root]
             var visited: [AXUIElement] = []
             var composers: [Node] = []
-            let deadline = ContinuousClock.now.advanced(by: .seconds(2))
-            while !queue.isEmpty, visited.count < 256, ContinuousClock.now < deadline, !Task.isCancelled {
+            let deadline = boundedDeadline(after: composerScanDuration)
+            while !queue.isEmpty, visited.count < composerScanNodeLimit,
+                  ContinuousClock.now < deadline, !Task.isCancelled {
                 let element = queue.removeFirst()
                 guard !visited.contains(where: { CFEqual($0, element) }) else { continue }
                 visited.append(element)
+                visitedCount = visited.count
                 let role = value(kAXRoleAttribute as String, element) as? String ?? ""
-                let title = value(kAXTitleAttribute as String, element) as? String ?? ""
-                let description = value(kAXDescriptionAttribute as String, element) as? String ?? ""
-                let text = value(kAXValueAttribute as String, element) as? String ?? ""
+                if pruneDiscoverySubtree(element, role: role) { continue }
+                let title = role == "AXGroup" ? (value(kAXTitleAttribute as String, element) as? String ?? "") : ""
+                let description = role == "AXGroup" ? (value(kAXDescriptionAttribute as String, element) as? String ?? "") : ""
                 if role == "AXGroup" && (title.hasPrefix("Compose:") || description.hasPrefix("Compose:")) {
-                    composers.append(Node(element: element, role: role, title: title, description: description, text: text))
+                    composers.append(Node(element: element, role: role, title: title, description: description, text: ""))
                     continue
                 }
                 // Gmail's inbox is an AXTable; its thousands of rows are unrelated to this owned compose.
                 if role == "AXTable" || role == "AXOutline" || role == "AXList" { continue }
                 if let children = value(kAXChildrenAttribute as String, element) as? [AXUIElement] {
-                    let room = max(0, 256 - visited.count - queue.count)
-                    guard children.count <= room else { return nil }
+                    let room = max(0, composerScanNodeLimit - visited.count - queue.count)
+                    guard children.count <= room else { incompleteReason = "node_limit"; return nil }
                     queue.append(contentsOf: children)
                 }
             }
-            guard queue.isEmpty, ContinuousClock.now < deadline, !Task.isCancelled else { return nil }
+            guard queue.isEmpty, ContinuousClock.now < deadline, !Task.isCancelled else {
+                incompleteReason = Task.isCancelled ? "cancelled"
+                    : (ContinuousClock.now >= deadline ? "deadline" : "node_limit")
+                return nil
+            }
             return composers
         }
-        func discoverStandaloneSubjectGroups(_ root: AXUIElement) -> [Node]? {
+        func discoverStandaloneSubjectGroups(_ root: AXUIElement, visitedCount: inout Int,
+            incompleteReason: inout String) -> [Node]? {
             var queue = [root]
             var visited: [AXUIElement] = []
             var groups: [Node] = []
-            let deadline = ContinuousClock.now.advanced(by: .seconds(2))
-            while !queue.isEmpty, visited.count < 256, ContinuousClock.now < deadline, !Task.isCancelled {
+            let deadline = boundedDeadline(after: composerScanDuration)
+            while !queue.isEmpty, visited.count < composerScanNodeLimit,
+                  ContinuousClock.now < deadline, !Task.isCancelled {
                 let element = queue.removeFirst()
                 guard !visited.contains(where: { CFEqual($0, element) }) else { continue }
                 visited.append(element)
+                visitedCount = visited.count
                 let role = value(kAXRoleAttribute as String, element) as? String ?? ""
-                let title = value(kAXTitleAttribute as String, element) as? String ?? ""
-                let description = value(kAXDescriptionAttribute as String, element) as? String ?? ""
-                let text = value(kAXValueAttribute as String, element) as? String ?? ""
+                if pruneDiscoverySubtree(element, role: role) { continue }
+                let title = role == "AXGroup" ? (value(kAXTitleAttribute as String, element) as? String ?? "") : ""
+                let description = role == "AXGroup" ? (value(kAXDescriptionAttribute as String, element) as? String ?? "") : ""
+                let text = role == "AXGroup" ? (value(kAXValueAttribute as String, element) as? String ?? "") : ""
                 if role == "AXGroup" && [title, description, text].contains(subject) {
                     groups.append(Node(element: element, role: role, title: title,
                         description: description, text: text))
@@ -1233,24 +1762,29 @@ final class CoreJobAcceptanceTests: XCTestCase {
                 }
                 if role == "AXTable" || role == "AXOutline" || role == "AXList" { continue }
                 if let children = value(kAXChildrenAttribute as String, element) as? [AXUIElement] {
-                    let room = max(0, 256 - visited.count - queue.count)
-                    guard children.count <= room else { return nil }
+                    let room = max(0, composerScanNodeLimit - visited.count - queue.count)
+                    guard children.count <= room else { incompleteReason = "node_limit"; return nil }
                     queue.append(contentsOf: children)
                 }
             }
-            guard queue.isEmpty, ContinuousClock.now < deadline, !Task.isCancelled else { return nil }
+            guard queue.isEmpty, ContinuousClock.now < deadline, !Task.isCancelled else {
+                incompleteReason = Task.isCancelled ? "cancelled"
+                    : (ContinuousClock.now >= deadline ? "deadline" : "node_limit")
+                return nil
+            }
             return groups
         }
         func outerWebAreaDescription(_ root: AXUIElement) -> String? {
             var queue = [root]
             var visited: [AXUIElement] = []
             var descriptions: [String] = []
-            let deadline = ContinuousClock.now.advanced(by: .seconds(2))
+            let deadline = boundedDeadline(after: .seconds(2))
             while !queue.isEmpty, visited.count < 256, ContinuousClock.now < deadline, !Task.isCancelled {
                 let element = queue.removeFirst()
                 guard !visited.contains(where: { CFEqual($0, element) }) else { continue }
                 visited.append(element)
                 let role = value(kAXRoleAttribute as String, element) as? String ?? ""
+                if pruneDiscoverySubtree(element, role: role) { continue }
                 if role == "AXWebArea" {
                     if let description = value(kAXDescriptionAttribute as String, element) as? String,
                        !description.isEmpty { descriptions.append(description) }
@@ -1267,15 +1801,27 @@ final class CoreJobAcceptanceTests: XCTestCase {
                   descriptions.count == 1 else { return nil }
             return descriptions[0]
         }
-        guard let composers = discoverComposers(window.accessibilityElement) else {
-            evidence["capture_status"] = "accessibility-tree-incomplete"
+        var embeddedScanVisited = 0
+        var embeddedScanFailure = ""
+        guard let composers = discoverComposers(window.accessibilityElement, visitedCount: &embeddedScanVisited,
+                incompleteReason: &embeddedScanFailure) else {
+            evidence["capture_status"] = "compose-discovery-incomplete"
+            evidence["compose_scan_pass"] = "embedded"
+            evidence["compose_scan_visited"] = embeddedScanVisited
+            evidence["compose_scan_failure"] = embeddedScanFailure
             return
         }
         var standalone = false
         var standaloneCandidates: [Node] = []
         if composers.isEmpty {
-            guard let found = discoverStandaloneSubjectGroups(window.accessibilityElement) else {
-                evidence["capture_status"] = "accessibility-tree-incomplete"
+            var standaloneScanVisited = 0
+            var standaloneScanFailure = ""
+            guard let found = discoverStandaloneSubjectGroups(window.accessibilityElement,
+                    visitedCount: &standaloneScanVisited, incompleteReason: &standaloneScanFailure) else {
+                evidence["capture_status"] = "compose-discovery-incomplete"
+                evidence["compose_scan_pass"] = "standalone"
+                evidence["compose_scan_visited"] = standaloneScanVisited
+                evidence["compose_scan_failure"] = standaloneScanFailure
                 return
             }
             standaloneCandidates = found
@@ -1310,50 +1856,406 @@ final class CoreJobAcceptanceTests: XCTestCase {
             evidence["capture_status"] = "compose-window-not-unique-or-readable"
             return
         }
-        let recipientContainer = nodes.first {
+        if existingDraftRecipientProbeEnabled {
+            let urlVerified = !standalone && composers.count == 1
+                && Self.gmailIsOwnedOpaqueDraftComposeURL(page.url, expectedAccountIndex: accountIndex)
+            evidence["existing_draft_recipient_probe_url_verified"] = urlVerified
+            guard urlVerified else {
+                evidence["capture_status"] = "recipient-probe-requires-existing-opaque-compose"
+                return
+            }
+        }
+        let recipientContainers = nodes.filter {
             ($0.role == "AXGroup" || $0.role == "AXTextField") && ($0.title == "To" || $0.description == "To")
         }
+        let recipientContainer = recipientContainers.count == 1 ? recipientContainers.first : nil
         let recipientNodes = recipientContainer.flatMap { readTree($0.element, limit: 64) } ?? []
         var recipientMatches = recipientNodes.contains {
             $0.role == "AXStaticText" && [$0.title, $0.description, $0.text].contains(recipient)
         }
-        if !recipientMatches, !composers.isEmpty {
-            // A collapsed contact chip is not always exposed beneath a To group.
-            // Restrict fallback discovery to the subject field's parent inside
-            // this unique compose group, then use only an advertised AXShowMenu.
-            let subjectField = nodes.first { $0.role == "AXTextField" && $0.title == "Subject" }
-            var subjectParent: AXUIElement?
-            if let subjectField {
-                var parent: CFTypeRef?
-                if AXUIElementCopyAttributeValue(subjectField.element, kAXParentAttribute as CFString, &parent) == .success,
-                   let parent, CFGetTypeID(parent) == AXUIElementGetTypeID() {
-                    subjectParent = (parent as! AXUIElement)
-                }
-            }
-            let chipScope = recipientContainer?.element ?? subjectParent
-            let chipNodes = chipScope.flatMap { readTree($0, limit: 64) } ?? []
+        var recipientProofDiagnostic: [String: Any]?
+        if !recipientMatches, !composers.isEmpty, !draftRowProbeEnabled {
+            var failurePhase = "compose_unavailable"
+            var candidateCountsByDepth: [Int] = []
+            var chipCandidateAncestorDiagnostics: [[String: Any]] = []
+            var reacquisitionCandidateCounts: [Int] = []
+            var reacquisitionScopeAvailable: Bool?
+            var reacquisitionScanComplete: Bool?
+            var reacquisitionCandidateRoleMatches: Bool?
+            var reacquisitionCandidateVisible: Bool?
+            var reacquisitionCandidateUnprotected: Bool?
+            var reacquisitionCandidateSupportsMenu: Bool?
+            var preexistingMenuCount = 0
+            var openedMenuCount = 0
+            var exactCopyItemCount = 0
+            var cancelSucceeded = false
+            var escapeDispatched = false
+            var menuClosed = false
+            var contextClickAttempted = false
+            var contextClickDownSent = false
+            var contextClickReleaseSent = false
+            var menuScanVisited = 0
             func supportsShowMenu(_ element: AXUIElement) -> Bool {
+                AXUIElementSetMessagingTimeout(element, 0.1)
                 var actions: CFArray?
                 guard AXUIElementCopyActionNames(element, &actions) == .success,
                       let actions = actions as? [String] else { return false }
                 return actions.contains("AXShowMenu")
             }
-            let chip = chipNodes.first {
-                $0.role == "AXStaticText" && !$0.text.isEmpty && $0.text != subject && supportsShowMenu($0.element)
+            func supportsCancel(_ element: AXUIElement) -> Bool {
+                AXUIElementSetMessagingTimeout(element, 0.1)
+                var actions: CFArray?
+                guard AXUIElementCopyActionNames(element, &actions) == .success,
+                      let actions = actions as? [String] else { return false }
+                return actions.contains("AXCancel")
             }
-            if let chip, let chipScope,
-               AXUIElementPerformAction(chip.element, "AXShowMenu" as CFString) == .success {
-                try? await Task.sleep(for: .milliseconds(120))
-                let menuNodes = readTree(chipScope, limit: 128) ?? []
-                let copyLabel = "Copy \"\(recipient)\""
-                recipientMatches = menuNodes.contains {
-                    $0.role == "AXMenuItem" && [$0.title, $0.description, $0.text].contains(where: {
-                        $0 == copyLabel || $0 == "\(copyLabel) Option+C"
-                    })
+
+            func parent(of element: AXUIElement) -> AXUIElement? {
+                AXUIElementSetMessagingTimeout(element, 0.1)
+                var parentValue: CFTypeRef?
+                guard AXUIElementCopyAttributeValue(element, kAXParentAttribute as CFString, &parentValue) == .success,
+                      let parentValue, CFGetTypeID(parentValue) == AXUIElementGetTypeID() else { return nil }
+                return unsafeBitCast(parentValue, to: AXUIElement.self)
+            }
+            func freshComposeAndSubject() -> (Node, [Node], Node)? {
+                var scanVisited = 0
+                var scanFailure = ""
+                guard let freshComposers = discoverComposers(window.accessibilityElement,
+                        visitedCount: &scanVisited, incompleteReason: &scanFailure),
+                      freshComposers.count == 1, composers.count == 1,
+                      CFEqual(freshComposers[0].element, composers[0].element),
+                      let freshNodes = readTree(freshComposers[0].element, limit: 256) else { return nil }
+                let subjectFields = freshNodes.filter { $0.role == "AXTextField" && $0.title == "Subject" }
+                guard subjectFields.count == 1 else { return nil }
+                let fields = freshNodes.map { GmailAXFact($0.role, $0.title, $0.description, value: $0.text) }
+                let proof = Self.gmailTextFieldProof(fields, subject: subject, body: body)
+                guard proof.subjectMatches, proof.bodyMatches else { return nil }
+                return (freshComposers[0], freshNodes, subjectFields[0])
+            }
+
+            func locateRecipientChip(compose: Node, nodes: [Node], subjectField: Node)
+                -> (candidate: Node?, counts: [Int], complete: Bool, scopeAvailable: Bool, diagnostics: [[String: Any]]) {
+                let explicitToContainers = nodes.filter {
+                    ($0.role == "AXGroup" || $0.role == "AXTextField") && ($0.title == "To" || $0.description == "To")
                 }
-                if let menu = menuNodes.first(where: { $0.role == "AXMenu" }) {
-                    _ = AXUIElementPerformAction(menu.element, "AXCancel" as CFString)
+                var scopes: [AXUIElement] = []
+                if explicitToContainers.count == 1 {
+                    scopes = [explicitToContainers[0].element]
+                } else if explicitToContainers.isEmpty {
+                    var cursor = subjectField.element
+                    for _ in 0..<6 {
+                        guard let next = parent(of: cursor) else { break }
+                        if CFEqual(next, compose.element) { break }
+                        scopes.append(next)
+                        cursor = next
+                    }
                 }
+                guard !scopes.isEmpty else { return (nil, [], true, false, []) }
+                var candidatesByDepth = Array(repeating: [Node](), count: scopes.count)
+                var diagnostics: [[String: Any]] = []
+                let excludedRoles: Set<String> = ["AXTextArea", "AXMenu", "AXMenuItem", "AXWebArea",
+                    "AXSecureTextField", "AXHeading", "AXButton", "AXLink"]
+                let diagnosticRoles: Set<String> = ["AXApplication", "AXWindow", "AXWebArea", "AXGroup",
+                    "AXTextField", "AXTextArea", "AXTextEntryArea", "AXStaticText", "AXHeading",
+                    "AXButton", "AXLink", "AXMenu", "AXMenuItem", "AXToolbar", "AXSheet", "AXDialog",
+                    "AXScrollArea", "AXTable", "AXOutline", "AXList", "AXCell", "AXRow"]
+                let deadline = boundedDeadline(after: .seconds(3))
+                var actionChecks = 0
+                var complete = true
+                for node in nodes where node.role == "AXStaticText" {
+                    if actionChecks >= 32 || ContinuousClock.now >= deadline {
+                        complete = false
+                        break
+                    }
+                    actionChecks += 1
+                    guard !pruneDiscoverySubtree(node.element, role: node.role), supportsShowMenu(node.element) else {
+                        continue
+                    }
+                    var descendant = node.element
+                    var ancestorRoles: [String] = []
+                    var firstBlockedRole: String?
+                    for _ in 0..<8 {
+                        guard let nodeParent = parent(of: descendant) else { break }
+                        let role = value(kAXRoleAttribute as String, nodeParent) as? String ?? ""
+                        ancestorRoles.append(diagnosticRoles.contains(role) ? role : "other")
+                        if firstBlockedRole == nil && (excludedRoles.contains(role)
+                            || pruneDiscoverySubtree(nodeParent, role: role)) {
+                            firstBlockedRole = diagnosticRoles.contains(role) ? role : "hidden_or_protected"
+                        }
+                        if excludedRoles.contains(role) || pruneDiscoverySubtree(nodeParent, role: role) { break }
+                        if CFEqual(nodeParent, compose.element) { break }
+                        if let depth = scopes.firstIndex(where: { CFEqual($0, nodeParent) }) {
+                            if !candidatesByDepth[depth].contains(where: { CFEqual($0.element, node.element) }) {
+                                candidatesByDepth[depth].append(node)
+                            }
+                            break
+                        }
+                        descendant = nodeParent
+                    }
+                    diagnostics.append(["ancestor_roles": ancestorRoles,
+                        "first_blocked_role": firstBlockedRole ?? "none"])
+                }
+                let counts = candidatesByDepth.map(\.count)
+                let firstMatchDepth = candidatesByDepth.firstIndex(where: { !$0.isEmpty })
+                let candidate = firstMatchDepth.flatMap { candidatesByDepth[$0].count == 1 ? candidatesByDepth[$0][0] : nil }
+                return (complete ? candidate : nil, counts, complete, true, diagnostics)
+            }
+
+            var candidate: Node?
+            var pageMenuRoot: AXUIElement?
+            do {
+                try revalidateAccountPage()
+                guard let (compose, freshNodes, subjectField) = freshComposeAndSubject() else {
+                    failurePhase = "unique_compose_or_subject_unavailable"
+                    throw HarnessError.missingEvidence("Unique compose or Subject field unavailable")
+                }
+                let locatedChip = locateRecipientChip(compose: compose, nodes: freshNodes, subjectField: subjectField)
+                candidateCountsByDepth = locatedChip.counts
+                chipCandidateAncestorDiagnostics = locatedChip.diagnostics
+                guard locatedChip.scopeAvailable else {
+                    failurePhase = "recipient_scope_unavailable"
+                    throw HarnessError.missingEvidence("Unique recipient or Subject scope unavailable")
+                }
+                guard locatedChip.complete else {
+                    failurePhase = "chip_candidate_scan_incomplete"
+                    throw HarnessError.missingEvidence("Collapsed recipient chip scan incomplete")
+                }
+                guard let locatedCandidate = locatedChip.candidate else {
+                    failurePhase = locatedChip.counts.contains(where: { $0 > 1 })
+                        ? "subject_ancestor_chip_ambiguous" : "subject_ancestor_chip_missing"
+                    throw HarnessError.missingEvidence("Collapsed recipient chip is not unique")
+                }
+                candidate = locatedCandidate
+                var rootCursor = compose.element
+                for _ in 0..<8 {
+                    if value(kAXRoleAttribute as String, rootCursor) as? String == "AXWebArea" {
+                        pageMenuRoot = rootCursor
+                        break
+                    }
+                    guard let next = parent(of: rootCursor) else { break }
+                    rootCursor = next
+                }
+                guard pageMenuRoot != nil else {
+                    failurePhase = "compose_page_scope_unavailable"
+                    throw HarnessError.missingEvidence("Compose page scope unavailable")
+                }
+            } catch {
+                if failurePhase == "compose_unavailable" { failurePhase = "page_revalidation_failed" }
+            }
+
+            func scanMenus() -> (complete: Bool, menus: [AXUIElement], exactCopyCount: Int, visited: Int) {
+                guard let pageMenuRoot else { return (false, [], 0, 0) }
+                var queue = [pageMenuRoot]
+                var seen: [AXUIElement] = []
+                var menus: [AXUIElement] = []
+                var copyCount = 0
+                let deadline = boundedDeadline(after: .seconds(3))
+                let nodeLimit = 512
+                let containerRoles: Set<String> = ["AXWebArea", "AXGroup", "AXScrollArea", "AXMenu", "AXMenuBar"]
+                let skipRoles: Set<String> = ["AXTable", "AXOutline", "AXList", "AXCell", "AXRow", "AXTextArea",
+                    "AXButton", "AXLink", "AXHeading"]
+                while !queue.isEmpty, seen.count < nodeLimit, ContinuousClock.now < deadline, !Task.isCancelled {
+                    let element = queue.removeFirst()
+                    guard !seen.contains(where: { CFEqual($0, element) }) else { continue }
+                    seen.append(element)
+                    let role = value(kAXRoleAttribute as String, element) as? String ?? ""
+                    if pruneDiscoverySubtree(element, role: role) || role == "AXDialog" { continue }
+                    if role == "AXMenu" { menus.append(element) }
+                    if role == "AXMenuItem" {
+                        let copyLabel = "Copy \"\(recipient)\""
+                        let labels = [kAXTitleAttribute as String, kAXDescriptionAttribute as String,
+                            kAXValueAttribute as String].compactMap { value($0, element) as? String }
+                        if labels.contains(where: { $0 == copyLabel || $0 == "\(copyLabel) Option+C" }) {
+                            copyCount += 1
+                        }
+                    }
+                    if skipRoles.contains(role) { continue }
+                    AXUIElementSetMessagingTimeout(element, 0.1)
+                    var childrenValue: CFTypeRef?
+                    let status = AXUIElementCopyAttributeValue(element, kAXChildrenAttribute as CFString, &childrenValue)
+                    let children = status == .success ? childrenValue as? [AXUIElement] : nil
+                    if children == nil, containerRoles.contains(role) { return (false, menus, copyCount, seen.count) }
+                    let next = children ?? []
+                    let remaining = max(0, nodeLimit - seen.count - queue.count)
+                    guard next.count <= remaining else { return (false, menus, copyCount, seen.count) }
+                    queue.append(contentsOf: next)
+                }
+                let complete = queue.isEmpty && ContinuousClock.now < deadline && !Task.isCancelled
+                return (complete, menus, copyCount, seen.count)
+            }
+
+            if candidate != nil, let pageMenuRoot {
+                do {
+                    try revalidateAccountPage()
+                    let beforeMenu = scanMenus()
+                    menuScanVisited += beforeMenu.visited
+                    preexistingMenuCount = beforeMenu.menus.count
+                    guard beforeMenu.complete, beforeMenu.menus.isEmpty else {
+                        failurePhase = beforeMenu.complete ? "preexisting_page_menu" : "page_menu_scan_incomplete"
+                        throw HarnessError.missingEvidence("Page menu state is not clear")
+                    }
+                    try revalidateAccountPage()
+                    guard readinessDeadline.map({ ContinuousClock.now < $0 }) ?? true else {
+                        failurePhase = "recipient_readiness_deadline"
+                        throw HarnessError.missingEvidence("Recipient readiness deadline expired before menu action")
+                    }
+                    guard let (freshCompose, freshNodes, freshSubject) = freshComposeAndSubject() else {
+                        failurePhase = "chip_reacquisition_compose_unavailable"
+                        throw HarnessError.missingEvidence("Compose fields changed before recipient click")
+                    }
+                    let freshChip = locateRecipientChip(compose: freshCompose, nodes: freshNodes,
+                        subjectField: freshSubject)
+                    reacquisitionCandidateCounts = freshChip.counts
+                    reacquisitionScopeAvailable = freshChip.scopeAvailable
+                    reacquisitionScanComplete = freshChip.complete
+                    guard freshChip.complete, freshChip.scopeAvailable, let selectedCandidate = freshChip.candidate else {
+                        failurePhase = !freshChip.complete ? "chip_reacquisition_scan_incomplete"
+                            : (!freshChip.scopeAvailable ? "chip_reacquisition_scope_unavailable"
+                            : (freshChip.counts.contains(where: { $0 > 1 })
+                                ? "chip_reacquisition_ambiguous" : "chip_reacquisition_chip_missing"))
+                        throw HarnessError.missingEvidence("Unique recipient chip changed before context click")
+                    }
+                    let roleMatches = value(kAXRoleAttribute as String, selectedCandidate.element) as? String == "AXStaticText"
+                    let isVisible = value(kAXHiddenAttribute as String, selectedCandidate.element) as? Bool != true
+                    let isUnprotected = value("AXProtectedContent", selectedCandidate.element) as? Bool != true
+                    let canShowMenu = supportsShowMenu(selectedCandidate.element)
+                    reacquisitionCandidateRoleMatches = roleMatches
+                    reacquisitionCandidateVisible = isVisible
+                    reacquisitionCandidateUnprotected = isUnprotected
+                    reacquisitionCandidateSupportsMenu = canShowMenu
+                    guard roleMatches, isVisible, isUnprotected, canShowMenu,
+                          let chipBounds = axBounds(selectedCandidate.element),
+                          let clickPoint = Self.gmailContextClickPoint(chipBounds: chipBounds,
+                            windowBounds: revalidatedWindowBounds) else {
+                        failurePhase = "chip_reacquisition_metadata_or_bounds_invalid"
+                        throw HarnessError.missingEvidence("Unique recipient chip bounds are not safe for context click")
+                    }
+                    candidate = selectedCandidate
+                    func contextClickStillVerified() -> Bool {
+                        guard !Task.isCancelled,
+                              readinessDeadline.map({ ContinuousClock.now < $0 }) ?? true else { return false }
+                        do {
+                            try revalidateAccountPage()
+                            guard let (currentCompose, currentNodes, currentSubject) = freshComposeAndSubject() else {
+                                return false
+                            }
+                            let currentChip = locateRecipientChip(compose: currentCompose, nodes: currentNodes,
+                                subjectField: currentSubject)
+                            guard currentChip.complete, currentChip.scopeAvailable,
+                                  let currentCandidate = currentChip.candidate,
+                                  CFEqual(currentCandidate.element, selectedCandidate.element),
+                                  value(kAXRoleAttribute as String, currentCandidate.element) as? String == "AXStaticText",
+                                  value(kAXHiddenAttribute as String, currentCandidate.element) as? Bool != true,
+                                  value("AXProtectedContent", currentCandidate.element) as? Bool != true,
+                                  supportsShowMenu(currentCandidate.element),
+                                  let currentBounds = axBounds(currentCandidate.element),
+                                  Self.gmailContextClickPoint(chipBounds: currentBounds,
+                                    windowBounds: revalidatedWindowBounds) == clickPoint else { return false }
+                            return true
+                        } catch { return false }
+                    }
+                    recipientMenuEffectAttempted = true
+                    contextClickAttempted = true
+                    let injector = InputInjector()
+                    let clickX = Int(clickPoint.x.rounded())
+                    let clickY = Int(clickPoint.y.rounded())
+                    contextClickDownSent = injector.apply(.pointer(x: clickX, y: clickY, buttons: 0b010),
+                        ifAllowed: contextClickStillVerified)
+                    guard contextClickDownSent else {
+                        failurePhase = "chip_context_click_denied"
+                        throw HarnessError.missingEvidence("Recipient context click was not authorized by fresh bounds")
+                    }
+                    // A successful context click may replace the chip node with the open menu.
+                    // Bind release to the retained account/window/page only; the exact chip guard
+                    // is required immediately before down, while menu proof verifies the effect.
+                    contextClickReleaseSent = injector.apply(.pointer(x: clickX, y: clickY, buttons: 0),
+                        ifAllowed: {
+                            guard !Task.isCancelled else { return false }
+                            do { try revalidateAccountPage(); return true }
+                            catch { return false }
+                        })
+                    guard contextClickReleaseSent else {
+                        failurePhase = "chip_context_click_release_denied"
+                        throw HarnessError.missingEvidence("Recipient context click release was not authorized")
+                    }
+                    try? await Task.sleep(for: .milliseconds(120))
+                    try revalidateAccountPage()
+                    let openedMenu = scanMenus()
+                    menuScanVisited += openedMenu.visited
+                    openedMenuCount = openedMenu.menus.count
+                    exactCopyItemCount = openedMenu.exactCopyCount
+                    if openedMenu.menus.count == 1, supportsCancel(openedMenu.menus[0]) {
+                        try revalidateAccountPage()
+                        cancelSucceeded = AXUIElementPerformAction(openedMenu.menus[0], "AXCancel" as CFString) == .success
+                    }
+                    try? await Task.sleep(for: .milliseconds(120))
+                    try revalidateAccountPage()
+                    let closedMenu = scanMenus()
+                    menuScanVisited += closedMenu.visited
+                    menuClosed = closedMenu.complete && closedMenu.menus.isEmpty
+                    recipientMatches = beforeMenu.complete && openedMenu.complete && openedMenu.menus.count == 1
+                        && openedMenu.exactCopyCount == 1 && cancelSucceeded && menuClosed
+                    if !recipientMatches {
+                        failurePhase = !openedMenu.complete ? "opened_menu_scan_incomplete"
+                            : (openedMenu.menus.count != 1 ? "opened_menu_not_unique"
+                            : (openedMenu.exactCopyCount != 1 ? "copy_address_item_not_unique"
+                            : (!cancelSucceeded ? "menu_cancel_failed" : "menu_close_unverified")))
+                    }
+                    if !menuClosed, cancelSucceeded, closedMenu.complete, closedMenu.menus.count == 1,
+                       closedMenu.exactCopyCount == 1, let confirmedMenu = closedMenu.menus.first,
+                       let openedMenuElement = openedMenu.menus.first,
+                       CFEqual(confirmedMenu, openedMenuElement) {
+                        try revalidateAccountPage()
+                        let injector = InputInjector()
+                        let keyDown = injector.apply(.key(usage: 0x29, down: true, modifiers: 0),
+                            ifAllowed: {
+                                do { try revalidateAccountPage(); return true }
+                                catch { return false }
+                            })
+                        let keyUp = injector.apply(.key(usage: 0x29, down: false, modifiers: 0),
+                            ifAllowed: {
+                                do { try revalidateAccountPage(); return true }
+                                catch { return false }
+                            })
+                        escapeDispatched = keyDown && keyUp
+                        try? await Task.sleep(for: .milliseconds(120))
+                        try revalidateAccountPage()
+                        let escapedMenu = scanMenus()
+                        menuScanVisited += escapedMenu.visited
+                        menuClosed = escapedMenu.complete && escapedMenu.menus.isEmpty
+                        recipientMatches = beforeMenu.complete && openedMenu.complete
+                            && openedMenu.menus.count == 1 && openedMenu.exactCopyCount == 1
+                            && cancelSucceeded && escapeDispatched && menuClosed
+                    }
+                } catch {
+                    if failurePhase == "compose_unavailable" { failurePhase = "page_revalidation_failed" }
+                }
+            }
+            if !recipientMatches {
+                recipientProofDiagnostic = [
+                    "phase": failurePhase,
+                    "subject_ancestor_candidate_counts": candidateCountsByDepth,
+                    "recipient_reacquisition_candidate_counts": reacquisitionCandidateCounts,
+                    "recipient_reacquisition_scope_available": reacquisitionScopeAvailable as Any? ?? NSNull(),
+                    "recipient_reacquisition_scan_complete": reacquisitionScanComplete as Any? ?? NSNull(),
+                    "recipient_reacquisition_role_matches": reacquisitionCandidateRoleMatches as Any? ?? NSNull(),
+                    "recipient_reacquisition_visible": reacquisitionCandidateVisible as Any? ?? NSNull(),
+                    "recipient_reacquisition_unprotected": reacquisitionCandidateUnprotected as Any? ?? NSNull(),
+                    "recipient_reacquisition_supports_menu": reacquisitionCandidateSupportsMenu as Any? ?? NSNull(),
+                    "recipient_container_count": recipientContainers.count,
+                    "recipient_container_roles": recipientContainers.map(\.role),
+                    "chip_candidate_ancestor_diagnostics": chipCandidateAncestorDiagnostics,
+                    "preexisting_menu_count": preexistingMenuCount,
+                    "opened_menu_count": openedMenuCount,
+                    "context_click_attempted": contextClickAttempted,
+                    "context_click_down_sent": contextClickDownSent,
+                    "context_click_release_sent": contextClickReleaseSent,
+                    "exact_copy_address_item_count": exactCopyItemCount,
+                    "cancel_succeeded": cancelSucceeded,
+                    "escape_dispatched": escapeDispatched,
+                    "menu_closed_verified": menuClosed,
+                    "menu_scan_nodes_visited": menuScanVisited,
+                ]
             }
         }
         let axFacts = nodes.map { GmailAXFact($0.role, $0.title, $0.description, value: $0.text) }
@@ -1371,34 +2273,35 @@ final class CoreJobAcceptanceTests: XCTestCase {
         let ccMatches = ccValues.allSatisfy(\.isEmpty)
         let bccMatches = bccValues.allSatisfy(\.isEmpty)
         let attachmentGroups = nodes.filter {
-            $0.role == "AXGroup" && ($0.title + $0.description + $0.text).contains("Attachment:")
-                && ($0.title + $0.description + $0.text).contains("delete to remove it")
+            $0.role == "AXGroup" && ($0.title + " " + $0.description + " " + $0.text)
+                .range(of: #"(?:^|\s)Attachment: "#, options: [.regularExpression]) != nil
         }
-        let expectedAttachmentGroups = attachmentGroups.filter {
-            ($0.title + $0.description + $0.text).contains("Attachment: \(name).")
+        let expectedGroup = attachmentGroups.first {
+            Self.gmailAttachmentGroupNamesMatch(groupText: $0.title + " " + $0.description + " " + $0.text,
+                expectedName: name)
         }
-        let attachmentGroup = attachmentGroups.count == 1 && expectedAttachmentGroups.count == 1
-            ? expectedAttachmentGroups.first : nil
+        let attachmentGroup = attachmentGroups.count == 1 ? expectedGroup : nil
         let attachmentNodes = attachmentGroup.flatMap { readTree($0.element, limit: 64) } ?? []
-        let attachmentNameVisible = attachmentNodes.contains {
-            $0.role == "AXLink" && [$0.title, $0.description, $0.text].contains(where: {
-                $0 == name || $0.hasPrefix("\(name) (")
-            })
-        }
+        func label(_ node: Node) -> String { [node.title, node.description, node.text].first { !$0.isEmpty } ?? "" }
+        let attachmentLinks = attachmentNodes.filter { $0.role == "AXLink" }.map(label)
+        let removalButtons = attachmentNodes.filter { $0.role == "AXButton" && label($0).localizedCaseInsensitiveContains("remove") }
+            .map(label)
+        let groupLabel = attachmentGroup.map { $0.title + " " + $0.description + " " + $0.text } ?? ""
+        let attachmentFacts = Self.gmailAttachmentFactsMatch(groupText: groupLabel,
+            linkLabels: attachmentLinks, removeButtonLabels: removalButtons,
+            groupCount: attachmentGroups.count, expectedName: name, expectedBytes: expected.source_bytes ?? -1)
         let formatter = ByteCountFormatter(); formatter.countStyle = .file
         let sizeLabel = formatter.string(fromByteCount: Int64(expected.source_bytes ?? 0))
-        let attachmentSizeVisible = (attachmentNodes + (attachmentGroup.map { [$0] } ?? [])).contains {
-            ($0.title + $0.description + $0.text).contains(sizeLabel)
-        }
         evidence["recipient_matches"] = recipientMatches
+        if let recipientProofDiagnostic { evidence["recipient_proof_diagnostic"] = recipientProofDiagnostic }
         evidence["subject_matches"] = subjectMatches
         evidence["body_matches"] = bodyMatches
         evidence["cc_matches"] = ccMatches
         evidence["bcc_matches"] = bccMatches
-        evidence["attachment_name_visible"] = attachmentNameVisible
+        evidence["attachment_name_visible"] = attachmentFacts.nameMatches
         evidence["attachment_count"] = attachmentGroups.count
         evidence["attachment_size_label"] = sizeLabel
-        evidence["attachment_size_visible"] = attachmentSizeVisible
+        evidence["attachment_size_visible"] = attachmentFacts.sizeVisible
         evidence["attachment_bytes_verified"] = false
         evidence["saved_marker_observed"] = nodes.contains {
             ($0.title + $0.description + $0.text).localizedCaseInsensitiveContains("Draft saved")
@@ -1412,32 +2315,89 @@ final class CoreJobAcceptanceTests: XCTestCase {
         func children(_ element: AXUIElement) -> [AXUIElement] {
             value(kAXChildrenAttribute as String, element) as? [AXUIElement] ?? []
         }
+        var draftRowProbe: [String: Any]?
         func findOwnedDraftSubject(_ root: AXUIElement, subject: String) -> [Node]? {
-            var queue = [root]
+            struct PendingNode {
+                let element: AXUIElement
+                let cellIndex: Int?
+            }
+            struct DraftCell {
+                let element: AXUIElement
+                let title: String
+                let description: String
+                var primaryText: String
+            }
+            var queue = [PendingNode(element: root, cellIndex: nil)]
             var visited: [AXUIElement] = []
-            var matches: [Node] = []
+            var cells: [DraftCell] = []
+            var cellCount = 0
+            func saveProbe(complete: Bool, failure: String?) {
+                guard draftRowProbeEnabled else { return }
+                var summary: [String: Any] = [
+                    "visited": visited.count,
+                    "cell_count": cellCount,
+                    "resolved_primary_subject_cell_count": cells.filter { $0.primaryText == subject }.count,
+                    "scan_complete": complete,
+                ]
+                if let failure { summary["scan_failure"] = failure }
+                draftRowProbe = summary
+            }
             let deadline = ContinuousClock.now.advanced(by: .seconds(3))
             while !queue.isEmpty, visited.count < 1_800, ContinuousClock.now < deadline, !Task.isCancelled {
-                let element = queue.removeFirst()
+                let pending = queue.removeLast()
+                let element = pending.element
                 guard !visited.contains(where: { CFEqual($0, element) }) else { continue }
                 visited.append(element)
                 let role = value(kAXRoleAttribute as String, element) as? String ?? ""
+                if pruneDiscoverySubtree(element, role: role) || role == "AXDialog" { continue }
                 let title = value(kAXTitleAttribute as String, element) as? String ?? ""
                 let description = value(kAXDescriptionAttribute as String, element) as? String ?? ""
-                let text = value(kAXValueAttribute as String, element) as? String ?? ""
-                let candidate = role == "AXCell" && text == subject
-                if candidate {
-                    matches.append(Node(element: element, role: role, title: title,
-                        description: description, text: text))
+                let rawValue = (role == "AXCell" || (role == "AXStaticText" && pending.cellIndex != nil))
+                    ? value(kAXValueAttribute as String, element) : nil
+                let text = rawValue as? String ?? (rawValue as? NSAttributedString)?.string ?? ""
+                var cellIndex = pending.cellIndex
+                if role == "AXCell" {
+                    cells.append(DraftCell(element: element, title: title, description: description,
+                        primaryText: text))
+                    cellIndex = cells.count - 1
+                } else if role == "AXStaticText", let index = cellIndex,
+                          cells.indices.contains(index), cells[index].primaryText.isEmpty,
+                          !text.isEmpty {
+                    cells[index].primaryText = text
                 }
-                if role == "AXSheet" || role == "AXDialog" { continue }
-                let next = children(element)
+                if role == "AXCell" {
+                    cellCount += 1
+                }
+                AXUIElementSetMessagingTimeout(element, 0.1)
+                var childrenResult: CFTypeRef?
+                let childrenStatus = AXUIElementCopyAttributeValue(element, kAXChildrenAttribute as CFString,
+                    &childrenResult)
+                let childElements = childrenStatus == .success ? childrenResult as? [AXUIElement] : nil
+                let containerRoles: Set<String> = ["AXWindow", "AXWebArea", "AXTable", "AXOutline", "AXRow",
+                    "AXList", "AXGroup", "AXScrollArea", "AXCell"]
+                if childElements == nil, containerRoles.contains(role) {
+                    saveProbe(complete: false, failure: "container_children_unavailable")
+                    return nil
+                }
+                let next = childElements ?? []
                 let room = max(0, 1_800 - visited.count - queue.count)
-                guard next.count <= room else { return nil }
-                queue.append(contentsOf: next)
+                guard next.count <= room else {
+                    saveProbe(complete: false, failure: "node_limit")
+                    return nil
+                }
+                queue.append(contentsOf: next.reversed().map { PendingNode(element: $0, cellIndex: cellIndex) })
             }
-            guard queue.isEmpty, ContinuousClock.now < deadline, !Task.isCancelled else { return nil }
+            guard queue.isEmpty, ContinuousClock.now < deadline, !Task.isCancelled else {
+                saveProbe(complete: false, failure: Task.isCancelled ? "cancelled"
+                    : (ContinuousClock.now >= deadline ? "deadline" : "node_limit"))
+                return nil
+            }
+            saveProbe(complete: true, failure: nil)
 
+            let matches = cells.filter { $0.primaryText == subject }.map {
+                Node(element: $0.element, role: "AXCell", title: $0.title,
+                    description: $0.description, text: $0.primaryText)
+            }
             let exactCellIndex = Self.gmailUniqueDraftSubjectRowIndex(
                 cellValuesByRow: matches.map { [$0.text] }, scanComplete: true, subject: subject)
             guard let exactCellIndex, matches.indices.contains(exactCellIndex) else { return [] }
@@ -1467,6 +2427,11 @@ final class CoreJobAcceptanceTests: XCTestCase {
             }
             return rows
         }
+        if draftRowProbeEnabled && (!composers.isEmpty || standalone) {
+            evidence["draft_saved_verified"] = false
+            evidence["saved_oracle_status"] = "probe-composer-open-no-action"
+            return
+        }
         if composers.count == 1 {
             guard let saveClose = nodes.first(where: {
                 $0.role == "AXButton" && [$0.title, $0.description].contains("Save & close")
@@ -1478,56 +2443,153 @@ final class CoreJobAcceptanceTests: XCTestCase {
             try? await Task.sleep(for: .milliseconds(350))
         }
 
-        // Search only browser chrome/navigation for Drafts; never traverse the inbox table.
-        var chromeQueue = [window.accessibilityElement]
-        var chromeSeen: [AXUIElement] = []
-        var chromeNodes: [Node] = []
-        let chromeDeadline = ContinuousClock.now.advanced(by: .seconds(2))
-        while !chromeQueue.isEmpty, chromeSeen.count < 256, ContinuousClock.now < chromeDeadline,
-              !Task.isCancelled {
-            let element = chromeQueue.removeFirst()
-            guard !chromeSeen.contains(where: { CFEqual($0, element) }) else { continue }
-            chromeSeen.append(element)
-            let role = value(kAXRoleAttribute as String, element) as? String ?? ""
-            let title = value(kAXTitleAttribute as String, element) as? String ?? ""
-            let description = value(kAXDescriptionAttribute as String, element) as? String ?? ""
-            let text = value(kAXValueAttribute as String, element) as? String ?? ""
-            chromeNodes.append(Node(element: element, role: role, title: title, description: description, text: text))
-            if role == "AXTable" || role == "AXOutline" || role == "AXList" { continue }
-            let next = children(element)
-            let room = max(0, 256 - chromeSeen.count - chromeQueue.count)
-            guard next.count <= room else { break }
-            chromeQueue.append(contentsOf: next)
-        }
-        let draftsLabel = chromeNodes.first {
-            [$0.title, $0.description, $0.text].contains(where: { $0 == "Drafts" || $0.hasPrefix("Drafts ") })
-        }
-        var draftsNavigation: AXUIElement?
-        var draftsAncestor: AXUIElement? = draftsLabel?.element
-        for _ in 0..<6 {
-            guard let current = draftsAncestor else { break }
-            let role = value(kAXRoleAttribute as String, current) as? String ?? ""
-            if role == "AXLink" || role == "AXButton" || role == "AXRow" || role == "AXMenuItem" {
-                draftsNavigation = current
-                break
+        func verifiedCurrentGmailURL() -> String? {
+            guard let currentURL = try? reader.readRetainedPageURL(window: window.accessibilityElement,
+                    application: application, mayAct: { !Task.isCancelled }),
+                  ComputerUseGmailAccountDirectory.accountIndex(from: currentURL) == accountIndex else { return nil }
+            let revalidate: @MainActor () throws -> Void = {
+                guard !Task.isCancelled,
+                      let snapshot = try? ComputerUseDefaultBrowserSession.captureWindowsForApplication(application),
+                      snapshot.application == application,
+                      snapshot.windows.filter({ $0.id == window.id }).count == 1,
+                      let currentWindow = snapshot.windows.first(where: { $0.id == window.id }),
+                      CFEqual(currentWindow.accessibilityElement, window.accessibilityElement),
+                      let rereadURL = try? reader.readRetainedPageURL(window: currentWindow.accessibilityElement,
+                        application: application, mayAct: { !Task.isCancelled }),
+                      rereadURL == currentURL else {
+                    throw HarnessError.missingEvidence("The retained Gmail page changed during the Drafts oracle")
+                }
             }
-            var parent: CFTypeRef?
-            guard AXUIElementCopyAttributeValue(current, kAXParentAttribute as CFString, &parent) == .success,
-                  let parent, CFGetTypeID(parent) == AXUIElementGetTypeID() else { break }
-            draftsAncestor = (parent as! AXUIElement)
+            guard let currentLabel = try? ComputerUseGmailRecipientVerifier.accountControlLabel(
+                    window: window.accessibilityElement, application: application, revalidate: revalidate),
+                  let title = try? ComputerUseGmailAccountDirectory.observedWindowTitle(
+                    window: window.accessibilityElement, application: application, revalidate: revalidate),
+                  ComputerUseGmailAccountDirectory.confirmsActiveAccount(currentURL: currentURL,
+                    windowTitle: title, accountControlLabel: currentLabel, expected: account),
+                  let finalURL = try? reader.readRetainedPageURL(window: window.accessibilityElement,
+                    application: application, mayAct: { !Task.isCancelled }), finalURL == currentURL else { return nil }
+            return currentURL
         }
-        guard let draftsNavigation, press(draftsNavigation) else {
+        guard let currentURL = verifiedCurrentGmailURL() else {
             evidence["draft_saved_verified"] = false
-            evidence["saved_oracle_status"] = "drafts-navigation-unavailable"
+            evidence["saved_oracle_status"] = "drafts-page-account-unverified"
             return
         }
-        try? await Task.sleep(for: .milliseconds(500))
-        guard let subjectNodes = findOwnedDraftSubject(window.accessibilityElement, subject: subject) else {
+        let alreadyOnDrafts = Self.gmailIsOwnedDraftsListingURL(currentURL, expectedAccountIndex: accountIndex)
+        if draftRowProbeEnabled && !alreadyOnDrafts {
+            evidence["draft_saved_verified"] = false
+            evidence["saved_oracle_status"] = "probe-current-page-is-not-owned-drafts-listing"
+            return
+        }
+        if draftRowProbeEnabled {
+            var productDiagnostic = "phase=not_reported reason=not_reported visited=0 max_depth=0 max_children=0 exact_matches=0"
+            var productAmbiguous = false
+            let productRevalidate: @MainActor () throws -> Void = {
+                guard !Task.isCancelled, verifiedCurrentGmailURL() == currentURL else {
+                    throw HarnessError.missingEvidence("The retained Gmail page changed during product row diagnostics")
+                }
+            }
+            var productCellFound = false
+            do {
+                let result = try ComputerUseGmailRecipientVerifier.exactDraftSubjectCellEvidence(
+                    window: window.accessibilityElement, application: application, subject: subject,
+                    ambiguous: &productAmbiguous,
+                    diagnostic: { productDiagnostic = $0 }, revalidate: productRevalidate)
+                productCellFound = result != nil
+            } catch {
+                productCellFound = false
+            }
+            let diagnosticPattern = #"^phase=[a-z_]+ reason=[a-z_]+ visited=[0-9]+ max_depth=[0-9]+ max_children=[0-9]+ exact_matches=[0-9]+$"#
+            evidence["product_draft_row_probe_diagnostic"] = productDiagnostic.range(
+                of: diagnosticPattern, options: .regularExpression) != nil ? productDiagnostic : "phase=invalid"
+            evidence["product_draft_row_probe_cell_found"] = productCellFound
+            evidence["product_draft_row_probe_ambiguous"] = productAmbiguous
+        }
+        if !alreadyOnDrafts {
+            // Search the complete bounded navigation tree for one exact Drafts link;
+            // never use a truncated scan or an arbitrary text ancestor as a target.
+            func isDraftsLinkLabel(_ label: String) -> Bool {
+                label == "Drafts" || label.range(of: #"^Drafts [0-9]+ unread$"#,
+                    options: [.regularExpression]) != nil
+            }
+            var chromeQueue = [window.accessibilityElement]
+            var chromeSeen: [AXUIElement] = []
+            var draftsLinks: [AXUIElement] = []
+            var chromeFailure = ""
+            let chromeDeadline = ContinuousClock.now.advanced(by: .seconds(3))
+            while !chromeQueue.isEmpty, chromeSeen.count < 512, ContinuousClock.now < chromeDeadline,
+                  !Task.isCancelled {
+                let element = chromeQueue.removeFirst()
+                guard !chromeSeen.contains(where: { CFEqual($0, element) }) else { continue }
+                chromeSeen.append(element)
+                let role = value(kAXRoleAttribute as String, element) as? String ?? ""
+                if pruneDiscoverySubtree(element, role: role) { continue }
+                if role == "AXLink" {
+                    let title = value(kAXTitleAttribute as String, element) as? String ?? ""
+                    let description = value(kAXDescriptionAttribute as String, element) as? String ?? ""
+                    let text = value(kAXValueAttribute as String, element) as? String ?? ""
+                    if [title, description, text].contains(where: isDraftsLinkLabel) {
+                        draftsLinks.append(element)
+                    }
+                }
+                if role == "AXTable" || role == "AXOutline" || role == "AXList" { continue }
+                let next = children(element)
+                let room = max(0, 512 - chromeSeen.count - chromeQueue.count)
+                guard next.count <= room else { chromeFailure = "node_limit"; break }
+                chromeQueue.append(contentsOf: next)
+            }
+            if chromeFailure.isEmpty && !chromeQueue.isEmpty {
+                chromeFailure = Task.isCancelled ? "cancelled"
+                    : (ContinuousClock.now >= chromeDeadline ? "deadline" : "node_limit")
+            }
+            guard chromeQueue.isEmpty, chromeFailure.isEmpty,
+                  ContinuousClock.now < chromeDeadline, !Task.isCancelled else {
+                evidence["draft_saved_verified"] = false
+                evidence["saved_oracle_status"] = "drafts-navigation-scan-incomplete"
+                evidence["drafts_navigation_scan_visited"] = chromeSeen.count
+                evidence["drafts_navigation_scan_failure"] = chromeFailure.isEmpty
+                    ? (Task.isCancelled ? "cancelled" : "deadline") : chromeFailure
+                return
+            }
+            guard draftsLinks.count == 1, let draftsNavigation = draftsLinks.first else {
+                evidence["draft_saved_verified"] = false
+                evidence["saved_oracle_status"] = draftsLinks.isEmpty
+                    ? "drafts-navigation-unavailable" : "drafts-navigation-ambiguous"
+                return
+            }
+            guard verifiedCurrentGmailURL() == currentURL else {
+                evidence["draft_saved_verified"] = false
+                evidence["saved_oracle_status"] = "drafts-navigation-page-changed-before-press"
+                return
+            }
+            guard value(kAXEnabledAttribute as String, draftsNavigation) as? Bool == true,
+                  press(draftsNavigation) else {
+                evidence["draft_saved_verified"] = false
+                evidence["saved_oracle_status"] = "drafts-navigation-link-disabled"
+                return
+            }
+            try? await Task.sleep(for: .milliseconds(500))
+            guard let navigatedURL = verifiedCurrentGmailURL(),
+                  Self.gmailIsOwnedDraftsListingURL(navigatedURL, expectedAccountIndex: accountIndex) else {
+                evidence["draft_saved_verified"] = false
+                evidence["saved_oracle_status"] = "drafts-navigation-unverified"
+                return
+            }
+        }
+        let subjectNodes = findOwnedDraftSubject(window.accessibilityElement, subject: subject)
+        if let draftRowProbe { evidence["draft_row_capture_probe"] = draftRowProbe }
+        guard let subjectNodes else {
             evidence["draft_saved_verified"] = false
             evidence["saved_oracle_status"] = "drafts-list-incomplete"
             return
         }
         evidence["saved_draft_count"] = subjectNodes.count
+        if draftRowProbeEnabled {
+            evidence["draft_saved_verified"] = false
+            evidence["saved_oracle_status"] = subjectNodes.count == 1
+                ? "probe-unique-exact-subject-row-found" : "probe-exact-subject-row-not-unique"
+            return
+        }
         guard subjectNodes.count == 1, let subjectNode = subjectNodes.first else {
             evidence["draft_saved_verified"] = false
             evidence["saved_oracle_status"] = "owned-subject-not-unique-in-drafts"
@@ -1555,7 +2617,10 @@ final class CoreJobAcceptanceTests: XCTestCase {
         var reopened = false
         let reopenDeadline = ContinuousClock.now.advanced(by: .seconds(3))
         while ContinuousClock.now < reopenDeadline, !Task.isCancelled {
-            if let found = discoverComposers(window.accessibilityElement), found.count == 1 {
+            var reopenScanVisited = 0
+            var reopenScanFailure = ""
+            if let found = discoverComposers(window.accessibilityElement, visitedCount: &reopenScanVisited,
+                    incompleteReason: &reopenScanFailure), found.count == 1 {
                 reopened = true
                 break
             }
@@ -1568,14 +2633,55 @@ final class CoreJobAcceptanceTests: XCTestCase {
         }
         var savedFields: [String: Any] = [:]
         await Self.captureGmailDraft(expected: expected, evidence: &savedFields)
+        let reopenedComposeURL = savedFields["compose_url"] as? String
+        let retryDeadline = ContinuousClock.now.advanced(by: .seconds(3))
+        var readinessRetryCount = 0
+        if Self.gmailSavedRecipientProofRetryEligible(savedFields),
+           savedFields["account_identity_verified"] as? Bool == true,
+           savedFields["compose_identity_verified"] as? Bool == true,
+           savedFields["compose_count"] as? Int == 1,
+           let reopenedComposeURL,
+           Self.gmailIsOwnedOpaqueDraftComposeURL(reopenedComposeURL, expectedAccountIndex: accountIndex) {
+            while readinessRetryCount < 2, ContinuousClock.now < retryDeadline,
+                  !Task.isCancelled, Self.gmailSavedRecipientProofRetryEligible(savedFields) {
+                try? await Task.sleep(for: .milliseconds(250))
+                guard ContinuousClock.now < retryDeadline, !Task.isCancelled else { break }
+                var retryFields: [String: Any] = [:]
+                await Self.captureGmailDraft(expected: expected, evidence: &retryFields,
+                    requiredComposeURL: reopenedComposeURL, requiredApplication: application,
+                    requiredWindowID: window.id, readinessDeadline: retryDeadline)
+                readinessRetryCount += 1
+                let sameOwnedCompose = retryFields["compose_url"] as? String == reopenedComposeURL
+                    && retryFields["account_identity_verified"] as? Bool == true
+                    && retryFields["compose_identity_verified"] as? Bool == true
+                    && retryFields["compose_count"] as? Int == 1
+                    && retryFields["subject_matches"] as? Bool == true
+                    && retryFields["body_matches"] as? Bool == true
+                    && retryFields["url_is_gmail"] as? Bool == true
+                guard sameOwnedCompose else {
+                    savedFields["recipient_retry_status"] = "owned_compose_changed"
+                    break
+                }
+                savedFields = retryFields
+                if retryFields["recipient_matches"] as? Bool == true
+                    || !Self.gmailSavedRecipientProofRetryEligible(retryFields) { break }
+            }
+        }
+        evidence["saved_recipient_readiness_retry_count"] = readinessRetryCount
         evidence["saved_draft_url"] = savedFields["compose_url"] ?? NSNull()
         evidence["saved_to_matches"] = savedFields["recipient_matches"] ?? false
+        if let diagnostic = savedFields["recipient_proof_diagnostic"] {
+            evidence["saved_recipient_proof_diagnostic"] = diagnostic
+        }
         evidence["saved_subject_matches"] = savedFields["subject_matches"] ?? false
         evidence["saved_body_matches"] = savedFields["body_matches"] ?? false
         evidence["saved_attachment_name_visible"] = savedFields["attachment_name_visible"] ?? false
         evidence["saved_attachment_size_visible"] = savedFields["attachment_size_visible"] ?? false
         evidence["saved_attachment_count"] = savedFields["attachment_count"] ?? 0
         evidence["draft_saved_verified"] = subjectNodes.count == 1
+            && (savedFields["account_identity_verified"] as? Bool == true)
+            && (savedFields["compose_identity_verified"] as? Bool == true)
+            && (savedFields["compose_count"] as? Int == 1)
             && (savedFields["attachment_count"] as? Int == 1)
             && (savedFields["url_is_gmail"] as? Bool == true)
             && (savedFields["recipient_matches"] as? Bool == true)

@@ -2312,6 +2312,79 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
         XCTAssertEqual(executor.diagnosticHistory.first?.response, "click")
     }
 
+    func testReadOnlyWaitAcceptsRepaintAndRevalidatesFollowingClick() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let bounds = CGRect(x: 0, y: 0, width: 640, height: 400)
+        var repainted = false, proposals = 0, effects = 0, scopeChecks = 0
+        var observedFrames: [Data] = []
+        let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { true },
+            approvalTargetProvider: { _ in .init(context: "AXTextField Query", applicationID: "fixture", accessibilityIdentity: "editor") },
+            actionPerformer: { _ in effects += 1 }, screenProvider: {
+                .init(image: CIImage(color: repainted ? .white : .black).cropped(to: bounds),
+                    displayBounds: bounds, frontmostWindowBounds: bounds)
+            }, transientSystemOverlayProvider: { _ in false }, accessibilityContextProvider: { _ in "AXTextField Query" },
+            authenticationContextProvider: { nil }, screenCaptureConsentContextProvider: { nil },
+            planningAccessibilityIdentityProvider: { "editor" }, frontmostApplicationProvider: { "Fixture" })
+        let executor = try ComputerUseDesktopExecutor(journalDirectory: directory, propose: { input in
+            proposals += 1
+            observedFrames.append(input.screenshotPNG)
+            switch proposals {
+            case 1:
+                repainted = true
+                return .init(response: "wait", action: .wait(0.01))
+            case 2:
+                XCTAssertNotEqual(input.screenshotPNG, observedFrames[0], "The next proposal must use a fresh frame after waiting through a repaint")
+                return .init(response: "click", action: .pointer(.leftClick, .init(x: 500, y: 350)))
+            default:
+                return .init(response: "handoff", decision: .handoff("The page is ready for review."))
+            }
+        }, surfaceScopeCheck: { _ in scopeChecks += 1 }, screenConsentRecognizer: { _ in false })
+
+        let result = try await executor.execute(taskID: "repaint-during-wait", prompt: "Wait, then click", trustedUserPrompt: "Wait, then click",
+            tools: tools, progress: { _ in })
+        XCTAssertEqual(result, .userInterventionRequired("The page is ready for review."))
+        XCTAssertEqual(effects, 1, "Only the fresh-frame click should send input")
+        XCTAssertEqual(proposals, 3)
+        XCTAssertGreaterThan(scopeChecks, 0, "A read-only wait still checks retained-surface authority")
+    }
+
+    func testReadOnlyWaitStopsWhenRetainedSurfaceChanges() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let bounds = CGRect(x: 0, y: 0, width: 640, height: 400)
+        var scopeValid = true, proposals = 0, effects = 0
+        let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { true },
+            approvalTargetProvider: { _ in .init(context: "AXTextField Query", applicationID: "fixture", accessibilityIdentity: "editor") },
+            actionPerformer: { _ in effects += 1 }, screenProvider: {
+                .init(image: CIImage(color: .black).cropped(to: bounds),
+                    displayBounds: bounds, frontmostWindowBounds: bounds)
+            }, transientSystemOverlayProvider: { _ in false }, accessibilityContextProvider: { _ in "AXTextField Query" },
+            authenticationContextProvider: { nil }, screenCaptureConsentContextProvider: { nil },
+            planningAccessibilityIdentityProvider: { "editor" }, frontmostApplicationProvider: { "Fixture" })
+        let executor = try ComputerUseDesktopExecutor(journalDirectory: directory, propose: { _ in
+            proposals += 1
+            guard proposals == 1 else {
+                return .init(response: "click", action: .pointer(.leftClick, .init(x: 500, y: 350)))
+            }
+            Task { @MainActor in
+                try? await Task.sleep(for: .milliseconds(10))
+                scopeValid = false
+            }
+            return .init(response: "wait", action: .wait(0.05))
+        }, surfaceScopeCheck: { _ in
+            guard scopeValid else { throw ComputerUseDesktopExecutor.Failure.scopedSurfaceChanged }
+        }, screenConsentRecognizer: { _ in false })
+
+        do {
+            _ = try await executor.execute(taskID: "scope-change-during-wait", prompt: "Wait, then click", trustedUserPrompt: "Wait, then click",
+                tools: tools, progress: { _ in })
+            XCTFail("A changed retained surface must stop before another proposal")
+        } catch ComputerUseDesktopExecutor.Failure.scopedSurfaceChanged {}
+        XCTAssertEqual(proposals, 1)
+        XCTAssertEqual(effects, 0, "No native input may follow a wait after scope loss")
+    }
+
     func testVisualNativeTypeTextPostsUnicodeWithoutAXSettersWhenProjectionContainsHelperText() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -3464,7 +3537,7 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
         XCTAssertEqual(executor.diagnosticHistory.filter { $0.response == "open-compose" }.count, 1)
     }
 
-    func testScopedDesktopEditorChurnStopsAndResumeDoesNotReplayClick() async throws {
+    func testScopedDesktopEditorChurnReobservesWithoutReplayingClick() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
         var current = ComputerUseTextSnapshot(targetID: "A", value: "", selection: NSRange(location: 0, length: 0),
@@ -3493,42 +3566,17 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
             if proposals == 1 { return .init(response: "open-compose", action: .pointer(.leftClick, .init(x: 500, y: 500))) }
             XCTAssertEqual(input.history.count, 1)
             return .init(response: "ready", decision: .handoff("Review the editor."))
-        }, surfaceScopeCheck: { _ in })
+        }, surfaceScopeCheck: { _ in }, screenConsentRecognizer: { _ in false })
+        let result: ComputerUseExecutionResult
         do {
-            _ = try await executor.execute(taskID: "editor-churn", prompt: "Open a compose editor.",
+            result = try await executor.execute(taskID: "editor-churn", prompt: "Open a compose editor.",
                 trustedUserPrompt: "Open a compose editor.", tools: tools, progress: { _ in })
-            XCTFail("A continuously changing focused target must stop safely")
-        } catch ComputerUseDesktopExecutor.Failure.scopedSurfaceChanged {}
-        catch { XCTFail("Unexpected error: \(error)") }
-        XCTAssertEqual(proposals, 1)
-        XCTAssertEqual(effects, 1)
-        XCTAssertEqual(executor.diagnosticHistory.filter { $0.response == "open-compose" }.count, 1)
-        let settleDiagnostic = executor.lastRevalidationDiagnostic
-        XCTAssertEqual(settleDiagnostic["blockedAt"], "editor-settle-timeout")
-        let allowedDiagnosticKeys: Set<String> = ["blockedAt", "sampleCount", "tokenChangeCount",
-            "nilSampleCount", "elapsedMs", "quietMs"]
-        XCTAssertEqual(Set(settleDiagnostic.keys), allowedDiagnosticKeys)
-        let sampleCount = try XCTUnwrap(Int(settleDiagnostic["sampleCount"] ?? ""))
-        let changeCount = try XCTUnwrap(Int(settleDiagnostic["tokenChangeCount"] ?? ""))
-        let nilCount = try XCTUnwrap(Int(settleDiagnostic["nilSampleCount"] ?? ""))
-        let elapsed = try XCTUnwrap(Int(settleDiagnostic["elapsedMs"] ?? ""))
-        let quiet = try XCTUnwrap(Int(settleDiagnostic["quietMs"] ?? ""))
-        XCTAssertGreaterThan(sampleCount, 1)
-        XCTAssertGreaterThan(changeCount, 0)
-        XCTAssertEqual(nilCount, 0, "This scenario churns between valid nonnil target tokens")
-        XCTAssertTrue((2_500...3_500).contains(elapsed))
-        XCTAssertTrue((0...1_250).contains(quiet))
-        XCTAssertFalse(settleDiagnostic.values.contains(where: { $0.contains("churn") || $0.contains("focused") }))
-
-        churn?.cancel()
-        churn = nil
-        current = ComputerUseTextSnapshot(targetID: "stable-after-stop", value: "", selection: NSRange(location: 0, length: 0),
-            isEditable: true, isSecure: false)
-        let resumed = try await executor.execute(taskID: "editor-churn", prompt: "Resume editor observation.",
-            trustedUserPrompt: "Open a compose editor.", tools: tools, progress: { _ in })
-        XCTAssertEqual(resumed, .userInterventionRequired("Review the editor."))
-        XCTAssertEqual(proposals, 2)
-        XCTAssertEqual(effects, 1, "Resume observes the stable editor without replaying the earlier click")
+        } catch {
+            return XCTFail("Churn reobservation failed: \(error); proposals=\(proposals); effects=\(effects); diagnostic=\(executor.lastRevalidationDiagnostic)")
+        }
+        XCTAssertEqual(result, .userInterventionRequired("Review the editor."))
+        XCTAssertEqual(proposals, 2, "Valid window scope allows a fresh observation despite editor metadata churn")
+        XCTAssertEqual(effects, 1, "Reobservation never replays the already dispatched click")
         XCTAssertEqual(executor.diagnosticHistory.filter { $0.response == "open-compose" }.count, 1)
     }
 

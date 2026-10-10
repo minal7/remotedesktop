@@ -449,8 +449,31 @@ struct ComputerUseWebJobContentExtractor: Sendable {
             }
             sort = .init(field: dateField, direction: direction)
         }
-        return .init(description: description, query: .init(fileKind: fileKind, sort: sort,
+        // A literal filename suffix is stronger format evidence than the
+        // extractor's coarse semantic kind. Keep the original name fragment
+        // and every other query constraint unchanged; this never grants path
+        // authority because nameContains has already passed isSafeFileText.
+        let resolvedFileKind = Self.fileKind(fromLiteralNameFragment: nameContains) ?? fileKind
+        return .init(description: description, query: .init(fileKind: resolvedFileKind, sort: sort,
             nameContains: nameContains, folderScope: folderScope))
+    }
+
+    private static func fileKind(fromLiteralNameFragment value: String) -> ComputerUseLocalFileCatalog.FileKind? {
+        let fragment = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let dot = fragment.lastIndex(of: "."), dot < fragment.index(before: fragment.endIndex) else {
+            return nil
+        }
+        let suffix = fragment[fragment.index(after: dot)...].lowercased()
+        switch suffix {
+        case "ppt", "pptx", "pps", "ppsx", "pot", "potx", "odp", "key":
+            return .presentation
+        case "xls", "xlsx", "xlsm", "xlsb", "csv", "ods", "numbers":
+            return .spreadsheet
+        case "doc", "docx", "docm", "odt", "pdf", "rtf", "txt", "md", "pages":
+            return .document
+        default:
+            return nil
+        }
     }
 
     private static func isSafeFileText(_ value: String) -> Bool {

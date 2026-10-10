@@ -194,6 +194,22 @@ def gmail_draft_identity(value: Any) -> tuple[str, str] | None:
     return parsed.path, next(iter(identifiers))
 
 
+def record_gmail_batch_draft_identity(token: Any, saved_url: Any,
+                                      seen_tokens: set[str],
+                                      seen_identities: set[tuple[str, str]]) -> None:
+    if not isinstance(token, str) or not re.fullmatch(r"[a-f0-9]{32}", token):
+        raise AcceptanceError("Gmail batch token is invalid")
+    identity = gmail_draft_identity(saved_url)
+    if identity is None:
+        raise AcceptanceError("Gmail batch run has no canonical observed draft identity")
+    if token in seen_tokens:
+        raise AcceptanceError("Gmail batch reused a run token")
+    if identity in seen_identities:
+        raise AcceptanceError("Gmail batch reused a saved draft identity")
+    seen_tokens.add(token)
+    seen_identities.add(identity)
+
+
 def gmail_session(fixture: dict[str, dict[str, Any]]) -> tuple[str, str, Path, int, str | None]:
     """Persist one owned Gmail subject token and reuse its canonical attachment."""
     TRACE_ROOT.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -206,6 +222,7 @@ def gmail_session(fixture: dict[str, dict[str, Any]]) -> tuple[str, str, Path, i
             raise AcceptanceError("Gmail acceptance session is invalid") from error
         token = saved.get("token") if isinstance(saved, dict) else None
         attempts = saved.get("attempts", 0) if isinstance(saved, dict) else 0
+        attachment_token = saved.get("attachment_token", token) if isinstance(saved, dict) else None
         candidate_url = validate_gmail_compose_url(saved.get("existing_draft_url") if isinstance(saved, dict) else None)
         draft_verified = candidate_url is not None and isinstance(saved, dict) and saved.get("draft_saved_verified") is True
         retry_url = validate_gmail_compose_url(saved.get("retry_compose_url") if isinstance(saved, dict) else None)
@@ -222,10 +239,29 @@ def gmail_session(fixture: dict[str, dict[str, Any]]) -> tuple[str, str, Path, i
     else:
         token = uuid.uuid4().hex
         attempts = 1
+        attachment_token = token
         existing_draft_url = None
         draft_verified = False
         legacy_url = None
+    if not isinstance(attachment_token, str) or not re.fullmatch(r"[a-f0-9]{32}", attachment_token):
+        raise AcceptanceError("Gmail acceptance attachment token is invalid")
+    source = fixture["Quarterly Metrics.xlsx"]
+    payload_bytes = Path(source["path"]).read_bytes()
+    if sha256(payload_bytes) != source["sha256"]:
+        raise AcceptanceError("Canonical Gmail fixture changed before staging")
+    DOWNLOADS.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if DOWNLOADS.is_symlink() or not DOWNLOADS.is_dir():
+        raise AcceptanceError("Downloads must be a real directory")
+    staged = DOWNLOADS / f"Gmail Acceptance {attachment_token} - Quarterly Metrics.xlsx"
+    if staged.exists() or staged.is_symlink():
+        if staged.is_symlink() or not staged.is_file() or sha256(staged.read_bytes()) != source["sha256"]:
+            raise AcceptanceError("Existing Gmail acceptance attachment differs from its canonical fixture")
+    else:
+        descriptor = os.open(staged, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(payload_bytes)
     payload = json.dumps({"schema_version": 2, "token": token, "attempts": attempts,
+                          "attachment_token": attachment_token,
                           "draft_saved_verified": bool(draft_verified),
                           **({"existing_draft_url": existing_draft_url} if existing_draft_url and draft_verified else {}),
                           **({"retry_compose_url": existing_draft_url} if existing_draft_url and not draft_verified else {}),
@@ -238,22 +274,7 @@ def gmail_session(fixture: dict[str, dict[str, Any]]) -> tuple[str, str, Path, i
     with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
         stream.write(payload)
     os.replace(temp, GMAIL_SESSION_PATH)
-    source = fixture["Quarterly Metrics.xlsx"]
     subject = f"Remote Desktop acceptance [{token}]"
-    DOWNLOADS.mkdir(mode=0o700, parents=True, exist_ok=True)
-    if DOWNLOADS.is_symlink() or not DOWNLOADS.is_dir():
-        raise AcceptanceError("Downloads must be a real directory")
-    staged = DOWNLOADS / f"Gmail Acceptance {token} - Quarterly Metrics.xlsx"
-    payload = Path(source["path"]).read_bytes()
-    if sha256(payload) != source["sha256"]:
-        raise AcceptanceError("Canonical Gmail fixture changed before staging")
-    if staged.exists():
-        if staged.is_symlink() or not staged.is_file() or sha256(staged.read_bytes()) != source["sha256"]:
-            raise AcceptanceError("Existing Gmail acceptance attachment differs from its canonical fixture")
-    else:
-        descriptor = os.open(staged, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        with os.fdopen(descriptor, "wb") as stream:
-            stream.write(payload)
     return token, subject, staged, attempts, existing_draft_url
 
 
@@ -290,6 +311,45 @@ def persist_verified_gmail_draft_url(gmail: tuple[str, str, Path, str, int, str 
     return token, subject, staged, recipient, attempt, url
 
 
+def rotate_gmail_session_after_success(
+    gmail: tuple[str, str, Path, str, int, str | None], *,
+    passed: bool, more_runs: bool, send_approval_check: bool = False,
+) -> tuple[str, str, Path, str, int, str | None]:
+    """Start a fresh owned draft only after a successful draft acceptance run."""
+    if not passed or not more_runs or send_approval_check:
+        return gmail
+    token, _, staged, recipient, _, observed_url = gmail
+    if validate_gmail_compose_url(observed_url) is None:
+        raise AcceptanceError("A successful Gmail run must retain its observed draft before rotation")
+    staged_match = re.fullmatch(r"Gmail Acceptance ([a-f0-9]{32}) - Quarterly Metrics\.xlsx", staged.name)
+    if staged.parent != DOWNLOADS or staged_match is None or staged.is_symlink() or not staged.is_file():
+        raise AcceptanceError("Gmail batch attachment is not an owned staged fixture")
+    attachment_token = staged_match.group(1)
+    if GMAIL_SESSION_PATH.is_symlink():
+        raise AcceptanceError("Gmail acceptance session must not be a symlink")
+    try:
+        saved = json.loads(GMAIL_SESSION_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise AcceptanceError("Gmail acceptance session is invalid") from error
+    if (not isinstance(saved, dict) or saved.get("token") != token
+            or saved.get("draft_saved_verified") is not True
+            or validate_gmail_compose_url(saved.get("existing_draft_url")) != observed_url
+            or saved.get("attachment_token", token) != attachment_token):
+        raise AcceptanceError("Gmail acceptance session changed during the run")
+    fresh_token = uuid.uuid4().hex
+    payload = json.dumps({"schema_version": 2, "token": fresh_token, "attempts": 1,
+                          "attachment_token": attachment_token,
+                          "draft_saved_verified": False}, sort_keys=True) + "\n"
+    temp = GMAIL_SESSION_PATH.with_name(GMAIL_SESSION_PATH.name + ".tmp")
+    if temp.exists() or temp.is_symlink():
+        raise AcceptanceError("Gmail acceptance session update is already in progress")
+    descriptor = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+        stream.write(payload)
+    os.replace(temp, GMAIL_SESSION_PATH)
+    return fresh_token, f"Remote Desktop acceptance [{fresh_token}]", staged, recipient, 1, None
+
+
 def persist_gmail_retry_compose_url(gmail: tuple[str, str, Path, str, int, str | None],
                                     outcome_path: Path) -> tuple[str, str, Path, str, int, str | None]:
     """Retain an exact-token draft target after a failed oracle, never as acceptance."""
@@ -300,11 +360,42 @@ def persist_gmail_retry_compose_url(gmail: tuple[str, str, Path, str, int, str |
         return gmail
     if not isinstance(evidence, dict):
         return gmail
-    saved_subject_match = evidence.get("saved_subject_matches") is True and evidence.get("saved_draft_count") == 1
-    compose_subject_match = evidence.get("subject_matches") is True and evidence.get("compose_count") == 1
+    saved_subject_match = (evidence.get("saved_subject_matches") is True
+        and type(evidence.get("saved_draft_count")) is int and evidence.get("saved_draft_count") == 1)
+    compose_subject_match = (evidence.get("subject_matches") is True
+        and type(evidence.get("compose_count")) is int and evidence.get("compose_count") == 1)
     saved_url = validate_gmail_compose_url(evidence.get("saved_draft_url")) if saved_subject_match else None
     compose_url = validate_gmail_compose_url(evidence.get("compose_url")) if compose_subject_match else None
     url = saved_url if saved_subject_match else compose_url if compose_subject_match else None
+    if url is None and evidence.get("recovery_subject_verified") is True:
+        candidate = evidence.get("recovery_compose_url")
+        try:
+            recovery_url = validate_gmail_compose_url(candidate)
+            recovery_identity = gmail_draft_identity(recovery_url) if recovery_url is not None else None
+        except AcceptanceError:
+            recovery_url = None
+            recovery_identity = None
+        if recovery_url is not None and recovery_identity is not None:
+            account_match = re.fullmatch(r"/mail/u/([0-9]+)/", recovery_identity[0])
+            expected_account_index = evidence.get("gmail_account_index")
+            if expected_account_index is not None:
+                account_is_expected = (type(expected_account_index) is int and expected_account_index >= 0
+                    and account_match is not None and int(account_match.group(1)) == expected_account_index)
+            else:
+                prior_url = gmail[5]
+                if prior_url is None:
+                    account_is_expected = account_match is not None
+                else:
+                    try:
+                        prior_identity = gmail_draft_identity(prior_url)
+                    except AcceptanceError:
+                        prior_identity = None
+                    prior_account = (re.fullmatch(r"/mail/u/([0-9]+)/", prior_identity[0])
+                        if prior_identity is not None else None)
+                    account_is_expected = (account_match is not None and prior_account is not None
+                        and account_match.group(1) == prior_account.group(1))
+            if account_is_expected:
+                url = recovery_url
     if url is None:
         return gmail
     token, subject, staged, recipient, attempt, _ = gmail
@@ -850,8 +941,8 @@ def check_gmail(expected: dict[str, Any], outcome: dict[str, Any]) -> dict[str, 
     if expected_draft_url and gmail_draft_identity(saved_url) != gmail_draft_identity(expected_draft_url):
         raise AcceptanceError("Gmail draft oracle returned a different owned compose URL")
     fields_exact = (evidence.get("draft_saved_verified") is True
-        and evidence.get("saved_draft_count") == 1
-        and evidence.get("saved_attachment_count") == 1
+        and type(evidence.get("saved_draft_count")) is int and evidence.get("saved_draft_count") == 1
+        and type(evidence.get("saved_attachment_count")) is int and evidence.get("saved_attachment_count") == 1
         and all(evidence.get(key) is True for key in (
             "saved_to_matches", "saved_subject_matches", "saved_body_matches",
             "saved_attachment_name_visible", "saved_attachment_size_visible")))
@@ -1091,6 +1182,8 @@ def main() -> int:
     batch_staged: Path | None = None
     batch_staged_hash: str | None = None
     gmail: tuple[str, str, Path, str, int, str | None] | None = None
+    gmail_batch_tokens: set[str] = set()
+    gmail_batch_draft_identities: set[tuple[str, str]] = set()
     try:
         cloud_root = check_cloud_root(args.cloud_root) if args.job == "cloud" else None
         fixture = prepare_fixtures()
@@ -1176,12 +1269,31 @@ def main() -> int:
                     passed, check = verify_run(trace, expected, code)
                 except (AcceptanceError, OSError, ValueError) as error:
                     passed, check = False, {"passed": False, "reason": str(error)}
-                if passed and args.job == "gmail" and not args.send_approval_check and gmail is not None:
-                    gmail = persist_verified_gmail_draft_url(gmail, trace / "outcome.json")
-                    gmail = (*gmail[:4], gmail[4] + 1, gmail[5])
-                elif args.job == "gmail" and not args.send_approval_check and gmail is not None:
-                    gmail = persist_gmail_retry_compose_url(gmail, trace / "outcome.json")
                 outcome_path = trace / "outcome.json"
+                if passed and args.job == "gmail" and not args.send_approval_check and gmail is not None:
+                    try:
+                        raw_outcome = json.loads(outcome_path.read_text(encoding="utf-8"))
+                        gmail_evidence = raw_outcome["evidence"]["gmail"]
+                        if (not isinstance(gmail_evidence, dict)
+                                or gmail_evidence.get("draft_saved_verified") is not True
+                                or gmail_evidence.get("saved_subject_matches") is not True
+                                or type(gmail_evidence.get("saved_draft_count")) is not int
+                                or gmail_evidence.get("saved_draft_count") != 1):
+                            raise AcceptanceError("Gmail run is missing exact saved-draft evidence")
+                        record_gmail_batch_draft_identity(expected.get("gmail_token"),
+                            gmail_evidence.get("saved_draft_url"), gmail_batch_tokens,
+                            gmail_batch_draft_identities)
+                        check["gmail_batch_identity_unique"] = True
+                    except (AcceptanceError, OSError, KeyError, TypeError, json.JSONDecodeError) as error:
+                        passed, check = False, {"passed": False, "reason": str(error)}
+                if passed and args.job == "gmail" and not args.send_approval_check and gmail is not None:
+                    verified_gmail = persist_verified_gmail_draft_url(gmail, outcome_path)
+                    if verified_gmail[5] is None:
+                        raise AcceptanceError("Passed Gmail run did not retain its independently observed draft URL")
+                    gmail = rotate_gmail_session_after_success(verified_gmail, passed=True,
+                        more_runs=index < args.runs)
+                elif args.job == "gmail" and not args.send_approval_check and gmail is not None:
+                    gmail = persist_gmail_retry_compose_url(gmail, outcome_path)
                 failure_class = None
                 if outcome_path.is_file():
                     try:
@@ -1215,6 +1327,9 @@ def main() -> int:
         summary = {"status": "passed" if passed_count == args.runs else "failed", "job": args.job,
                    "runs_requested": args.runs, "runs_passed": passed_count, "median_seconds": median,
                    "failure_classes": classes, "build_seconds": round(build_seconds, 3), "runs": results}
+        if args.job == "gmail" and not args.send_approval_check:
+            summary["distinct_gmail_subject_tokens"] = len(gmail_batch_tokens)
+            summary["distinct_gmail_saved_drafts"] = len(gmail_batch_draft_identities)
         summary_path = Path(results[-1]["trace"]) / "summary.json"
         summary_path.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         prune_traces()

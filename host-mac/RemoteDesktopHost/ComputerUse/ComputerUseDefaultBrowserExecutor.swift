@@ -242,6 +242,8 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
         var pendingVisualDirective: ComputerUseFaraModel.WorkerDirective?
         private var pendingPickerConfirmation: (candidateID: String, action: ComputerUsePredictedAction)?
         var dispatchedPickerConfirmationCandidateID: String?
+        var gmailVerifiedAttachmentCandidateID: String?
+        var lastVerifiedGmailComposeURL: URL?
         private var fileOperationRevision: UInt64 = 0
         var lastSessionFailureForDiagnostics: ComputerUseDefaultBrowserSession.Failure?
         var nativeControlErrorDomainForDiagnostics: String?
@@ -263,6 +265,7 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
         var gmailNavigationTargetURL: URL?
         var gmailFlowStage: GmailFlowStage = .compose
         var gmailStandaloneDraftNormalizationComplete = false
+        var gmailSavedDraftReopenVerification = false
         var gmailJob: ComputerUseGmailJob?
         var gmailNavigationStage: GmailNavigationStage = .navigateTarget
         var pendingGmailFlowStage: GmailFlowStage?
@@ -270,8 +273,6 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
         var gmailNavigationWaitCount = 0
         var gmailExpandedRecipientControl = false
         var gmailPendingSendAction: ComputerUsePredictedAction?
-        var pendingGmailDraftRowTarget: (subject: String, cell: AXUIElement, row: AXUIElement,
-            bounds: CGRect, action: ComputerUsePredictedAction)?
         init(session: ComputerUseDefaultBrowserSession, pageReader: ComputerUseDefaultBrowserPageReader,
              localFileCatalogFactory: @escaping ComputerUseDefaultBrowserFileCatalogFactory) {
             self.session = session; self.pageReader = pageReader; self.localFileCatalogFactory = localFileCatalogFactory
@@ -283,7 +284,11 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
             let isNewTask = taskID == nil
             taskID = id; self.goal = goal
             pendingPickerConfirmation = nil
-            if isNewTask { dispatchedPickerConfirmationCandidateID = nil }
+            if isNewTask {
+                dispatchedPickerConfirmationCandidateID = nil
+                gmailVerifiedAttachmentCandidateID = nil
+                lastVerifiedGmailComposeURL = nil
+            }
             visualFallbackPending = false
             pendingVisualDirective = nil
             if executionTaskID == nil { executionTaskID = id }
@@ -312,18 +317,6 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
             }
             guard let window = session.currentWindow else { throw Failure.noRetainedWindow }
             self.window = window
-            if action != nil, let target = pendingGmailDraftRowTarget {
-                var ambiguousRow = false
-                guard let action, action == target.action,
-                      let current = try ComputerUseGmailRecipientVerifier.exactDraftSubjectCellEvidence(
-                        window: window.accessibilityElement, application: window.application,
-                        subject: target.subject, ambiguous: &ambiguousRow,
-                        revalidate: { try session.validate(taskID: taskID, goal: goal, tools: tools) }),
-                      CFEqual(current.cell, target.cell), CFEqual(current.row, target.row),
-                      current.bounds.equalTo(target.bounds) else {
-                    throw ComputerUseDesktopExecutor.Failure.scopedSurfaceChanged
-                }
-            }
             if let panel = session.currentFileOpenPanel {
                 let selectedURL = try selectedFileURL()
                 guard panel.parentWindowID == window.id,
@@ -407,10 +400,22 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
             }
         }
 
-        func successfulDispatch(_ action: ComputerUsePredictedAction) {
-            if let pendingGmailDraftRowTarget, pendingGmailDraftRowTarget.action == action {
-                self.pendingGmailDraftRowTarget = nil
+        func checkGmailDraftsPage(_ action: ComputerUsePredictedAction, _ tools: ComputerUseHostTools) throws {
+            try check(action, tools)
+            guard let taskID, let goal, let window = self.window,
+                  let account = gmailJob?.request.account,
+                  let page = try pageReader.read(window: window.accessibilityElement, application: window.application,
+                    mayAct: { (try? tools.requireActive()) != nil }),
+                  page.application == window.application,
+                  page.url.range(of: #"^https://mail\.google\.com/mail/u/[0-9]+/#drafts$"#,
+                    options: [.regularExpression, .caseInsensitive]) != nil,
+                  ComputerUseGmailAccountDirectory.accountIndex(from: page.url) == account.index else {
+                throw ComputerUseDesktopExecutor.Failure.scopedSurfaceChanged
             }
+            try session.validate(taskID: taskID, goal: goal, tools: tools)
+        }
+
+        func successfulDispatch(_ action: ComputerUsePredictedAction) {
             if let pendingGmailFlowStage {
                 gmailFlowStage = pendingGmailFlowStage
                 self.pendingGmailFlowStage = nil
@@ -687,9 +692,19 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
     /// Optional task-specific verification supplements the model's decision
     /// from the fresh screenshot. Real-site acceptance checks outcomes separately.
     var retainedWindowForDiagnostics: ComputerUseDefaultBrowserSession.Window? { scope.window }
+    /// Recovery navigation hint only; it is not completion or approval evidence.
+    var gmailVerifiedComposeURLForRecovery: URL? { scope.lastVerifiedGmailComposeURL }
     private(set) var lastSessionFailureForDiagnostics: ComputerUseDefaultBrowserSession.Failure?
+    private(set) var lastApprovedVisualContinuationFailureForDiagnostics: String?
+    private(set) var lastApprovedVisualContinuationDesktopFailureForDiagnostics: String?
     var lastActionDiagnosticForTests: [String: String] {
         var diagnostic = desktop.lastRevalidationDiagnostic
+        if let failure = lastApprovedVisualContinuationFailureForDiagnostics {
+            diagnostic["approvedVisualContinuationFailure"] = failure
+        }
+        if let failure = lastApprovedVisualContinuationDesktopFailureForDiagnostics {
+            diagnostic["approvedVisualContinuationDesktopFailure"] = failure
+        }
         if let domain = scope.nativeControlErrorDomainForDiagnostics {
             diagnostic["nativeControlErrorDomain"] = domain
         }
@@ -1260,26 +1275,37 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
                             "Gmail did not show exactly one complete Drafts row for this subject. Review Drafts before continuing."),
                             includeInModelHistory: false)
                     }
-                    guard let actionBounds = scope.session.currentActionBounds,
-                          let display = enriched.desktopDisplayBounds else {
+                    guard let actionBounds = scope.session.currentActionBounds else {
                         return .init(response: "", decision: .handoff(
                             "The retained Gmail Drafts window could not be positioned safely."), includeInModelHistory: false)
                     }
                     scope.gmailNavigationWaitCount = 0
                     let center = CGPoint(x: row.bounds.midX, y: row.bounds.midY)
-                    guard center.x.isFinite, center.y.isFinite, actionBounds.contains(center),
-                          display.width.isFinite, display.height.isFinite,
-                          display.width > 0, display.height > 0 else {
+                    guard center.x.isFinite, center.y.isFinite, actionBounds.contains(center) else {
                         return .init(response: "", decision: .handoff(
                             "The exact Gmail draft row is outside the retained browser window."), includeInModelHistory: false)
                     }
                     let predicted = ComputerUsePredictedAction.click(x: Int(center.x.rounded()), y: Int(center.y.rounded()),
                         button: 1, count: 1)
-                    scope.pendingGmailDraftRowTarget = (job.request.subject, row.cell, row.row, row.bounds, predicted)
-                    try scope.check(predicted, tools)
-                    scope.pendingGmailFlowStage = .waitingForDraftReopen
-                    return .init(response: "", action: try Self.normalizedPointerAction(center: center, display: display),
-                        includeInModelHistory: false)
+                    var pressAttempted = false
+                    let pressed = try ComputerUseGmailRecipientVerifier.pressExactDraftSubjectRow(
+                        window: window.accessibilityElement, application: window.application,
+                        subject: job.request.subject, expectedCell: row.cell, expectedRow: row.row,
+                        expectedBounds: row.bounds,
+                        revalidate: { try scope.checkGmailDraftsPage(predicted, tools) },
+                        willDispatch: {
+                            pressAttempted = true
+                            scope.gmailFlowStage = .waitingForDraftReopen
+                        })
+                    guard pressed else {
+                        let message = pressAttempted
+                            ? "Gmail did not confirm the native action on this draft row. Review Drafts before continuing."
+                            : "The exact Gmail draft row changed before it could be reopened. Review Drafts before continuing."
+                        return .init(response: "", decision: .handoff(message),
+                            includeInModelHistory: false)
+                    }
+                    scope.gmailNavigationWaitCount = 0
+                    return .init(response: "", decision: .refreshObservation, includeInModelHistory: false)
                 }
                 if scope.gmailFlowStage == .waitingForDraftReopen {
                     guard let recoveredURL = URL(string: page.url),
@@ -1307,6 +1333,7 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
                             includeInModelHistory: false)
                     }
                     scope.gmailStandaloneDraftNormalizationComplete = true
+                    scope.gmailRecipientsVerified = false
                     scope.gmailFlowStage = .compose
                     scope.gmailNavigationStage = .ready
                     scope.gmailWaitCount = 0
@@ -1395,7 +1422,23 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
                         }
                         return .init(response: "", decision: .refreshObservation, includeInModelHistory: false)
                     }
+                    if let account = job.request.account,
+                       scope.selectedGmailAccount?.index == account.index,
+                       let composeURL = URL(string: page.url),
+                       ComputerUseGmailJob.isOpaqueComposeDraftURL(composeURL),
+                       ComputerUseGmailAccountDirectory.accountIndex(from: page.url) == account.index {
+                        // This actual opaque URL is saved only after exact
+                        // compose fields and recipients have been verified.
+                        // It supports retry navigation, never completion or
+                        // approval proof.
+                        scope.lastVerifiedGmailComposeURL = composeURL
+                    }
                     if job.requiresAttachment && scope.selectedCandidate == nil {
+                        if scope.gmailSavedDraftReopenVerification {
+                            return .init(response: "", decision: .handoff(
+                                "The reopened Gmail draft did not retain the requested attachment. Review it before continuing."),
+                                includeInModelHistory: false)
+                        }
                         guard let query = scope.gmailFileQuery, query.isValid else {
                             return .init(response: "", decision: .handoff(
                                 "The requested attachment could not be resolved from a typed file query."), includeInModelHistory: false)
@@ -1444,18 +1487,59 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
                         guard let currentWindow = scope.session.currentWindow, let attachment = job.attachment else {
                             throw Failure.selectedFileStale
                         }
+                        if scope.gmailSavedDraftReopenVerification &&
+                           (scope.gmailVerifiedAttachmentCandidateID != candidate.id ||
+                            attachment.candidateID != candidate.id ||
+                            attachment.displayName != candidate.displayName ||
+                            attachment.byteCount != candidate.byteCount) {
+                            return .init(response: "", decision: .handoff(
+                                "The reopened Gmail draft attachment is not bound to the selected file. Review it before continuing."),
+                                includeInModelHistory: false)
+                        }
                         switch try ComputerUseGmailRecipientVerifier.attachmentEvidence(
                             window: currentWindow.accessibilityElement, application: currentWindow.application,
                             expected: attachment, revalidate: { try scope.check(nil, tools) }) {
                         case .matching:
-                            scope.gmailFlowStage = job.request.sendRequested ? .send : .saveDraft
+                            if scope.gmailSavedDraftReopenVerification {
+                                scope.gmailSavedDraftReopenVerification = false
+                                scope.gmailFlowStage = .complete
+                            } else {
+                                guard attachment.candidateID == candidate.id,
+                                      attachment.displayName == candidate.displayName,
+                                      attachment.byteCount == candidate.byteCount,
+                                      scope.gmailFlowStage != .waitingForAttachment ||
+                                        scope.dispatchedPickerConfirmationCandidateID == candidate.id else {
+                                    return .init(response: "", decision: .handoff(
+                                        "The Gmail attachment could not be bound to the selected file."),
+                                        includeInModelHistory: false)
+                                }
+                                scope.gmailVerifiedAttachmentCandidateID = candidate.id
+                                scope.gmailFlowStage = job.request.sendRequested ? .send : .saveDraft
+                            }
                         case .conflicting:
                             return .init(response: "", decision: .handoff(
                                 "The existing Gmail attachment does not match the selected file. Review the draft before continuing."),
                                 includeInModelHistory: false)
                         case .absent:
+                            if scope.gmailSavedDraftReopenVerification {
+                                return .init(response: "", decision: .handoff(
+                                    "The reopened Gmail draft did not retain the requested attachment. Review it before continuing."),
+                                    includeInModelHistory: false)
+                            }
                             break
                         }
+                    }
+                    if scope.gmailSavedDraftReopenVerification && !job.requiresAttachment {
+                        guard let currentWindow = scope.session.currentWindow,
+                              try ComputerUseGmailRecipientVerifier.attachmentEvidence(
+                                window: currentWindow.accessibilityElement, application: currentWindow.application,
+                                expected: nil, revalidate: { try scope.check(nil, tools) }) == .absent else {
+                            return .init(response: "", decision: .handoff(
+                                "The reopened Gmail draft contains an unexpected attachment. Review it before continuing."),
+                                includeInModelHistory: false)
+                        }
+                        scope.gmailSavedDraftReopenVerification = false
+                        scope.gmailFlowStage = .complete
                     }
                 } else if composerIsExpected {
                     scope.gmailFieldDiagnostics = job.composeFieldDiagnostics(page)
@@ -1471,6 +1555,9 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
                           scope.dispatchedPickerConfirmationCandidateID == candidate.id,
                           let currentWindow = scope.session.currentWindow,
                           let attachment = job.attachment,
+                          attachment.candidateID == candidate.id,
+                          attachment.displayName == candidate.displayName,
+                          attachment.byteCount == candidate.byteCount,
                           try ComputerUseGmailRecipientVerifier.attachmentEvidence(
                             window: currentWindow.accessibilityElement, application: currentWindow.application,
                             expected: attachment, revalidate: { try scope.check(nil, tools) }) == .matching else {
@@ -1482,6 +1569,7 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
                             "Gmail did not show the selected filename and size. Review the draft before continuing."),
                             includeInModelHistory: false)
                     }
+                    scope.gmailVerifiedAttachmentCandidateID = candidate.id
                     scope.gmailWaitCount = 0
                     scope.gmailFlowStage = job.request.sendRequested ? .send : .saveDraft
                 }
@@ -1525,9 +1613,11 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
                 case .waitingForAttachment:
                     guard let candidate = scope.selectedCandidate,
                           scope.dispatchedPickerConfirmationCandidateID == candidate.id,
+                          job.attachment?.candidateID == candidate.id,
                           job.verifiesAttachment(page) else {
                         return waitForGmailProgress("Gmail did not show the selected filename and size. Review the draft before continuing.")
                     }
+                    scope.gmailVerifiedAttachmentCandidateID = candidate.id
                     scope.gmailWaitCount = 0
                     scope.gmailFlowStage = job.request.sendRequested ? .send : .saveDraft
                 case .send:
@@ -1558,10 +1648,18 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
                         scope.gmailWaitCount = 0
                     } else { return waitForGmailProgress("Gmail did not confirm the message was sent. Review the page before continuing.") }
                 case .verifyDraft:
-                    if job.verifiesSavedDraft(page) {
-                        scope.gmailFlowStage = .complete
-                        scope.gmailWaitCount = 0
-                    } else { return waitForGmailProgress("Gmail did not confirm the draft was saved. Review the page before continuing.") }
+                    guard let account = job.request.account,
+                          let draftsURL = ComputerUseGmailAccountDirectory.draftsURL(index: account.index) else {
+                        return .init(response: "", decision: .handoff(
+                            "The selected Gmail Drafts address could not be prepared safely."), includeInModelHistory: false)
+                    }
+                    scope.gmailSavedDraftReopenVerification = true
+                    scope.gmailRecipientsVerified = false
+                    scope.gmailFlowStage = .normalizeDrafts
+                    scope.gmailNavigationTargetURL = draftsURL
+                    scope.gmailNavigationStage = page.url == draftsURL.absoluteString ? .waitForTarget : .navigateTarget
+                    scope.gmailWaitCount = 0
+                    return .init(response: "", decision: .refreshObservation, includeInModelHistory: false)
                 case .complete:
                     return .init(response: "", decision: .completionStatus(success: true), includeInModelHistory: false)
                 }
@@ -1876,6 +1974,8 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
 
     func continueAfterApprovedVisualAction(_ continuation: ComputerUseVisualApprovalContinuation, action: ComputerUsePredictedAction,
         tools: ComputerUseHostTools, progress: @escaping (String) -> Void) async throws -> ComputerUseExecutionResult {
+        lastApprovedVisualContinuationFailureForDiagnostics = nil
+        lastApprovedVisualContinuationDesktopFailureForDiagnostics = nil
         do {
             scope.tools = tools
             // The action has already been approved and dispatched. Let the desktop
@@ -1883,8 +1983,39 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
             // before validating this retained browser scope again.
             return try await desktop.continueAfterApprovedVisualAction(continuation, action: action, tools: tools, progress: progress)
         } catch is CancellationError { throw CancellationError() }
-        catch ComputerUseDefaultBrowserSession.Failure.authenticationHandoff { return .userInterventionRequired("Complete sign-in or macOS permission in the intended browser window, then choose Resume.") }
-        catch { return .userInterventionRequired("The intended browser window changed or is unavailable. Restore it, then choose Resume.") }
+        catch ComputerUseDefaultBrowserSession.Failure.authenticationHandoff {
+            lastApprovedVisualContinuationFailureForDiagnostics = "sessionAuthenticationHandoff"
+            return .userInterventionRequired("Complete sign-in or macOS permission in the intended browser window, then choose Resume.")
+        }
+        catch {
+            lastApprovedVisualContinuationFailureForDiagnostics = Self.approvedVisualContinuationFailureCategory(error)
+            if let failure = error as? ComputerUseDesktopExecutor.Failure {
+                lastApprovedVisualContinuationDesktopFailureForDiagnostics = Self.desktopFailureCase(failure)
+            }
+            return .userInterventionRequired("The intended browser window changed or is unavailable. Restore it, then choose Resume.")
+        }
+    }
+
+    private static func desktopFailureCase(_ failure: ComputerUseDesktopExecutor.Failure) -> String {
+        switch failure {
+        case .changedTask: return "changedTask"
+        case .recoveredTask: return "recoveredTask"
+        case .changedScreen: return "changedScreen"
+        case .scopedSurfaceChanged: return "scopedSurfaceChanged"
+        case .completionUnverified: return "completionUnverified"
+        case .unsupportedAction: return "unsupportedAction"
+        case .invalidApproval: return "invalidApproval"
+        case .stepLimit: return "stepLimit"
+        case .authentication: return "authentication"
+        }
+    }
+
+    private static func approvedVisualContinuationFailureCategory(_ error: Error) -> String {
+        if error is ComputerUseDesktopExecutor.Failure { return "desktopFailure" }
+        if error is ComputerUseDefaultBrowserSession.Failure { return "sessionFailure" }
+        if error is Failure { return "browserFailure" }
+        if error is ComputerUseHostTools.ToolError { return "hostFailure" }
+        return "other"
     }
 
     func cancelVisualApprovalContinuation(_ continuation: ComputerUseVisualApprovalContinuation) {

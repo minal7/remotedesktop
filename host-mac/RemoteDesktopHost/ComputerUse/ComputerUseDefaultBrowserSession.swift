@@ -577,7 +577,10 @@ final class ComputerUseDefaultBrowserSession {
                     && (lastCaptureReasonForDiagnostics == "windows_read"
                         || lastCaptureReasonForDiagnostics == "focused_window_read")
                     && lastCaptureAXErrorCodeForDiagnostics == Int(AXError.cannotComplete.rawValue)
-                guard transientAXRead, ContinuousClock.now < deadline else { throw failure }
+                let transientBoundsRead = failure == .ambiguousWindows
+                    && lastCaptureReasonForDiagnostics == "bounds_read"
+                    && lastCaptureAXErrorCodeForDiagnostics == Int(AXError.cannotComplete.rawValue)
+                guard transientAXRead || transientBoundsRead, ContinuousClock.now < deadline else { throw failure }
                 try await Task.sleep(for: .milliseconds(50))
                 continue
             }
@@ -998,12 +1001,13 @@ final class ComputerUseDefaultBrowserSession {
         let deadline = ContinuousClock.now.advanced(by: .seconds(2))
         let root = AXUIElementCreateApplication(application.processIdentifier)
         var rootReadAXError: Int?
-        func read(_ element: AXUIElement, _ attribute: CFString) -> CFTypeRef? {
+        func read(_ element: AXUIElement, _ attribute: CFString,
+                  messagingTimeout: Float? = nil) -> CFTypeRef? {
             guard !Task.isCancelled, ContinuousClock.now < deadline else { return nil }
             let isApplicationWindowRead = CFEqual(element, root)
                 && (attribute == (kAXWindowsAttribute as CFString)
                     || attribute == (kAXFocusedWindowAttribute as CFString))
-            AXUIElementSetMessagingTimeout(element, isApplicationWindowRead ? 0.5 : 0.15)
+            AXUIElementSetMessagingTimeout(element, messagingTimeout ?? (isApplicationWindowRead ? 0.5 : 0.15))
             var value: CFTypeRef?
             let result = AXUIElementCopyAttributeValue(element, attribute, &value)
             guard result == .success else {
@@ -1082,8 +1086,10 @@ final class ComputerUseDefaultBrowserSession {
             diagnostic("phase=ax_window_validation reason=\(reason) index=\(index) count=\(elements.count) deadline=\(ContinuousClock.now >= deadline ? 1 : 0) role=\(safeRole(element))")
         }
         func checkedWindowBounds(_ element: AXUIElement) -> (CGRect?, String) {
-            guard let rawPosition = read(element, kAXPositionAttribute as CFString),
-                  let rawSize = read(element, kAXSizeAttribute as CFString) else {
+            // Only retained/focused action-relevant windows reach this helper.
+            // Their geometry can take longer to settle during Safari navigation.
+            guard let rawPosition = read(element, kAXPositionAttribute as CFString, messagingTimeout: 0.5),
+                  let rawSize = read(element, kAXSizeAttribute as CFString, messagingTimeout: 0.5) else {
                 return (nil, ContinuousClock.now >= deadline ? "deadline" : "read")
             }
             guard CFGetTypeID(rawPosition) == AXValueGetTypeID(),
@@ -1188,6 +1194,7 @@ final class ComputerUseDefaultBrowserSession {
                 throw Failure.ambiguousWindows
             }
             let containsNativeFocus = focusedWithin(focusedElement, element)
+            let isRetainedTarget = expectedWindow.map { CFEqual(element, $0.accessibilityElement) } ?? false
             let requireBounds = expectedWindow != nil || containsNativeFocus
             let bounds: CGRect
             if requireBounds {
@@ -1210,10 +1217,13 @@ final class ComputerUseDefaultBrowserSession {
             let window = Window(id: id, application: application,
                 accessibilityElement: element, identity: windowIdentity)
             windows.append(window)
-            // A background window's chooser or sign-in sheet does not own
-            // input in this window. Keep all window identities for startup
-            // comparison, but inspect sheets only under current native focus.
-            guard containsNativeFocus else { continue }
+            // Startup inventory inspects sheets only under native focus. A
+            // retained-session capture also inspects this exact
+            // retained window's sheets even when macOS reports a detached
+            // Go To sheet as the focused window and its AXParent chain does
+            // not lead back through the browser. Other background windows
+            // remain excluded from sheet inspection.
+            guard containsNativeFocus || (expectedWindow != nil && isRetainedTarget) else { continue }
             let axSheets = array(element, "AXSheets" as CFString)
             if !axSheets.isEmpty { hasSheets = true }
             for sheet in axSheets where string(sheet, kAXRoleAttribute as CFString) != "AXSheet" {
@@ -1265,6 +1275,7 @@ final class ComputerUseDefaultBrowserSession {
             var goToBounds: CGRect?
             var pathField: AXUIElement?
             var pathFocused = false
+            var detachedGoToPathFieldFocused = false
             var pathValue: String?
             var pathSelection: NSRange?
             if let nested = nestedSheets.first {
@@ -1278,9 +1289,17 @@ final class ComputerUseDefaultBrowserSession {
                       let nestedBounds = bounds(nested) else { throw Failure.authenticationHandoff }
                 goToBounds = nestedBounds
                 pathField = fields[0]
-                if let focusedUI = read(root, kAXFocusedUIElementAttribute as CFString),
-                   CFGetTypeID(focusedUI) == AXUIElementGetTypeID() {
-                    pathFocused = focusedWithin(focusedUI as! AXUIElement, fields[0])
+                if let focusedUIValue = read(root, kAXFocusedUIElementAttribute as CFString),
+                   CFGetTypeID(focusedUIValue) == AXUIElementGetTypeID() {
+                    let focusedUI = unsafeBitCast(focusedUIValue, to: AXUIElement.self)
+                    pathFocused = focusedWithin(focusedUI, fields[0])
+                    if let expectedWindow {
+                        detachedGoToPathFieldFocused = Self.isExactRetainedGoToPathFieldFocus(
+                            retainedWindow: expectedWindow.accessibilityElement,
+                            panelParentWindow: parentWindow.accessibilityElement,
+                            focusedWindow: focusedElement, goToWindow: nested,
+                            focusedUI: focusedUI, pathField: fields[0])
+                    }
                 }
                 if let text = string(fields[0], kAXValueAttribute as CFString), text.utf8.count <= 32_768 {
                     pathValue = text
@@ -1298,7 +1317,7 @@ final class ComputerUseDefaultBrowserSession {
             }
             fileOpenPanel = FileOpenPanel(parentWindowID: parentWindow.id,
                 parentWindowElement: parentWindow.accessibilityElement, accessibilityElement: panel,
-                bounds: bounds(panel)!, isFocused: focusedWithin(focusedElement, panel),
+                bounds: bounds(panel)!, isFocused: focusedWithin(focusedElement, panel) || detachedGoToPathFieldFocused,
                 goToFolderBounds: goToBounds, pathTextFieldElement: pathField,
                 selectedFileURLs: selectedURLs(in: listViews[0]),
                 primaryActionElement: primaryButtons[0], primaryActionBounds: bounds(primaryButtons[0]),
@@ -1327,5 +1346,17 @@ final class ComputerUseDefaultBrowserSession {
         return WindowSnapshot(application: application, windows: windows,
             focusedWindowID: focusedID, hasSheets: hasSheets, fileOpenPanel: fileOpenPanel,
             hasUnrecognizedSheets: hasUnrecognizedSheets)
+    }
+
+    /// macOS may expose Safari's Go To sheet as AXFocusedWindow while its
+    /// parent chain stops before the retained browser window. Admit that
+    /// detached focus only when every participant is the exact unique object
+    /// discovered under the retained open panel.
+    static func isExactRetainedGoToPathFieldFocus(retainedWindow: AXUIElement,
+        panelParentWindow: AXUIElement, focusedWindow: AXUIElement, goToWindow: AXUIElement,
+        focusedUI: AXUIElement, pathField: AXUIElement) -> Bool {
+        CFEqual(retainedWindow, panelParentWindow)
+            && CFEqual(focusedWindow, goToWindow)
+            && CFEqual(focusedUI, pathField)
     }
 }

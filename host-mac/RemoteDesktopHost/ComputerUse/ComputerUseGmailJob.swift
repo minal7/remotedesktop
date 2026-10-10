@@ -158,17 +158,91 @@ struct ComputerUseGmailJob: Equatable, Sendable {
     func verifiesAttachment(_ observation: ComputerUseDefaultBrowserPageReader.Observation) -> Bool {
         guard let url = URL(string: observation.url), Self.isGmailURL(url), matchesAccount(url) else { return false }
         guard let attachment else { return !requiresAttachment }
-        var formatter = ByteCountFormatter()
-        formatter.countStyle = .file
-        let formattedSize = formatter.string(fromByteCount: attachment.byteCount)
-        func matches(_ value: String) -> Bool {
-            value.localizedCaseInsensitiveContains(attachment.displayName)
-                && (value.localizedCaseInsensitiveContains(formattedSize)
-                    || value.localizedCaseInsensitiveContains("\(attachment.byteCount) bytes"))
+        let linkLabels = observation.controls.filter { $0.role == "AXLink" }.map(\.label)
+        let linkCandidates = linkLabels.filter(Self.isAttachmentLabel)
+        let labels = linkCandidates.isEmpty
+            ? observation.exactTextValues.filter(Self.isAttachmentLabel) : linkCandidates
+        return labels.count == 1 && Self.attachmentLabelMatches(labels[0], expected: attachment)
+    }
+
+    private struct AttachmentSizeLabel: Equatable {
+        let amount: Decimal
+        let unit: String
+    }
+
+    private struct ParsedAttachmentLabel: Equatable {
+        let fileName: String
+        let size: AttachmentSizeLabel?
+    }
+
+    static func attachmentLabelMatches(_ label: String, expected: Attachment) -> Bool {
+        guard let parsed = parseAttachmentLabel(label), parsed.fileName == expected.displayName,
+              let size = parsed.size else { return false }
+        return attachmentSizeLabelMatches(size, byteCount: expected.byteCount)
+    }
+
+    static func isAttachmentLabel(_ label: String) -> Bool {
+        parseAttachmentLabel(label) != nil
+    }
+
+    private static func parseAttachmentLabel(_ label: String) -> ParsedAttachmentLabel? {
+        let value = label.trimmingCharacters(in: .whitespacesAndNewlines)
+        let fileName: String
+        let sizeText: String
+        if value.hasSuffix(")"), let separator = value.range(of: " (", options: .backwards) {
+            fileName = String(value[..<separator.lowerBound])
+            sizeText = String(value[separator.upperBound..<value.index(before: value.endIndex)])
+        } else if let separator = value.range(of: ",", options: .backwards) {
+            fileName = String(value[..<separator.lowerBound])
+            sizeText = String(value[separator.upperBound...]).trimmingCharacters(in: .whitespaces)
+        } else {
+            return nil
         }
-        let textMatches = observation.exactTextValues.filter(matches)
-        if !textMatches.isEmpty { return textMatches.count == 1 }
-        return observation.controls.filter { matches($0.label) }.count == 1
+        guard !fileName.isEmpty, !fileName.contains("/"), !fileName.contains("\\"), !sizeText.isEmpty else { return nil }
+        let size = parseAttachmentSizeLabel(sizeText)
+        return .init(fileName: fileName, size: size)
+    }
+
+    private static func parseAttachmentSizeLabel(_ text: String) -> AttachmentSizeLabel? {
+        guard let expression = try? NSRegularExpression(pattern: #"^\s*([0-9]+(?:[.,][0-9]+)?)\s*(bytes?|b|k|kb|kib|m|mb|mib|g|gb|gib|t|tb|tib)\s*$"#,
+                                                        options: .caseInsensitive) else { return nil }
+        let nsText = text as NSString
+        let fullRange = NSRange(location: 0, length: nsText.length)
+        guard let match = expression.firstMatch(in: text, range: fullRange), match.range == fullRange,
+              match.numberOfRanges == 3,
+              let amountRange = Range(match.range(at: 1), in: text),
+              let unitRange = Range(match.range(at: 2), in: text) else { return nil }
+        let numberText = String(text[amountRange]).replacingOccurrences(of: ",", with: ".")
+        guard let amount = Decimal(string: numberText, locale: Locale(identifier: "en_US_POSIX")) else { return nil }
+        let rawUnit = String(text[unitRange]).lowercased()
+        let unit: String
+        switch rawUnit {
+        case "b", "byte", "bytes": unit = "B"
+        case "k", "kb", "kib": unit = "K"
+        case "m", "mb", "mib": unit = "M"
+        case "g", "gb", "gib": unit = "G"
+        case "t", "tb", "tib": unit = "T"
+        default: return nil
+        }
+        return .init(amount: amount, unit: unit)
+    }
+
+    private static func attachmentSizeLabelMatches(_ observed: AttachmentSizeLabel, byteCount: Int64) -> Bool {
+        guard byteCount >= 0 else { return false }
+        if observed.unit == "B", observed.amount == Decimal(byteCount) { return true }
+
+        for style in [ByteCountFormatter.CountStyle.file, .binary] {
+            let formatter = ByteCountFormatter()
+            formatter.countStyle = style
+            guard let expected = parseAttachmentSizeLabel(formatter.string(fromByteCount: byteCount)),
+                  expected.unit == observed.unit else { continue }
+            if expected.amount == observed.amount { return true }
+            var expectedAmount = expected.amount
+            var rounded = Decimal()
+            NSDecimalRound(&rounded, &expectedAmount, 0, .plain)
+            if observed.amount == rounded { return true }
+        }
+        return false
     }
 
     func hasVisibleAttachmentRemovalControl(_ observation: ComputerUseDefaultBrowserPageReader.Observation) -> Bool {
@@ -181,13 +255,6 @@ struct ComputerUseGmailJob: Equatable, Sendable {
     func verifiesSend(_ observation: ComputerUseDefaultBrowserPageReader.Observation) -> Bool {
         request.sendRequested && URL(string: observation.url).map { Self.isGmailURL($0) && matchesAccount($0) } == true && observation.exactTextValues.contains {
             $0.localizedCaseInsensitiveContains("Message sent")
-        }
-    }
-
-    func verifiesSavedDraft(_ observation: ComputerUseDefaultBrowserPageReader.Observation) -> Bool {
-        !request.sendRequested && URL(string: observation.url).map { Self.isGmailURL($0) && matchesAccount($0) } == true && observation.exactTextValues.contains {
-            $0.localizedCaseInsensitiveContains("Draft saved")
-                || $0.localizedCaseInsensitiveContains("Saved to Drafts")
         }
     }
 
@@ -236,6 +303,12 @@ struct ComputerUseGmailJob: Equatable, Sendable {
         guard scanComplete, !subject.isEmpty else { return nil }
         let matches = rowTexts.indices.filter { rowTexts[$0] == subject }
         return matches.count == 1 ? matches[0] : nil
+    }
+
+    static func primaryDraftSubjectCellText(cellValue: String?, firstDescendantStaticText: String?) -> String? {
+        if let cellValue, !cellValue.isEmpty { return cellValue }
+        guard let firstDescendantStaticText, !firstDescendantStaticText.isEmpty else { return nil }
+        return firstDescendantStaticText
     }
 
     private func matchesAccount(_ url: URL) -> Bool {
@@ -545,6 +618,21 @@ final class ComputerUseGmailAccountPreferences {
 /// item; visible names and account headers are never treated as addresses.
 @MainActor
 enum ComputerUseGmailRecipientVerifier {
+    static func pressExactDraftSubjectRow(window: AXUIElement, application: ComputerUseApplicationIdentity,
+        subject: String, expectedCell: AXUIElement, expectedRow: AXUIElement, expectedBounds: CGRect,
+        revalidate: @MainActor () throws -> Void, willDispatch: @MainActor () -> Void) throws -> Bool {
+        try revalidate()
+        var ambiguous = false
+        guard let current = try exactDraftSubjectCellEvidence(window: window, application: application,
+            subject: subject, ambiguous: &ambiguous, revalidate: revalidate),
+              !ambiguous, CFEqual(current.cell, expectedCell), CFEqual(current.row, expectedRow),
+              current.bounds.equalTo(expectedBounds) else { return false }
+        try revalidate()
+        willDispatch()
+        guard AXUIElementPerformAction(current.row, "AXPress" as CFString) == .success else { return false }
+        return true
+    }
+
     enum RecipientMenuObservation: Equatable {
         case absent
         case copyAddress(String)
@@ -579,13 +667,18 @@ enum ComputerUseGmailRecipientVerifier {
         let element: AXUIElement
         let role: String
         let strings: [String]
+        let title: String?
+        let description: String?
         let value: String?
         let children: [Node]
 
-        init(element: AXUIElement, role: String, strings: [String], value: String?, children: [Node]) {
+        init(element: AXUIElement, role: String, strings: [String], title: String?, description: String?,
+             value: String?, children: [Node]) {
             self.element = element
             self.role = role
             self.strings = strings
+            self.title = title
+            self.description = description
             self.value = value
             self.children = children
         }
@@ -715,25 +808,63 @@ enum ComputerUseGmailRecipientVerifier {
     static func exactDraftSubjectCellEvidence(window: AXUIElement, application: ComputerUseApplicationIdentity,
                                               subject: String,
                                               ambiguous: inout Bool,
+                                              diagnostic: ((String) -> Void)? = nil,
                                               revalidate: @MainActor () throws -> Void)
         throws -> (cell: AXUIElement, row: AXUIElement, bounds: CGRect)? {
-        try revalidate()
-        guard frontmostMatches(application), !subject.isEmpty else { return nil }
-        let deadline = ContinuousClock.now.advanced(by: .seconds(1))
-        var visited = 0, overflow = false, outerWebAreaSeen = false
+        var visited = 0, maxDepth = 0, maxChildren = 0, scanReason = "none"
+        func report(_ phase: String, reason: String? = nil, exactMatches: Int = 0) {
+            diagnostic?("phase=\(phase) reason=\(reason ?? scanReason) visited=\(visited) max_depth=\(maxDepth) max_children=\(maxChildren) exact_matches=\(exactMatches)")
+        }
+        func failScan(_ reason: String) {
+            if scanReason == "none" { scanReason = reason }
+        }
+        func deadlineOrCancellationReason() -> String {
+            Task.isCancelled ? "cancelled" : "deadline"
+        }
+        do { try revalidate() }
+        catch {
+            report("revalidation_failed", reason: "revalidation_failed")
+            throw error
+        }
+        guard frontmostMatches(application), !subject.isEmpty else {
+            report("preflight_rejected", reason: "preflight_rejected")
+            return nil
+        }
+        // Gmail's Drafts table can expose hundreds of empty AXCell values;
+        // allow one bounded fresh traversal to read the first static-text fallback.
+        let deadline = ContinuousClock.now.advanced(by: .seconds(3))
+        var overflow = false, outerWebAreaSeen = false
         var cellTexts: [String] = []
         var cellElements: [AXUIElement] = []
+        var visitedElements: [AXUIElement] = []
         func read(_ element: AXUIElement, _ attribute: String) -> CFTypeRef? {
-            guard !Task.isCancelled, ContinuousClock.now < deadline else { overflow = true; return nil }
+            guard !Task.isCancelled, ContinuousClock.now < deadline else {
+                overflow = true
+                failScan(deadlineOrCancellationReason())
+                return nil
+            }
             AXUIElementSetMessagingTimeout(element, 0.1)
             var value: CFTypeRef?
             guard AXUIElementCopyAttributeValue(element, attribute as CFString, &value) == .success,
-                  !Task.isCancelled, ContinuousClock.now < deadline else { return nil }
+                  !Task.isCancelled, ContinuousClock.now < deadline else {
+                if Task.isCancelled || ContinuousClock.now >= deadline {
+                    overflow = true
+                    failScan(deadlineOrCancellationReason())
+                }
+                return nil
+            }
             return value
         }
-        func visit(_ element: AXUIElement, depth: Int) {
-            guard depth <= 16, visited < 1_024, ContinuousClock.now < deadline, !Task.isCancelled else {
-                overflow = true; return
+        func visit(_ element: AXUIElement, depth: Int, activeCellIndex: Int?) {
+            guard !visitedElements.contains(where: { CFEqual($0, element) }) else { return }
+            visitedElements.append(element)
+            maxDepth = max(maxDepth, depth)
+            guard depth <= 16 else { overflow = true; failScan("depth_limit"); return }
+            guard visited < 1_800 else { overflow = true; failScan("node_limit"); return }
+            guard !Task.isCancelled, ContinuousClock.now < deadline else {
+                overflow = true
+                failScan(deadlineOrCancellationReason())
+                return
             }
             visited += 1
             if read(element, kAXHiddenAttribute as String) as? Bool == true
@@ -746,28 +877,49 @@ enum ComputerUseGmailRecipientVerifier {
                 guard !outerWebAreaSeen else { return }
                 outerWebAreaSeen = true
             }
+            var descendantCellIndex = activeCellIndex
             if outerWebAreaSeen, role == "AXCell" {
-                cellTexts.append((read(element, kAXValueAttribute as String) as? String
-                    ?? read(element, kAXTitleAttribute as String) as? String) ?? "")
+                let index = cellTexts.count
+                let value = read(element, kAXValueAttribute as String) as? String
+                cellTexts.append(ComputerUseGmailJob.primaryDraftSubjectCellText(
+                    cellValue: value, firstDescendantStaticText: nil) ?? "")
                 cellElements.append(element)
+                descendantCellIndex = index
+            } else if outerWebAreaSeen, role == "AXStaticText",
+                      let index = descendantCellIndex, cellTexts.indices.contains(index), cellTexts[index].isEmpty {
+                let value = read(element, kAXValueAttribute as String) as? String
+                cellTexts[index] = ComputerUseGmailJob.primaryDraftSubjectCellText(
+                    cellValue: nil, firstDescendantStaticText: value) ?? ""
             }
             guard let children = read(element, kAXChildrenAttribute as String) as? [AXUIElement] else {
                 if ["AXWindow", "AXGroup", "AXWebArea", "AXTable", "AXRow", "AXScrollArea"].contains(role) {
                     overflow = true
+                    failScan(role == "AXScrollArea" ? "scroll_children_unavailable" : "container_children_unavailable")
                 }
                 return
             }
-            guard children.count <= 128 else { overflow = true; return }
-            children.forEach { visit($0, depth: depth + 1) }
+            maxChildren = max(maxChildren, children.count)
+            guard children.count <= 128 else { overflow = true; failScan("children_limit"); return }
+            children.forEach { visit($0, depth: depth + 1, activeCellIndex: descendantCellIndex) }
         }
-        visit(window, depth: 0)
-        guard !overflow, outerWebAreaSeen else { return nil }
+        visit(window, depth: 0, activeCellIndex: nil)
         let exactCellIndices = cellTexts.indices.filter { cellTexts[$0] == subject }
-        if exactCellIndices.count > 1 { ambiguous = true; return nil }
+        guard !overflow, outerWebAreaSeen else {
+            report("scan_incomplete", reason: outerWebAreaSeen ? nil : "webarea_missing", exactMatches: exactCellIndices.count)
+            return nil
+        }
+        if exactCellIndices.count > 1 {
+            ambiguous = true
+            report("ambiguous_subject", reason: "duplicate_subject", exactMatches: exactCellIndices.count)
+            return nil
+        }
         guard let selectedCellIndex = ComputerUseGmailJob.uniqueDraftSubjectCellIndex(
                 rowTexts: cellTexts, scanComplete: true, subject: subject),
               cellElements.indices.contains(selectedCellIndex),
-              !Task.isCancelled, ContinuousClock.now < deadline else { return nil }
+              !Task.isCancelled, ContinuousClock.now < deadline else {
+            report("subject_not_unique", reason: "subject_missing", exactMatches: exactCellIndices.count)
+            return nil
+        }
 
         let cell = cellElements[selectedCellIndex]
         var ancestor = cell
@@ -784,51 +936,104 @@ enum ComputerUseGmailRecipientVerifier {
             ancestor = parent
             if CFEqual(parent, window) { break }
         }
-        guard let row,
-              let position = read(cell, kAXPositionAttribute as String),
+        guard let row else {
+            report("row_missing", reason: "row_missing", exactMatches: exactCellIndices.count)
+            return nil
+        }
+        guard let position = read(cell, kAXPositionAttribute as String),
               let size = read(cell, kAXSizeAttribute as String),
-              CFGetTypeID(position) == AXValueGetTypeID(), CFGetTypeID(size) == AXValueGetTypeID() else { return nil }
+              CFGetTypeID(position) == AXValueGetTypeID(), CFGetTypeID(size) == AXValueGetTypeID() else {
+            report("bounds_missing", reason: "bounds_missing", exactMatches: exactCellIndices.count)
+            return nil
+        }
         var point = CGPoint.zero, dimensions = CGSize.zero
         guard AXValueGetValue(position as! AXValue, .cgPoint, &point),
               AXValueGetValue(size as! AXValue, .cgSize, &dimensions),
               point.x.isFinite, point.y.isFinite, dimensions.width.isFinite, dimensions.height.isFinite,
-              dimensions.width > 0, dimensions.height > 0 else { return nil }
-        try revalidate()
-        guard frontmostMatches(application) else { return nil }
+              dimensions.width > 0, dimensions.height > 0 else {
+            report("bounds_invalid", reason: "bounds_invalid", exactMatches: exactCellIndices.count)
+            return nil
+        }
+        do { try revalidate() }
+        catch {
+            report("revalidation_failed", reason: "revalidation_failed", exactMatches: exactCellIndices.count)
+            throw error
+        }
+        guard frontmostMatches(application) else {
+            report("revalidation_failed", reason: "revalidation_failed", exactMatches: exactCellIndices.count)
+            return nil
+        }
+        report("verified", exactMatches: exactCellIndices.count)
         return (cell, row, CGRect(origin: point, size: dimensions))
     }
 
     static func attachmentEvidence(window: AXUIElement, application: ComputerUseApplicationIdentity,
-                                   expected: ComputerUseGmailJob.Attachment,
+                                   expected: ComputerUseGmailJob.Attachment?,
                                    revalidate: @MainActor () throws -> Void) throws -> AttachmentEvidence {
         try revalidate()
         guard frontmostMatches(application), let compose = try composeRegion(window: window) else {
             return .conflicting
         }
-        var formatter = ByteCountFormatter()
-        formatter.countStyle = .file
-        let formattedSize = formatter.string(fromByteCount: expected.byteCount)
-        let staticValues = descendants(of: compose).compactMap { node -> String? in
-            node.role == "AXStaticText" ? node.value : nil
-        }
-        let matches = staticValues.filter { value in
-            value.localizedCaseInsensitiveContains(expected.displayName)
-                && (value.localizedCaseInsensitiveContains(formattedSize)
-                    || value.localizedCaseInsensitiveContains("\(expected.byteCount) bytes"))
-        }
-        let fileLike = staticValues.filter {
-            $0.range(of: #"(?i)\b[^/\s]+\.[a-z0-9]{1,12}\b.{0,64}\b(?:\d+(?:\.\d+)?\s*(?:bytes?|B|KB|MB|GB|TB))\b"#,
-                options: .regularExpression) != nil
-        }
-        let hasRemovalControl = descendants(of: compose).contains { node in
-            node.role == "AXButton" && (node.strings + [node.value].compactMap { $0 }).contains {
-                $0.localizedCaseInsensitiveContains("remove attachment")
-            }
-        }
+        let nodes = descendants(of: compose)
+        let containers = nodes.filter(isAttachmentContainer)
+        let linksInContainer = containers.count == 1
+            ? descendants(of: containers[0]).filter { $0.role == "AXLink" }
+            : []
+        let candidateNodes = containers.isEmpty ? nodes.filter { $0.role == "AXStaticText" } : linksInContainer
+        let labelsByNode = candidateNodes.map(attachmentLabels(for:))
+        let removalControlCount = nodes.filter { node in
+            node.role == "AXButton" && (node.title.map { isRemoveAttachmentLabel($0) } == true
+                || node.description.map { isRemoveAttachmentLabel($0) } == true
+                || node.value.map { isRemoveAttachmentLabel($0) } == true)
+        }.count
         try revalidate()
-        if matches.count == 1 && fileLike.count == 1 { return .matching }
-        if matches.isEmpty && fileLike.isEmpty && !hasRemovalControl { return .absent }
+        return classifyAttachmentEvidence(labelsByNode: labelsByNode,
+            attachmentContainerCount: containers.count,
+            attachmentContainerLinkCount: containers.count == 1 ? linksInContainer.count : nil,
+            removalControlCount: removalControlCount, expected: expected)
+    }
+
+    static func classifyAttachmentEvidence(labelsByNode: [[String]], attachmentContainerCount: Int,
+                                           attachmentContainerLinkCount: Int?, removalControlCount: Int,
+                                           expected: ComputerUseGmailJob.Attachment?) -> AttachmentEvidence {
+        guard attachmentContainerCount >= 0, removalControlCount >= 0 else { return .conflicting }
+        if attachmentContainerCount > 1 { return .conflicting }
+        if removalControlCount > 1 { return .conflicting }
+        if attachmentContainerCount == 1,
+           (attachmentContainerLinkCount != 1 || removalControlCount != 1) { return .conflicting }
+
+        let parsed = labelsByNode.flatMap { labels in
+            Array(Set(labels)).filter(ComputerUseGmailJob.isAttachmentLabel)
+        }
+        if parsed.isEmpty, attachmentContainerCount == 0, removalControlCount == 0 { return .absent }
+        guard let expected else { return .conflicting }
+        let matches = parsed.filter { ComputerUseGmailJob.attachmentLabelMatches($0, expected: expected) }
+        if parsed.count == 1, matches.count == 1 { return .matching }
         return .conflicting
+    }
+
+    private static func isAttachmentContainer(_ node: Node) -> Bool {
+        guard node.role == "AXGroup" else { return false }
+        return [node.title, node.description].compactMap { $0 }.contains {
+            $0.trimmingCharacters(in: .whitespacesAndNewlines)
+                .range(of: "Attachment:", options: [.anchored, .caseInsensitive]) != nil
+        }
+    }
+
+    private static func isRemoveAttachmentLabel(_ label: String) -> Bool {
+        label.localizedCaseInsensitiveContains("remove attachment")
+    }
+
+    private static func attachmentLabels(for node: Node) -> [String] {
+        let values: [String]
+        if node.role == "AXStaticText" {
+            values = [node.value, node.title, node.description].compactMap { $0 }
+        } else {
+            // Gmail's attachment link exposes its display text in title/description;
+            // its URL is not evidence of the selected attachment.
+            values = [node.title, node.description].compactMap { $0 }
+        }
+        return Array(Set(values))
     }
 
     static func accountControlLabel(window: AXUIElement, application: ComputerUseApplicationIdentity,
@@ -986,8 +1191,10 @@ enum ComputerUseGmailRecipientVerifier {
                 guard !outerWebAreaSeen else { return nil }
                 outerWebAreaSeen = true
             }
-            let strings = [kAXTitleAttribute, kAXDescriptionAttribute, kAXHelpAttribute,
-                kAXIdentifierAttribute, kAXPlaceholderValueAttribute]
+            let title = read(element, kAXTitleAttribute as String) as? String
+            let description = read(element, kAXDescriptionAttribute as String) as? String
+            let strings = [title, description].compactMap { $0 }
+                + [kAXHelpAttribute, kAXIdentifierAttribute, kAXPlaceholderValueAttribute]
                 .compactMap { read(element, $0 as String) as? String }
             let value = role == "AXStaticText" ? read(element, kAXValueAttribute as String) as? String : nil
             let childValue = read(element, kAXChildrenAttribute as String)
@@ -997,7 +1204,8 @@ enum ComputerUseGmailRecipientVerifier {
             }
             if (childElements?.count ?? 0) > 128 { overflow = true; return nil }
             let children = (childElements ?? []).compactMap { makeNode($0, depth: depth + 1) }
-            return Node(element: element, role: role, strings: strings, value: value, children: children)
+            return Node(element: element, role: role, strings: strings, title: title,
+                description: description, value: value, children: children)
         }
         guard let tree = makeNode(root, depth: 0), !overflow, !Task.isCancelled,
               ContinuousClock.now < deadline else { return nil }

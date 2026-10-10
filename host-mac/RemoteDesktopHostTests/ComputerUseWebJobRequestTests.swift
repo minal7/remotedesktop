@@ -182,6 +182,38 @@ final class ComputerUseWebJobRequestTests: XCTestCase {
         }
     }
 
+    func testLiteralFilenameExtensionOverridesCoarseFileKindWithoutChangingQueryAuthority() throws {
+        func decode(_ fileName: String, kind: String) throws -> ComputerUseLocalFileCatalog.Query? {
+            let object: [String: Any] = [
+                "subject": "", "body": "",
+                "file_description": [
+                    "description": "the file named \(fileName)",
+                    "file_kind": kind,
+                    "name_contains": fileName,
+                    "folder_scope": "downloads",
+                    "date_field": "modifiedAt",
+                    "direction": "descending",
+                ],
+            ]
+            let data = try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
+            return try ComputerUseWebJobContentExtractor.decode(String(decoding: data, as: UTF8.self)).fileQuery
+        }
+
+        let spreadsheet = try XCTUnwrap(decode("Gmail Acceptance - Quarterly Metrics.XLSX", kind: "document"))
+        XCTAssertEqual(spreadsheet.fileKind, .spreadsheet)
+        XCTAssertEqual(spreadsheet.nameContains, "Gmail Acceptance - Quarterly Metrics.XLSX")
+        XCTAssertEqual(spreadsheet.folderScope, .downloads)
+        XCTAssertEqual(spreadsheet.sort, .init(field: .modifiedAt, direction: .descending))
+
+        XCTAssertEqual(try decode("Quarterly Metrics.pptx", kind: "document")?.fileKind, .presentation)
+        XCTAssertEqual(try decode("Quarterly Metrics.pdf", kind: "spreadsheet")?.fileKind, .document)
+        XCTAssertEqual(try decode("Quarterly Metrics.unknown", kind: "presentation")?.fileKind, .presentation)
+        XCTAssertEqual(try decode("Quarterly Metrics", kind: "spreadsheet")?.fileKind, .spreadsheet)
+
+        XCTAssertThrowsError(try decode("/Users/example/Downloads/Quarterly Metrics.xlsx", kind: "document"),
+            "A recognized suffix must not make a path-like value acceptable")
+    }
+
     func testExtractorUsesOnlyLocalStrictTextProposal() async throws {
         let responseContent = #"{"subject":"Board Review","body":"The meeting is Friday.","file_description":{"description":"the latest Board Review deck","file_kind":"presentation","name_contains":"Board Review","folder_scope":"downloads","date_field":"modifiedAt","direction":"descending"}}"#
         let transport = WebJobTransport(reply: try envelope(responseContent))

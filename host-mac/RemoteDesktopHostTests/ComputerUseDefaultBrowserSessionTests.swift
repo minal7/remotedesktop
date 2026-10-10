@@ -1012,7 +1012,7 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                 guard let candidate = context.page.candidates.first(where: { $0.displayName == selectedName }) else { return nil }
                 return .init(kind: .localFileOperation, reference: candidate.id, text: "Select unique candidate",
                     localFileOperation: .selectFile(candidateID: candidate.id))
-            }, localFileCatalogFactory: { taskID in
+            }, screenConsentRecognizer: { _ in false }, localFileCatalogFactory: { taskID in
                 try ComputerUseLocalFileCatalog(taskID: taskID, approvedDirectory: downloads, pageSize: pageSize)
             })
         let beforeInput = fixture.desktop.keyCount
@@ -1277,6 +1277,52 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
         XCTAssertEqual(session.currentActionBounds, parentBounds)
     }
 
+    func testDetachedGoToSheetRequiresExactRetainedWindowAndFocusedPathField() async throws {
+        let retained = AXUIElementCreateApplication(710)
+        let goTo = AXUIElementCreateApplication(711)
+        let pathField = AXUIElementCreateApplication(712)
+        XCTAssertTrue(ComputerUseDefaultBrowserSession.isExactRetainedGoToPathFieldFocus(
+            retainedWindow: retained, panelParentWindow: AXUIElementCreateApplication(710),
+            focusedWindow: goTo, goToWindow: AXUIElementCreateApplication(711),
+            focusedUI: pathField, pathField: AXUIElementCreateApplication(712)))
+        XCTAssertFalse(ComputerUseDefaultBrowserSession.isExactRetainedGoToPathFieldFocus(
+            retainedWindow: retained, panelParentWindow: AXUIElementCreateApplication(713),
+            focusedWindow: goTo, goToWindow: AXUIElementCreateApplication(711),
+            focusedUI: pathField, pathField: AXUIElementCreateApplication(712)),
+            "A detached sheet from a different parent cannot focus this retained panel")
+        XCTAssertFalse(ComputerUseDefaultBrowserSession.isExactRetainedGoToPathFieldFocus(
+            retainedWindow: retained, panelParentWindow: AXUIElementCreateApplication(710),
+            focusedWindow: AXUIElementCreateApplication(714), goToWindow: AXUIElementCreateApplication(711),
+            focusedUI: pathField, pathField: AXUIElementCreateApplication(712)),
+            "The focused window must be the unique nested Go To sheet")
+        XCTAssertFalse(ComputerUseDefaultBrowserSession.isExactRetainedGoToPathFieldFocus(
+            retainedWindow: retained, panelParentWindow: AXUIElementCreateApplication(710),
+            focusedWindow: goTo, goToWindow: AXUIElementCreateApplication(711),
+            focusedUI: AXUIElementCreateApplication(715), pathField: AXUIElementCreateApplication(712)),
+            "A stale or different focused field cannot authorize path entry")
+
+        let fixture = try Fixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let session = try fixture.session()
+        let parent = try await session.ensure(taskID: "task-1", goal: "Use the default browser", tools: fixture.tools)
+        fixture.desktop.focusedID = nil // The detached Go To sheet is not in AXWindows.
+        var detachedPanel = fixture.fileOpenPanel(parentWindowID: parent.id,
+            bounds: CGRect(x: 300, y: 200, width: 700, height: 500), focused: true,
+            goToFolderBounds: CGRect(x: 420, y: 330, width: 450, height: 180))
+        detachedPanel.pathFieldIsFocused = true
+        fixture.desktop.fileOpenPanel = detachedPanel
+        try session.validate(taskID: "task-1", goal: "Use the default browser", tools: fixture.tools)
+        XCTAssertTrue(session.currentFileOpenPanel?.isNavigatingPath == true)
+        XCTAssertTrue(session.currentFileOpenPanel?.pathFieldIsFocused == true)
+
+        var stalePathPanel = fixture.fileOpenPanel(parentWindowID: parent.id,
+            bounds: detachedPanel.bounds, focused: false, goToFolderBounds: detachedPanel.goToFolderBounds)
+        stalePathPanel.pathFieldIsFocused = true
+        fixture.desktop.fileOpenPanel = stalePathPanel
+        XCTAssertThrowsError(try session.validate(taskID: "task-1", goal: "Use the default browser", tools: fixture.tools),
+            "Path-field focus without the matching focused Go To sheet must fail closed")
+    }
+
     func testPickerConfirmationEligibilityBindsOnlyEnabledExactSelectedCandidate() throws {
         let fixture = try Fixture()
         defer { try? FileManager.default.removeItem(at: fixture.root) }
@@ -1347,7 +1393,7 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                     XCTAssertEqual(page.controls.map(\.label), ["New"])
                     return scenario == "ask-user" ? .askUser("Choose the destination account.")
                         : .pressControl(id: "stale-control-id", explanation: "No longer in the observed page.")
-                }, pageReader: reader)
+                }, pageReader: reader, screenConsentRecognizer: { _ in false })
 
             let result = try await executor.execute(taskID: taskID, prompt: goal, trustedUserPrompt: goal,
                 tools: fixture.tools, progress: { _ in })
@@ -1596,7 +1642,7 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                     return .pressControl(id: currentControl.id, explanation: "Open the observed page control")
                 }
                 return .askUser("Should I continue with the next step?")
-            }, pageReader: reader)
+            }, pageReader: reader, screenConsentRecognizer: { _ in false })
 
         let pending = try await executor.execute(taskID: taskID, prompt: goal, trustedUserPrompt: goal,
             tools: fixture.tools, progress: { _ in })
@@ -1660,7 +1706,7 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                     }
                     graph.changePageURL("https://drive.google.com/drive/home")
                     return .pressControl(id: observedID, explanation: "Changed page target")
-                }, pageReader: reader)
+                }, pageReader: reader, screenConsentRecognizer: { _ in false })
 
             let result = try await executor.execute(taskID: taskID, prompt: goal, trustedUserPrompt: goal,
                 tools: fixture.tools, progress: { _ in })
@@ -1704,7 +1750,7 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
             }, nativeControlPlanner: { _, _ in
                 nativeCalls += 1
                 return .askUser("Empty native planner was wrongly consulted.")
-            }, pageReader: reader)
+            }, pageReader: reader, screenConsentRecognizer: { _ in false })
 
         let result = try await executor.execute(taskID: taskID, prompt: goal, trustedUserPrompt: goal,
             tools: fixture.tools, progress: { _ in })
@@ -1748,7 +1794,7 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                 fixture.desktop.screenColor = CIColor.white
                 graph.changePageURL("https://drive.google.com/drive/home")
                 return .pressControl(id: observedID, explanation: "Open the current page control")
-            }, pageReader: ComputerUseDefaultBrowserPageReader(access: graph.access))
+            }, pageReader: ComputerUseDefaultBrowserPageReader(access: graph.access), screenConsentRecognizer: { _ in false })
 
         let result = try await executor.execute(taskID: taskID, prompt: goal, trustedUserPrompt: goal,
             tools: fixture.tools, progress: { _ in })
@@ -1875,7 +1921,7 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
             }, nativeControlPlanner: { _, _ in
                 nativeCalls += 1
                 return .visualFallback("No current page controls were available", directive: nil)
-            }, pageReader: pageReader)
+            }, pageReader: pageReader, screenConsentRecognizer: { _ in false })
 
         let result = try await executor.execute(taskID: taskID, prompt: goal, trustedUserPrompt: goal,
             tools: fixture.tools, progress: { _ in })
@@ -1921,7 +1967,7 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                     nativeCalls += 1
                     XCTAssertEqual(input.goal, goal)
                     return .askUser("Native planner was reached.")
-                }, pageReader: ComputerUseDefaultBrowserPageReader(access: graph.access))
+                }, pageReader: ComputerUseDefaultBrowserPageReader(access: graph.access), screenConsentRecognizer: { _ in false })
 
             let result = try await executor.execute(taskID: taskID, prompt: goal, trustedUserPrompt: goal,
                 tools: fixture.tools, progress: { _ in })
@@ -1965,7 +2011,7 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                 nativeCalls += 1
                 nativeInput = input
                 throw ComputerUseDefaultBrowserControlPlanError.invalidProposal
-            }, pageReader: reader)
+            }, pageReader: reader, screenConsentRecognizer: { _ in false })
 
         let result = try await executor.execute(taskID: taskID, prompt: goal, trustedUserPrompt: goal,
             tools: fixture.tools, progress: { _ in })
@@ -2007,7 +2053,7 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                 default:
                     return .init(response: "Address bar focused.", decision: .completionStatus(success: true))
                 }
-            })
+            }, screenConsentRecognizer: { _ in false })
 
         let result = try await executor.execute(taskID: taskID, prompt: goal, trustedUserPrompt: goal,
             tools: fixture.tools, progress: { _ in })
@@ -2048,7 +2094,7 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                 default:
                     return .init(response: "Editor text selected.", decision: .completionStatus(success: true))
                 }
-            })
+            }, screenConsentRecognizer: { _ in false })
 
         let result = try await executor.execute(taskID: taskID, prompt: goal, trustedUserPrompt: goal,
             tools: fixture.tools, progress: { _ in })
@@ -2083,7 +2129,7 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                 XCTAssertTrue(input.actionError?.contains("No input was sent") == true)
                 return .init(response: "Unsupported-key feedback received.",
                     decision: .handoff("The unsupported shortcut was not sent."))
-            })
+            }, screenConsentRecognizer: { _ in false })
 
         let result = try await executor.execute(taskID: taskID, prompt: goal, trustedUserPrompt: goal,
             tools: fixture.tools, progress: { _ in })
@@ -2121,7 +2167,7 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                     proposals += 1
                     return .init(response: "Try the far edge of the screen.",
                         action: .pointer(.leftClick, .init(x: 1_000, y: 1_000)))
-                })
+                }, screenConsentRecognizer: { _ in false })
 
             let result = try await executor.execute(taskID: taskID, prompt: goal, trustedUserPrompt: goal,
                 tools: fixture.tools, progress: { _ in })
@@ -2166,7 +2212,7 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                 nativeInput = input
                 fixture.desktop.screenColor = CIColor.white
                 return .visualFallback("The next menu item requires screenshot inspection.", directive: directive)
-            }, pageReader: reader)
+            }, pageReader: reader, screenConsentRecognizer: { _ in false })
 
         let result = try await executor.execute(taskID: taskID, prompt: goal, trustedUserPrompt: goal,
             tools: fixture.tools, progress: { _ in })
@@ -2280,7 +2326,7 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                 }
                 resumedNativeInput = input
                 return .askUser("Review the editor before continuing.")
-            }, pageReader: ComputerUseDefaultBrowserPageReader(access: graph.access))
+            }, pageReader: ComputerUseDefaultBrowserPageReader(access: graph.access), screenConsentRecognizer: { _ in false })
 
         let result = try await executor.execute(taskID: taskID, prompt: goal, trustedUserPrompt: goal,
             tools: fixture.tools, progress: { _ in })
@@ -2326,7 +2372,7 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                 }
                 resumedNativeInput = input
                 return .askUser("Review the current page before continuing.")
-            }, pageReader: ComputerUseDefaultBrowserPageReader(access: graph.access))
+            }, pageReader: ComputerUseDefaultBrowserPageReader(access: graph.access), screenConsentRecognizer: { _ in false })
 
         let result = try await executor.execute(taskID: taskID, prompt: goal, trustedUserPrompt: goal,
             tools: fixture.tools, progress: { _ in })
@@ -2393,7 +2439,7 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                 }
                 resumedNativeInput = input
                 return .askUser("Review the current page before continuing.")
-            }, pageReader: ComputerUseDefaultBrowserPageReader(access: graph.access))
+            }, pageReader: ComputerUseDefaultBrowserPageReader(access: graph.access), screenConsentRecognizer: { _ in false })
 
         var result = try await executor.execute(taskID: taskID, prompt: goal, trustedUserPrompt: goal,
             tools: tools, progress: { _ in })
@@ -2441,7 +2487,7 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                     return .visualFallback("The current screen needs one visual inspection.", directive: nil)
                 }
                 return .askUser("Review the current page before continuing.")
-            }, pageReader: ComputerUseDefaultBrowserPageReader(access: graph.access))
+            }, pageReader: ComputerUseDefaultBrowserPageReader(access: graph.access), screenConsentRecognizer: { _ in false })
 
         let result = try await executor.execute(taskID: taskID, prompt: goal, trustedUserPrompt: goal,
             tools: fixture.tools, progress: { _ in })
@@ -2465,7 +2511,7 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
         let executor = try ComputerUseDefaultBrowserExecutor(journalDirectory: fixture.root, session: session,
             propose: { _ in .init(response: "", decision: .handoff("Unexpected visual fallback")) },
             nativeControlPlanner: { _, _ in throw plannerError },
-            pageReader: ComputerUseDefaultBrowserPageReader(access: graph.access))
+            pageReader: ComputerUseDefaultBrowserPageReader(access: graph.access), screenConsentRecognizer: { _ in false })
 
         let result = try await executor.execute(taskID: taskID, prompt: goal, trustedUserPrompt: goal,
             tools: fixture.tools, progress: { _ in })
@@ -2502,7 +2548,7 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                 fixture.desktop.fileOpenPanel = fixture.fileOpenPanel(parentWindowID: retained.id,
                     bounds: CGRect(x: 200, y: 150, width: 700, height: 500), focused: true)
                 return .visualFallback("The browser menu needs visual inspection.", directive: directive)
-            }, pageReader: ComputerUseDefaultBrowserPageReader(access: graph.access))
+            }, pageReader: ComputerUseDefaultBrowserPageReader(access: graph.access), screenConsentRecognizer: { _ in false })
 
         let result = try await executor.execute(taskID: taskID, prompt: goal, trustedUserPrompt: goal,
             tools: fixture.tools, progress: { _ in })
@@ -2550,7 +2596,7 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                     XCTAssertNotNil(input.focusedEditor)
                     XCTAssertNotNil(input.focusedTextState)
                     return plan
-                }, pageReader: ComputerUseDefaultBrowserPageReader(access: graph.access))
+                }, pageReader: ComputerUseDefaultBrowserPageReader(access: graph.access), screenConsentRecognizer: { _ in false })
             let result = try await executor.execute(taskID: taskID, prompt: goal, trustedUserPrompt: goal,
                 tools: tools, progress: { _ in })
             guard case .approvalRequired(_, let action, _) = result else {
@@ -2573,7 +2619,7 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
         let executor = try ComputerUseDefaultBrowserExecutor(journalDirectory: fixture.root, session: session,
             propose: { _ in XCTFail("Ungrounded typing must not reach visual dispatch"); return .init(response: "", decision: .handoff("Stop")) },
             nativeControlPlanner: { _, _ in .typeFocusedText(text: "Example", explanation: "Fill field") },
-            pageReader: ComputerUseDefaultBrowserPageReader(access: graph.access))
+            pageReader: ComputerUseDefaultBrowserPageReader(access: graph.access), screenConsentRecognizer: { _ in false })
         let result = try await executor.execute(taskID: taskID, prompt: goal, trustedUserPrompt: goal,
             tools: fixture.tools, progress: { _ in })
         XCTAssertEqual(result, .userInterventionRequired("Focus the intended text field, then choose Resume."))
@@ -2644,7 +2690,7 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                     return .pressControl(id: id, explanation: "Open the menu")
                 }
                 return .visualFallback("Use the fresh screenshot after the click.")
-            }, pageReader: reader)
+            }, pageReader: reader, screenConsentRecognizer: { _ in false })
 
         var result = try await executor.execute(taskID: taskID, prompt: goal, trustedUserPrompt: goal,
             tools: tools, progress: { _ in })
@@ -2803,7 +2849,8 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
         let destination = try XCTUnwrap(URL(string: "https://mail.google.com/mail/u/0/#inbox"))
 
         for scenario in ["pre-write-authority", "uncertain-write", "delayed-focus", "never-focused",
-                         "inactive-after-focus", "transient-capture-read", "persistent-capture-read"] {
+                         "inactive-after-focus", "transient-capture-read", "persistent-capture-read",
+                         "transient-bounds-read", "persistent-bounds-read"] {
             let root = FileManager.default.temporaryDirectory
                 .appendingPathComponent("SafariNavigationLatch-\(UUID().uuidString)", isDirectory: true)
             defer { try? FileManager.default.removeItem(at: root) }
@@ -2822,8 +2869,8 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                 defaultWritable: scenario != "pre-write-authority",
                 focusDelayAfterCommandL: scenario == "delayed-focus" ? 2
                     : scenario == "never-focused" ? Int.max
-                    : ["transient-capture-read", "persistent-capture-read"].contains(scenario) ? 0 : nil,
-                writeStatus: ["delayed-focus", "transient-capture-read"].contains(scenario) ? .success : .cannotComplete,
+                    : ["transient-capture-read", "persistent-capture-read", "transient-bounds-read", "persistent-bounds-read"].contains(scenario) ? 0 : nil,
+                writeStatus: ["delayed-focus", "transient-capture-read", "transient-bounds-read"].contains(scenario) ? .success : .cannotComplete,
                 deactivateOnWritableRead: scenario == "inactive-after-focus" ? 2 : nil)
             let existing = ComputerUseDefaultBrowserSession.Window(id: "existing", application: app,
                 accessibilityElement: AXUIElementCreateApplication(pid + 199),
@@ -2880,12 +2927,15 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                 captureWindows: { identity in
                     guard identity == app else { throw ComputerUseDefaultBrowserSession.Failure.targetLost }
                     if graph.hasDispatchedCommandL
-                        && (scenario == "persistent-capture-read"
-                            || (scenario == "transient-capture-read" && transientCaptureFailures == 0)) {
+                        && (scenario == "persistent-capture-read" || scenario == "persistent-bounds-read"
+                            || (scenario == "transient-capture-read" && transientCaptureFailures == 0)
+                            || (scenario == "transient-bounds-read" && transientCaptureFailures == 0)) {
                         transientCaptureFailures += 1
-                        captureReason = "windows_read"
+                        captureReason = scenario.contains("bounds") ? "bounds_read" : "windows_read"
                         captureAXErrorCode = Int(AXError.cannotComplete.rawValue)
-                        throw ComputerUseDefaultBrowserSession.Failure.targetLost
+                        throw scenario.contains("bounds")
+                            ? ComputerUseDefaultBrowserSession.Failure.ambiguousWindows
+                            : ComputerUseDefaultBrowserSession.Failure.targetLost
                     }
                     captureReason = nil
                     captureAXErrorCode = nil
@@ -2905,13 +2955,16 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
             XCTAssertEqual(launches, 1)
 
             var firstDiagnostics: [String] = []
-            if scenario == "delayed-focus" || scenario == "transient-capture-read" {
+            if scenario == "delayed-focus" || scenario == "transient-capture-read" || scenario == "transient-bounds-read" {
                 try await session.navigateRetainedSafariTab(to: destination, taskID: taskID, goal: goal,
                     tools: tools, diagnostic: { firstDiagnostics.append($0) })
                 XCTAssertEqual(firstDiagnostics.last, "phase=ax_navigation_dispatched")
                 XCTAssertEqual(focusDispatches, 1, "A delayed focus must follow exactly one Cmd-L dispatch")
                 XCTAssertEqual(returnDispatches, 1)
                 XCTAssertEqual(graph.writeCount, 1)
+                if scenario == "transient-bounds-read" {
+                    XCTAssertEqual(transientCaptureFailures, 1, "Only one exact transient bounds failure is recovered")
+                }
                 continue
             } else {
                 do {
@@ -2921,7 +2974,7 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                 } catch let error as ComputerUseHostTools.ToolError where scenario == "inactive-after-focus" {
                     XCTAssertEqual(error.localizedDescription, ComputerUseHostTools.ToolError.paused.localizedDescription)
                 } catch let failure as ComputerUseDefaultBrowserSession.Failure {
-                    XCTAssertEqual(failure, .targetLost)
+                    XCTAssertEqual(failure, scenario == "persistent-bounds-read" ? .ambiguousWindows : .targetLost)
                 }
             }
             if scenario == "never-focused" {
@@ -2932,6 +2985,14 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                 XCTAssertEqual(focusDispatches, 1, "A persistent AX read failure must not replay Cmd-L")
                 XCTAssertEqual(graph.writeCount, 0, "Unverified retained focus must never authorize the URL write")
                 XCTAssertEqual(returnDispatches, 0)
+                XCTAssertTrue(firstDiagnostics.contains("phase=address_field_not_focused_before_navigation"))
+                continue
+            }
+            if scenario == "persistent-bounds-read" {
+                XCTAssertEqual(focusDispatches, 1, "A persistent bounds read failure must not replay Cmd-L")
+                XCTAssertEqual(graph.writeCount, 0, "Unverified retained geometry must never authorize the URL write")
+                XCTAssertEqual(returnDispatches, 0)
+                XCTAssertGreaterThan(transientCaptureFailures, 1)
                 XCTAssertTrue(firstDiagnostics.contains("phase=address_field_not_focused_before_navigation"))
                 continue
             }
@@ -3686,7 +3747,7 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
             }, nativeControlPlanner: { _, _ in
                 nativePlannerCalls += 1
                 return .askUser("Unexpected native control fallback")
-            })
+            }, screenConsentRecognizer: { _ in false })
 
         let result = try await executor.execute(taskID: taskID, prompt: prompt, trustedUserPrompt: prompt,
             tools: fixture.tools, progress: { _ in })

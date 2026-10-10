@@ -157,6 +157,29 @@ final class ComputerUseGmailJobTests: XCTestCase {
             rowTexts: ["Quarterly review draft"], scanComplete: true, subject: subject))
     }
 
+    func testGmailDraftSubjectCellUsesOnlyItsPrimaryTextEvidence() {
+        let subject = "Quarterly review"
+        let emptyCellFallback = ComputerUseGmailJob.primaryDraftSubjectCellText(
+            cellValue: "", firstDescendantStaticText: subject)
+        XCTAssertEqual(emptyCellFallback, subject)
+        XCTAssertEqual(ComputerUseGmailJob.uniqueDraftSubjectCellIndex(
+            rowTexts: ["Other draft", emptyCellFallback ?? ""], scanComplete: true, subject: subject), 1)
+
+        let primaryTextWins = ComputerUseGmailJob.primaryDraftSubjectCellText(
+            cellValue: nil, firstDescendantStaticText: "Other draft")
+        XCTAssertEqual(primaryTextWins, "Other draft")
+        XCTAssertNil(ComputerUseGmailJob.uniqueDraftSubjectCellIndex(
+            rowTexts: [primaryTextWins ?? ""], scanComplete: true, subject: subject),
+            "A later body/snippet text equal to the subject must not identify this row")
+
+        XCTAssertEqual(ComputerUseGmailJob.primaryDraftSubjectCellText(
+            cellValue: subject, firstDescendantStaticText: "Different descendant"), subject,
+            "A populated cell value remains authoritative")
+        XCTAssertNil(ComputerUseGmailJob.uniqueDraftSubjectCellIndex(
+            rowTexts: [subject, subject], scanComplete: true, subject: subject),
+            "Two exact cell subjects remain ambiguous")
+    }
+
     @MainActor
     func testGmailAccountPreferenceStoresOnlyExplicitlySelectedEmail() throws {
         let suite = "ComputerUseGmailAccountPreferencesTests-\(UUID().uuidString)"
@@ -527,9 +550,9 @@ final class ComputerUseGmailJobTests: XCTestCase {
         var job = try ComputerUseGmailJob(request: .init(to: ["alex@example.com"], cc: [], bcc: [],
             subject: "Review", body: "Please review.", fileDescription: "deck", sendRequested: false,
             existingDraftURL: nil))
-        try job.selectAttachment(.init(candidateID: "candidate-1", displayName: "Review.pptx", byteCount: 1_024))
+        try job.selectAttachment(.init(candidateID: "candidate-1", displayName: "Review.pptx", byteCount: 2_793))
         var formatter = ByteCountFormatter(); formatter.countStyle = .file
-        let size = formatter.string(fromByteCount: 1_024)
+        let size = formatter.string(fromByteCount: 2_793)
         let identity = ComputerUseApplicationIdentity(bundleIdentifier: "com.apple.Safari", processIdentifier: 42,
             codeIdentity: nil)!
         func observation(_ values: [String]) -> ComputerUseDefaultBrowserPageReader.Observation {
@@ -538,7 +561,89 @@ final class ComputerUseGmailJobTests: XCTestCase {
                 exactTextValues: values)
         }
         XCTAssertTrue(job.verifiesAttachment(observation(["Review.pptx, \(size)"])))
+        XCTAssertTrue(job.verifiesAttachment(observation(["Review.pptx, 2793 bytes"])))
+        XCTAssertTrue(job.verifiesAttachment(observation(["Review.pptx (3K)"])),
+            "A Gmail rounded label confirms the displayed attachment, not exact byte identity")
         XCTAssertFalse(job.verifiesAttachment(observation(["Review.pptx", size])),
             "A separate page-size string does not prove the selected attachment chip")
+
+        let linkObservation = ComputerUseDefaultBrowserPageReader.Observation(id: "page", application: identity,
+            url: "https://mail.google.com/mail/u/0/?view=cm", renderedAXText: "", controls: [
+                .init(id: "attachment-link", role: "AXLink", label: "Review.pptx (3K)",
+                    frame: nil, enabled: true),
+            ], iframeContentMayBeOmitted: true, truncated: false, exactTextValues: ["Review.pptx (3K)"])
+        XCTAssertTrue(job.verifiesAttachment(linkObservation),
+            "Prefer the actual attachment link node when its label is also repeated in page text")
+    }
+
+    func testAttachmentLabelParserRequiresExactNameAndCompleteKnownSize() throws {
+        let attachment = ComputerUseGmailJob.Attachment(candidateID: "candidate-1", displayName: "Review.pptx",
+            byteCount: 2_793)
+        var formatter = ByteCountFormatter(); formatter.countStyle = .file
+        let legacy = "Review.pptx, \(formatter.string(fromByteCount: attachment.byteCount))"
+        for label in ["Review.pptx (3K)", "Review.pptx, 2793 bytes", legacy] {
+            XCTAssertTrue(ComputerUseGmailJob.attachmentLabelMatches(label, expected: attachment), label)
+        }
+        for label in ["XReview.pptx (3K)", "Review.pptx.backup (3K)", "Review.pptx (3K) trailing",
+                      "Review.pptx (4K)", "Review.pptx (unknown)", "Review.pptx"] {
+            XCTAssertFalse(ComputerUseGmailJob.attachmentLabelMatches(label, expected: attachment), label)
+        }
+
+        let zeroByte = ComputerUseGmailJob.Attachment(candidateID: "zero", displayName: "empty.bin", byteCount: 0)
+        XCTAssertTrue(ComputerUseGmailJob.attachmentLabelMatches("empty.bin (0B)", expected: zeroByte))
+        let oneKB = ComputerUseGmailJob.Attachment(candidateID: "kb", displayName: "one.bin", byteCount: 1_024)
+        for label in ["one.bin (1K)", "one.bin (1KB)", "one.bin (1KiB)"] {
+            XCTAssertTrue(ComputerUseGmailJob.attachmentLabelMatches(label, expected: oneKB), label)
+        }
+        let oneMB = ComputerUseGmailJob.Attachment(candidateID: "mb", displayName: "one.bin", byteCount: 1_048_576)
+        for label in ["one.bin (1M)", "one.bin (1MB)", "one.bin (1MiB)"] {
+            XCTAssertTrue(ComputerUseGmailJob.attachmentLabelMatches(label, expected: oneMB), label)
+        }
+        for byteCount in [Int64(1_023), 1_024, 1_025, 1_048_575, 1_048_576, 1_048_577] {
+            let boundary = ComputerUseGmailJob.Attachment(candidateID: "boundary", displayName: "boundary.bin",
+                byteCount: byteCount)
+            formatter.countStyle = .file
+            XCTAssertTrue(ComputerUseGmailJob.attachmentLabelMatches(
+                "boundary.bin, \(formatter.string(fromByteCount: byteCount))", expected: boundary),
+                "ByteCountFormatter display should remain accepted around unit boundaries: \(byteCount)")
+        }
+    }
+
+    @MainActor
+    func testAttachmentEvidenceRejectsDuplicatesAndUnknownPresentSize() {
+        let expected = ComputerUseGmailJob.Attachment(candidateID: "candidate-1", displayName: "Review.pptx",
+            byteCount: 2_793)
+        typealias Evidence = ComputerUseGmailRecipientVerifier.AttachmentEvidence
+        func classify(_ labels: [[String]], groups: Int = 1, links: Int? = 1,
+                      removals: Int = 1) -> Evidence {
+            ComputerUseGmailRecipientVerifier.classifyAttachmentEvidence(labelsByNode: labels,
+                attachmentContainerCount: groups, attachmentContainerLinkCount: links,
+                removalControlCount: removals, expected: expected)
+        }
+        XCTAssertEqual(classify([["Review.pptx (3K)"]]), .matching)
+        XCTAssertEqual(classify([["Review.pptx (3K)"], ["Review.pptx (3K)"]]), .conflicting,
+            "Two identical labels on distinct nodes remain ambiguous")
+        XCTAssertEqual(classify([["Review.pptx (3K)"], ["Other.pdf (8K)"]]), .conflicting,
+            "A matching attachment plus another attachment is ambiguous")
+        XCTAssertEqual(classify([["Review.pptx (3K)"]], removals: 0), .conflicting,
+            "An attachment container without its removal control is incomplete evidence")
+        XCTAssertEqual(classify([["Review.pptx (3K)"]], removals: 2), .conflicting,
+            "Multiple removal controls make the attachment region ambiguous")
+        XCTAssertEqual(classify([["Review.pptx (unknown)"]]), .conflicting,
+            "A visible attachment with unknown size must not trigger another upload")
+        XCTAssertEqual(classify([["Review.pptx (3K)"]], groups: 2, links: nil), .conflicting)
+        XCTAssertEqual(classify([], groups: 0, links: nil, removals: 0), .absent)
+        XCTAssertEqual(ComputerUseGmailRecipientVerifier.classifyAttachmentEvidence(labelsByNode: [],
+            attachmentContainerCount: 0, attachmentContainerLinkCount: nil, removalControlCount: 0,
+            expected: nil), .absent,
+            "A saved draft without an intended attachment requires affirmative absence evidence")
+        XCTAssertEqual(ComputerUseGmailRecipientVerifier.classifyAttachmentEvidence(
+            labelsByNode: [["Unexpected.pdf (8K)"]], attachmentContainerCount: 1,
+            attachmentContainerLinkCount: 1, removalControlCount: 1, expected: nil), .conflicting,
+            "A saved draft without an intended attachment must reject extra attachments")
+        XCTAssertEqual(ComputerUseGmailRecipientVerifier.classifyAttachmentEvidence(
+            labelsByNode: [["Unexpected.pdf (unknown)"]], attachmentContainerCount: 0,
+            attachmentContainerLinkCount: nil, removalControlCount: 0, expected: nil), .conflicting,
+            "Unknown-size attachment evidence must not be mistaken for an empty draft")
     }
 }

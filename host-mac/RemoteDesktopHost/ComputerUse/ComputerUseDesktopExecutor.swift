@@ -251,22 +251,27 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
                 return
             }
         }
-        // The input already returned and was recorded. Do not route a settle
-        // timeout through changedScreen, whose feedback says no input was sent.
+        // Editor metadata can keep changing while the retained window remains
+        // valid (for example, an asynchronous upload). Reobserve at the bounded
+        // deadline; every later effect still needs a fresh target and fingerprint.
+        guard try currentScopeIsValid(activeBefore: "settle-active-app-before-editor-sample",
+                                      activeAfter: "settle-active-app-after-post-sample-scope") else {
+            throw scopedFailure("settle-scope-invalid-after-editor-sample")
+        }
         let timedOutAt = ContinuousClock.now
         func milliseconds(_ duration: Duration) -> String {
             let components = duration.components
             return String(components.seconds * 1_000 + components.attoseconds / 1_000_000_000_000_000)
         }
         lastRevalidationDiagnostic = [
-            "blockedAt": "editor-settle-timeout",
+            "blockedAt": "editor-settle-deadline-reobserve",
             "sampleCount": String(sampleCount),
             "tokenChangeCount": String(tokenChangeCount),
             "nilSampleCount": String(nilSampleCount),
             "elapsedMs": milliseconds(settleStarted.duration(to: timedOutAt)),
             "quietMs": milliseconds(quietSince.duration(to: timedOutAt))
         ]
-        throw Failure.scopedSurfaceChanged
+        // No native input is issued here. The next turn observes the new state.
     }
 
     private static func displayKeyboardChord(_ keys: [String]) -> String {
@@ -644,6 +649,10 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
                 } else if case .action(.localFileOperation) = proposal.decision {
                     // Catalog operations read host metadata only. A page repaint
                     // while the model was planning must not block that read.
+                    try checkScopedSurface()
+                } else if case .action(.wait) = proposal.decision {
+                    // Waiting has no native input effect. Keep task and retained
+                    // surface authority, then capture a fresh screen next turn.
                     try checkScopedSurface()
                 } else {
                     do { try await revalidate(observation, action: action, tools: tools) }
