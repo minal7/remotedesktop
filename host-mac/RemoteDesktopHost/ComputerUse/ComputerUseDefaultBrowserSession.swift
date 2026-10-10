@@ -120,6 +120,9 @@ final class ComputerUseDefaultBrowserSession {
         var currentFileOpenPanel: FileOpenPanel?
         var currentActionBounds: CGRect?
         var navigationDispatches: Set<String> = []
+        var navigationReturnsCompleted: Set<String> = []
+        var stableNavigationRetryConsumed: Set<String> = []
+        var stableNavigationRetryPermits: Set<String> = []
 
         init(taskID: String, goalDigest: String, sessionTaskID: String,
              handler: ComputerUseDefaultBrowserTarget.Handler) {
@@ -164,8 +167,10 @@ final class ComputerUseDefaultBrowserSession {
     private let safariAddressBarAX: SafariAddressBarAXAccess
     private let captureDiagnosticProvider: @MainActor () -> String?
     private let captureDiagnosticAXErrorProvider: @MainActor () -> Int?
+    private let captureWindowsDiagnostic: @MainActor (String) -> Void
     private var runState: RunState?
     private(set) var lastValidationPhaseForDiagnostics: ValidationPhase?
+    private(set) var lastWindowTransitionDiagnostic: String?
     var currentWindow: Window? { runState?.target }
     var currentFileOpenPanel: FileOpenPanel? { runState?.currentFileOpenPanel }
     var currentActionBounds: CGRect? { runState?.currentActionBounds }
@@ -196,7 +201,8 @@ final class ComputerUseDefaultBrowserSession {
                 return try Self.captureWindowsForApplication(application, expectedWindow: target,
                     diagnostic: recordDiagnostic)
             }, captureDiagnosticProvider: { captureDiagnosticState.reason },
-            captureDiagnosticAXErrorProvider: { captureDiagnosticState.axErrorCode })
+            captureDiagnosticAXErrorProvider: { captureDiagnosticState.axErrorCode },
+            captureWindowsDiagnostic: captureWindowsDiagnostic)
     }
 
     init(journalDirectory: URL,
@@ -207,7 +213,8 @@ final class ComputerUseDefaultBrowserSession {
          makeStore: @escaping (URL) throws -> ComputerUseTaskJournalStore = { try .init(directory: $0) },
          captureRetainedWindow: CaptureRetainedWindow? = nil,
          captureDiagnosticProvider: @escaping @MainActor () -> String? = { nil },
-         captureDiagnosticAXErrorProvider: @escaping @MainActor () -> Int? = { nil }) throws {
+         captureDiagnosticAXErrorProvider: @escaping @MainActor () -> Int? = { nil },
+         captureWindowsDiagnostic: @escaping @MainActor (String) -> Void = { _ in }) throws {
         self.journalDirectory = journalDirectory
         self.resolveHandler = resolveHandler
         self.launchApplication = launchApplication
@@ -217,6 +224,7 @@ final class ComputerUseDefaultBrowserSession {
         self.makeStore = makeStore
         self.captureDiagnosticProvider = captureDiagnosticProvider
         self.captureDiagnosticAXErrorProvider = captureDiagnosticAXErrorProvider
+        self.captureWindowsDiagnostic = captureWindowsDiagnostic
     }
 
     func ensure(taskID: String, goal: String, tools: ComputerUseHostTools) async throws -> Window {
@@ -323,6 +331,31 @@ final class ComputerUseDefaultBrowserSession {
 
     /// Navigates through Safari's observed address field using only the
     /// already-authorized Accessibility and native input paths.
+    func rearmStableGmailNavigationRetry(to targetURL: URL, observedPageURL: URL,
+        accountIndex: Int, taskID: String, goal: String, tools: ComputerUseHostTools) throws -> Bool {
+        try Task.checkCancellation()
+        try tools.requireActive()
+        try validate(taskID: taskID, goal: goal, tools: tools)
+        guard let state = runState, let target = state.target,
+              state.currentFileOpenPanel == nil,
+              Self.isCanonicalStableGmailNavigationURL(targetURL, accountIndex: accountIndex),
+              Self.isSameAccountGmailObservationURL(observedPageURL, accountIndex: accountIndex),
+              observedPageURL.absoluteString != targetURL.absoluteString,
+              state.navigationDispatches.contains(targetURL.absoluteString),
+              state.navigationReturnsCompleted.contains(targetURL.absoluteString),
+              !state.stableNavigationRetryConsumed.contains(targetURL.absoluteString),
+              !state.stableNavigationRetryPermits.contains(targetURL.absoluteString),
+              target.application.bundleIdentifier == "com.apple.Safari" else { return false }
+        try Task.checkCancellation()
+        try tools.requireActive()
+        try validate(taskID: taskID, goal: goal, tools: tools)
+        guard let current = runState?.target, Self.sameWindow(current, target),
+              state.currentFileOpenPanel == nil else { return false }
+        state.stableNavigationRetryConsumed.insert(targetURL.absoluteString)
+        state.stableNavigationRetryPermits.insert(targetURL.absoluteString)
+        return true
+    }
+
     func navigateRetainedSafariTab(to url: URL, taskID: String, goal: String,
                                    tools: ComputerUseHostTools,
                                    diagnostic: @MainActor (String) -> Void = { _ in }) async throws {
@@ -339,8 +372,10 @@ final class ComputerUseDefaultBrowserSession {
         guard Self.isSupportedGmailNavigationURL(url) else {
             diagnostic("phase=destination_rejected"); throw Failure.targetLost
         }
-        guard !state.navigationDispatches.contains(url.absoluteString) else {
-            diagnostic("phase=already_latched"); throw Failure.targetLost
+        if state.navigationDispatches.contains(url.absoluteString) {
+            guard state.stableNavigationRetryPermits.remove(url.absoluteString) != nil else {
+                diagnostic("phase=already_latched"); throw Failure.targetLost
+            }
         }
         let initiallyObservedAddressField: AXUIElement
         do { initiallyObservedAddressField = try uniqueSafariAddressField(in: target, diagnostic: diagnostic) }
@@ -351,14 +386,49 @@ final class ComputerUseDefaultBrowserSession {
         // AX focus can name Safari's address control before Cmd+L has
         // activated location editing, so always establish that native mode.
         let focusAction = ComputerUsePredictedAction.key(usage: 0x0F, modifiers: 1 << 3) // Command+L
-        let focusFingerprint = try tools.prepareNativeActionFingerprint(for: focusAction)
+        var focusEffectBegan = false
         do {
-            try await tools.performNativeAction(focusAction, fingerprint: focusFingerprint, willBeginEffect: {
+            for attempt in 0..<2 {
                 try Task.checkCancellation()
                 try tools.requireActive()
-                try self.validate(taskID: taskID, goal: goal, tools: tools)
-                guard self.focusedSafariAddressField(in: target) != nil else { throw Failure.targetLost }
-            })
+                try validate(taskID: taskID, goal: goal, tools: tools)
+                guard let current = runState?.target, Self.sameWindow(current, target),
+                      focusedSafariAddressField(in: current) != nil else { throw Failure.targetLost }
+                do {
+                    let fingerprint = try tools.prepareNativeActionFingerprint(for: focusAction)
+                    try Task.checkCancellation()
+                    try tools.requireActive()
+                    try validate(taskID: taskID, goal: goal, tools: tools)
+                    guard let current = runState?.target, Self.sameWindow(current, target),
+                          focusedSafariAddressField(in: current) != nil else { throw Failure.targetLost }
+                    try await tools.performNativeAction(focusAction, fingerprint: fingerprint, willBeginEffect: {
+                        try Task.checkCancellation()
+                        try tools.requireActive()
+                        try self.validate(taskID: taskID, goal: goal, tools: tools)
+                        guard let current = self.runState?.target, Self.sameWindow(current, target),
+                              self.focusedSafariAddressField(in: current) != nil else { throw Failure.targetLost }
+                        focusEffectBegan = true
+                    })
+                    break
+                } catch ComputerUseHostTools.ToolError.approvalTargetChanged {
+                    try Task.checkCancellation()
+                    try tools.requireActive()
+                    guard !focusEffectBegan, attempt == 0 else {
+                        throw ComputerUseHostTools.ToolError.approvalTargetChanged
+                    }
+                    try validate(taskID: taskID, goal: goal, tools: tools)
+                    guard let current = runState?.target, Self.sameWindow(current, target) else {
+                        throw Failure.targetLost
+                    }
+                    await Task.yield()
+                    try Task.checkCancellation()
+                    try tools.requireActive()
+                    try validate(taskID: taskID, goal: goal, tools: tools)
+                    guard let current = runState?.target, Self.sameWindow(current, target) else {
+                        throw Failure.targetLost
+                    }
+                }
+            }
         } catch { diagnostic("phase=address_field_focus_dispatch_failed"); throw error }
         diagnostic("phase=address_editing_activated")
         let addressField: AXUIElement
@@ -468,7 +538,37 @@ final class ComputerUseDefaultBrowserSession {
             diagnostic("phase=post_navigation_identity_mismatch")
             throw Failure.targetLost
         }
+        state.navigationReturnsCompleted.insert(url.absoluteString)
         diagnostic("phase=ax_navigation_dispatched")
+    }
+
+    private static func isCanonicalStableGmailNavigationURL(_ url: URL, accountIndex: Int) -> Bool {
+        guard (0...9_999).contains(accountIndex),
+              let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              components.scheme?.lowercased() == "https",
+              components.host?.lowercased() == "mail.google.com",
+              components.user == nil, components.password == nil, components.port == nil,
+              components.query == nil,
+              let parsedIndex = ComputerUseGmailAccountDirectory.accountIndex(from: url.absoluteString),
+              parsedIndex == accountIndex,
+              components.path == "/mail/u/\(accountIndex)/",
+              components.fragment == "inbox" || components.fragment == "drafts" else {
+            return false
+        }
+        return true
+    }
+
+    private static func isSameAccountGmailObservationURL(_ url: URL, accountIndex: Int) -> Bool {
+        guard (0...9_999).contains(accountIndex),
+              let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              components.scheme?.lowercased() == "https",
+              components.host?.lowercased() == "mail.google.com",
+              components.user == nil, components.password == nil, components.port == nil,
+              ComputerUseGmailAccountDirectory.accountIndex(from: url.absoluteString) == accountIndex,
+              components.path == "/mail/u/\(accountIndex)" || components.path == "/mail/u/\(accountIndex)/" else {
+            return false
+        }
+        return true
     }
 
     static func selectedSafariAddressBarCandidate(from candidates: [SafariAddressBarCandidate],
@@ -797,6 +897,11 @@ final class ComputerUseDefaultBrowserSession {
         let resolveHandler = self.resolveHandler
         let launchApplication = self.launchApplication
         let captureWindows = self.captureWindows
+        let captureWindowsDiagnostic = self.captureWindowsDiagnostic
+        let recordWindowTransition: @MainActor (String) -> Void = { [weak self] message in
+            self?.lastWindowTransitionDiagnostic = message
+            captureWindowsDiagnostic(message)
+        }
         let execution = try ComputerUseTaskExecution(contract: contract, recovered: state.saved,
             observe: { [weak state] predicate in
                 guard let state else { throw ComputerUseTaskExecutionError.invalidContract }
@@ -807,8 +912,9 @@ final class ComputerUseDefaultBrowserSession {
                 case "new-window":
                     guard let app = state.app, let before = state.before, let target = state.target else { return false }
                     let current = try await Self.waitForNewFocusedWindow(
-                        before: before, app: app, tools: tools, captureWindows: captureWindows)
-                    return Self.sameWindow(current, target)
+                        before: before, app: app, tools: tools, captureWindows: captureWindows,
+                        diagnostic: recordWindowTransition)
+                    return Self.sameWindowReference(current, target, in: app)
                 default: return false
                 }
             }, perform: { [weak state] step, _ in
@@ -865,7 +971,8 @@ final class ComputerUseDefaultBrowserSession {
                     }
                 }
                 state.target = try await Self.waitForNewFocusedWindow(
-                    before: before, app: app, tools: tools, captureWindows: captureWindows)
+                    before: before, app: app, tools: tools, captureWindows: captureWindows,
+                    diagnostic: recordWindowTransition)
             }, persist: { [weak state, store] journal in
                 guard let state else { throw ComputerUseTaskExecutionError.invalidContract }
                 try Task.checkCancellation()
@@ -890,7 +997,7 @@ final class ComputerUseDefaultBrowserSession {
         state.execution = execution
     }
 
-    private static func uniqueWindows(_ windows: [Window]) -> Bool {
+    static func uniqueWindows(_ windows: [Window]) -> Bool {
         let identifiers = windows.map(\.id)
         guard identifiers.count == Set(identifiers).count else { return false }
         for index in windows.indices {
@@ -901,6 +1008,54 @@ final class ComputerUseDefaultBrowserSession {
         return true
     }
 
+    static func safariStableWindowID(processIdentifier: pid_t, accessibilityHash: CFHashCode,
+                                     safariAXIdentifier: String?) -> String {
+        if let uuid = parsedSafariWindowUUID(safariAXIdentifier) {
+            return "\(processIdentifier):safari-uuid:\(uuid.uuidString.lowercased())"
+        }
+        return "\(processIdentifier):ax-hash:\(accessibilityHash)"
+    }
+
+    static func capturedWindowID(application: ComputerUseApplicationIdentity, element: AXUIElement,
+                                 accessibilityHash: CFHashCode, safariAXIdentifier: String?,
+                                 retainedWindow: Window?) -> String? {
+        if let retainedWindow {
+            var elementPID: pid_t = 0
+            guard retainedWindow.application == application,
+                  retainedWindow.identity.applicationProcessIdentifier == application.processIdentifier,
+                  AXUIElementGetPid(element, &elementPID) == .success,
+                  elementPID == application.processIdentifier,
+                  CFEqual(retainedWindow.accessibilityElement, element) else { return nil }
+            return retainedWindow.id
+        }
+        return safariStableWindowID(processIdentifier: application.processIdentifier,
+            accessibilityHash: accessibilityHash, safariAXIdentifier: safariAXIdentifier)
+    }
+
+    private static func parsedSafariWindowUUID(_ identifier: String?) -> UUID? {
+        guard let identifier, identifier.utf8.count <= 256,
+              identifier.hasPrefix("SafariWindow?") else { return nil }
+        let fields = identifier.dropFirst("SafariWindow?".count)
+            .split(separator: "&", omittingEmptySubsequences: false)
+        var secureValues: [String] = []
+        var uuidValues: [String] = []
+        for field in fields {
+            let pair = field.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
+            guard pair.count == 2 else { return nil }
+            switch pair[0] {
+            case "IsSecure": secureValues.append(String(pair[1]))
+            case "UUID": uuidValues.append(String(pair[1]))
+            default: return nil
+            }
+        }
+        guard secureValues.count == 1,
+              ["true", "false"].contains(secureValues[0].lowercased()),
+              uuidValues.count == 1, uuidValues[0].utf8.count == 36,
+              let uuid = UUID(uuidString: uuidValues[0]),
+              uuid.uuidString.caseInsensitiveCompare(uuidValues[0]) == .orderedSame else { return nil }
+        return uuid
+    }
+
     private static func sameWindow(_ lhs: Window, _ rhs: Window) -> Bool {
         // AX reference plus the exact app launch identifies the window. Bounds
         // are refreshed metadata and may change when the browser lays it out.
@@ -908,13 +1063,27 @@ final class ComputerUseDefaultBrowserSession {
             && CFEqual(lhs.accessibilityElement, rhs.accessibilityElement)
     }
 
+    private static func sameWindowReference(_ lhs: Window, _ rhs: Window,
+                                            in application: ComputerUseApplicationIdentity) -> Bool {
+        lhs.application == application && rhs.application == application
+            && lhs.identity.applicationProcessIdentifier == application.processIdentifier
+            && rhs.identity.applicationProcessIdentifier == application.processIdentifier
+            && CFEqual(lhs.accessibilityElement, rhs.accessibilityElement)
+    }
+
     private static func sameSnapshot(_ lhs: WindowSnapshot, _ rhs: WindowSnapshot) throws -> Bool {
         guard lhs.application == rhs.application, !lhs.hasSheets, !rhs.hasSheets,
-              lhs.focusedWindowID == rhs.focusedWindowID,
               uniqueWindows(lhs.windows), uniqueWindows(rhs.windows),
               lhs.windows.count == rhs.windows.count else { return false }
+        if lhs.focusedWindowID == nil || rhs.focusedWindowID == nil {
+            guard lhs.focusedWindowID == nil, rhs.focusedWindowID == nil else { return false }
+        } else {
+            guard let lhsFocused = lhs.windows.first(where: { $0.id == lhs.focusedWindowID }),
+                  let rhsFocused = rhs.windows.first(where: { $0.id == rhs.focusedWindowID }),
+                  sameWindowReference(lhsFocused, rhsFocused, in: lhs.application) else { return false }
+        }
         return lhs.windows.allSatisfy { prior in
-            rhs.windows.filter { sameWindow($0, prior) }.count == 1
+            rhs.windows.filter { sameWindowReference($0, prior, in: lhs.application) }.count == 1
         }
     }
 
@@ -923,9 +1092,11 @@ final class ComputerUseDefaultBrowserSession {
               uniqueWindows(before.windows), uniqueWindows(after.windows),
               after.windows.count == before.windows.count + 1 else { return nil }
         for prior in before.windows {
-            guard after.windows.filter({ sameWindow($0, prior) }).count == 1 else { return nil }
+            guard after.windows.filter({ sameWindowReference($0, prior, in: before.application) }).count == 1 else { return nil }
         }
-        let added = after.windows.filter { candidate in !before.windows.contains(where: { sameWindow($0, candidate) }) }
+        let added = after.windows.filter { candidate in
+            !before.windows.contains(where: { sameWindowReference($0, candidate, in: before.application) })
+        }
         return added.count == 1 ? added[0] : nil
     }
 
@@ -937,7 +1108,7 @@ final class ComputerUseDefaultBrowserSession {
 
     private static func isExactlyOneNewWindow(before: WindowSnapshot, after: WindowSnapshot, target: Window) -> Bool {
         guard let current = newFocusedWindow(before: before, after: after) else { return false }
-        return sameWindow(current, target)
+        return sameWindowReference(current, target, in: before.application)
     }
 
     private static func validate(application: ComputerUseApplicationIdentity,
@@ -1027,9 +1198,13 @@ final class ComputerUseDefaultBrowserSession {
 
     private static func waitForNewFocusedWindow(
         before: WindowSnapshot, app: ComputerUseApplicationIdentity, tools: ComputerUseHostTools,
-        captureWindows: @escaping CaptureWindows
+        captureWindows: @escaping CaptureWindows,
+        diagnostic: @MainActor (String) -> Void = { _ in }
     ) async throws -> Window {
-        let deadline = ContinuousClock.now.advanced(by: .seconds(1.5))
+        // A capture can spend up to two seconds reading Safari's window list;
+        // keep observing for a delayed Cmd+N result without ever replaying it.
+        let deadline = ContinuousClock.now.advanced(by: .seconds(5))
+        var transitionDiagnostics = 0
         while ContinuousClock.now < deadline {
             try Task.checkCancellation()
             try tools.requireActive()
@@ -1040,6 +1215,25 @@ final class ComputerUseDefaultBrowserSession {
                 guard tools.frontmostApplicationSnapshot().identity == app else { throw Failure.targetLost }
                 try await Task.sleep(for: .milliseconds(50))
                 continue
+            }
+            if transitionDiagnostics < 8 {
+                let addedExactCFEqualCount = after.windows.filter { candidate in
+                    !before.windows.contains(where: { CFEqual($0.accessibilityElement, candidate.accessibilityElement) })
+                }.count
+                let removedExactCFEqualCount = before.windows.filter { prior in
+                    !after.windows.contains(where: { CFEqual($0.accessibilityElement, prior.accessibilityElement) })
+                }.count
+                let changedIDorElementCount = before.windows.filter { prior in
+                    after.windows.contains(where: { candidate in
+                        (candidate.id == prior.id || CFEqual(candidate.accessibilityElement, prior.accessibilityElement))
+                            && !sameWindow(candidate, prior)
+                    })
+                }.count
+                let focusedIsAdded = after.windows.first(where: { $0.id == after.focusedWindowID }).map { focused in
+                    !before.windows.contains(where: { CFEqual($0.accessibilityElement, focused.accessibilityElement) })
+                } ?? false
+                diagnostic("phase=new_window_transition before=\(before.windows.count) after=\(after.windows.count) added=\(addedExactCFEqualCount) removed=\(removedExactCFEqualCount) changed=\(changedIDorElementCount) focused_added=\(focusedIsAdded ? 1 : 0) unique_before=\(uniqueWindows(before.windows) ? 1 : 0) unique_after=\(uniqueWindows(after.windows) ? 1 : 0)")
+                transitionDiagnostics += 1
             }
             guard after.application == app else { throw Failure.targetLost }
             guard !after.hasSheets else { throw Failure.authenticationHandoff }
@@ -1297,7 +1491,20 @@ final class ComputerUseDefaultBrowserSession {
             let hash = CFHash(element)
             let windowIdentity = ComputerUseFrontmostWindowCaptureIdentity(
                 applicationProcessIdentifier: pid, accessibilityWindowHash: hash, bounds: bounds)
-            let id = "\(pid):\(hash)"
+            let id: String
+            if let expectedWindow, isRetainedTarget {
+                guard let retainedID = Self.capturedWindowID(application: application, element: element,
+                    accessibilityHash: hash, safariAXIdentifier: nil, retainedWindow: expectedWindow) else {
+                    windowFailure("retained_identity", index: index, element: element)
+                    throw Failure.targetLost
+                }
+                id = retainedID
+            } else {
+                let safariIdentifier = application.bundleIdentifier == "com.apple.Safari"
+                    ? read(element, "AXIdentifier" as CFString, messagingTimeout: 0.05) as? String : nil
+                id = Self.capturedWindowID(application: application, element: element,
+                    accessibilityHash: hash, safariAXIdentifier: safariIdentifier, retainedWindow: nil) ?? "\(pid):ax-hash:\(hash)"
+            }
             let window = Window(id: id, application: application,
                 accessibilityElement: element, identity: windowIdentity)
             windows.append(window)

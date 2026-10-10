@@ -244,6 +244,21 @@ final class CoreJobAcceptanceTests: XCTestCase {
         XCTAssertNil(Self.sanitizedSessionCaptureAXErrorCode("private text"))
     }
 
+    func testGmailAcceptanceSanitizesWindowTransitionDiagnostic() {
+        let generated = "phase=new_window_transition before=48 after=49 added=1 removed=0 changed=0 focused_added=1 unique_before=1 unique_after=1"
+        XCTAssertEqual(Self.sanitizedSessionWindowTransitionDiagnostic(generated), generated)
+        for rejected in [
+            "https://mail.google.com/ recipient@example.com",
+            "phase=new_window_transition before=48 after=49 added=1 removed=0 changed=0 focused_added=1 unique_before=1 unique_after=1 private",
+            "phase=new_window_transition before=999999 after=49 added=1 removed=0 changed=0 focused_added=1 unique_before=1 unique_after=1",
+            "phase=new_window_transition before=48 after=49 added=50 removed=0 changed=0 focused_added=1 unique_before=1 unique_after=1",
+            "phase=new_window_transition before=48 after=49 added=1 removed=0 changed=0 focused_added=true unique_before=1 unique_after=1",
+        ] {
+            XCTAssertNil(Self.sanitizedSessionWindowTransitionDiagnostic(rejected))
+        }
+        XCTAssertNil(Self.sanitizedSessionWindowTransitionDiagnostic(nil))
+    }
+
     func testGmailAcceptanceSanitizesDesktopRevalidationEvidence() {
         let diagnostic = Self.sanitizedDesktopRevalidationDiagnostic([
             "blockedAt": "editor-settle-timeout", "sampleCount": "13", "tokenChangeCount": "2",
@@ -1067,6 +1082,9 @@ final class CoreJobAcceptanceTests: XCTestCase {
         if let code = Self.sanitizedSessionCaptureAXErrorCode(raw["sessionCaptureAXErrorCode"]) {
             result["sessionCaptureAXErrorCode"] = code
         }
+        if let transition = Self.sanitizedSessionWindowTransitionDiagnostic(raw["sessionWindowTransitionDiagnostic"]) {
+            result["sessionWindowTransitionDiagnostic"] = transition
+        }
         for (key, value) in Self.sanitizedDesktopRevalidationDiagnostic(raw) {
             result[key] = value
         }
@@ -1088,6 +1106,36 @@ final class CoreJobAcceptanceTests: XCTestCase {
             result["lastSessionFailureForDiagnostics"] = failure
         }
         return result
+    }
+
+    private static func sanitizedSessionWindowTransitionDiagnostic(_ raw: String?) -> String? {
+        guard let raw, raw.utf8.count <= 256 else { return nil }
+        let fields = raw.split(separator: " ", omittingEmptySubsequences: false)
+        guard fields.count == 9, fields[0] == "phase=new_window_transition" else { return nil }
+        let names = ["before", "after", "added", "removed", "changed"]
+        var counts: [Int] = []
+        for (index, name) in names.enumerated() {
+            let prefix = "\(name)="
+            guard fields[index + 1].hasPrefix(prefix),
+                  let value = Int(fields[index + 1].dropFirst(prefix.count)), (0...1_024).contains(value) else {
+                return nil
+            }
+            counts.append(value)
+        }
+        guard counts[2] <= counts[1], counts[3] <= counts[0], counts[4] <= max(counts[0], counts[1]) else {
+            return nil
+        }
+        let booleanNames = ["focused_added", "unique_before", "unique_after"]
+        var booleans: [Int] = []
+        for (index, name) in booleanNames.enumerated() {
+            let prefix = "\(name)="
+            guard fields[index + 6].hasPrefix(prefix),
+                  let value = Int(fields[index + 6].dropFirst(prefix.count)), (0...1).contains(value) else {
+                return nil
+            }
+            booleans.append(value)
+        }
+        return "phase=new_window_transition before=\(counts[0]) after=\(counts[1]) added=\(counts[2]) removed=\(counts[3]) changed=\(counts[4]) focused_added=\(booleans[0]) unique_before=\(booleans[1]) unique_after=\(booleans[2])"
     }
 
     private static func sanitizedDesktopRevalidationDiagnostic(_ raw: [String: String]) -> [String: Any] {

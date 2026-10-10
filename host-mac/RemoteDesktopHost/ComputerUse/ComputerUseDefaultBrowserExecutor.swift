@@ -727,6 +727,9 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
         if let code = scope.session.lastCaptureAXErrorCodeForDiagnostics {
             diagnostic["sessionCaptureAXErrorCode"] = String(code)
         }
+        if let transition = scope.session.lastWindowTransitionDiagnostic {
+            diagnostic["sessionWindowTransitionDiagnostic"] = transition
+        }
         diagnostic["lastSessionFailureForDiagnostics"] = String(describing: lastSessionFailureForDiagnostics)
         return diagnostic
     }
@@ -1246,6 +1249,26 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
                     guard page.url.range(of: #"^https://mail\.google\.com/mail/u/[0-9]+/#drafts$"#,
                         options: [.regularExpression, .caseInsensitive]) != nil else {
                         if scope.gmailNavigationStage == .waitForTarget {
+                            if scope.gmailNavigationWaitCount >= 20,
+                               let taskID = scope.taskID, let goal = scope.goal,
+                               let targetURL = scope.gmailNavigationTargetURL,
+                               let observedURL = URL(string: page.url) {
+                                // The URL came from the freshly selected page observation above.
+                                // Revalidate the retained Safari window before granting one retry
+                                // for a completed canonical Inbox/Drafts navigation.
+                                try scope.check(nil, tools)
+                                let mayRetry = try scope.session.rearmStableGmailNavigationRetry(
+                                    to: targetURL, observedPageURL: observedURL,
+                                    accountIndex: account.index, taskID: taskID, goal: goal, tools: tools)
+                                guard mayRetry else {
+                                    return .init(response: "", decision: .handoff(
+                                        "Gmail is still showing a different page after navigation. Review the browser, then choose Resume."),
+                                        includeInModelHistory: false)
+                                }
+                                scope.gmailNavigationWaitCount = 0
+                                scope.gmailNavigationStage = .navigateTarget
+                                return .init(response: "", decision: .refreshObservation, includeInModelHistory: false)
+                            }
                             return waitForGmailPage("Gmail is still opening Drafts. Review the browser, then choose Resume.")
                         }
                         return .init(response: "", decision: .handoff(

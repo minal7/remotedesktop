@@ -413,6 +413,137 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
         XCTAssertEqual(fixture.desktop.windows.first?.identity, fixture.original.identity)
     }
 
+    func testInitialWindowCreationToleratesStartupMetadataIDChurnForSameAXReferences() async throws {
+        let fixture = try Fixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let background = fixture.window("background", pid: fixture.app.processIdentifier, hash: 3)
+        fixture.desktop.windows.append(background)
+        var captureCount = 0
+        var backgroundIDs: Set<String> = []
+        var newTargetIDs: Set<String> = []
+        let captureWindows: ComputerUseDefaultBrowserSession.CaptureWindows = { identity in
+            guard identity == fixture.app else { throw ComputerUseDefaultBrowserSession.Failure.targetLost }
+            captureCount += 1
+            let windows = fixture.desktop.windows.map { window -> ComputerUseDefaultBrowserSession.Window in
+                let id: String
+                if CFEqual(window.accessibilityElement, background.accessibilityElement) {
+                    id = "background-metadata-\(captureCount)"
+                    backgroundIDs.insert(id)
+                } else if !CFEqual(window.accessibilityElement, fixture.original.accessibilityElement) {
+                    id = "new-window-metadata-\(captureCount)"
+                    newTargetIDs.insert(id)
+                } else {
+                    id = window.id
+                }
+                return .init(id: id, application: window.application,
+                    accessibilityElement: window.accessibilityElement, identity: window.identity)
+            }
+            let focusedElement = fixture.desktop.windows.first(where: { $0.id == fixture.desktop.focusedID })?.accessibilityElement
+            let focusedID = windows.first(where: { candidate in
+                guard let focusedElement else { return false }
+                return CFEqual(candidate.accessibilityElement, focusedElement)
+            })?.id
+            return .init(application: identity, windows: windows, focusedWindowID: focusedID,
+                hasSheets: false)
+        }
+        let captureRetainedWindow: ComputerUseDefaultBrowserSession.CaptureRetainedWindow = { identity, target in
+            let snapshot = try captureWindows(identity)
+            let anchored = snapshot.windows.map { window in
+                CFEqual(window.accessibilityElement, target.accessibilityElement)
+                    ? ComputerUseDefaultBrowserSession.Window(id: target.id, application: window.application,
+                        accessibilityElement: window.accessibilityElement, identity: window.identity)
+                    : window
+            }
+            let focusedElement = snapshot.windows.first(where: { $0.id == snapshot.focusedWindowID })?.accessibilityElement
+            let focusedID = anchored.first(where: { window in
+                guard let focusedElement else { return false }
+                return CFEqual(window.accessibilityElement, focusedElement)
+            })?.id
+            return .init(application: snapshot.application, windows: anchored, focusedWindowID: focusedID,
+                hasSheets: snapshot.hasSheets, fileOpenPanel: snapshot.fileOpenPanel,
+                hasUnrecognizedSheets: snapshot.hasUnrecognizedSheets)
+        }
+        let session = try fixture.session(captureWindowsOverride: captureWindows,
+            retainedWindowCapture: captureRetainedWindow)
+
+        let target = try await session.ensure(taskID: "task-1", goal: "Use the default browser", tools: fixture.tools)
+
+        XCTAssertEqual(target.application, fixture.app)
+        XCTAssertEqual(fixture.desktop.keyCount, 1, "ID churn must not cause another Cmd+N")
+        XCTAssertGreaterThan(backgroundIDs.count, 1, "Background metadata changed while the same AX reference stayed listed")
+        XCTAssertGreaterThan(newTargetIDs.count, 1, "The new focused AX reference retained ownership through metadata churn")
+    }
+
+    func testInitialWindowCreationRejectsReplacementOrFocusSwitchWithStableIDs() async throws {
+        for scenario in ["replacement-reference", "focus-switch"] {
+            let fixture = try Fixture()
+            defer { try? FileManager.default.removeItem(at: fixture.root) }
+            let background = fixture.window("background", pid: fixture.app.processIdentifier, hash: 3)
+            fixture.desktop.windows.append(background)
+            var captureCount = 0
+            let captureWindows: ComputerUseDefaultBrowserSession.CaptureWindows = { identity in
+                guard identity == fixture.app else { throw ComputerUseDefaultBrowserSession.Failure.targetLost }
+                captureCount += 1
+                var windows = fixture.desktop.windows
+                if captureCount == 2, scenario == "replacement-reference" {
+                    let originalIndex = try XCTUnwrap(windows.firstIndex(where: { $0.id == fixture.original.id }))
+                    let original = windows[originalIndex]
+                    windows[originalIndex] = .init(id: original.id, application: original.application,
+                        accessibilityElement: AXUIElementCreateApplication(fixture.app.processIdentifier + 999),
+                        identity: original.identity)
+                }
+                let focusedID = captureCount == 2 && scenario == "focus-switch" ? background.id
+                    : fixture.desktop.focusedID
+                return .init(application: identity, windows: windows, focusedWindowID: focusedID,
+                    hasSheets: false)
+            }
+            let session = try fixture.session(captureWindowsOverride: captureWindows)
+
+            do {
+                _ = try await session.ensure(taskID: "task-1", goal: "Use the default browser", tools: fixture.tools)
+                XCTFail("A changed startup reference or focused window must stop before Cmd+N")
+            } catch { }
+
+            XCTAssertEqual(fixture.desktop.keyCount, 0, "Changed startup ownership cannot dispatch input")
+            XCTAssertEqual(captureCount, 2)
+        }
+    }
+
+    func testNewFocusedWindowWaitsForDelayedWindowWithoutRepeatingCmdN() async throws {
+        let fixture = try Fixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        var dispatches = 0
+        var arrivalTask: Task<Void, Never>?
+        defer { arrivalTask?.cancel() }
+        let tools = retryTestTools(fixture,
+            target: { _ in
+                .init(context: "Browser focused window", applicationID: fixture.app.bundleIdentifier,
+                    accessibilityIdentity: "stable-target")
+            },
+            perform: { action in
+                guard case .key(let usage, let modifiers) = action, usage == 0x11, modifiers == (1 << 3) else {
+                    throw ComputerUseDefaultBrowserSession.Failure.interrupted
+                }
+                dispatches += 1
+                fixture.desktop.keyCount += 1
+                arrivalTask = Task { @MainActor in
+                    try? await Task.sleep(for: .milliseconds(1_700))
+                    guard !Task.isCancelled else { return }
+                    let created = fixture.window("delayed", pid: fixture.app.processIdentifier, hash: 2)
+                    fixture.desktop.windows.append(created)
+                    fixture.desktop.focusedID = created.id
+                }
+            })
+        let session = try fixture.session()
+
+        let window = try await session.ensure(taskID: "task-1", goal: "Use the default browser", tools: tools)
+
+        XCTAssertEqual(window.id, "delayed")
+        XCTAssertEqual(dispatches, 1)
+        XCTAssertEqual(fixture.desktop.keyCount, 1, "Waiting longer for the same window must not replay Cmd+N")
+        XCTAssertEqual(fixture.desktop.windows.map(\.id), ["existing", "delayed"])
+    }
+
     func testInitialWindowCreationRetriesOneConfirmedPreEffectFingerprintChange() async throws {
         for scenario in ["comparison-mismatch", "fingerprint-preparation"] {
             let fixture = try Fixture()
@@ -3145,9 +3276,13 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
     }
 
     func testSafariNavigationUsesNativeURLTypingAndDoesNotReplayUncertainDispatch() async throws {
-        let destination = try XCTUnwrap(URL(string: "https://mail.google.com/mail/u/0/#inbox"))
+        let inboxDestination = try XCTUnwrap(URL(string: "https://mail.google.com/mail/u/0/#inbox"))
 
-        for scenario in ["success", "selection-refusal", "uncertain-native-typing"] {
+        for scenario in ["success", "selection-refusal", "uncertain-native-typing", "uncertain-native-return",
+                         "focus-pre-effect-retry", "focus-persistent-rejection", "focus-post-effect-rejection",
+                         "focus-gate-revoked", "focus-cancelled", "drafts-success"] {
+            let destination = scenario == "drafts-success"
+                ? try XCTUnwrap(URL(string: "https://mail.google.com/mail/u/0/#drafts")) : inboxDestination
             let root = FileManager.default.temporaryDirectory
                 .appendingPathComponent("SafariNativeURLTyping-\(UUID().uuidString)", isDirectory: true)
             defer { try? FileManager.default.removeItem(at: root) }
@@ -3167,13 +3302,31 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                 identity: .init(applicationProcessIdentifier: pid, accessibilityWindowHash: 40,
                     bounds: CGRect(x: 10, y: 20, width: 900, height: 700)))
             var retained: ComputerUseDefaultBrowserSession.Window?
+            var panel: ComputerUseDefaultBrowserSession.FileOpenPanel?
             var focusDispatches = 0
+            var focusTargetReads = 0
+            var active = true
             var selectionDispatches = 0
             var returnDispatches = 0
             var nativeNavigationEffects: [String] = []
-            let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { graph.isActive },
-                approvalTargetProvider: { _ in
-                    .init(context: "Safari focused window", applicationID: app.bundleIdentifier,
+            let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { active && graph.isActive },
+                approvalTargetProvider: { action in
+                    if case .key(let usage, let modifiers) = action, usage == 0x0F, modifiers == (1 << 3) {
+                        focusTargetReads += 1
+                        let targetRead = focusTargetReads
+                        let isRejectedRead = (scenario == "focus-pre-effect-retry" && targetRead == 2)
+                            || (scenario == "focus-persistent-rejection" && targetRead.isMultiple(of: 2))
+                            || ((scenario == "focus-gate-revoked" || scenario == "focus-cancelled") && targetRead == 2)
+                        if scenario == "focus-gate-revoked" && targetRead == 2 { active = false }
+                        if scenario == "focus-cancelled" && targetRead == 2 {
+                            withUnsafeCurrentTask { $0?.cancel() }
+                        }
+                        if isRejectedRead {
+                            return .init(context: "Safari focused window", applicationID: app.bundleIdentifier,
+                                accessibilityIdentity: "transient-focus-target")
+                        }
+                    }
+                    return .init(context: "Safari focused window", applicationID: app.bundleIdentifier,
                         accessibilityIdentity: "retained-safari-window")
                 },
                 actionPerformer: { action in
@@ -3185,6 +3338,9 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                     case .key(let usage, let modifiers) where usage == 0x0F && modifiers == (1 << 3):
                         focusDispatches += 1
                         nativeNavigationEffects.append("CmdL")
+                        if scenario == "focus-post-effect-rejection" {
+                            throw ComputerUseHostTools.ToolError.approvalTargetChanged
+                        }
                         graph.markCommandLDispatched()
                     case .key(let usage, let modifiers) where usage == 0x04 && modifiers == (1 << 3):
                         selectionDispatches += 1
@@ -3201,6 +3357,9 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                     case .key(let usage, let modifiers) where usage == 0x28 && modifiers == 0:
                         returnDispatches += 1
                         nativeNavigationEffects.append("Return")
+                        if scenario == "uncertain-native-return" {
+                            throw ComputerUseDefaultBrowserSession.Failure.interrupted
+                        }
                     default:
                         throw ComputerUseDefaultBrowserSession.Failure.interrupted
                     }
@@ -3221,13 +3380,54 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                 captureWindows: { identity in
                     guard identity == app else { throw ComputerUseDefaultBrowserSession.Failure.targetLost }
                     return .init(application: app, windows: [existing] + (retained.map { [$0] } ?? []),
-                        focusedWindowID: retained?.id ?? existing.id, hasSheets: false)
+                        focusedWindowID: retained?.id ?? existing.id, hasSheets: panel != nil, fileOpenPanel: panel)
                 },
                 safariAddressBarAX: .init(read: { graph.read($0, $1) },
                     processIdentifier: { _ in pid },
                     valueIsSettable: { graph.isSettable($0) }))
 
             _ = try await session.ensure(taskID: "task-\(scenario)", goal: "Open the signed-in Gmail inbox.", tools: tools)
+
+            if scenario.hasPrefix("focus-") {
+                let navigation = Task { @MainActor in
+                    try await session.navigateRetainedSafariTab(to: destination, taskID: "task-\(scenario)",
+                        goal: "Open the signed-in Gmail inbox.", tools: tools)
+                }
+                do {
+                    try await navigation.value
+                    if scenario == "focus-pre-effect-retry" {
+                        XCTAssertEqual(focusDispatches, 1, "One pre-effect fingerprint retry must dispatch Cmd-L once")
+                        XCTAssertEqual(focusTargetReads, 4)
+                        XCTAssertEqual(graph.nativeTypeCount, 1)
+                        XCTAssertEqual(returnDispatches, 1)
+                        XCTAssertEqual(nativeNavigationEffects, ["CmdL", "CmdA", "type", "Return"])
+                    } else {
+                        XCTFail("The injected focus failure must stop navigation for \(scenario)")
+                    }
+                } catch ComputerUseHostTools.ToolError.paused where scenario == "focus-gate-revoked" {
+                    XCTAssertEqual(focusTargetReads, 2, "A revoked gate must block a retry")
+                    XCTAssertEqual(focusDispatches, 0)
+                } catch is CancellationError where scenario == "focus-cancelled" {
+                    XCTAssertEqual(focusTargetReads, 2, "Cancellation must block a retry")
+                    XCTAssertEqual(focusDispatches, 0)
+                } catch ComputerUseHostTools.ToolError.approvalTargetChanged
+                    where scenario == "focus-persistent-rejection" {
+                    XCTAssertEqual(focusTargetReads, 4, "Only one fresh pre-effect retry is allowed")
+                    XCTAssertEqual(focusDispatches, 0)
+                } catch ComputerUseHostTools.ToolError.approvalTargetChanged
+                    where scenario == "focus-post-effect-rejection" {
+                    XCTAssertEqual(focusTargetReads, 2)
+                    XCTAssertEqual(focusDispatches, 1, "An error after the effect boundary must not replay Cmd-L")
+                } catch {
+                    XCTFail("Unexpected navigation failure for \(scenario): \(error)")
+                }
+                if scenario != "focus-pre-effect-retry" {
+                    XCTAssertEqual(graph.nativeTypeCount, 0, "A failed focus action must not type the destination")
+                    XCTAssertEqual(selectionDispatches, 0)
+                    XCTAssertEqual(returnDispatches, 0)
+                }
+                continue
+            }
 
             if scenario == "selection-refusal" {
                 var firstDiagnostics: [String] = []
@@ -3247,7 +3447,7 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                 XCTAssertEqual(selectionDispatches, 2)
                 XCTAssertEqual(graph.nativeTypeCount, 1)
                 XCTAssertEqual(returnDispatches, 1)
-            } else if scenario == "success" {
+            } else if scenario == "success" || scenario == "drafts-success" {
                 try await session.navigateRetainedSafariTab(to: destination, taskID: "task-\(scenario)",
                     goal: "Open the signed-in Gmail inbox.", tools: tools)
                 XCTAssertEqual(graph.nativeTypeCount, 1, "The destination must be entered through native keyboard input once")
@@ -3255,7 +3455,105 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                 XCTAssertEqual(selectionDispatches, 1, "A nonempty address must be explicitly selected before replacement")
                 XCTAssertEqual(focusDispatches, 1, "Cmd-L must activate Safari's location editor even when AX focus already names the address field")
                 XCTAssertEqual(nativeNavigationEffects, ["CmdL", "CmdA", "type", "Return"])
-                XCTAssertEqual(returnDispatches, 1)
+                func mayRearm(to target: URL, observed: URL) throws -> Bool {
+                    try session.rearmStableGmailNavigationRetry(to: target, observedPageURL: observed,
+                        accountIndex: 0, taskID: "task-\(scenario)", goal: "Open the signed-in Gmail inbox.", tools: tools)
+                }
+                let actualDraftsURL = try XCTUnwrap(URL(string: "https://mail.google.com/mail/u/0/#drafts"))
+                let otherAccountURL = try XCTUnwrap(URL(string: "https://mail.google.com/mail/u/1/#drafts"))
+                let authURL = try XCTUnwrap(URL(string: "https://accounts.google.com/signin"))
+                let otherAccountTargetURL = try XCTUnwrap(URL(string: "https://mail.google.com/mail/u/1/#inbox"))
+                let composeTargetURL = try XCTUnwrap(URL(string: "https://mail.google.com/mail/u/0/#drafts?compose=opaque-token"))
+                let queryTargetURL = try XCTUnwrap(URL(string: "https://mail.google.com/mail/u/0/#drafts?x=1"))
+                let rootTargetURL = try XCTUnwrap(URL(string: "https://mail.google.com/mail/u/0/"))
+                let emptyFragmentTargetURL = try XCTUnwrap(URL(string: "https://mail.google.com/mail/u/0/#"))
+                let missingTrailingSlashTargetURL = try XCTUnwrap(URL(string: "https://mail.google.com/mail/u/0#drafts"))
+                let userInfoTargetURL = try XCTUnwrap(URL(string: "https://user@mail.google.com/mail/u/0/#inbox"))
+                let portTargetURL = try XCTUnwrap(URL(string: "https://mail.google.com:443/mail/u/0/#inbox"))
+                let composerObservationURL = try XCTUnwrap(URL(string:
+                    "https://mail.google.com/mail/u/0/?fs=1&to=current%40example.com&su=Draft&body=Example&tf=cm"))
+                let mismatchURL = scenario == "drafts-success" ? composerObservationURL : actualDraftsURL
+                let panelElement = AXUIElementCreateApplication(pid + 103)
+                panel = .init(parentWindowID: "retained", parentWindowElement: graph.window,
+                    accessibilityElement: panelElement, bounds: CGRect(x: 30, y: 30, width: 700, height: 500),
+                    isFocused: true, goToFolderBounds: nil, pathTextFieldElement: nil, selectedFileURLs: [],
+                    primaryActionElement: panelElement, primaryActionBounds: nil, primaryActionEnabled: false)
+                XCTAssertFalse(try mayRearm(to: destination, observed: mismatchURL),
+                    "A native picker blocks stable-page navigation recovery")
+                panel = nil
+                XCTAssertFalse(try mayRearm(to: destination, observed: destination),
+                    "An observed target match does not authorize a retry")
+                XCTAssertFalse(try mayRearm(to: destination, observed: otherAccountURL),
+                    "A cross-account observation is ineligible")
+                XCTAssertFalse(try mayRearm(to: destination, observed: authURL),
+                    "An authentication page is ineligible")
+                XCTAssertFalse(try mayRearm(to: composeTargetURL, observed: actualDraftsURL),
+                    "Compose URLs are never eligible for the stable-page retry")
+                XCTAssertFalse(try mayRearm(to: queryTargetURL, observed: actualDraftsURL),
+                    "Query-bearing URLs are never eligible for the stable-page retry")
+                XCTAssertFalse(try mayRearm(to: rootTargetURL, observed: actualDraftsURL),
+                    "A bare account root is not an Inbox or Drafts recovery target")
+                XCTAssertFalse(try mayRearm(to: emptyFragmentTargetURL, observed: actualDraftsURL),
+                    "An empty route fragment is not a canonical recovery target")
+                XCTAssertFalse(try mayRearm(to: missingTrailingSlashTargetURL, observed: actualDraftsURL),
+                    "Recovery targets require the exact host-built account path")
+                XCTAssertFalse(try mayRearm(to: otherAccountTargetURL, observed: actualDraftsURL),
+                    "A target for another account is ineligible")
+                XCTAssertFalse(try mayRearm(to: userInfoTargetURL, observed: actualDraftsURL),
+                    "User-info URLs are not host-built navigation targets")
+                XCTAssertFalse(try mayRearm(to: portTargetURL, observed: actualDraftsURL),
+                    "Port-bearing URLs are not host-built navigation targets")
+                do {
+                    _ = try session.rearmStableGmailNavigationRetry(to: destination, observedPageURL: mismatchURL,
+                        accountIndex: 0, taskID: "wrong-task", goal: "Open the signed-in Gmail inbox.", tools: tools)
+                    XCTFail("A retry permit cannot cross task identity")
+                } catch let failure as ComputerUseDefaultBrowserSession.Failure {
+                    XCTAssertEqual(failure, .changedTaskOrGoal)
+                }
+                active = false
+                do {
+                    _ = try mayRearm(to: destination, observed: mismatchURL)
+                    XCTFail("A paused task cannot receive a retry permit")
+                } catch let error as ComputerUseHostTools.ToolError {
+                    XCTAssertEqual(error.localizedDescription, ComputerUseHostTools.ToolError.paused.localizedDescription)
+                }
+                active = true
+                let cancelledRearm = Task { @MainActor in
+                    withUnsafeCurrentTask { $0?.cancel() }
+                    return try mayRearm(to: destination, observed: mismatchURL)
+                }
+                do {
+                    _ = try await cancelledRearm.value
+                    XCTFail("Cancellation cannot grant a retry permit")
+                } catch is CancellationError {}
+                XCTAssertTrue(try mayRearm(to: destination, observed: mismatchURL),
+                    "A completed canonical navigation may receive one retry after a same-account mismatch")
+                try await session.navigateRetainedSafariTab(to: destination, taskID: "task-\(scenario)",
+                    goal: "Open the signed-in Gmail inbox.", tools: tools)
+                XCTAssertEqual(graph.nativeTypeCount, 2, "The retry must perform one complete second URL entry")
+                XCTAssertEqual(selectionDispatches, 2)
+                XCTAssertEqual(focusDispatches, 2)
+                XCTAssertEqual(returnDispatches, 2)
+                XCTAssertEqual(nativeNavigationEffects, ["CmdL", "CmdA", "type", "Return",
+                    "CmdL", "CmdA", "type", "Return"])
+                XCTAssertFalse(try mayRearm(to: destination, observed: mismatchURL),
+                    "A navigation URL may be rearmed only once")
+                do {
+                    try await session.navigateRetainedSafariTab(to: destination, taskID: "task-\(scenario)",
+                        goal: "Open the signed-in Gmail inbox.", tools: tools)
+                    XCTFail("A third native URL sequence must be refused")
+                } catch let failure as ComputerUseDefaultBrowserSession.Failure {
+                    XCTAssertEqual(failure, .targetLost)
+                }
+                XCTAssertEqual(graph.nativeTypeCount, 2)
+                XCTAssertEqual(selectionDispatches, 2)
+                XCTAssertEqual(focusDispatches, 2)
+                XCTAssertEqual(returnDispatches, 2)
+                retained = .init(id: "replacement", application: app, accessibilityElement: graph.window,
+                    identity: .init(applicationProcessIdentifier: pid, accessibilityWindowHash: 42,
+                        bounds: CGRect(x: 10, y: 20, width: 900, height: 700)))
+                XCTAssertThrowsError(try mayRearm(to: destination, observed: mismatchURL),
+                    "A replacement retained window cannot authorize recovery")
             } else {
                 do {
                     try await session.navigateRetainedSafariTab(to: destination, taskID: "task-\(scenario)",
@@ -3265,7 +3563,13 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                 XCTAssertEqual(graph.nativeTypeCount, 1)
                 XCTAssertEqual(graph.currentAddressValue, destination.absoluteString)
                 XCTAssertEqual(selectionDispatches, 1)
-                XCTAssertEqual(returnDispatches, 0, "Return must not follow an uncertain URL typing dispatch")
+                XCTAssertEqual(returnDispatches, scenario == "uncertain-native-return" ? 1 : 0,
+                    "Return must not follow an uncertain URL typing dispatch")
+                let observedDraftsURL = try XCTUnwrap(URL(string: "https://mail.google.com/mail/u/0/#drafts"))
+                XCTAssertFalse(try session.rearmStableGmailNavigationRetry(to: destination,
+                    observedPageURL: observedDraftsURL, accountIndex: 0, taskID: "task-\(scenario)",
+                    goal: "Open the signed-in Gmail inbox.", tools: tools),
+                    "Typing or an uncertain Return is not proof that the navigation completed")
                 do {
                     try await session.navigateRetainedSafariTab(to: destination, taskID: "task-\(scenario)",
                         goal: "Open the signed-in Gmail inbox.", tools: tools)
@@ -3274,9 +3578,221 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                     XCTAssertEqual(failure, .targetLost)
                 }
                 XCTAssertEqual(graph.nativeTypeCount, 1)
-                XCTAssertEqual(returnDispatches, 0)
+                XCTAssertEqual(returnDispatches, scenario == "uncertain-native-return" ? 1 : 0)
             }
         }
+    }
+
+    func testOptInSafariWindowIdentityInventoryProbe() throws {
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["RUN_DEFAULT_BROWSER_WINDOW_ID_PROBE"] == "1" else {
+            throw XCTSkip("Set RUN_DEFAULT_BROWSER_WINDOW_ID_PROBE=1 for a read-only Safari AX window identity sample.")
+        }
+        guard let outputPath = environment["RUN_DEFAULT_BROWSER_WINDOW_ID_PROBE_RESULT_PATH"], !outputPath.isEmpty else {
+            throw XCTSkip("Set RUN_DEFAULT_BROWSER_WINDOW_ID_PROBE_RESULT_PATH to an external JSON output path.")
+        }
+        guard let running = NSWorkspace.shared.frontmostApplication, !running.isTerminated,
+              running.bundleIdentifier == "com.apple.Safari",
+              let identity = ComputerUseApplicationIdentity(runningApplication: running),
+              identity.bundleIdentifier == "com.apple.Safari",
+              NSWorkspace.shared.frontmostApplication?.processIdentifier == identity.processIdentifier else {
+            throw XCTSkip("The read-only inventory sample requires the signed frontmost Safari application.")
+        }
+
+        let root = AXUIElementCreateApplication(identity.processIdentifier)
+        AXUIElementSetMessagingTimeout(root, 0.2)
+        var windowsValue: CFTypeRef?
+        let windowsError = AXUIElementCopyAttributeValue(root, kAXWindowsAttribute as CFString, &windowsValue)
+        XCTAssertEqual(windowsError, .success)
+        guard windowsError == .success, let rawWindows = windowsValue,
+              CFGetTypeID(rawWindows) == CFArrayGetTypeID(),
+              let allWindows = rawWindows as? [AXUIElement] else {
+            throw XCTSkip("Safari did not expose a readable AXWindows array.")
+        }
+
+        var focusedElement: AXUIElement?
+        var focusedValue: CFTypeRef?
+        if AXUIElementCopyAttributeValue(root, kAXFocusedWindowAttribute as CFString, &focusedValue) == .success,
+           let rawFocused = focusedValue, CFGetTypeID(rawFocused) == AXUIElementGetTypeID() {
+            focusedElement = unsafeBitCast(rawFocused, to: AXUIElement.self)
+        }
+
+        let deadline = ContinuousClock.now.advanced(by: .seconds(5))
+        var rows: [[String: Any]] = []
+        var identifierValues: [String?] = []
+        var uuidValues: [UUID?] = []
+        var candidateIDs: [String] = []
+        let sampledWindows = Array(allWindows.prefix(64))
+        func canonicalSafariWindowUUID(_ identifier: String?) -> UUID? {
+            guard let identifier, identifier.hasPrefix("SafariWindow?") else { return nil }
+            let fields = identifier.dropFirst("SafariWindow?".count).split(separator: "&", omittingEmptySubsequences: false)
+            var secureValues: [String] = []
+            var uuidStrings: [String] = []
+            for field in fields {
+                let parts = field.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
+                guard parts.count == 2 else { return nil }
+                switch parts[0] {
+                case "IsSecure": secureValues.append(String(parts[1]))
+                case "UUID": uuidStrings.append(String(parts[1]))
+                default: return nil
+                }
+            }
+            guard secureValues.count == 1, ["true", "false"].contains(secureValues[0].lowercased()),
+                  uuidStrings.count == 1, uuidStrings[0].count == 36,
+                  let uuid = UUID(uuidString: uuidStrings[0]) else { return nil }
+            return uuid
+        }
+        for (index, element) in sampledWindows.enumerated() {
+            guard ContinuousClock.now < deadline else { break }
+            var pid: pid_t = -1
+            let pidError = AXUIElementGetPid(element, &pid)
+            var identifierValue: CFTypeRef?
+            AXUIElementSetMessagingTimeout(element, 0.1)
+            let identifierError = AXUIElementCopyAttributeValue(element, "AXIdentifier" as CFString, &identifierValue)
+            let identifier = identifierError == .success ? identifierValue as? String : nil
+            identifierValues.append(identifier)
+            let uuid = canonicalSafariWindowUUID(identifier)
+            uuidValues.append(uuid)
+            let identifierIsString = identifier != nil
+            let identifierIsNonempty = identifier?.isEmpty == false
+            let equivalentIndices = sampledWindows.enumerated().compactMap { otherIndex, other in
+                CFEqual(element, other) ? otherIndex : nil
+            }
+            let identifierEqualIndices = identifier.map { identifier in
+                identifierValues.enumerated().compactMap { otherIndex, otherValue in
+                    otherValue == identifier ? otherIndex : nil
+                }
+            } ?? []
+            let uuidEqualIndices = uuid.map { uuid in
+                uuidValues.enumerated().compactMap { otherIndex, otherValue in
+                    otherValue == uuid ? otherIndex : nil
+                }
+            } ?? []
+            func sanitizedRole(_ attribute: CFString, allowed: Set<String>) -> String {
+                var value: CFTypeRef?
+                guard AXUIElementCopyAttributeValue(element, attribute, &value) == .success,
+                      let role = value as? String else { return "unavailable" }
+                return allowed.contains(role) ? role : "other"
+            }
+            let role = sanitizedRole(kAXRoleAttribute as CFString,
+                allowed: ["AXWindow", "AXSheet", "AXPopover", "AXUnknown"])
+            let subrole = sanitizedRole(kAXSubroleAttribute as CFString,
+                allowed: ["AXStandardWindow", "AXDialog", "AXSystemDialog", "AXFloatingWindow", "AXUnknown"])
+            let candidateID = ComputerUseDefaultBrowserSession.safariStableWindowID(
+                processIdentifier: pid, accessibilityHash: CFHash(element), safariAXIdentifier: identifier)
+            candidateIDs.append(candidateID)
+            let candidateIDEqualIndices = candidateIDs.enumerated().compactMap { otherIndex, otherID in
+                candidateID == otherID ? otherIndex : nil
+            }
+            rows.append([
+                "index": index,
+                "pid": pidError == .success ? pid : -1,
+                "pid_read": pidError == .success,
+                "cf_hash": CFHash(element),
+                "candidate_id_equal_group": candidateIDEqualIndices,
+                "cf_equal_group": equivalentIndices,
+                "ax_identifier_equal_group": identifierEqualIndices,
+                "focused": focusedElement.map { CFEqual(element, $0) } ?? false,
+                "ax_identifier_read": identifierError == .success,
+                "ax_identifier_is_string": identifierIsString,
+                "ax_identifier_nonempty": identifierIsNonempty,
+                "safari_uuid_available": uuid != nil,
+                "safari_uuid_equal_group": uuidEqualIndices,
+                "role": role,
+                "subrole": subrole
+            ])
+        }
+        let payload: [String: Any] = [
+            "process_id": identity.processIdentifier,
+            "window_count": allWindows.count,
+            "sampled_count": rows.count,
+            "truncated": rows.count != allWindows.count,
+            "ax_identifier_unique_count": Set(identifierValues.compactMap { $0 }).count,
+            "safari_uuid_unique_count": Set(uuidValues.compactMap { $0 }).count,
+            "candidate_id_unique_count": Set(candidateIDs).count,
+            "windows": rows
+        ]
+        let data = try JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys])
+        let output = URL(fileURLWithPath: outputPath)
+        try data.write(to: output, options: .atomic)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: output.path)
+        XCTAssertFalse(rows.isEmpty, "A successful read-only inventory probe should sample at least one AX window")
+    }
+
+    @MainActor
+    func testSafariStableWindowIDUsesValidatedUUIDAndFailsClosedOnDuplicates() throws {
+        let pid: pid_t = 9123
+        let firstIdentifier = "SafariWindow?IsSecure=false&UUID=12345678-1234-4234-8234-1234567890ab"
+        let secondIdentifier = "SafariWindow?IsSecure=true&UUID=87654321-4321-4432-8432-ba0987654321"
+        let firstID = ComputerUseDefaultBrowserSession.safariStableWindowID(processIdentifier: pid,
+            accessibilityHash: 1_919_919_400, safariAXIdentifier: firstIdentifier)
+        let secondID = ComputerUseDefaultBrowserSession.safariStableWindowID(processIdentifier: pid,
+            accessibilityHash: 1_919_919_400, safariAXIdentifier: secondIdentifier)
+        XCTAssertNotEqual(firstID, secondID, "Distinct canonical Safari UUIDs disambiguate a CFHash collision")
+
+        let secureVariant = ComputerUseDefaultBrowserSession.safariStableWindowID(processIdentifier: pid,
+            accessibilityHash: 77, safariAXIdentifier: "SafariWindow?UUID=12345678-1234-4234-8234-1234567890AB&IsSecure=true")
+        XCTAssertEqual(firstID, secureVariant, "Secure-state changes and inventory ordering do not change a Safari window ID")
+
+        let fallback = "\(pid):ax-hash:1919919400"
+        for invalidIdentifier in [nil, "SafariWindow?IsSecure=false", "SafariWindow?IsSecure=false&UUID=bad",
+                                  "SafariWindow?IsSecure=false&UUID=12345678-1234-4234-8234-1234567890ab&UUID=87654321-4321-4432-8432-ba0987654321",
+                                  "SafariWindow?IsSecure=maybe&UUID=12345678-1234-4234-8234-1234567890ab",
+                                  "SafariWindow?" + String(repeating: "x", count: 257)] {
+            XCTAssertEqual(ComputerUseDefaultBrowserSession.safariStableWindowID(processIdentifier: pid,
+                accessibilityHash: 1_919_919_400, safariAXIdentifier: invalidIdentifier), fallback,
+                "Malformed or missing Safari identity metadata must preserve the typed hash fallback")
+        }
+
+        let duplicateIdentifier = "SafariWindow?IsSecure=false&UUID=12345678-1234-4234-8234-1234567890ab"
+        let duplicateID1 = ComputerUseDefaultBrowserSession.safariStableWindowID(processIdentifier: pid,
+            accessibilityHash: 1, safariAXIdentifier: duplicateIdentifier)
+        let duplicateID2 = ComputerUseDefaultBrowserSession.safariStableWindowID(processIdentifier: pid,
+            accessibilityHash: 2, safariAXIdentifier: "SafariWindow?UUID=12345678-1234-4234-8234-1234567890AB&IsSecure=true")
+        XCTAssertEqual(duplicateID1, duplicateID2, "A duplicated UUID remains an ambiguous identity")
+        let code = ComputerUseApplicationCodeIdentity(authority: .runningCode,
+            bundleIdentifier: "com.apple.Safari", canonicalBundlePath: "/System/Applications/Safari.app",
+            canonicalExecutablePath: "/System/Applications/Safari.app/Contents/MacOS/Safari",
+            designatedRequirement: "fixture", teamIdentifier: "TEST", platformIdentifier: nil)
+        let app = try XCTUnwrap(ComputerUseApplicationIdentity(bundleIdentifier: "com.apple.Safari",
+            processIdentifier: pid, launchGeneration: 1, codeIdentity: code))
+        let firstElement = AXUIElementCreateApplication(pid + 1)
+        let secondElement = AXUIElementCreateApplication(pid + 2)
+        let bounds = CGRect(x: 1, y: 2, width: 300, height: 200)
+        let windows = [
+            ComputerUseDefaultBrowserSession.Window(id: duplicateID1, application: app,
+                accessibilityElement: firstElement, identity: .init(applicationProcessIdentifier: pid,
+                    accessibilityWindowHash: 1, bounds: bounds)),
+            ComputerUseDefaultBrowserSession.Window(id: duplicateID2, application: app,
+                accessibilityElement: secondElement, identity: .init(applicationProcessIdentifier: pid,
+                    accessibilityWindowHash: 2, bounds: bounds))
+        ]
+        XCTAssertFalse(ComputerUseDefaultBrowserSession.uniqueWindows(windows),
+            "Distinct AX objects claiming the same UUID must stay ambiguous")
+
+        let retainedElement = AXUIElementCreateApplication(pid)
+        let retained = ComputerUseDefaultBrowserSession.Window(id: "retained-window-id", application: app,
+            accessibilityElement: retainedElement, identity: .init(applicationProcessIdentifier: pid,
+                accessibilityWindowHash: 55, bounds: bounds))
+        XCTAssertEqual(ComputerUseDefaultBrowserSession.capturedWindowID(application: app, element: retainedElement,
+            accessibilityHash: 55, safariAXIdentifier: nil, retainedWindow: retained), retained.id,
+            "A validated retained AX object keeps its original task-bound ID despite identifier metadata churn")
+        XCTAssertEqual(ComputerUseDefaultBrowserSession.capturedWindowID(application: app, element: retainedElement,
+            accessibilityHash: 55, safariAXIdentifier: secondIdentifier, retainedWindow: retained), retained.id)
+
+        let otherLaunch = try XCTUnwrap(ComputerUseApplicationIdentity(bundleIdentifier: "com.apple.Safari",
+            processIdentifier: pid, launchGeneration: 2, codeIdentity: code))
+        XCTAssertNil(ComputerUseDefaultBrowserSession.capturedWindowID(application: otherLaunch,
+            element: retainedElement, accessibilityHash: 55, safariAXIdentifier: nil, retainedWindow: retained),
+            "A different signed app launch cannot reuse a retained task ID")
+        XCTAssertNil(ComputerUseDefaultBrowserSession.capturedWindowID(application: app,
+            element: AXUIElementCreateApplication(pid + 11), accessibilityHash: 55,
+            safariAXIdentifier: nil, retainedWindow: retained),
+            "A different AX object cannot reuse a retained task ID even with matching geometry/hash")
+        XCTAssertEqual(ComputerUseDefaultBrowserSession.capturedWindowID(application: app,
+            element: AXUIElementCreateApplication(pid + 12), accessibilityHash: 1_919_919_400,
+            safariAXIdentifier: firstIdentifier, retainedWindow: nil), firstID,
+            "Fresh startup windows continue to use validated Safari UUIDs")
     }
 
     func testOptInSafariHostNavigationUsesOwnedWindowAndGmailInboxOnly() async throws {
@@ -3298,7 +3814,25 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
         let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { true })
         let taskID = UUID().uuidString
         let goal = "Open the signed-in Gmail inbox in the retained Safari window."
-        let target = try await session.ensure(taskID: taskID, goal: goal, tools: tools)
+        let target: ComputerUseDefaultBrowserSession.Window
+        do {
+            target = try await session.ensure(taskID: taskID, goal: goal, tools: tools)
+        } catch {
+            let failure: String
+            if let sessionFailure = error as? ComputerUseDefaultBrowserSession.Failure {
+                failure = String(describing: sessionFailure)
+            } else if error is CancellationError {
+                failure = "cancelled"
+            } else {
+                failure = "other_error"
+            }
+            Self.writeNavigationProbeResultIfRequested(success: false,
+                diagnostics: Array(captureDiagnostics.suffix(12)) + ["ensure_failure=\(failure)"],
+                screenEvidence: ["ensure_stage": "failed",
+                    "capture_diagnostic_count": captureDiagnostics.count,
+                    "last_capture_diagnostic": captureDiagnostics.last ?? "none"])
+            throw error
+        }
         let accountRoot = try XCTUnwrap(URL(string: "https://mail.google.com/mail/u/0/"))
         let inbox = try XCTUnwrap(URL(string: "https://mail.google.com/mail/u/0/#inbox"))
         var diagnostics: [String] = []
@@ -6340,13 +6874,11 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
         }
 
         func session(hasSheets override: Bool? = nil,
+                     captureWindowsOverride: ComputerUseDefaultBrowserSession.CaptureWindows? = nil,
                      retainedWindowCapture: ComputerUseDefaultBrowserSession.CaptureRetainedWindow? = nil,
                      captureDiagnosticProvider: @escaping @MainActor () -> String? = { nil },
                      captureDiagnosticAXErrorProvider: @escaping @MainActor () -> Int? = { nil}) throws -> ComputerUseDefaultBrowserSession {
-            try ComputerUseDefaultBrowserSession(journalDirectory: root,
-                resolveHandler: { handler },
-                launchApplication: { _, beforeOpen in try beforeOpen(); desktop.launchCount += 1; return app },
-                captureWindows: { identity in
+            let defaultCaptureWindows: ComputerUseDefaultBrowserSession.CaptureWindows = { identity in
                     guard identity == app else { throw ComputerUseDefaultBrowserSession.Failure.targetLost }
                     if desktop.keyCount > 0, desktop.transientWindowFailures > 0 {
                         desktop.transientWindowFailures -= 1
@@ -6373,7 +6905,11 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                         snapshot = .init(application: app, windows: snapshot.windows, focusedWindowID: snapshot.focusedWindowID, hasSheets: true)
                     }
                     return snapshot
-                },
+                }
+            return try ComputerUseDefaultBrowserSession(journalDirectory: root,
+                resolveHandler: { handler },
+                launchApplication: { _, beforeOpen in try beforeOpen(); desktop.launchCount += 1; return app },
+                captureWindows: captureWindowsOverride ?? defaultCaptureWindows,
                 captureRetainedWindow: retainedWindowCapture,
                 captureDiagnosticProvider: captureDiagnosticProvider,
                 captureDiagnosticAXErrorProvider: captureDiagnosticAXErrorProvider)
