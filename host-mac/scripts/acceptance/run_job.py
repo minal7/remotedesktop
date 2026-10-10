@@ -235,7 +235,14 @@ def gmail_session(fixture: dict[str, dict[str, Any]]) -> tuple[str, str, Path, i
             raise AcceptanceError("Gmail acceptance session token is invalid")
         if not isinstance(attempts, int) or attempts < 0:
             raise AcceptanceError("Gmail acceptance session attempt counter is invalid")
-        attempts = 1 if candidate_url and existing_draft_url is None else attempts + 1
+        if existing_draft_url is not None:
+            # URL validation requires a compose identifier; this second check
+            # rejects multiple/conflicting identifiers before any fixture or
+            # session write can create another composer for the same token.
+            gmail_draft_identity(existing_draft_url)
+        elif attempts > 0 or legacy_url is not None:
+            raise AcceptanceError("Attempted Gmail identity has no verified draft URL for safe retry")
+        attempts += 1
     else:
         token = uuid.uuid4().hex
         attempts = 1

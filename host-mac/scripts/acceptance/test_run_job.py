@@ -42,7 +42,7 @@ class GmailHarnessTests(unittest.TestCase):
             self.assertEqual(check["reason"], text)
             self.assertEqual(check["failure_class"], "text-entry")
 
-    def test_retry_keeps_one_owned_draft_and_attachment(self) -> None:
+    def test_retry_without_verified_url_fails_and_keeps_one_owned_attachment(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             with patch.multiple(runner, TRACE_ROOT=root / "traces",
@@ -50,25 +50,28 @@ class GmailHarnessTests(unittest.TestCase):
                                 FIXTURE_ROOT=root / "fixtures", DOWNLOADS=root / "downloads"):
                 fixtures = runner.prepare_fixtures()
                 first = runner.gmail_session(fixtures)
-                retry = runner.gmail_session(fixtures)
-                self.assertEqual(first[:3], retry[:3])
-                self.assertEqual((first[3], retry[3]), (1, 2))
+                state_before_retry = runner.GMAIL_SESSION_PATH.read_bytes()
+                files_before_retry = sorted((path.name, path.read_bytes())
+                    for path in (root / "downloads").iterdir())
                 self.assertIsNone(first[4])
-                self.assertIsNone(retry[4])
-                self.assertEqual(list((root / "downloads").iterdir()), [first[2]])
+                with self.assertRaises(runner.AcceptanceError):
+                    runner.gmail_session(fixtures)
+                self.assertEqual(runner.GMAIL_SESSION_PATH.read_bytes(), state_before_retry)
+                self.assertEqual(sorted((path.name, path.read_bytes())
+                    for path in (root / "downloads").iterdir()), files_before_retry)
+                self.assertEqual([name for name, _ in files_before_retry], [first[2].name])
                 self.assertEqual(runner.sha256(first[2].read_bytes()),
                                  fixtures["Quarterly Metrics.xlsx"]["sha256"])
                 recipient = "checker-only@example.invalid"
-                for session in (first, retry):
-                    expected, _, _ = runner.make_expected("gmail", "run", 1, fixtures, None,
-                        staged_source=session[2], gmail=(session[0], session[1], session[2], recipient,
-                                                       session[3], session[4]))
-                    self.assertEqual(expected["to"], recipient)
-                    self.assertNotIn(recipient, expected["prompt"])
-                    self.assertNotIn(str(session[2]), expected["prompt"])
-                    self.assertIn(session[1], expected["prompt"])
-                    self.assertIn("never send", expected["prompt"])
-                    self.assertEqual("reuse it" in expected["prompt"], session[3] > 1)
+                expected, _, _ = runner.make_expected("gmail", "run", 1, fixtures, None,
+                    staged_source=first[2], gmail=(first[0], first[1], first[2], recipient,
+                                                   first[3], first[4]))
+                self.assertEqual(expected["to"], recipient)
+                self.assertNotIn(recipient, expected["prompt"])
+                self.assertNotIn(str(first[2]), expected["prompt"])
+                self.assertIn(first[1], expected["prompt"])
+                self.assertIn("never send", expected["prompt"])
+                self.assertNotIn("reuse it", expected["prompt"])
 
     def test_successful_draft_run_rotates_to_a_fresh_token_and_subject(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -102,7 +105,7 @@ class GmailHarnessTests(unittest.TestCase):
                                          "attachment_token": token,
                                          "draft_saved_verified": False})
 
-    def test_rotated_gmail_session_reloads_same_attachment_for_retry_and_verified_reuse(self) -> None:
+    def test_rotated_gmail_session_stays_in_memory_until_a_verified_retry_url_exists(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             old_url = "https://mail.google.com/mail/u/0/#inbox?compose=FMfcgzQX_oldDraft123"
@@ -120,12 +123,18 @@ class GmailHarnessTests(unittest.TestCase):
                 gmail = (first[0], first[1], attachment_path, "checker@example.invalid", first[3], old_url)
                 fresh = runner.rotate_gmail_session_after_success(gmail, passed=True, more_runs=True)
 
-                current = runner.gmail_session(fixtures)
-                self.assertEqual(current[0], fresh[0])
+                rotated_state = runner.GMAIL_SESSION_PATH.read_bytes()
+                with self.assertRaises(runner.AcceptanceError):
+                    runner.gmail_session(fixtures)
+                self.assertEqual(runner.GMAIL_SESSION_PATH.read_bytes(), rotated_state)
+                current = fresh
                 self.assertEqual(current[2], attachment_path)
                 expected, _, _ = runner.make_expected("gmail", "run", 2, fixtures, None,
-                    staged_source=current[2], gmail=(current[0], current[1], current[2],
-                        "checker@example.invalid", current[3], current[4]))
+                    staged_source=current[2], gmail=current)
+                self.assertEqual(expected["gmail_attempt"], 1)
+                self.assertIsNone(expected["gmail_existing_draft_url"])
+                self.assertIn("Use the Gmail compose opened by the host", expected["prompt"])
+                self.assertIn("do not create another compose", expected["prompt"])
                 self.assertEqual(expected["attachment_name"], attachment_path.name)
                 self.assertIn(attachment_path.name, expected["body"])
 
@@ -135,8 +144,7 @@ class GmailHarnessTests(unittest.TestCase):
                     "saved_draft_url": retry_url, "saved_draft_count": 1,
                     "saved_subject_matches": True}}}
                 (trace / "outcome.json").write_text(json.dumps(retry_outcome), encoding="utf-8")
-                current_gmail = (current[0], current[1], current[2], "checker@example.invalid",
-                                 current[3], current[4])
+                current_gmail = current
                 runner.persist_gmail_retry_compose_url(current_gmail, trace / "outcome.json")
                 retry = runner.gmail_session(fixtures)
                 self.assertEqual(retry[2], attachment_path)
@@ -216,7 +224,7 @@ class GmailHarnessTests(unittest.TestCase):
                 self.assertNotIn("checker-only@example.invalid", expected["prompt"])
                 self.assertNotIn(str(session[2]), expected["prompt"])
 
-    def test_unverified_legacy_compose_url_is_preserved_but_not_reused(self) -> None:
+    def test_unverified_legacy_compose_url_fails_before_new_compose(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             old_url = "https://mail.google.com/mail/u/0/#inbox?compose=FMfcgzQX_oldBlankDraft123"
@@ -229,17 +237,66 @@ class GmailHarnessTests(unittest.TestCase):
                     "existing_draft_url": old_url,
                 }), encoding="utf-8")
                 fixtures = runner.prepare_fixtures()
+                before_state = runner.GMAIL_SESSION_PATH.read_bytes()
+                with self.assertRaises(runner.AcceptanceError):
+                    runner.gmail_session(fixtures)
+                self.assertEqual(runner.GMAIL_SESSION_PATH.read_bytes(), before_state)
+                self.assertFalse((root / "downloads").exists())
+
+    def test_fresh_zero_attempt_gmail_identity_can_be_initialized(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with patch.multiple(runner, TRACE_ROOT=root / "traces",
+                                GMAIL_SESSION_PATH=root / "traces/session.json",
+                                FIXTURE_ROOT=root / "fixtures", DOWNLOADS=root / "downloads"):
+                token = "d" * 32
+                runner.TRACE_ROOT.mkdir(mode=0o700)
+                runner.GMAIL_SESSION_PATH.write_text(json.dumps({
+                    "schema_version": 2, "token": token, "attempts": 0,
+                    "attachment_token": token, "draft_saved_verified": False,
+                }), encoding="utf-8")
+                fixtures = runner.prepare_fixtures()
                 session = runner.gmail_session(fixtures)
-                saved = json.loads(runner.GMAIL_SESSION_PATH.read_text(encoding="utf-8"))
-                self.assertIsNone(session[4])
-                self.assertEqual(saved["legacy_unverified_compose_url"], old_url)
-                self.assertFalse(saved["draft_saved_verified"])
+                self.assertEqual(session[0], token)
                 self.assertEqual(session[3], 1)
-                expected, _, _ = runner.make_expected("gmail", "run", 1, fixtures, None,
-                    staged_source=session[2], gmail=(session[0], session[1], session[2],
-                        "checker-only@example.invalid", session[3], session[4]))
-                self.assertNotIn(old_url, expected["prompt"])
-                self.assertIn("Use the Gmail compose opened by the host", expected["prompt"])
+                self.assertIsNone(session[4])
+
+    def test_attempted_gmail_identity_without_verified_retry_url_fails_before_new_compose(self) -> None:
+        old_url = "https://mail.google.com/mail/u/0/#inbox?compose=FMfcgzQX_unverifiedDraft123"
+        for state_kind in ("no-url", "legacy-unverified-url", "conflicting-draft-ids"):
+            with self.subTest(state_kind=state_kind), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                with patch.multiple(runner, TRACE_ROOT=root / "traces",
+                                    GMAIL_SESSION_PATH=root / "traces/session.json",
+                                    FIXTURE_ROOT=root / "fixtures", DOWNLOADS=root / "downloads"):
+                    fixtures = runner.prepare_fixtures()
+                    first = runner.gmail_session(fixtures)
+                    state = json.loads(runner.GMAIL_SESSION_PATH.read_text(encoding="utf-8"))
+                    state["attempts"] = 3
+                    if state_kind == "legacy-unverified-url":
+                        state["existing_draft_url"] = old_url
+                        state["draft_saved_verified"] = False
+                    elif state_kind == "conflicting-draft-ids":
+                        state["retry_compose_url"] = (
+                            "https://mail.google.com/mail/u/0/#drafts?compose=FMfcgzQX_firstDraft123"
+                            "&compose=FMfcgzQX_secondDraft456")
+                    runner.GMAIL_SESSION_PATH.write_text(json.dumps(state, sort_keys=True) + "\n",
+                        encoding="utf-8")
+                    before_state = runner.GMAIL_SESSION_PATH.read_bytes()
+                    before_files = sorted((path.name, path.read_bytes())
+                        for path in (root / "downloads").iterdir())
+
+                    with self.assertRaises(runner.AcceptanceError):
+                        runner.gmail_session(fixtures)
+
+                    self.assertEqual(runner.GMAIL_SESSION_PATH.read_bytes(), before_state)
+                    self.assertEqual(sorted((path.name, path.read_bytes())
+                        for path in (root / "downloads").iterdir()), before_files)
+                    saved = json.loads(before_state)
+                    self.assertEqual(saved["token"], first[0])
+                    self.assertEqual(saved["attempts"], 3)
+                    self.assertEqual(len(before_files), 1)
+                    self.assertEqual(before_files[0][0], first[2].name)
 
     def test_verified_saved_draft_url_is_persisted_for_later_gate_runs(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
