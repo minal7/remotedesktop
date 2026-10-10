@@ -12,6 +12,7 @@ private final class ConsentDiagnosticCounter: @unchecked Sendable {
     private let lock = NSLock()
     private var storage = 0
     func incrementAndRead() -> Int { lock.withLock { storage += 1; return storage } }
+    func set(_ value: Int) { lock.withLock { storage = value } }
     var value: Int { lock.withLock { storage } }
 }
 
@@ -617,6 +618,83 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
             XCTFail("Cancellation should stop the executor after its awaited local operation")
         } catch is CancellationError { }
         XCTAssertEqual(proposals, 1, "No new proposal may follow a cancelled local file operation")
+    }
+
+    func testHostPreparationRunsBeforeEachObservationAndProposalAndStopsWhenCancelledOrPaused() async throws {
+        do {
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: directory) }
+            let preparations = ConsentDiagnosticCounter(), observations = ConsentDiagnosticCounter()
+            let proposals = ConsentDiagnosticCounter(), preparedObservations = ConsentDiagnosticCounter()
+            let preparedProposals = ConsentDiagnosticCounter()
+            let executor = try ComputerUseDesktopExecutor(journalDirectory: directory, propose: { _ in
+                let proposalIndex = proposals.incrementAndRead()
+                if preparations.value == proposalIndex { _ = preparedProposals.incrementAndRead() }
+                return proposalIndex == 1
+                    ? .init(response: "refresh", decision: .refreshObservation)
+                    : .init(response: "handoff", decision: .handoff("Review the page."))
+            }, hostPreparation: {
+                _ = preparations.incrementAndRead()
+            }, screenConsentRecognizer: { _ in
+                let observationIndex = observations.value + 1
+                if preparations.value == observationIndex { _ = preparedObservations.incrementAndRead() }
+                _ = observations.incrementAndRead()
+                return false
+            })
+            let result = try await executor.execute(taskID: "host-preparation-order", prompt: "Review the page",
+                trustedUserPrompt: "Review the page", tools: desktopTestTools(), progress: { _ in })
+            XCTAssertEqual(result, .userInterventionRequired("Review the page."))
+            XCTAssertEqual(preparations.value, 2, "Preparation runs once for each proposed turn")
+            XCTAssertEqual(observations.value, 2)
+            XCTAssertEqual(preparedObservations.value, 2, "Each fresh observation follows host preparation")
+            XCTAssertEqual(proposals.value, 2)
+            XCTAssertEqual(preparedProposals.value, 2, "Each proposal follows host preparation")
+        }
+
+        do {
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: directory) }
+            let preparations = ConsentDiagnosticCounter(), observations = ConsentDiagnosticCounter()
+            let proposals = ConsentDiagnosticCounter()
+            let executor = try ComputerUseDesktopExecutor(journalDirectory: directory, propose: { _ in
+                _ = proposals.incrementAndRead()
+                return .init(response: "unexpected", decision: .handoff("Review the page."))
+            }, hostPreparation: {
+                _ = preparations.incrementAndRead()
+                withUnsafeCurrentTask { $0?.cancel() }
+            }, screenConsentRecognizer: { _ in _ = observations.incrementAndRead(); return false })
+            let run = Task { try await executor.execute(taskID: "host-preparation-cancel", prompt: "Review the page",
+                trustedUserPrompt: "Review the page", tools: desktopTestTools(), progress: { _ in }) }
+            do {
+                _ = try await run.value
+                XCTFail("Cancellation in host preparation must stop before a fresh observation")
+            } catch is CancellationError { }
+            XCTAssertEqual(preparations.value, 1)
+            XCTAssertEqual(observations.value, 0)
+            XCTAssertEqual(proposals.value, 0)
+        }
+
+        do {
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: directory) }
+            let gate = ConsentDiagnosticCounter(), preparations = ConsentDiagnosticCounter()
+            let observations = ConsentDiagnosticCounter(), proposals = ConsentDiagnosticCounter()
+            let executor = try ComputerUseDesktopExecutor(journalDirectory: directory, propose: { _ in
+                _ = proposals.incrementAndRead()
+                return .init(response: "unexpected", decision: .handoff("Review the page."))
+            }, hostPreparation: {
+                _ = preparations.incrementAndRead()
+                gate.set(1)
+            }, screenConsentRecognizer: { _ in _ = observations.incrementAndRead(); return false })
+            do {
+                _ = try await executor.execute(taskID: "host-preparation-paused", prompt: "Review the page",
+                    trustedUserPrompt: "Review the page", tools: desktopTestTools(mayAct: { gate.value == 0 }), progress: { _ in })
+                XCTFail("A revoked action gate must stop before a fresh observation")
+            } catch ComputerUseHostTools.ToolError.paused { }
+            XCTAssertEqual(preparations.value, 1)
+            XCTAssertEqual(observations.value, 0)
+            XCTAssertEqual(proposals.value, 0)
+        }
     }
 
     func testDefaultBrowserFilePanelRequiresTheResolvedCandidateBeforeOpen() {
@@ -4157,7 +4235,8 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
     private func syntheticMCPFocusedTextSnapshot(_ text: ComputerUseTextSnapshot,
         physicalElement: AXUIElement, windowHash: CFHashCode = 42,
         bundleIdentifier: String = "com.apple.Safari", role: String = "AXTextArea",
-        documentIdentity: String = "fixture-document", isWebContent: Bool = false) throws -> ComputerUseMCPFocusedTextSnapshot {
+        documentIdentity: String = "fixture-document", isWebContent: Bool = false,
+        frame: CGRect = CGRect(x: 20, y: 20, width: 300, height: 40)) throws -> ComputerUseMCPFocusedTextSnapshot {
         let processIdentifier: pid_t = 42_401
         let codeIdentity = ComputerUseApplicationCodeIdentity(authority: .runningCode,
             bundleIdentifier: bundleIdentifier, canonicalBundlePath: "/Applications/\(bundleIdentifier).app",
@@ -4171,8 +4250,75 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
         let window = ComputerUseFrontmostWindowCaptureIdentity(applicationProcessIdentifier: processIdentifier,
             accessibilityWindowHash: windowHash, bounds: bounds)
         return ComputerUseMCPFocusedTextSnapshot(application: application, window: window, text: text,
-            frame: CGRect(x: 20, y: 20, width: 300, height: 40), role: role,
+            frame: frame, role: role,
             focusedElement: physicalElement, documentIdentity: documentIdentity, isWebContent: isWebContent)
+    }
+
+    func testScopedBrowserAddressTypingAllowsChromeFrameExpansionButRejectsTargetChanges() async throws {
+        for scenario in ["frame-expansion", "generic-frame-expansion", "field-change", "window-change", "document-change", "secure"] {
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: directory) }
+            let payload = "https://example.org/editor"
+            var current = ComputerUseTextSnapshot(targetID: "binding-0", value: "",
+                selection: NSRange(location: 0, length: 0), isEditable: true, isSecure: false)
+            let addressField = AXUIElementCreateApplication(42_401)
+            let replacementField = AXUIElementCreateApplication(42_402)
+            let retainedWindow = AXUIElementCreateApplication(42_401)
+            let replacementWindow = AXUIElementCreateApplication(42_404)
+            var strokes: [String] = []
+            var effects = 0
+            let editor = ComputerUseTextEditor(read: { current }, select: { _, _ in false },
+                replaceSelectedText: { _, _ in nil },
+                postUnicode: { grapheme, expected in
+                    guard current == expected,
+                          let range = Range(expected.selection, in: expected.value) else {
+                        throw ComputerUseTextEditError.preconditionChanged
+                    }
+                    strokes.append(grapheme)
+                    current = ComputerUseTextSnapshot(targetID: "binding-\(strokes.count)",
+                        value: expected.value.replacingCharacters(in: range, with: grapheme),
+                        selection: NSRange(location: expected.selection.location + grapheme.utf16.count, length: 0),
+                        isEditable: true, isSecure: scenario == "secure")
+                }, mayAct: { true }, replaceValue: { _, _ in nil })
+            let tools = desktopTestTools(textEditor: editor, mcpFocusedTextSnapshotProvider: {
+                let changed = !strokes.isEmpty
+                let field = scenario == "field-change" && changed ? replacementField : addressField
+                let windowHash = scenario == "window-change" && changed
+                    ? CFHash(replacementWindow) : CFHash(retainedWindow)
+                let document = scenario == "document-change" && changed ? "changed-document" : "fixture-document"
+                let frame = (scenario == "frame-expansion" || scenario == "generic-frame-expansion") && changed
+                    ? CGRect(x: 20, y: 20, width: 360, height: 40)
+                    : CGRect(x: 20, y: 20, width: 300, height: 40)
+                return try self.syntheticMCPFocusedTextSnapshot(current, physicalElement: field,
+                    windowHash: windowHash, role: "AXTextField", documentIdentity: document, frame: frame)
+            })
+            let initial = try XCTUnwrap(tools.nativeVisualKeyboardTextSnapshot())
+            let scope = ComputerUseNativeBrowserAddressEntryScope(
+                application: try XCTUnwrap(initial.application.identity), window: initial.window,
+                retainedWindow: retainedWindow, addressField: addressField)
+            let action = ComputerUsePredictedAction.typeText(payload)
+            let fingerprint = try tools.prepareNativeActionFingerprint(for: action)
+            var failure: Error?
+            do {
+                if scenario == "generic-frame-expansion" {
+                    try await tools.performNativeAction(action, fingerprint: fingerprint,
+                        willBeginEffect: { effects += 1 })
+                } else {
+                    try await tools.performNativeBrowserAddressEntry(payload, scope: scope,
+                        fingerprint: fingerprint, willBeginEffect: { effects += 1 })
+                }
+            } catch { failure = error }
+
+            if scenario == "frame-expansion" {
+                XCTAssertNil(failure, "A chrome field may resize while its signed app, retained window, field, and document stay exact")
+                XCTAssertEqual(strokes.joined(), payload)
+                XCTAssertEqual(current.value, payload)
+            } else {
+                XCTAssertNotNil(failure, "A changed address-field authority must stop typing")
+                XCTAssertLessThan(strokes.count, payload.count)
+            }
+            XCTAssertEqual(effects, 1)
+        }
     }
 
     func testDesktopScreenConsentRecognitionFailureReturnsRecoverableHandoffBeforePlanning() async throws {

@@ -251,6 +251,10 @@ final class CoreJobAcceptanceTests: XCTestCase {
             "pointerTargetFrame": "recipient@example.com", "sampleCountExtra": "500000",
             "approvedVisualContinuationFailure": "desktopFailure",
             "approvedVisualContinuationDesktopFailure": "scopedSurfaceChanged",
+            "rejectedFailure": "changedScreen", "rejectedCount": "3", "decisionKind": "reportCompletion",
+            "completionVerificationPhase": "final-surface", "completionOutcomeAccepted": "true",
+            "gmailFlowStage": "normalizeDrafts", "gmailNavigationStage": "waitForTarget",
+            "gmailPendingFlowStage": "waitingForAttachment",
         ])
         XCTAssertEqual(diagnostic["blockedAt"] as? String, "editor-settle-timeout")
         XCTAssertEqual(diagnostic["sampleCount"] as? Int, 13)
@@ -262,8 +266,20 @@ final class CoreJobAcceptanceTests: XCTestCase {
         XCTAssertNil(diagnostic["sampleCountExtra"])
         XCTAssertEqual(diagnostic["approvedVisualContinuationFailure"] as? String, "desktopFailure")
         XCTAssertEqual(diagnostic["approvedVisualContinuationDesktopFailure"] as? String, "scopedSurfaceChanged")
+        XCTAssertEqual(diagnostic["rejectedFailure"] as? String, "changedScreen")
+        XCTAssertEqual(diagnostic["rejectedCount"] as? Int, 3)
+        XCTAssertEqual(diagnostic["decisionKind"] as? String, "reportCompletion")
+        XCTAssertEqual(diagnostic["completionVerificationPhase"] as? String, "final-surface")
+        XCTAssertEqual(diagnostic["completionOutcomeAccepted"] as? Bool, true)
+        XCTAssertEqual(diagnostic["gmailFlowStage"] as? String, "normalizeDrafts")
+        XCTAssertEqual(diagnostic["gmailNavigationStage"] as? String, "waitForTarget")
+        XCTAssertEqual(diagnostic["gmailPendingFlowStage"] as? String, "waitingForAttachment")
         XCTAssertTrue(Self.sanitizedDesktopRevalidationDiagnostic([
-            "blockedAt": "recipient@example.com", "sampleCount": "999999"
+            "blockedAt": "recipient@example.com", "sampleCount": "999999",
+            "rejectedFailure": "private text", "rejectedCount": "4", "decisionKind": "https://private.invalid/",
+            "completionVerificationPhase": "private text", "completionOutcomeAccepted": "yes",
+            "gmailFlowStage": "recipient@example.com", "gmailNavigationStage": "private text",
+            "gmailPendingFlowStage": "private text",
         ]).isEmpty)
         let rejected = Self.sanitizedDesktopRevalidationDiagnostic([
             "approvedVisualContinuationFailure": "recipient@example.com",
@@ -1108,6 +1124,27 @@ final class CoreJobAcceptanceTests: XCTestCase {
         if let failure = raw["approvedVisualContinuationDesktopFailure"], desktopFailures.contains(failure) {
             result["approvedVisualContinuationDesktopFailure"] = failure
         }
+        let finiteLabels: [String: Set<String>] = [
+            "rejectedFailure": ["changedScreen", "completionUnverified", "unsupportedAction"],
+            "decisionKind": ["completionStatus", "handoff", "refreshObservation", "unsupported", "pointer",
+                "typeText", "key", "scroll", "visitURL", "unsupportedNavigation", "historyBack", "webSearch",
+                "readPageQuestion", "remember", "askUser", "localFileOperation", "wait", "reportCompletion"],
+            "completionVerificationPhase": ["outcome-check", "complete-check", "final-surface", "verified", "check-rejected"],
+            "gmailFlowStage": ["compose", "normalizeDrafts", "waitingForDraftReopen", "attach", "waitingForPicker",
+                "waitingForAttachment", "send", "saveDraft", "verifySend", "verifyDraft", "complete"],
+            "gmailPendingFlowStage": ["compose", "normalizeDrafts", "waitingForDraftReopen", "attach", "waitingForPicker",
+                "waitingForAttachment", "send", "saveDraft", "verifySend", "verifyDraft", "complete"],
+            "gmailNavigationStage": ["navigateTarget", "waitForTarget", "ready"],
+        ]
+        for (key, allowed) in finiteLabels {
+            if let value = raw[key], allowed.contains(value) { result[key] = value }
+        }
+        if let count = raw["rejectedCount"].flatMap(Int.init), (1...3).contains(count) {
+            result["rejectedCount"] = count
+        }
+        if let value = raw["completionOutcomeAccepted"], ["true", "false"].contains(value) {
+            result["completionOutcomeAccepted"] = value == "true"
+        }
         return result
     }
 
@@ -1602,6 +1639,7 @@ final class CoreJobAcceptanceTests: XCTestCase {
         let reader = ComputerUseDefaultBrowserPageReader()
         var accountRevalidationFailed = false
         var revalidatedWindowBounds = window.identity.bounds
+        var retainedPageURL = page.url
         let revalidateAccountPage: @MainActor () throws -> Void = {
             guard !Task.isCancelled,
                   let snapshot = try? ComputerUseDefaultBrowserSession.captureWindowsForApplication(application),
@@ -1613,7 +1651,7 @@ final class CoreJobAcceptanceTests: XCTestCase {
                   CFEqual(currentWindow.accessibilityElement, window.accessibilityElement),
                   let currentURL = try? reader.readRetainedPageURL(window: currentWindow.accessibilityElement,
                     application: application, mayAct: { !Task.isCancelled }),
-                  currentURL == page.url else {
+                  currentURL == retainedPageURL else {
                 accountRevalidationFailed = true
                 throw HarnessError.missingEvidence("The owned Gmail page changed during the independent account proof")
             }
@@ -1678,11 +1716,12 @@ final class CoreJobAcceptanceTests: XCTestCase {
                 guard !visited.contains(where: { CFEqual($0, element) }) else { continue }
                 visited.append(element)
                 let role = value(kAXRoleAttribute as String, element) as? String ?? ""
+                if pruneDiscoverySubtree(element, role: role) { continue }
                 let title = value(kAXTitleAttribute as String, element) as? String ?? ""
                 let description = value(kAXDescriptionAttribute as String, element) as? String ?? ""
                 let text = value(kAXValueAttribute as String, element) as? String ?? ""
                 result.append(Node(element: element, role: role, title: title, description: description, text: text))
-                if role == "AXSheet" || role == "AXDialog" { continue }
+                if role == "AXSheet" || role == "AXDialog" || role == "AXWebArea" { continue }
                 if let children = value(kAXChildrenAttribute as String, element) as? [AXUIElement] {
                     let room = max(0, limit - visited.count - queue.count)
                     guard children.count <= room else { return nil }
@@ -1717,6 +1756,7 @@ final class CoreJobAcceptanceTests: XCTestCase {
                 visitedCount = visited.count
                 let role = value(kAXRoleAttribute as String, element) as? String ?? ""
                 if pruneDiscoverySubtree(element, role: role) { continue }
+                if role == "AXWebArea" && !CFEqual(element, root) { continue }
                 let title = role == "AXGroup" ? (value(kAXTitleAttribute as String, element) as? String ?? "") : ""
                 let description = role == "AXGroup" ? (value(kAXDescriptionAttribute as String, element) as? String ?? "") : ""
                 if role == "AXGroup" && (title.hasPrefix("Compose:") || description.hasPrefix("Compose:")) {
@@ -1752,6 +1792,7 @@ final class CoreJobAcceptanceTests: XCTestCase {
                 visitedCount = visited.count
                 let role = value(kAXRoleAttribute as String, element) as? String ?? ""
                 if pruneDiscoverySubtree(element, role: role) { continue }
+                if role == "AXWebArea" && !CFEqual(element, root) { continue }
                 let title = role == "AXGroup" ? (value(kAXTitleAttribute as String, element) as? String ?? "") : ""
                 let description = role == "AXGroup" ? (value(kAXDescriptionAttribute as String, element) as? String ?? "") : ""
                 let text = role == "AXGroup" ? (value(kAXValueAttribute as String, element) as? String ?? "") : ""
@@ -1774,36 +1815,109 @@ final class CoreJobAcceptanceTests: XCTestCase {
             }
             return groups
         }
-        func outerWebAreaDescription(_ root: AXUIElement) -> String? {
-            var queue = [root]
+        func selectedOuterWebArea() -> AXUIElement? {
+            do { try revalidateAccountPage() } catch { return nil }
+            var queue = [window.accessibilityElement]
             var visited: [AXUIElement] = []
-            var descriptions: [String] = []
-            let deadline = boundedDeadline(after: .seconds(2))
-            while !queue.isEmpty, visited.count < 256, ContinuousClock.now < deadline, !Task.isCancelled {
+            var areas: [AXUIElement] = []
+            let deadline = boundedDeadline(after: .seconds(3))
+            let limit = 512
+            while !queue.isEmpty, visited.count < limit, ContinuousClock.now < deadline, !Task.isCancelled {
                 let element = queue.removeFirst()
                 guard !visited.contains(where: { CFEqual($0, element) }) else { continue }
                 visited.append(element)
                 let role = value(kAXRoleAttribute as String, element) as? String ?? ""
                 if pruneDiscoverySubtree(element, role: role) { continue }
                 if role == "AXWebArea" {
-                    if let description = value(kAXDescriptionAttribute as String, element) as? String,
-                       !description.isEmpty { descriptions.append(description) }
+                    areas.append(element)
                     continue
                 }
                 if role == "AXTable" || role == "AXOutline" || role == "AXList" { continue }
-                if let children = value(kAXChildrenAttribute as String, element) as? [AXUIElement] {
-                    let room = max(0, 256 - visited.count - queue.count)
-                    guard children.count <= room else { return nil }
-                    queue.append(contentsOf: children)
-                }
+                var childrenValue: CFTypeRef?
+                let childrenStatus = AXUIElementCopyAttributeValue(element, kAXChildrenAttribute as CFString,
+                    &childrenValue)
+                let children = childrenStatus == .success ? childrenValue as? [AXUIElement] : nil
+                let containerRoles: Set<String> = ["AXWindow", "AXGroup", "AXScrollArea", "AXTabGroup", "AXTab",
+                    "AXSplitGroup", "AXUnknown"]
+                if children == nil, containerRoles.contains(role) { return nil }
+                let room = max(0, limit - visited.count - queue.count)
+                let next = children ?? []
+                guard next.count <= room else { return nil }
+                queue.append(contentsOf: next)
             }
             guard queue.isEmpty, ContinuousClock.now < deadline, !Task.isCancelled,
-                  descriptions.count == 1 else { return nil }
-            return descriptions[0]
+                  !areas.isEmpty, areas.count <= 8 else { return nil }
+            if areas.count == 1 { return areas[0] }
+
+            let windowBounds = revalidatedWindowBounds
+            guard windowBounds.origin.x.isFinite, windowBounds.origin.y.isFinite,
+                  windowBounds.width.isFinite, windowBounds.height.isFinite,
+                  windowBounds.width > 0, windowBounds.height > 0 else { return nil }
+            let candidateFrames = areas.compactMap(axBounds)
+            guard candidateFrames.count == areas.count,
+                  let firstFrame = candidateFrames.first,
+                  candidateFrames.allSatisfy({ frame in
+                      frame.origin.x.isFinite && frame.origin.y.isFinite
+                          && frame.width.isFinite && frame.height.isFinite
+                          && frame.width > 0 && frame.height > 0
+                          && windowBounds.contains(frame)
+                          && abs(frame.minX - firstFrame.minX) <= 2
+                          && abs(frame.minY - firstFrame.minY) <= 2
+                          && abs(frame.width - firstFrame.width) <= 2
+                          && abs(frame.height - firstFrame.height) <= 2
+                  }) else { return nil }
+            let points = [
+                CGPoint(x: windowBounds.midX, y: windowBounds.midY),
+                CGPoint(x: windowBounds.midX, y: windowBounds.minY + windowBounds.height * 0.33),
+                CGPoint(x: windowBounds.midX, y: windowBounds.minY + windowBounds.height * 0.67),
+            ]
+            let systemWide = AXUIElementCreateSystemWide()
+            AXUIElementSetMessagingTimeout(systemWide, 0.2)
+            var hits: [AXUIElement] = []
+            for point in points {
+                guard ContinuousClock.now < deadline, !Task.isCancelled else { return nil }
+                var hit: AXUIElement?
+                guard AXUIElementCopyElementAtPosition(systemWide, Float(point.x), Float(point.y), &hit) == .success,
+                      var current = hit else { return nil }
+                var chain: [AXUIElement] = []
+                var area: AXUIElement?
+                var reachedWindow = false
+                for _ in 0..<16 {
+                    guard !chain.contains(where: { CFEqual($0, current) }) else { return nil }
+                    chain.append(current)
+                    let role = value(kAXRoleAttribute as String, current) as? String ?? ""
+                    guard role.hasPrefix("AX"), role != "AXUnknown",
+                          !pruneDiscoverySubtree(current, role: role) else { return nil }
+                    if role == "AXWebArea" {
+                        guard area == nil, areas.contains(where: { CFEqual($0, current) }) else { return nil }
+                        area = current
+                    }
+                    if role == "AXWindow" {
+                        guard CFEqual(current, window.accessibilityElement) else { return nil }
+                        reachedWindow = true
+                        break
+                    }
+                    var parentValue: CFTypeRef?
+                    guard AXUIElementCopyAttributeValue(current, kAXParentAttribute as CFString,
+                            &parentValue) == .success,
+                          let parentValue, CFGetTypeID(parentValue) == AXUIElementGetTypeID() else { return nil }
+                    current = unsafeBitCast(parentValue, to: AXUIElement.self)
+                }
+                guard reachedWindow, let area else { return nil }
+                hits.append(area)
+            }
+            guard hits.count == 3, hits.allSatisfy({ CFEqual($0, hits[0]) }),
+                  areas.filter({ CFEqual($0, hits[0]) }).count == 1 else { return nil }
+            do { try revalidateAccountPage() } catch { return nil }
+            return hits[0]
         }
         var embeddedScanVisited = 0
         var embeddedScanFailure = ""
-        guard let composers = discoverComposers(window.accessibilityElement, visitedCount: &embeddedScanVisited,
+        guard let outerWebArea = selectedOuterWebArea() else {
+            evidence["capture_status"] = "outer-page-selection-unverified"
+            return
+        }
+        guard let composers = discoverComposers(outerWebArea, visitedCount: &embeddedScanVisited,
                 incompleteReason: &embeddedScanFailure) else {
             evidence["capture_status"] = "compose-discovery-incomplete"
             evidence["compose_scan_pass"] = "embedded"
@@ -1816,7 +1930,7 @@ final class CoreJobAcceptanceTests: XCTestCase {
         if composers.isEmpty {
             var standaloneScanVisited = 0
             var standaloneScanFailure = ""
-            guard let found = discoverStandaloneSubjectGroups(window.accessibilityElement,
+            guard let found = discoverStandaloneSubjectGroups(outerWebArea,
                     visitedCount: &standaloneScanVisited, incompleteReason: &standaloneScanFailure) else {
                 evidence["capture_status"] = "compose-discovery-incomplete"
                 evidence["compose_scan_pass"] = "standalone"
@@ -1827,7 +1941,7 @@ final class CoreJobAcceptanceTests: XCTestCase {
             standaloneCandidates = found
             if !found.isEmpty {
                 let title = value(kAXTitleAttribute as String, window.accessibilityElement) as? String ?? ""
-                let description = outerWebAreaDescription(window.accessibilityElement) ?? ""
+                let description = value(kAXDescriptionAttribute as String, outerWebArea) as? String ?? ""
                 let expectedAccount = ComputerUseGmailAccountPreferences().preferredEmail ?? ""
                 let facts = found.count == 1 ? ((readTree(found[0].element, limit: 256) ?? []).map {
                     GmailAXFact($0.role, $0.title, $0.description, value: $0.text)
@@ -1920,7 +2034,8 @@ final class CoreJobAcceptanceTests: XCTestCase {
             func freshComposeAndSubject() -> (Node, [Node], Node)? {
                 var scanVisited = 0
                 var scanFailure = ""
-                guard let freshComposers = discoverComposers(window.accessibilityElement,
+                guard let freshOuterWebArea = selectedOuterWebArea(), CFEqual(freshOuterWebArea, outerWebArea),
+                      let freshComposers = discoverComposers(freshOuterWebArea,
                         visitedCount: &scanVisited, incompleteReason: &scanFailure),
                       freshComposers.count == 1, composers.count == 1,
                       CFEqual(freshComposers[0].element, composers[0].element),
@@ -2060,6 +2175,7 @@ final class CoreJobAcceptanceTests: XCTestCase {
                     seen.append(element)
                     let role = value(kAXRoleAttribute as String, element) as? String ?? ""
                     if pruneDiscoverySubtree(element, role: role) || role == "AXDialog" { continue }
+                    if role == "AXWebArea" && !CFEqual(element, pageMenuRoot) { continue }
                     if role == "AXMenu" { menus.append(element) }
                     if role == "AXMenuItem" {
                         let copyLabel = "Copy \"\(recipient)\""
@@ -2350,6 +2466,7 @@ final class CoreJobAcceptanceTests: XCTestCase {
                 visited.append(element)
                 let role = value(kAXRoleAttribute as String, element) as? String ?? ""
                 if pruneDiscoverySubtree(element, role: role) || role == "AXDialog" { continue }
+                if role == "AXWebArea" && !CFEqual(element, root) { continue }
                 let title = value(kAXTitleAttribute as String, element) as? String ?? ""
                 let description = value(kAXDescriptionAttribute as String, element) as? String ?? ""
                 let rawValue = (role == "AXCell" || (role == "AXStaticText" && pending.cellIndex != nil))
@@ -2475,6 +2592,7 @@ final class CoreJobAcceptanceTests: XCTestCase {
             evidence["saved_oracle_status"] = "drafts-page-account-unverified"
             return
         }
+        retainedPageURL = currentURL
         let alreadyOnDrafts = Self.gmailIsOwnedDraftsListingURL(currentURL, expectedAccountIndex: accountIndex)
         if draftRowProbeEnabled && !alreadyOnDrafts {
             evidence["draft_saved_verified"] = false
@@ -2575,8 +2693,14 @@ final class CoreJobAcceptanceTests: XCTestCase {
                 evidence["saved_oracle_status"] = "drafts-navigation-unverified"
                 return
             }
+            retainedPageURL = navigatedURL
         }
-        let subjectNodes = findOwnedDraftSubject(window.accessibilityElement, subject: subject)
+        guard let draftsPageRoot = selectedOuterWebArea(), verifiedCurrentGmailURL() == retainedPageURL else {
+            evidence["draft_saved_verified"] = false
+            evidence["saved_oracle_status"] = "drafts-outer-page-selection-unverified"
+            return
+        }
+        let subjectNodes = findOwnedDraftSubject(draftsPageRoot, subject: subject)
         if let draftRowProbe { evidence["draft_row_capture_probe"] = draftRowProbe }
         guard let subjectNodes else {
             evidence["draft_saved_verified"] = false
@@ -2609,7 +2733,10 @@ final class CoreJobAcceptanceTests: XCTestCase {
             guard let parent, CFGetTypeID(parent) == AXUIElementGetTypeID() else { break }
             ancestor = (parent as! AXUIElement)
         }
-        guard let draftRow, press(draftRow) else {
+        guard let draftRow,
+              verifiedCurrentGmailURL() == retainedPageURL,
+              value(kAXEnabledAttribute as String, draftRow) as? Bool == true,
+              press(draftRow) else {
             evidence["draft_saved_verified"] = false
             evidence["saved_oracle_status"] = "owned-draft-row-not-actionable"
             return
@@ -2617,9 +2744,19 @@ final class CoreJobAcceptanceTests: XCTestCase {
         var reopened = false
         let reopenDeadline = ContinuousClock.now.advanced(by: .seconds(3))
         while ContinuousClock.now < reopenDeadline, !Task.isCancelled {
+            guard let reopenedURL = verifiedCurrentGmailURL(),
+                  Self.gmailIsOwnedOpaqueDraftComposeURL(reopenedURL, expectedAccountIndex: accountIndex) else {
+                try? await Task.sleep(for: .milliseconds(150))
+                continue
+            }
+            retainedPageURL = reopenedURL
+            guard let reopenedPageRoot = selectedOuterWebArea() else {
+                try? await Task.sleep(for: .milliseconds(150))
+                continue
+            }
             var reopenScanVisited = 0
             var reopenScanFailure = ""
-            if let found = discoverComposers(window.accessibilityElement, visitedCount: &reopenScanVisited,
+            if let found = discoverComposers(reopenedPageRoot, visitedCount: &reopenScanVisited,
                     incompleteReason: &reopenScanFailure), found.count == 1 {
                 reopened = true
                 break

@@ -107,6 +107,12 @@ final class ComputerUseDefaultBrowserPageReader {
         let controlMetadata: [String: Control]
     }
 
+    private struct OuterPageInventory {
+        let pages: [AXUIElement]
+        let sheetFrames: [CGRect]
+        let complete: Bool
+    }
+
     private let access: Access
     private var retained: [String: Retained] = [:]
     private let contextByteLimit = 8_192
@@ -115,6 +121,130 @@ final class ComputerUseDefaultBrowserPageReader {
     private let nodeLimitPerPass = 256
 
     init(access: Access? = nil) { self.access = access ?? .live }
+
+    private func readFrame(_ element: AXUIElement,
+                           value: (String, AXUIElement) throws -> CFTypeRef?) throws -> CGRect? {
+        guard let position = try value(kAXPositionAttribute as String, element),
+              let size = try value(kAXSizeAttribute as String, element),
+              CFGetTypeID(position) == AXValueGetTypeID(), CFGetTypeID(size) == AXValueGetTypeID() else { return nil }
+        var origin = CGPoint.zero, dimensions = CGSize.zero
+        guard AXValueGetValue(position as! AXValue, .cgPoint, &origin),
+              AXValueGetValue(size as! AXValue, .cgSize, &dimensions),
+              origin.x.isFinite, origin.y.isFinite, dimensions.width.isFinite, dimensions.height.isFinite,
+              dimensions.width > 0, dimensions.height > 0 else { return nil }
+        return CGRect(origin: origin, size: dimensions)
+    }
+
+    private func discoverOuterPages(in root: AXUIElement,
+                                    value: (String, AXUIElement) throws -> CFTypeRef?,
+                                    check: () throws -> Void) throws -> OuterPageInventory {
+        var pending: [(AXUIElement, Int)] = [(root, 0)]
+        var visited: [AXUIElement] = [], pages: [AXUIElement] = [], sheetFrames: [CGRect] = []
+        var complete = true
+        while !pending.isEmpty, visited.count < nodeLimitPerPass {
+            try check()
+            let (node, depth) = pending.removeFirst()
+            if visited.contains(where: { CFEqual($0, node) }) { continue }
+            visited.append(node)
+            guard depth <= 16 else { complete = false; continue }
+            let role = try value(kAXRoleAttribute as String, node) as? String ?? ""
+            let subrole = try value(kAXSubroleAttribute as String, node) as? String ?? ""
+            let hidden = (try value("AXHidden", node) as? NSNumber)?.boolValue == true
+            let protected = (try value("AXProtectedContent", node) as? NSNumber)?.boolValue == true
+            if role == "AXSecureTextField" || subrole == (kAXSecureTextFieldSubrole as String) || hidden || protected {
+                continue
+            }
+            if role == "AXSheet" {
+                if let frame = try readFrame(node, value: value) { sheetFrames.append(frame) }
+                continue
+            }
+            if role == "AXWebArea" { pages.append(node); continue }
+            if let children = try value(kAXChildrenAttribute as String, node) as? [AXUIElement] {
+                let room = max(0, nodeLimitPerPass - visited.count - pending.count)
+                if children.count > room { complete = false }
+                pending.append(contentsOf: children.prefix(room).map { ($0, depth + 1) })
+            } else if ["AXWindow", "AXGroup", "AXSplitGroup", "AXUnknown", "AXScrollArea", "AXTabGroup", "AXToolbar"].contains(role) {
+                // A container whose children could not be read can conceal a
+                // second outer page. An explicitly empty children list is safe.
+                complete = false
+            }
+        }
+        if !pending.isEmpty { complete = false }
+        return OuterPageInventory(pages: pages, sheetFrames: sheetFrames, complete: complete)
+    }
+
+    private func selectOuterPage(from inventory: OuterPageInventory, window: AXUIElement,
+                                 value: (String, AXUIElement) throws -> CFTypeRef?,
+                                 check: () throws -> Void) throws -> AXUIElement? {
+        guard inventory.complete, !inventory.pages.isEmpty else { return nil }
+        if inventory.pages.count == 1 { return inventory.pages[0] }
+        guard let windowFrame = try readFrame(window, value: value),
+              let firstFrame = try readFrame(inventory.pages[0], value: value),
+              windowFrame.width > 0, windowFrame.height > 0 else { return nil }
+        let tolerance: CGFloat = 2
+        func coextensive(_ lhs: CGRect, _ rhs: CGRect) -> Bool {
+            abs(lhs.minX - rhs.minX) <= tolerance && abs(lhs.minY - rhs.minY) <= tolerance
+                && abs(lhs.width - rhs.width) <= tolerance && abs(lhs.height - rhs.height) <= tolerance
+        }
+        guard windowFrame.insetBy(dx: -tolerance, dy: -tolerance).contains(firstFrame) else { return nil }
+        for page in inventory.pages.dropFirst() {
+            guard let pageFrame = try readFrame(page, value: value), coextensive(firstFrame, pageFrame),
+                  windowFrame.insetBy(dx: -tolerance, dy: -tolerance).contains(pageFrame) else { return nil }
+        }
+
+        let samples = [
+            CGPoint(x: firstFrame.midX, y: firstFrame.midY),
+            CGPoint(x: firstFrame.midX, y: firstFrame.minY + firstFrame.height * 0.33),
+            CGPoint(x: firstFrame.midX, y: firstFrame.minY + firstFrame.height * 0.67),
+            CGPoint(x: firstFrame.minX + firstFrame.width * 0.25, y: firstFrame.minY + firstFrame.height * 0.25),
+            CGPoint(x: firstFrame.minX + firstFrame.width * 0.75, y: firstFrame.minY + firstFrame.height * 0.25),
+            CGPoint(x: firstFrame.minX + firstFrame.width * 0.25, y: firstFrame.minY + firstFrame.height * 0.75),
+            CGPoint(x: firstFrame.minX + firstFrame.width * 0.75, y: firstFrame.minY + firstFrame.height * 0.75),
+            CGPoint(x: firstFrame.minX + firstFrame.width * 0.25, y: firstFrame.midY),
+            CGPoint(x: firstFrame.minX + firstFrame.width * 0.75, y: firstFrame.midY)
+        ].filter { point in
+            point.x.isFinite && point.y.isFinite && firstFrame.contains(point)
+                && !inventory.sheetFrames.contains(where: { $0.contains(point) })
+        }
+        guard samples.count >= 3 else { return nil }
+        var selectedPage: AXUIElement?
+        for point in samples.prefix(3) {
+            try check()
+            guard let hit = access.hitTestElementAtPoint(point) else { return nil }
+            var current: AXUIElement? = hit
+            var seen: [AXUIElement] = []
+            var hitPage: AXUIElement?
+            var reachedWindow = false
+            for _ in 0..<16 {
+                try check()
+                guard let node = current, !seen.contains(where: { CFEqual($0, node) }) else { return nil }
+                seen.append(node)
+                let role = try value(kAXRoleAttribute as String, node) as? String ?? ""
+                let subrole = try value(kAXSubroleAttribute as String, node) as? String ?? ""
+                let hidden = (try value("AXHidden", node) as? NSNumber)?.boolValue == true
+                let protected = (try value("AXProtectedContent", node) as? NSNumber)?.boolValue == true
+                guard role.hasPrefix("AX"), role != "AXUnknown", role != "AXSecureTextField",
+                      subrole != (kAXSecureTextFieldSubrole as String), !hidden, !protected,
+                      role != "AXSheet" else { return nil }
+                if role == "AXWebArea" {
+                    guard hitPage == nil, inventory.pages.contains(where: { CFEqual($0, node) }) else { return nil }
+                    hitPage = node
+                }
+                if role == "AXWindow" {
+                    guard CFEqual(node, window), hitPage != nil else { return nil }
+                    reachedWindow = true
+                    break
+                }
+                guard let parent = try value(kAXParentAttribute as String, node),
+                      CFGetTypeID(parent) == AXUIElementGetTypeID() else { return nil }
+                current = unsafeBitCast(parent, to: AXUIElement.self)
+            }
+            guard reachedWindow, let hitPage else { return nil }
+            if let selectedPage, !CFEqual(selectedPage, hitPage) { return nil }
+            selectedPage = hitPage
+        }
+        return selectedPage
+    }
 
     /// Reads only the HTTPS URL from the exact retained page while the user
     /// interface may be focused on a recognized native panel. This grants no
@@ -143,14 +273,6 @@ final class ComputerUseDefaultBrowserPageReader {
             if let url = raw as? URL { return url.absoluteString }
             return nil
         }
-        func isPruned(_ node: AXUIElement) throws -> Bool {
-            let role = try string(kAXRoleAttribute as String, node) ?? ""
-            let subrole = try string(kAXSubroleAttribute as String, node) ?? ""
-            let hidden = (try value(kAXHiddenAttribute as String, node) as? NSNumber)?.boolValue == true
-            let protected = (try value("AXProtectedContent", node) as? NSNumber)?.boolValue == true
-            return role == "AXSecureTextField" || subrole == (kAXSecureTextFieldSubrole as String)
-                || hidden || protected
-        }
         func currentRoot() throws -> AXUIElement? {
             guard let (identity, root) = access.frontmost(), identity == expectedApplication else { return nil }
             return root
@@ -162,30 +284,8 @@ final class ComputerUseDefaultBrowserPageReader {
             return true
         }
         func uniqueOuterWebArea(in window: AXUIElement) throws -> AXUIElement? {
-            var pending = [window]
-            var visited: [AXUIElement] = []
-            var found: [AXUIElement] = []
-            var incomplete = false
-            while !pending.isEmpty, visited.count < nodeLimitPerPass, !expired {
-                try check()
-                let node = pending.removeFirst()
-                guard !visited.contains(where: { CFEqual($0, node) }) else { continue }
-                visited.append(node)
-                if try isPruned(node) { continue }
-                let role = try string(kAXRoleAttribute as String, node) ?? ""
-                if role == "AXSheet" { continue }
-                if role == "AXWebArea" {
-                    found.append(node)
-                    continue
-                }
-                if let children = try value(kAXChildrenAttribute as String, node) as? [AXUIElement] {
-                    let room = max(0, nodeLimitPerPass - visited.count - pending.count)
-                    if children.count > room { incomplete = true }
-                    pending.append(contentsOf: children.prefix(room))
-                }
-            }
-            guard pending.isEmpty, !incomplete, !expired, found.count == 1 else { return nil }
-            return found[0]
+            let inventory = try discoverOuterPages(in: window, value: value, check: check)
+            return try selectOuterPage(from: inventory, window: window, value: value, check: check)
         }
         func httpsURL(from webArea: AXUIElement) throws -> String? {
             guard let rawURL = try string("AXURL", webArea) ?? string(kAXDocumentAttribute as String, webArea),
@@ -272,29 +372,16 @@ final class ComputerUseDefaultBrowserPageReader {
             let hidden = (try value("AXHidden", node) as? NSNumber)?.boolValue == true
             return role == "AXSecureTextField" || subrole == (kAXSecureTextFieldSubrole as String) || protected || hidden
         }
+        var selectedInventory: OuterPageInventory?
         func discoverOuterWebArea() throws -> AXUIElement? {
-            var pending = [focused], seen: [AXUIElement] = [], found: [AXUIElement] = []
-            var incomplete = false
-            while !pending.isEmpty, seen.count < nodeLimitPerPass, !expired {
-                let node = pending.removeFirst()
-                if seen.contains(where: { CFEqual($0, node) }) { continue }
-                seen.append(node)
-                if try isPruned(node) { continue }
-                let role = try string(kAXRoleAttribute as String, node) ?? ""
-                if role == "AXWebArea" { found.append(node); continue }
-                if let children = try value(kAXChildrenAttribute as String, node) as? [AXUIElement] {
-                    let room = max(0, nodeLimitPerPass - seen.count - pending.count)
-                    if children.count > room { truncated = true; incomplete = true }
-                    pending.append(contentsOf: children.prefix(room))
-                }
-            }
-            guard pending.isEmpty, !expired, !incomplete, found.count == 1 else { return nil }
-            return found[0]
+            let inventory = try discoverOuterPages(in: focused, value: value, check: check)
+            guard inventory.complete else { truncated = true; return nil }
+            selectedInventory = inventory
+            return try selectOuterPage(from: inventory, window: focused, value: value, check: check)
         }
-        _ = root
-        // Stop at each AXWebArea, so nested iframe content is not treated as
-        // an outer page. Multiple discovered outer areas are ambiguous.
-        guard let webArea = try discoverOuterWebArea() else {
+        // Stop at each AXWebArea so nested iframe documents stay outside the
+        // candidate set. Multiple outer areas require fresh hit-test proof.
+        guard let webArea = try discoverOuterWebArea(), let initialInventory = selectedInventory else {
             return fail(expired ? "outer_page_discovery_deadline" : "outer_page_discovery_incomplete_or_ambiguous")
         }
         let controlRoles: Set<String> = ["AXButton", "AXLink", "AXTextField", "AXTextArea", "AXComboBox",
@@ -305,31 +392,42 @@ final class ComputerUseDefaultBrowserPageReader {
         var focusedPathControls: [AXUIElement] = []
         if let focusedUIElement {
             let focusedRole = try string(kAXRoleAttribute as String, focusedUIElement) ?? ""
-            var node = focusedUIElement
-            var seen: [AXUIElement] = []
-            var reachedBoundary = false
-            for _ in 0..<16 {
-                try check()
-                guard !expired else { return fail("deadline_during_focus_ancestry") }
-                guard !seen.contains(where: { CFEqual($0, node) }) else { return fail("focused_ancestry_cycle") }
-                seen.append(node)
-                let nodeRole = try string(kAXRoleAttribute as String, node) ?? ""
-                recordRole(nodeRole)
-                if try isPruned(node) { return fail("focused_ancestry_pruned") }
-                if CFEqual(node, webArea) {
-                    focusedNodeIsInPage = true
-                    focusedControlIsInPage = controlRoles.contains(focusedRole)
-                    focusedPagePath = seen.reversed()
-                    reachedBoundary = true
-                    break
+            let staleOuterPageFocus = focusedRole == "AXWebArea"
+                && !CFEqual(focusedUIElement, webArea)
+                && initialInventory.pages.contains(where: { CFEqual($0, focusedUIElement) })
+                && initialInventory.pages.count > 1
+            if staleOuterPageFocus {
+                // A focused AXWebArea can remain attached to an inactive sibling
+                // document after Safari switches the visible tab content. It is
+                // outside this page; interactive focus never gets this exception.
+                focusedControlIsInPage = false
+            } else {
+                var node = focusedUIElement
+                var seen: [AXUIElement] = []
+                var reachedBoundary = false
+                for _ in 0..<16 {
+                    try check()
+                    guard !expired else { return fail("deadline_during_focus_ancestry") }
+                    guard !seen.contains(where: { CFEqual($0, node) }) else { return fail("focused_ancestry_cycle") }
+                    seen.append(node)
+                    let nodeRole = try string(kAXRoleAttribute as String, node) ?? ""
+                    recordRole(nodeRole)
+                    if try isPruned(node) { return fail("focused_ancestry_pruned") }
+                    if CFEqual(node, webArea) {
+                        focusedNodeIsInPage = true
+                        focusedControlIsInPage = controlRoles.contains(focusedRole)
+                        focusedPagePath = seen.reversed()
+                        reachedBoundary = true
+                        break
+                    }
+                    if controlRoles.contains(nodeRole) { focusedPathControls.append(node) }
+                    if nodeRole == "AXWebArea" { return fail("focused_nested_webarea_boundary") }
+                    if CFEqual(node, focused) { reachedBoundary = true; break }
+                    guard let parent = try element(kAXParentAttribute as String, node) else { return fail("focused_ancestry_parent_missing") }
+                    node = parent
                 }
-                if controlRoles.contains(nodeRole) { focusedPathControls.append(node) }
-                if nodeRole == "AXWebArea" { return fail("focused_nested_webarea_boundary") }
-                if CFEqual(node, focused) { reachedBoundary = true; break }
-                guard let parent = try element(kAXParentAttribute as String, node) else { return fail("focused_ancestry_parent_missing") }
-                node = parent
+                guard reachedBoundary else { return fail("focused_ancestry_limit_or_window_mismatch") }
             }
-            guard reachedBoundary else { return fail("focused_ancestry_limit_or_window_mismatch") }
             // A focused browser-chrome control is outside the page, but the
             // retained same-window page remains a valid observation.
             if focusedControlIsInPage == nil { focusedControlIsInPage = false }

@@ -65,6 +65,8 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
     /// and the next loop must obtain a fresh observation before proposing again.
     typealias LocalFileOperationHandler = @MainActor @Sendable
         (ComputerUseMCPBrowserStepPlanner.Plan.LocalFileOperation) async throws -> ComputerUseExecutionResult?
+    /// Host-owned preparation that must finish before a fresh observation is planned.
+    typealias HostPreparation = @MainActor @Sendable () async throws -> Void
     /// Called only after native input returned and its dispatch journal was verified.
     typealias SuccessfulDispatchHandler = @MainActor @Sendable (ComputerUsePredictedAction) -> Void
     /// Optional active envelope identity for host-managed clarifications.
@@ -121,6 +123,7 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
     private let completionAnswerTransform: CompletionAnswerTransform?
     private let revalidationFailureObserver: RevalidationFailureObserver?
     private let localFileOperationHandler: LocalFileOperationHandler?
+    private let hostPreparation: HostPreparation?
     private let onSuccessfulDispatch: SuccessfulDispatchHandler
     private let approvalTaskIDProvider: ApprovalTaskIDProvider?
     private let screenConsentRecognizer: ScreenConsentRecognizer
@@ -149,6 +152,7 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
          completionAnswerTransform: CompletionAnswerTransform? = nil,
          revalidationFailureObserver: RevalidationFailureObserver? = nil,
          localFileOperationHandler: LocalFileOperationHandler? = nil,
+         hostPreparation: HostPreparation? = nil,
          onSuccessfulDispatch: @escaping SuccessfulDispatchHandler = { _ in },
          approvalTaskIDProvider: ApprovalTaskIDProvider? = nil,
          screenConsentRecognizer: ScreenConsentRecognizer? = nil,
@@ -159,7 +163,8 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
         self.outcomeCheck = outcomeCheck
         self.completionAnswerTransform = completionAnswerTransform
         self.revalidationFailureObserver = revalidationFailureObserver
-        self.localFileOperationHandler = localFileOperationHandler; self.finishRun = finishRun
+        self.localFileOperationHandler = localFileOperationHandler
+        self.hostPreparation = hostPreparation; self.finishRun = finishRun
         self.onSuccessfulDispatch = onSuccessfulDispatch
         self.approvalTaskIDProvider = approvalTaskIDProvider
         self.screenConsentRecognizer = screenConsentRecognizer
@@ -174,6 +179,20 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
         catch is CancellationError { throw CancellationError() }
         catch Failure.unsupportedAction { throw Failure.unsupportedAction }
         catch { throw Failure.scopedSurfaceChanged }
+    }
+
+    private func prepareHostTurn(lease: any ComputerUseTaskExecutionLease,
+                                 tools: ComputerUseHostTools) async throws {
+        guard let hostPreparation else { return }
+        try Task.checkCancellation()
+        try lease.assertOwnership()
+        try tools.requireActive()
+        try checkScopedSurface()
+        try await hostPreparation()
+        try Task.checkCancellation()
+        try lease.assertOwnership()
+        try tools.requireActive()
+        try checkScopedSurface()
     }
 
     private func waitForPostActionSurface(_ observation: Observation, tools: ComputerUseHostTools) async throws {
@@ -288,6 +307,32 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
         return String(components.joined(separator: "+").prefix(128))
     }
 
+    private static func diagnosticDecisionKind(_ decision: ComputerUseDesktopProposal.Decision) -> String {
+        switch decision {
+        case .completionStatus: return "completionStatus"
+        case .handoff: return "handoff"
+        case .refreshObservation: return "refreshObservation"
+        case .unsupported: return "unsupported"
+        case .action(let action):
+            switch action {
+            case .pointer: return "pointer"
+            case .typeText: return "typeText"
+            case .key: return "key"
+            case .scroll, .scrollAt: return "scroll"
+            case .visitURL: return "visitURL"
+            case .unsupportedNavigation: return "unsupportedNavigation"
+            case .historyBack: return "historyBack"
+            case .webSearch: return "webSearch"
+            case .readPageQuestion: return "readPageQuestion"
+            case .remember: return "remember"
+            case .askUser: return "askUser"
+            case .localFileOperation: return "localFileOperation"
+            case .wait: return "wait"
+            case .reportCompletion: return "reportCompletion"
+            }
+        }
+    }
+
     private func verifyCompletionCandidate(_ answer: String, input: ComputerUseFaraModel.Input,
                                            observation: Observation,
                                            tools: ComputerUseHostTools,
@@ -297,6 +342,7 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
         guard completeCheck != nil || outcomeCheck != nil else { return }
 
         var accepted = true
+        lastRevalidationDiagnostic["completionVerificationPhase"] = "outcome-check"
         if let outcomeCheck {
             do {
                 accepted = try await planning.perform(timeout: 45) {
@@ -313,6 +359,8 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
             try assertOwnership()
             try checkScopedSurface()
         }
+        lastRevalidationDiagnostic["completionOutcomeAccepted"] = String(accepted)
+        lastRevalidationDiagnostic["completionVerificationPhase"] = "complete-check"
         if accepted, let completeCheck {
             accepted = try await completeCheck(answer)
             try Task.checkCancellation()
@@ -321,10 +369,12 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
         }
         try Task.checkCancellation()
         try assertOwnership()
+        lastRevalidationDiagnostic["completionVerificationPhase"] = "final-surface"
         try await revalidate(observation, action: nil, tools: tools)
         try Task.checkCancellation()
         try assertOwnership()
         try checkScopedSurface()
+        lastRevalidationDiagnostic["completionVerificationPhase"] = accepted ? "verified" : "check-rejected"
         guard accepted else { throw Failure.completionUnverified }
     }
 
@@ -620,6 +670,7 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
             try Task.checkCancellation(); try lease.assertOwnership(); try checkScopedSurface()
         }
         while session.turns < 64 {
+            try await prepareHostTurn(lease: lease, tools: tools)
             try Task.checkCancellation(); try lease.assertOwnership()
             try checkScopedSurface()
             let observation = try await observe(tools, includeControls: true)
@@ -631,6 +682,13 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
                 clarifiedGoal: session.clarifiedGoal, desktopDisplayBounds: observation.image.displayBounds)
             let propose = self.propose
             let proposal = try await planning.perform(timeout: 45) { try await propose(input) }
+            func recordRejectedDiagnostic(_ failure: String) {
+                lastRevalidationDiagnostic.merge([
+                    "rejectedFailure": failure,
+                    "rejectedCount": String(min(3, session.rejected + 1)),
+                    "decisionKind": Self.diagnosticDecisionKind(proposal.decision)
+                ]) { _, latest in latest }
+            }
             var preservesRejectedActionFeedback = false
             try Task.checkCancellation(); try lease.assertOwnership()
             if case .refreshObservation = proposal.decision {
@@ -745,14 +803,17 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
                     try await waitForPostActionSurface(observation, tools: tools)
                 }
             } catch Failure.completionUnverified {
+                recordRejectedDiagnostic("completionUnverified")
                 record(proposal, observation: observation, session: session)
                 session.actionError = "The reported completion was not verified by the scoped surface. Inspect current evidence before reporting completion."
                 session.rejected += 1
             } catch Failure.changedScreen {
+                recordRejectedDiagnostic("changedScreen")
                 record(proposal, observation: observation, session: session)
                 session.actionError = "The desktop action was not performed because its observed screen, target or focus changed. No mouse or keyboard input was sent. Waiting will not complete the rejected action; choose a fresh action from the current screenshot."
                 session.rejected += 1
             } catch Failure.unsupportedAction {
+                recordRejectedDiagnostic("unsupportedAction")
                 record(proposal, observation: observation, session: session)
                 if case .scroll? = proposal.action {
                     session.actionError = "Native scrolling requires an explicit coordinate inside the intended pane in the foreground window. No input was sent. Inspect the current screenshot and provide that coordinate."

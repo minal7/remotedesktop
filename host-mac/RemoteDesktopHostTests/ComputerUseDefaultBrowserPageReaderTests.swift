@@ -6,6 +6,179 @@ import AppKit
 
 @MainActor
 final class ComputerUseDefaultBrowserPageReaderTests: XCTestCase {
+    func testOptInRealBrowserOuterPageVisibilityProbe() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_DEFAULT_BROWSER_OUTER_PAGE_PROBE"] == "1",
+              let resultPath = ProcessInfo.processInfo.environment["DEFAULT_BROWSER_OUTER_PAGE_PROBE_RESULT_PATH"],
+              !resultPath.isEmpty else {
+            throw XCTSkip("Set RUN_DEFAULT_BROWSER_OUTER_PAGE_PROBE=1 and DEFAULT_BROWSER_OUTER_PAGE_PROBE_RESULT_PATH for read-only native AX evidence")
+        }
+        let handler = try XCTUnwrap(ComputerUseDefaultBrowserTarget.currentDefaultHTTPSHandler())
+        guard handler.bundleIdentifier == "com.apple.Safari",
+              let safari = NSWorkspace.shared.frontmostApplication,
+              safari.bundleIdentifier == handler.bundleIdentifier,
+              let identity = ComputerUseApplicationIdentity(runningApplication: safari),
+              identity.codeIdentity != nil else {
+            throw XCTSkip("A signed, frontmost default Safari instance is required")
+        }
+        let root = AXUIElementCreateApplication(safari.processIdentifier)
+        AXUIElementSetMessagingTimeout(root, 0.2)
+        let pageReaderAccess = ComputerUseDefaultBrowserPageReader.Access.live
+        func read(_ node: AXUIElement, _ name: String) -> CFTypeRef? {
+            AXUIElementSetMessagingTimeout(node, 0.2)
+            var value: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(node, name as CFString, &value) == .success else { return nil }
+            return value
+        }
+        func role(_ node: AXUIElement) -> String { read(node, kAXRoleAttribute as String) as? String ?? "" }
+        func frame(_ node: AXUIElement) -> CGRect? {
+            guard let p = read(node, kAXPositionAttribute as String), CFGetTypeID(p) == AXValueGetTypeID(),
+                  let s = read(node, kAXSizeAttribute as String), CFGetTypeID(s) == AXValueGetTypeID() else { return nil }
+            var point = CGPoint.zero, size = CGSize.zero
+            guard AXValueGetValue(p as! AXValue, .cgPoint, &point), AXValueGetValue(s as! AXValue, .cgSize, &size),
+                  point.x.isFinite, point.y.isFinite, size.width.isFinite, size.height.isFinite,
+                  size.width > 0, size.height > 0 else { return nil }
+            return CGRect(origin: point, size: size)
+        }
+        guard let rawWindows = read(root, kAXWindowsAttribute as String) as? [AXUIElement],
+              let rawFocused = read(root, kAXFocusedWindowAttribute as String),
+              CFGetTypeID(rawFocused) == AXUIElementGetTypeID() else {
+            XCTFail("Could not read Safari's current window inventory"); return
+        }
+        let window = unsafeBitCast(rawFocused, to: AXUIElement.self)
+        guard role(window) == "AXWindow", rawWindows.filter({ CFEqual($0, window) }).count == 1 else {
+            XCTFail("Focused Safari window was not uniquely listed"); return
+        }
+        let bounds = try XCTUnwrap(frame(window), "Focused Safari window had no valid frame")
+        var pending = (read(window, kAXChildrenAttribute as String) as? [AXUIElement] ?? []).map { ($0, 1) }
+        var visited: [AXUIElement] = [], areas: [AXUIElement] = [], tabs: [AXUIElement] = [], groups: [AXUIElement] = []
+        while !pending.isEmpty, visited.count < 128 {
+            let (node, depth) = pending.removeFirst()
+            guard depth <= 16, !visited.contains(where: { CFEqual($0, node) }) else { continue }
+            visited.append(node)
+            let currentRole = role(node)
+            if currentRole == "AXWebArea" { areas.append(node); continue }
+            if currentRole == "AXTab" { tabs.append(node) }
+            if currentRole == "AXTabGroup" { groups.append(node) }
+            if currentRole == "AXSecureTextField" || (read(node, "AXHidden") as? NSNumber)?.boolValue == true
+                || (read(node, "AXProtectedContent") as? NSNumber)?.boolValue == true { continue }
+            pending.append(contentsOf: (read(node, kAXChildrenAttribute as String) as? [AXUIElement] ?? []).map { ($0, depth + 1) })
+        }
+        func urlRoute(_ raw: String?) -> Any {
+            guard let raw, let c = URLComponents(string: raw) else { return NSNull() }
+            return ["scheme": c.scheme ?? "", "host": c.host ?? "", "path": c.path,
+                    "fragment": c.fragment ?? "", "hasQuery": c.query != nil] as [String: Any]
+        }
+        func safeFrame(_ value: CGRect?) -> Any {
+            guard let value else { return NSNull() }
+            return ["x": value.origin.x, "y": value.origin.y, "width": value.width, "height": value.height] as [String: Any]
+        }
+        func parentEvidence(_ node: AXUIElement) -> [[String: Any]] {
+            var result: [[String: Any]] = [], current: AXUIElement? = node
+            for _ in 0..<12 {
+                guard let item = current, let raw = read(item, kAXParentAttribute as String),
+                      CFGetTypeID(raw) == AXUIElementGetTypeID() else { break }
+                let parent = unsafeBitCast(raw, to: AXUIElement.self)
+                let r = role(parent)
+                if r == "AXWindow" { break }
+                if r == "AXScrollArea" || r == "AXTabGroup" || r == "AXTab" {
+                    let visibleCount = (read(parent, "AXVisibleChildren") as? [AXUIElement])?.count
+                    result.append(["role": r, "frame": safeFrame(frame(parent)),
+                        "selected": read(parent, "AXSelected") as? Bool ?? NSNull() as Any,
+                        "value": read(parent, "AXValue") as? String ?? NSNull() as Any,
+                        "visibleChildren": visibleCount.map { $0 as Any } ?? NSNull()])
+                }
+                current = parent
+            }
+            return result
+        }
+        let areaEvidence: [[String: Any]] = areas.map { area in
+            let title = read(area, kAXTitleAttribute as String) as? String
+            let description = read(area, kAXDescriptionAttribute as String) as? String
+            let rawURL = (read(area, "AXURL") as? URL)?.absoluteString ?? read(area, "AXURL") as? String
+                ?? (read(area, kAXDocumentAttribute as String) as? URL)?.absoluteString
+                ?? read(area, kAXDocumentAttribute as String) as? String
+            return ["role": role(area), "title": title ?? NSNull() as Any,
+                "description": description ?? NSNull() as Any, "url": urlRoute(rawURL),
+                "hidden": read(area, "AXHidden") as? Bool ?? NSNull() as Any,
+                "visible": read(area, "AXVisible") as? Bool ?? NSNull() as Any,
+                "frame": safeFrame(frame(area)), "parents": parentEvidence(area)]
+        }
+        let tabEvidence: [[String: Any]] = tabs.map { tab in
+            ["role": role(tab), "selected": read(tab, "AXSelected") as? Bool ?? NSNull() as Any,
+             "value": read(tab, kAXValueAttribute as String) as? String ?? NSNull() as Any,
+             "title": read(tab, kAXTitleAttribute as String) as? String ?? NSNull() as Any]
+        }
+        let windowTitle = read(window, kAXTitleAttribute as String) as? String
+        let windowDocument = read(window, kAXDocumentAttribute as String).map { urlRoute(($0 as? URL)?.absoluteString ?? ($0 as? String)) } ?? NSNull()
+        let hitPoints: [(String, CGPoint)] = [
+            ("center", CGPoint(x: bounds.midX, y: bounds.minY + bounds.height * 0.5)),
+            ("upper_center", CGPoint(x: bounds.midX, y: bounds.minY + bounds.height * 0.33)),
+            ("lower_center", CGPoint(x: bounds.midX, y: bounds.minY + bounds.height * 0.67))]
+        let hits: [[String: Any]] = hitPoints.map { name, point in
+            var current = pageReaderAccess.hitTestElementAtPoint(point), chain: [String] = []
+            var matchedArea: Int? = nil, webAreaCount = 0, reachedRetainedWindow = false, seen: [AXUIElement] = []
+            for _ in 0..<16 {
+                guard let node = current, !seen.contains(where: { CFEqual($0, node) }) else { break }
+                seen.append(node)
+                let r = role(node); chain.append(r.isEmpty ? "unknown" : r)
+                if let index = areas.firstIndex(where: { CFEqual($0, node) }) { matchedArea = index }
+                if r == "AXWebArea" { webAreaCount += 1 }
+                if r == "AXWindow" { reachedRetainedWindow = CFEqual(node, window); break }
+                guard let parent = read(node, kAXParentAttribute as String), CFGetTypeID(parent) == AXUIElementGetTypeID() else { break }
+                current = unsafeBitCast(parent, to: AXUIElement.self)
+            }
+            return ["point": name, "matchedOuterAreaIndex": matchedArea.map { $0 as Any } ?? NSNull(),
+                    "webAreaCount": webAreaCount, "reachedRetainedWindow": reachedRetainedWindow,
+                    "ancestorRoles": chain]
+        }
+        let hitIndices = hits.compactMap { $0["matchedOuterAreaIndex"] as? Int }
+        let hitChainsValid = hits.allSatisfy {
+            ($0["reachedRetainedWindow"] as? Bool) == true && ($0["webAreaCount"] as? Int) == 1
+        }
+        let visibleAreaIndex = hitIndices.count == 3 && Set(hitIndices).count == 1 && hitChainsValid ? hitIndices.first : nil
+        let visibleRawURL = visibleAreaIndex.flatMap { index -> String? in
+            let area = areas[index]
+            return (read(area, "AXURL") as? URL)?.absoluteString ?? read(area, "AXURL") as? String
+                ?? (read(area, kAXDocumentAttribute as String) as? URL)?.absoluteString
+                ?? read(area, kAXDocumentAttribute as String) as? String
+        }
+        let productReader = ComputerUseDefaultBrowserPageReader(access: pageReaderAccess)
+        var readerFailure: String?
+        let productObservation = try productReader.read(window: window, application: identity,
+            mayAct: { NSWorkspace.shared.frontmostApplication?.processIdentifier == safari.processIdentifier },
+            diagnostic: { reason, _ in readerFailure = reason })
+        let retainedURL = try productReader.readRetainedPageURL(window: window, application: identity,
+            mayAct: { NSWorkspace.shared.frontmostApplication?.processIdentifier == safari.processIdentifier })
+        let selectedVisiblePage = visibleRawURL != nil && productObservation?.url == visibleRawURL
+            && retainedURL == visibleRawURL
+        guard NSWorkspace.shared.frontmostApplication?.processIdentifier == safari.processIdentifier,
+              let finalIdentity = ComputerUseApplicationIdentity(runningApplication: safari), finalIdentity == identity,
+              let finalWindows = read(root, kAXWindowsAttribute as String) as? [AXUIElement],
+              finalWindows.filter({ CFEqual($0, window) }).count == 1,
+              let finalFocused = read(root, kAXFocusedWindowAttribute as String),
+              CFGetTypeID(finalFocused) == AXUIElementGetTypeID(),
+              CFEqual(unsafeBitCast(finalFocused, to: AXUIElement.self), window) else {
+            XCTFail("Safari focus or retained-window identity changed during the read-only probe")
+            return
+        }
+        let readerDiagnostic: Any = readerFailure.map { $0 as Any }
+            ?? (productObservation == nil ? "reader_returned_nil" as Any : NSNull() as Any)
+        let evidence: [String: Any] = ["frontmostBundleIdentifier": NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "",
+            "processIdentifier": safari.processIdentifier, "windowTitle": windowTitle ?? NSNull() as Any,
+            "windowDocument": windowDocument, "outerAreas": areaEvidence, "tabGroupCount": groups.count,
+            "tabs": tabEvidence, "hitTests": hits, "inventoryComplete": pending.isEmpty && visited.count < 128,
+            "selected_visible_page": selectedVisiblePage,
+            "visiblePageRoute": urlRoute(visibleRawURL), "readerPageRoute": urlRoute(productObservation?.url),
+            "retainedPageRoute": urlRoute(retainedURL),
+            "readerDiagnostic": readerDiagnostic]
+        let data = try JSONSerialization.data(withJSONObject: evidence, options: [.prettyPrinted, .sortedKeys])
+        try data.write(to: URL(fileURLWithPath: resultPath), options: .atomic)
+        let attachment = XCTAttachment(data: data, uniformTypeIdentifier: "public.json")
+        attachment.name = "real-browser-outer-page-visibility-probe.json"
+        attachment.lifetime = .keepAlways
+        add(attachment)
+    }
+
     func testOptInRealDriveNativeControlSelection() async throws {
         let menuObservationOnly = ProcessInfo.processInfo.environment["RUN_DEFAULT_BROWSER_MENU_OBSERVATION_PROBE"] == "1"
         guard menuObservationOnly || ProcessInfo.processInfo.environment["RUN_DEFAULT_BROWSER_NATIVE_CONTROL_PROBE"] == "1" else {
@@ -1101,6 +1274,154 @@ final class ComputerUseDefaultBrowserPageReaderTests: XCTestCase {
         XCTAssertNil(try reader.read(window: graph.window, application: graph.identity, mayAct: { true }))
     }
 
+    func testOuterPageDiscoveryRejectsUnreadableContainerBesideKnownPage() throws {
+        for role in ["AXGroup", "AXSplitGroup", "AXUnknown", "AXScrollArea", "AXTabGroup"] {
+            let graph = PageAXGraph(); graph.makePage()
+            let unreadable = graph.element("unreadable-container")
+            graph.set("unreadable-container", kAXRoleAttribute, role as NSString)
+            graph.set("window", kAXChildrenAttribute, [graph.element("web"), unreadable] as CFArray)
+            let reader = ComputerUseDefaultBrowserPageReader(access: graph.access)
+            XCTAssertNil(try reader.read(window: graph.window, application: graph.identity, mayAct: { true }),
+                "A failed container read can conceal another page: \(role)")
+            XCTAssertNil(try reader.readRetainedPageURL(window: graph.window, application: graph.identity, mayAct: { true }), role)
+            graph.set("unreadable-container", kAXChildrenAttribute, [] as CFArray)
+            XCTAssertEqual(try reader.readRetainedPageURL(window: graph.window, application: graph.identity, mayAct: { true }),
+                "https://drive.google.com/drive/my-drive", "An explicitly empty container completes the inventory")
+        }
+    }
+
+    func testMultipleOuterPagesSelectOnlyConsistentlyHitTestedPageDespiteStaleWebAreaFocus() throws {
+        let graph = PageAXGraph(); graph.makePage()
+        let (_, composeText) = addSecondOuterPage(to: graph, key: "compose", url: "https://example.org/editor")
+        graph.set("root", kAXFocusedUIElementAttribute, graph.element("web"))
+        graph.hitTestElements = Array(repeating: composeText, count: 6)
+
+        let observation = try ComputerUseDefaultBrowserPageReader(access: graph.access)
+            .read(window: graph.window, application: graph.identity, mayAct: { true })
+        XCTAssertEqual(observation?.url, "https://example.org/editor")
+    }
+
+    func testMultipleOuterPagesRejectConflictingForeignNestedSecureAndChangedHitEvidence() throws {
+        let conflict = PageAXGraph(); conflict.makePage()
+        let (_, composeText) = addSecondOuterPage(to: conflict, key: "compose", url: "https://mail.google.com/compose")
+        conflict.hitTestElements = [composeText, conflict.element("button"), composeText,
+                                    composeText, composeText, composeText]
+        XCTAssertNil(try ComputerUseDefaultBrowserPageReader(access: conflict.access)
+            .read(window: conflict.window, application: conflict.identity, mayAct: { true }),
+            "Different visible page hits cannot be resolved by order or focus")
+
+        let foreign = PageAXGraph(); foreign.makePage()
+        _ = addSecondOuterPage(to: foreign, key: "compose", url: "https://mail.google.com/compose")
+        let foreignWindow = foreign.element("foreign-window"), foreignWeb = foreign.element("foreign-web")
+        let foreignText = foreign.element("foreign-text")
+        foreign.set("foreign-window", kAXRoleAttribute, "AXWindow" as NSString)
+        foreign.set("foreign-window", kAXChildrenAttribute, [foreignWeb] as CFArray)
+        foreign.set("foreign-web", kAXParentAttribute, foreignWindow)
+        foreign.set("foreign-web", kAXRoleAttribute, "AXWebArea" as NSString)
+        foreign.set("foreign-web", kAXChildrenAttribute, [foreignText] as CFArray)
+        foreign.set("foreign-text", kAXParentAttribute, foreignWeb)
+        foreign.set("foreign-text", kAXRoleAttribute, "AXStaticText" as NSString)
+        foreign.set("foreign-window", kAXParentAttribute, foreign.element("foreign-app"))
+        foreign.hitTestElements = Array(repeating: foreignText, count: 6)
+        XCTAssertNil(try ComputerUseDefaultBrowserPageReader(access: foreign.access)
+            .read(window: foreign.window, application: foreign.identity, mayAct: { true }),
+            "A hit whose ancestry belongs to another window is not page evidence")
+
+        let interactiveFocus = PageAXGraph(); interactiveFocus.makePage()
+        _ = addSecondOuterPage(to: interactiveFocus, key: "compose", url: "https://example.org/editor")
+        interactiveFocus.set("root", kAXFocusedUIElementAttribute, interactiveFocus.element("button"))
+        interactiveFocus.hitTestElements = Array(repeating: interactiveFocus.element("compose-text"), count: 6)
+        XCTAssertNil(try ComputerUseDefaultBrowserPageReader(access: interactiveFocus.access)
+            .read(window: interactiveFocus.window, application: interactiveFocus.identity, mayAct: { true }),
+            "Interactive focus in the other page cannot be dismissed as stale outer-page focus")
+
+        let nested = PageAXGraph(); nested.makePage()
+        let (nestedOuter, _) = addSecondOuterPage(to: nested, key: "compose", url: "https://mail.google.com/compose")
+        let nestedWeb = nested.element("nested-web"), nestedText = nested.element("nested-text")
+        nested.set("nested", kAXRoleAttribute, "AXGroup" as NSString)
+        nested.set("nested", kAXParentAttribute, nestedOuter)
+        nested.set("nested", kAXChildrenAttribute, [nestedWeb] as CFArray)
+        nested.set("nested-web", kAXRoleAttribute, "AXWebArea" as NSString)
+        nested.set("nested-web", kAXParentAttribute, nested.element("nested"))
+        nested.set("nested-web", kAXChildrenAttribute, [nestedText] as CFArray)
+        nested.set("nested-text", kAXRoleAttribute, "AXStaticText" as NSString)
+        nested.set("nested-text", kAXParentAttribute, nestedWeb)
+        nested.hitTestElements = Array(repeating: nestedText, count: 6)
+        XCTAssertNil(try ComputerUseDefaultBrowserPageReader(access: nested.access)
+            .read(window: nested.window, application: nested.identity, mayAct: { true }),
+            "A nested web area cannot stand in for the visible outer page")
+
+        let secure = PageAXGraph(); secure.makePage()
+        let (secureOuter, _) = addSecondOuterPage(to: secure, key: "compose", url: "https://mail.google.com/compose")
+        let secureText = secure.element("secure-hit")
+        secure.set("secure-hit", kAXRoleAttribute, "AXSecureTextField" as NSString)
+        secure.set("secure-hit", kAXSubroleAttribute, kAXSecureTextFieldSubrole as NSString)
+        secure.set("secure-hit", kAXParentAttribute, secureOuter)
+        secure.set("compose", kAXChildrenAttribute, [secureText] as CFArray)
+        secure.hitTestElements = Array(repeating: secureText, count: 6)
+        XCTAssertNil(try ComputerUseDefaultBrowserPageReader(access: secure.access)
+            .read(window: secure.window, application: secure.identity, mayAct: { true }),
+            "A secure hit chain cannot select an outer page")
+
+        let changed = PageAXGraph(); changed.makePage()
+        let (_, changedText) = addSecondOuterPage(to: changed, key: "compose", url: "https://mail.google.com/compose")
+        changed.hitTestElements = [changedText, changedText, changedText,
+                                  changed.element("button"), changed.element("button"), changed.element("button")]
+        changed.onHitTest = { if changed.hitTestCount == 3 { changed.hitTestElements = Array(repeating: changed.element("text"), count: 6) } }
+        XCTAssertNil(try ComputerUseDefaultBrowserPageReader(access: changed.access)
+            .read(window: changed.window, application: changed.identity, mayAct: { true }),
+            "Page selection must still agree after content collection")
+
+        let split = PageAXGraph(); split.makePage()
+        let (_, splitText) = addSecondOuterPage(to: split, key: "active", url: "https://example.org/editor")
+        split.setFrame("active", CGRect(x: 500, y: 0, width: 500, height: 800))
+        split.hitTestElements = Array(repeating: splitText, count: 6)
+        XCTAssertNil(try ComputerUseDefaultBrowserPageReader(access: split.access)
+            .read(window: split.window, application: split.identity, mayAct: { true }),
+            "Three vertical center hits cannot disambiguate side-by-side visible outer pages")
+    }
+
+    func testRetainedPageURLUsesSameVisiblePageProofAndRejectsFullyObscuredAmbiguity() throws {
+        let visible = PageAXGraph(); visible.makePage()
+        let (_, activeText) = addSecondOuterPage(to: visible, key: "active", url: "https://example.org/editor")
+        visible.hitTestElements = Array(repeating: activeText, count: 6)
+        XCTAssertEqual(try ComputerUseDefaultBrowserPageReader(access: visible.access)
+            .readRetainedPageURL(window: visible.window, application: visible.identity, mayAct: { true }),
+            "https://example.org/editor")
+
+        let obscured = PageAXGraph(); obscured.makePage()
+        _ = addSecondOuterPage(to: obscured, key: "active", url: "https://example.org/editor")
+        let sheet = obscured.element("native-panel"), panelContent = obscured.element("panel-content")
+        obscured.set("native-panel", kAXRoleAttribute, "AXSheet" as NSString)
+        obscured.set("native-panel", kAXParentAttribute, obscured.window)
+        obscured.setFrame("native-panel", CGRect(x: 0, y: 0, width: 1_000, height: 800))
+        obscured.set("native-panel", kAXChildrenAttribute, [panelContent] as CFArray)
+        obscured.set("panel-content", kAXParentAttribute, sheet)
+        obscured.set("panel-content", kAXRoleAttribute, "AXGroup" as NSString)
+        obscured.set("window", kAXChildrenAttribute, [obscured.element("web"), obscured.element("active-scroll"), sheet] as CFArray)
+        obscured.hitTestElements = Array(repeating: panelContent, count: 6)
+        XCTAssertNil(try ComputerUseDefaultBrowserPageReader(access: obscured.access)
+            .readRetainedPageURL(window: obscured.window, application: obscured.identity, mayAct: { true }),
+            "A native panel covering every sample point leaves the active outer page ambiguous")
+    }
+
+    private func addSecondOuterPage(to graph: PageAXGraph, key: String, url: String) -> (AXUIElement, AXUIElement) {
+        let scroll = graph.element("\(key)-scroll"), area = graph.element(key), text = graph.element("\(key)-text")
+        graph.set("\(key)-scroll", kAXRoleAttribute, "AXScrollArea" as NSString)
+        graph.set("\(key)-scroll", kAXParentAttribute, graph.window)
+        graph.set("\(key)-scroll", kAXChildrenAttribute, [area] as CFArray)
+        graph.set(key, kAXParentAttribute, scroll)
+        graph.set(key, kAXRoleAttribute, "AXWebArea" as NSString)
+        graph.set(key, "AXURL", url as NSString)
+        graph.setFrame(key, CGRect(x: 0, y: 0, width: 1_000, height: 800))
+        graph.set(key, kAXChildrenAttribute, [text] as CFArray)
+        graph.set("\(key)-text", kAXParentAttribute, area)
+        graph.set("\(key)-text", kAXRoleAttribute, "AXStaticText" as NSString)
+        graph.set("\(key)-text", kAXValueAttribute, "Compose content" as NSString)
+        graph.set("window", kAXChildrenAttribute, [graph.element("web"), scroll] as CFArray)
+        return (area, text)
+    }
+
     func testRetainedPageURLAllowsModalFocusOnlyForOneListedWindowAndOuterPage() throws {
         let graph = PageAXGraph(); graph.makePage()
         graph.focusedWindow = graph.otherWindow
@@ -1222,6 +1543,8 @@ private final class PageAXGraph {
     var onHitTest: (() -> Void)?
     var didReplace = false
     var hitTestElement: AXUIElement?
+    var hitTestElements: [AXUIElement] = []
+    var hitTestCount = 0
     let identity = ComputerUseApplicationIdentity(bundleIdentifier: "com.apple.Safari", processIdentifier: 93001,
                                                   launchGeneration: 9)!
     let otherIdentity = ComputerUseApplicationIdentity(bundleIdentifier: "com.google.Chrome", processIdentifier: 93002,
@@ -1261,10 +1584,12 @@ private final class PageAXGraph {
         set("root", kAXFocusedWindowAttribute, element("window"))
         set("root", kAXWindowsAttribute, [element("window")] as CFArray)
         set("window", kAXRoleAttribute, "AXWindow" as NSString)
+        setFrame("window", CGRect(x: 0, y: 0, width: 1_000, height: 800))
         set("window", kAXChildrenAttribute, [element("web")] as CFArray)
         set("web", kAXParentAttribute, element("window"))
         set("web", kAXRoleAttribute, "AXWebArea" as NSString)
         set("web", "AXURL", "https://drive.google.com/drive/my-drive" as NSString)
+        setFrame("web", CGRect(x: 0, y: 0, width: 1_000, height: 800))
         set("web", kAXChildrenAttribute, [element("text"), element("button"), element("secure"), element("iframe")] as CFArray)
         set("button", kAXParentAttribute, element("web"))
         hitTestElement = element("button")
@@ -1287,8 +1612,11 @@ private final class PageAXGraph {
             afterRead?(node, attr)
             return result
         }, timeout: { _, _ in }, hitTestElementAtPoint: { [self] _ in
+            let result = hitTestElements.isEmpty ? hitTestElement
+                : hitTestElements[min(hitTestCount, hitTestElements.count - 1)]
+            hitTestCount += 1
             onHitTest?()
-            return hitTestElement
+            return result
         })
     }
 }

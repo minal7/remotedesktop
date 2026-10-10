@@ -71,7 +71,6 @@ final class ComputerUseDefaultBrowserSession {
         let read: (String, AXUIElement) -> CFTypeRef?
         let processIdentifier: (AXUIElement) -> pid_t?
         let valueIsSettable: (AXUIElement) -> Bool
-        let setValue: (AXUIElement, String) -> AXError
 
         static var live: SafariAddressBarAXAccess {
             func read(_ name: String, _ element: AXUIElement) -> CFTypeRef? {
@@ -90,7 +89,7 @@ final class ComputerUseDefaultBrowserSession {
                 var settable = DarwinBoolean(false)
                 return AXUIElementIsAttributeSettable(element, kAXValueAttribute as CFString, &settable) == .success
                     && settable.boolValue
-            }, setValue: { element, value in AXUIElementSetAttributeValue(element, kAXValueAttribute as CFString, value as CFString) })
+            })
         }
     }
 
@@ -292,8 +291,7 @@ final class ComputerUseDefaultBrowserSession {
         }
         let current: WindowSnapshot
         lastValidationPhaseForDiagnostics = .capture
-        if let captureRetainedWindow { current = try captureRetainedWindow(app, expected) }
-        else { current = try captureWindows(app) }
+        current = try captureForValidation(application: app, target: expected, tools: tools)
         lastValidationPhaseForDiagnostics = .target
         guard current.application == app,
               let focused = current.windows.first(where: { $0.id == expected.id }),
@@ -350,18 +348,19 @@ final class ComputerUseDefaultBrowserSession {
         try Task.checkCancellation()
         try tools.requireActive()
         try validate(taskID: taskID, goal: goal, tools: tools)
-        if focusedSafariAddressField(in: target).map({ CFEqual($0, initiallyObservedAddressField) }) != true {
-            let focusAction = ComputerUsePredictedAction.key(usage: 0x0F, modifiers: 1 << 3) // Command+L
-            let focusFingerprint = try tools.prepareNativeActionFingerprint(for: focusAction)
-            do {
-                try await tools.performNativeAction(focusAction, fingerprint: focusFingerprint, willBeginEffect: {
-                    try Task.checkCancellation()
-                    try tools.requireActive()
-                    try self.validate(taskID: taskID, goal: goal, tools: tools)
-                    guard self.focusedSafariAddressField(in: target) != nil else { throw Failure.targetLost }
-                })
-            } catch { diagnostic("phase=address_field_focus_dispatch_failed"); throw error }
-        }
+        // AX focus can name Safari's address control before Cmd+L has
+        // activated location editing, so always establish that native mode.
+        let focusAction = ComputerUsePredictedAction.key(usage: 0x0F, modifiers: 1 << 3) // Command+L
+        let focusFingerprint = try tools.prepareNativeActionFingerprint(for: focusAction)
+        do {
+            try await tools.performNativeAction(focusAction, fingerprint: focusFingerprint, willBeginEffect: {
+                try Task.checkCancellation()
+                try tools.requireActive()
+                try self.validate(taskID: taskID, goal: goal, tools: tools)
+                guard self.focusedSafariAddressField(in: target) != nil else { throw Failure.targetLost }
+            })
+        } catch { diagnostic("phase=address_field_focus_dispatch_failed"); throw error }
+        diagnostic("phase=address_editing_activated")
         let addressField: AXUIElement
         do {
             addressField = try await waitForFocusedSafariAddressField(
@@ -382,23 +381,68 @@ final class ComputerUseDefaultBrowserSession {
         }
         try Task.checkCancellation()
         try tools.requireActive()
-        // Focus-only failures are safe to retry. Once the destination write
-        // begins, a partial write or uncertain Return must not be replayed.
-        state.navigationDispatches.insert(url.absoluteString)
-        diagnostic("phase=ax_navigation_latched")
-        let writeStatus = safariAddressBarAX.setValue(addressField, url.absoluteString)
-        guard writeStatus == .success else {
-            diagnostic("phase=ax_address_value_write_failed status=\(writeStatus.rawValue)")
-            throw Failure.targetLost
-        }
+        let selectAllAction = ComputerUsePredictedAction.key(usage: 0x04, modifiers: 1 << 3) // Command+A
+        let selectAllFingerprint = try tools.prepareNativeActionFingerprint(for: selectAllAction)
+        do {
+            try await tools.performNativeAction(selectAllAction, fingerprint: selectAllFingerprint, willBeginEffect: {
+                try Task.checkCancellation()
+                try tools.requireActive()
+                try self.validate(taskID: taskID, goal: goal, tools: tools)
+                guard self.isCurrentSafariAddressField(addressField, target: target),
+                      self.focusedSafariAddressField(in: target).map({ CFEqual($0, addressField) }) == true else {
+                    throw Failure.targetLost
+                }
+            })
+        } catch { diagnostic("phase=address_select_all_dispatch_failed"); throw error }
         try Task.checkCancellation()
         try tools.requireActive()
         do { try validate(taskID: taskID, goal: goal, tools: tools) }
-        catch { diagnostic("phase=post_address_write_scope_validation_failed"); throw error }
+        catch { diagnostic("phase=post_address_select_all_scope_validation_failed"); throw error }
+        let addressValue = safariAddressBarAX.read(kAXValueAttribute as String, addressField) as? String
+        guard isCurrentSafariAddressField(addressField, target: target),
+              focusedSafariAddressField(in: target).map({ CFEqual($0, addressField) }) == true,
+              let addressValue,
+              let selectedRange = selectedSafariAddressRange(addressField),
+              selectedRange.location == 0,
+              selectedRange.length == addressValue.utf16.count else {
+            diagnostic("phase=address_select_all_readback_failed")
+            throw Failure.targetLost
+        }
+        let typeAction = ComputerUsePredictedAction.typeText(url.absoluteString)
+        let typeFingerprint = try tools.prepareNativeActionFingerprint(for: typeAction)
+        let addressEntryScope = ComputerUseNativeBrowserAddressEntryScope(
+            application: target.application,
+            window: target.identity,
+            retainedWindow: target.accessibilityElement,
+            addressField: addressField)
+        do {
+            try await tools.performNativeBrowserAddressEntry(url.absoluteString, scope: addressEntryScope,
+                fingerprint: typeFingerprint, willBeginEffect: {
+                try Task.checkCancellation()
+                try tools.requireActive()
+                try self.validate(taskID: taskID, goal: goal, tools: tools)
+                guard self.isCurrentSafariAddressField(addressField, target: target),
+                      self.focusedSafariAddressField(in: target).map({ CFEqual($0, addressField) }) == true,
+                      self.safariAddressBarAX.read(kAXValueAttribute as String, addressField) as? String == addressValue,
+                      let selected = self.selectedSafariAddressRange(addressField),
+                      selected.location == 0, selected.length == addressValue.utf16.count else {
+                    throw Failure.targetLost
+                }
+                // Before this point a fresh Resume can safely retry. Once
+                // native URL typing begins, a partial/uncertain dispatch must
+                // never be replayed.
+                state.navigationDispatches.insert(url.absoluteString)
+                diagnostic("phase=native_url_entry_latched")
+            })
+        } catch { diagnostic("phase=native_url_typing_dispatch_failed"); throw error }
+        try Task.checkCancellation()
+        try tools.requireActive()
+        do { try validate(taskID: taskID, goal: goal, tools: tools) }
+        catch { diagnostic("phase=post_native_url_typing_scope_validation_failed"); throw error }
         guard
               focusedSafariAddressField(in: target).map({ CFEqual($0, addressField) }) == true,
               safariAddressBarAX.read(kAXValueAttribute as String, addressField) as? String == url.absoluteString else {
-            diagnostic("phase=ax_address_value_readback_or_focus_mismatch")
+            diagnostic("phase=native_url_typing_readback_or_focus_mismatch")
             throw Failure.targetLost
         }
         let returnAction = ComputerUsePredictedAction.key(usage: 0x28, modifiers: 0)
@@ -562,6 +606,16 @@ final class ComputerUseDefaultBrowserSession {
         return addressFieldBelongsToRetainedWindow(field, target: target, deadline: deadline)
     }
 
+    private func selectedSafariAddressRange(_ field: AXUIElement) -> CFRange? {
+        guard let raw = safariAddressBarAX.read(kAXSelectedTextRangeAttribute as String, field),
+              CFGetTypeID(raw) == AXValueGetTypeID() else { return nil }
+        let value = unsafeBitCast(raw, to: AXValue.self)
+        guard AXValueGetType(value) == .cfRange else { return nil }
+        var range = CFRange(location: 0, length: 0)
+        guard AXValueGetValue(value, .cfRange, &range), range.location >= 0, range.length >= 0 else { return nil }
+        return range
+    }
+
     private func waitForFocusedSafariAddressField(initiallyObserved: AXUIElement, target: Window,
                                                   taskID: String, goal: String,
                                                   tools: ComputerUseHostTools,
@@ -654,8 +708,7 @@ final class ComputerUseDefaultBrowserSession {
         try tools.requireActive()
         let current: WindowSnapshot
         lastValidationPhaseForDiagnostics = .capture
-        if let captureRetainedWindow { current = try captureRetainedWindow(app, target) }
-        else { current = try captureWindows(app) }
+        current = try captureForValidation(application: app, target: target, tools: tools)
         lastValidationPhaseForDiagnostics = .target
         guard current.application == app,
               let focused = current.windows.first(where: { $0.id == target.id }),
@@ -683,6 +736,37 @@ final class ComputerUseDefaultBrowserSession {
         state.currentFileOpenPanel = panel
         state.currentActionBounds = panel?.actionBounds ?? focused.identity.bounds
         lastValidationPhaseForDiagnostics = .complete
+    }
+
+    private func captureForValidation(application: ComputerUseApplicationIdentity,
+                                      target: Window,
+                                      tools: ComputerUseHostTools) throws -> WindowSnapshot {
+        func capture() throws -> WindowSnapshot {
+            if let captureRetainedWindow {
+                return try captureRetainedWindow(application, target)
+            }
+            return try captureWindows(application)
+        }
+        do {
+            return try capture()
+        } catch {
+            guard (error as? Failure) == .targetLost,
+                  lastCaptureReasonForDiagnostics == "windows_read",
+                  lastCaptureAXErrorCodeForDiagnostics == Int(AXError.cannotComplete.rawValue) else {
+                throw error
+            }
+            try Task.checkCancellation()
+            try tools.requireActive()
+            let frontmost = tools.frontmostApplicationSnapshot()
+            guard frontmost.identityIsAuthoritative, frontmost.identity == application else {
+                throw error
+            }
+            try Task.checkCancellation()
+            try tools.requireActive()
+            // The failed snapshot is discarded. The second read is fresh and
+            // still passes the unchanged retained-window/sheet/focus guards.
+            return try capture()
+        }
     }
 
     private func makeExecution(state: RunState, goalDigest: String,

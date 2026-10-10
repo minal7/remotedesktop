@@ -713,6 +713,11 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
         }
         diagnostic.merge(scope.gmailFieldDiagnostics) { _, new in new }
         if let phase = scope.gmailNavigationPhase { diagnostic["gmailNavigationPhase"] = phase }
+        if scope.gmailJob != nil {
+            diagnostic["gmailFlowStage"] = String(describing: scope.gmailFlowStage)
+            diagnostic["gmailNavigationStage"] = String(describing: scope.gmailNavigationStage)
+            if let stage = scope.pendingGmailFlowStage { diagnostic["gmailPendingFlowStage"] = String(describing: stage) }
+        }
         if let phase = scope.session.lastValidationPhaseForDiagnostics {
             diagnostic["sessionValidationPhase"] = phase.rawValue
         }
@@ -820,28 +825,11 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
             scope.nativeControlErrorDomainForDiagnostics = nil
             scope.nativeControlErrorCodeForDiagnostics = nil
             scope.nativeFileOperationReady = false
-            if (scope.gmailSetup != nil || scope.gmailJob != nil), scope.gmailNavigationStage == .navigateTarget {
-                guard let target = scope.gmailNavigationTargetURL else {
-                    return .init(response: "", decision: .handoff("The Gmail page address could not be prepared safely."),
-                        includeInModelHistory: false)
-                }
-                guard let taskID = scope.taskID, let goal = scope.goal, let tools = scope.tools else {
-                    throw Failure.noRetainedWindow
-                }
-                scope.gmailNavigationStage = .waitForTarget
-                do {
-                    scope.gmailNavigationPhase = nil
-                    try await scope.session.navigateRetainedSafariTab(to: target, taskID: taskID, goal: goal, tools: tools,
-                        diagnostic: { value in
-                            guard let phase = value.split(separator: " ", maxSplits: 1).first,
-                                  phase.range(of: #"^phase=[a-z_]+$"#, options: .regularExpression) != nil else { return }
-                            scope.gmailNavigationPhase = String(phase)
-                        })
-                } catch ComputerUseDefaultBrowserSession.Failure.browserAutomationPermissionRequired {
-                    scope.gmailNavigationStage = .navigateTarget
-                    throw ComputerUseDefaultBrowserSession.Failure.browserAutomationPermissionRequired
-                }
-                return .init(response: "", decision: .refreshObservation, includeInModelHistory: false)
+            if (scope.gmailSetup != nil || scope.gmailJob != nil),
+               scope.gmailNavigationStage == .navigateTarget,
+               scope.gmailNavigationTargetURL == nil {
+                return .init(response: "", decision: .handoff("The Gmail page address could not be prepared safely."),
+                    includeInModelHistory: false)
             }
             if scope.session.currentFileOpenPanel != nil {
                 scope.visualFallbackPending = false
@@ -1792,6 +1780,27 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
             },
             revalidationFailureObserver: revalidationFailureObserver,
             localFileOperationHandler: { try await scope.apply($0) },
+            hostPreparation: {
+                guard (scope.gmailSetup != nil || scope.gmailJob != nil),
+                      scope.gmailNavigationStage == .navigateTarget else { return }
+                guard let target = scope.gmailNavigationTargetURL else { return }
+                guard let taskID = scope.taskID, let goal = scope.goal, let tools = scope.tools else {
+                    throw Failure.noRetainedWindow
+                }
+                scope.gmailNavigationStage = .waitForTarget
+                do {
+                    scope.gmailNavigationPhase = nil
+                    try await scope.session.navigateRetainedSafariTab(to: target, taskID: taskID, goal: goal, tools: tools,
+                        diagnostic: { value in
+                            guard let phase = value.split(separator: " ", maxSplits: 1).first,
+                                  phase.range(of: #"^phase=[a-z_]+$"#, options: .regularExpression) != nil else { return }
+                            scope.gmailNavigationPhase = String(phase)
+                        })
+                } catch ComputerUseDefaultBrowserSession.Failure.browserAutomationPermissionRequired {
+                    scope.gmailNavigationStage = .navigateTarget
+                    throw ComputerUseDefaultBrowserSession.Failure.browserAutomationPermissionRequired
+                }
+            },
             onSuccessfulDispatch: { scope.successfulDispatch($0) },
             approvalTaskIDProvider: { scope.executionTaskID },
             screenConsentRecognizer: screenConsentRecognizer, finishRun: {

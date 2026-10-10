@@ -1064,6 +1064,50 @@ struct ComputerUseMCPFocusedTextSnapshot: Equatable {
     }
 }
 
+/// Narrow authority for typing a destination into a verified browser chrome
+/// address field. Ordinary native text entry continues to require document,
+/// frame, and element identity to remain unchanged.
+struct ComputerUseNativeBrowserAddressEntryScope {
+    let application: ComputerUseApplicationIdentity
+    let window: ComputerUseFrontmostWindowCaptureIdentity
+    let retainedWindow: AXUIElement
+    let addressField: AXUIElement
+
+    func isBoundToVerifiedSafariAddressField() -> Bool {
+        guard application.bundleIdentifier == "com.apple.Safari",
+              window.applicationProcessIdentifier == application.processIdentifier,
+              CFHash(retainedWindow) == window.accessibilityWindowHash,
+              window.bounds.width > 0, window.bounds.height > 0,
+              [window.bounds.minX, window.bounds.minY, window.bounds.width, window.bounds.height].allSatisfy(\.isFinite) else { return false }
+        var windowPID: pid_t = 0
+        var fieldPID: pid_t = 0
+        guard AXUIElementGetPid(retainedWindow, &windowPID) == .success,
+              windowPID == application.processIdentifier,
+              AXUIElementGetPid(addressField, &fieldPID) == .success,
+              fieldPID == application.processIdentifier else { return false }
+        // The retained Safari session constructs this scope only after its
+        // bounded chrome-ancestry and address-field checks, and repeats those
+        // checks at the effect boundary. Per-stroke authority is then bound to
+        // this exact app, window, and AX field reference below.
+        return true
+    }
+
+    func matches(_ snapshot: ComputerUseMCPFocusedTextSnapshot) -> Bool {
+        let frame = snapshot.frame
+        let bounds = window.bounds
+        let validFrame = !frame.isNull && !frame.isInfinite && !frame.isEmpty
+            && [frame.minX, frame.minY, frame.width, frame.height].allSatisfy(\.isFinite)
+            && bounds.contains(frame)
+        return snapshot.application.identityIsAuthoritative
+            && snapshot.application.identity == application
+            && snapshot.window == window
+            && CFEqual(snapshot.focusedElement, addressField)
+            && (snapshot.role == "AXTextField" || snapshot.role == "AXComboBox")
+            && snapshot.text.isEditable && !snapshot.text.isSecure && !snapshot.isWebContent
+            && validFrame
+    }
+}
+
 /// Value-free identity of the UI state a semantic route was selected from.
 /// The executor compares this fingerprint across every asynchronous planning
 /// and grounding boundary and immediately before effects. Pixel hashing is
@@ -2995,6 +3039,7 @@ final class ComputerUseHostTools {
         fingerprint: ComputerUseApprovalFingerprint,
         browserPageEvidence: ComputerUseBrowserPageEvidence?,
         nativeVisualKeyboard: Bool = false,
+        nativeBrowserAddressEntryScope: ComputerUseNativeBrowserAddressEntryScope? = nil,
         willBeginEffect: () throws -> Void
     ) async throws {
         if nativeVisualKeyboard, case .typeText(let payload) = action {
@@ -3036,7 +3081,8 @@ final class ComputerUseHostTools {
                     // Preserve the explicitly injected virtual performer path.
                     try perform(action)
                 } else {
-                    try await performNativeVisualKeyboardTyping(payload)
+                    try await performNativeVisualKeyboardTyping(
+                        payload, browserAddressEntryScope: nativeBrowserAddressEntryScope)
                 }
             } else {
                 try await performVerified(action)
@@ -3112,13 +3158,15 @@ final class ComputerUseHostTools {
 
     private func allowsInlineCompletionRefresh(
         _ candidate: ComputerUseMCPFocusedTextSnapshot,
-        relativeTo baseline: ComputerUseMCPFocusedTextSnapshot
+        relativeTo baseline: ComputerUseMCPFocusedTextSnapshot,
+        browserAddressEntryScope: ComputerUseNativeBrowserAddressEntryScope? = nil
     ) -> Bool {
         let candidateRange = candidate.text.selection
         let baselineRange = baseline.text.selection
         let candidateUTF16 = candidate.text.value.utf16
         let baselineUTF16 = baseline.text.value.utf16
-        guard candidate.hasSameDocumentTarget(as: baseline),
+        guard Self.hasSameNativeTypingTarget(candidate, as: baseline,
+                  browserAddressEntryScope: browserAddressEntryScope),
               candidateRange.location == baselineRange.location,
               candidateRange.location >= 0, baselineRange.location >= 0,
               candidateRange.length >= 0, baselineRange.length >= 0,
@@ -3135,6 +3183,23 @@ final class ComputerUseHostTools {
         // Only the unchanged prefix through that caret is typing authority.
         return Array(candidateUTF16.prefix(candidateRange.location))
             == Array(baselineUTF16.prefix(baselineRange.location))
+    }
+
+    private static func hasSameNativeTypingTarget(
+        _ candidate: ComputerUseMCPFocusedTextSnapshot,
+        as baseline: ComputerUseMCPFocusedTextSnapshot,
+        browserAddressEntryScope: ComputerUseNativeBrowserAddressEntryScope?
+    ) -> Bool {
+        guard let browserAddressEntryScope else {
+            return candidate.hasSameDocumentTarget(as: baseline)
+        }
+        return browserAddressEntryScope.matches(candidate)
+            && browserAddressEntryScope.matches(baseline)
+            && candidate.documentIdentity == baseline.documentIdentity
+            && candidate.role == baseline.role
+            && candidate.isWebContent == baseline.isWebContent
+            && candidate.text.isEditable == baseline.text.isEditable
+            && candidate.text.isSecure == baseline.text.isSecure
     }
 
     private func focusedTextSnapshot(allowedRoles: Set<String>,
@@ -3257,9 +3322,30 @@ final class ComputerUseHostTools {
                                   nativeVisualKeyboard: true, willBeginEffect: willBeginEffect)
     }
 
+    func performNativeBrowserAddressEntry(_ payload: String,
+                                          scope: ComputerUseNativeBrowserAddressEntryScope,
+                                          fingerprint: ComputerUseApprovalFingerprint,
+                                          willBeginEffect: () throws -> Void) async throws {
+        // An injected virtual performer has no live Safari AX tree to prove;
+        // the retained session still supplies its full effect-boundary checks.
+        // Keep native PID/window binding mandatory for the real keyboard path.
+        if actionPerformer == nil || textEditorOverride != nil {
+            guard scope.isBoundToVerifiedSafariAddressField() else {
+                throw ComputerUseTextEditError.preconditionChanged
+            }
+        }
+        try await performApproved(.typeText(payload), fingerprint: fingerprint, browserPageEvidence: nil,
+                                  nativeVisualKeyboard: true,
+                                  nativeBrowserAddressEntryScope: scope,
+                                  willBeginEffect: willBeginEffect)
+    }
+
     /// Native visual text proposals use keyboard events only. The semantic
     /// AX editing route remains unchanged for MCP and other approved actions.
-    private func performNativeVisualKeyboardTyping(_ payload: String) async throws {
+    private func performNativeVisualKeyboardTyping(
+        _ payload: String,
+        browserAddressEntryScope: ComputerUseNativeBrowserAddressEntryScope? = nil
+    ) async throws {
         let startedAt = ProcessInfo.processInfo.systemUptime
         var stage = "initial-read"
         var failureType = "none"
@@ -3283,8 +3369,17 @@ final class ComputerUseHostTools {
                 "completedStrokes": String(completedStrokes),
                 "snapshotAvailable": String(snapshot != nil),
                 "samePhysicalTarget": String(snapshot.map { value in
-                    referenceSnapshot.map { value.hasSameDocumentTarget(as: $0) } ?? false
+                    referenceSnapshot.map {
+                        Self.hasSameNativeTypingTarget(value, as: $0, browserAddressEntryScope: browserAddressEntryScope)
+                    } ?? false
                 } ?? false),
+                "sameApplication": snapshot.flatMap { value in referenceSnapshot.map { String(value.application == $0.application) } } ?? "unknown",
+                "sameWindow": snapshot.flatMap { value in referenceSnapshot.map { String(value.window == $0.window) } } ?? "unknown",
+                "sameElement": snapshot.flatMap { value in referenceSnapshot.map { String(CFEqual(value.focusedElement, $0.focusedElement)) } } ?? "unknown",
+                "sameDocument": snapshot.flatMap { value in referenceSnapshot.map { String(value.documentIdentity == $0.documentIdentity) } } ?? "unknown",
+                "sameFrame": snapshot.flatMap { value in referenceSnapshot.map { String(value.frame == $0.frame) } } ?? "unknown",
+                "sameRole": snapshot.flatMap { value in referenceSnapshot.map { String(value.role == $0.role) } } ?? "unknown",
+                "sameWebClassification": snapshot.flatMap { value in referenceSnapshot.map { String(value.isWebContent == $0.isWebContent) } } ?? "unknown",
                 "selectionLocation": snapshot.map { String($0.text.selection.location) } ?? "unknown",
                 "selectionLength": snapshot.map { String($0.text.selection.length) } ?? "unknown",
                 "expectedLocation": expectedLocation.map(String.init) ?? "unknown",
@@ -3306,6 +3401,10 @@ final class ComputerUseHostTools {
         guard let initial else {
             failureType = "unavailableTarget"
             throw ComputerUseTextEditError.unavailableTarget
+        }
+        if let browserAddressEntryScope, !browserAddressEntryScope.matches(initial) {
+            failureType = "browserAddressScopeRejected"
+            throw ComputerUseTextEditError.preconditionChanged
         }
         lastSnapshot = initial
         referenceSnapshot = initial
@@ -3363,8 +3462,10 @@ final class ComputerUseHostTools {
             }
             lastSnapshot = current
             guard let current,
+                  Self.hasSameNativeTypingTarget(current, as: baseline, browserAddressEntryScope: browserAddressEntryScope),
                   current == baseline || (pendingSpaceUTF16Index == nil && postedAnyStroke
-                    && allowsInlineCompletionRefresh(current, relativeTo: baseline)) else {
+                    && allowsInlineCompletionRefresh(current, relativeTo: baseline,
+                        browserAddressEntryScope: browserAddressEntryScope)) else {
                 failureType = current == nil ? "preKeySnapshotUnavailable" : "preKeySnapshotChanged"
                 throw postedAnyStroke ? ComputerUseTextEditError.deliveryUncertain : .preconditionChanged
             }
@@ -3406,7 +3507,8 @@ final class ComputerUseHostTools {
                 lastSnapshot = final
                 guard let final,
                       final == baseline || (pendingSpaceUTF16Index == nil && postedAnyStroke
-                        && allowsInlineCompletionRefresh(final, relativeTo: baseline)) else {
+                        && allowsInlineCompletionRefresh(final, relativeTo: baseline,
+                            browserAddressEntryScope: browserAddressEntryScope)) else {
                     failureType = "finalPrePostSnapshotChanged"
                     throw postedAnyStroke ? ComputerUseTextEditError.deliveryUncertain : .preconditionChanged
                 }
@@ -3457,7 +3559,8 @@ final class ComputerUseHostTools {
                             lastSnapshot = final
                             guard let final,
                                   final == baseline || (pendingSpaceUTF16Index == nil && postedAnyStroke
-                                    && allowsInlineCompletionRefresh(final, relativeTo: baseline)) else {
+                                  && allowsInlineCompletionRefresh(final, relativeTo: baseline,
+                                      browserAddressEntryScope: browserAddressEntryScope)) else {
                                 failedFinalStateCheck = true
                                 return false
                             }
@@ -3500,7 +3603,8 @@ final class ComputerUseHostTools {
                         }
                         guard recovered == baseline
                             || (pendingSpaceUTF16Index == nil && postedAnyStroke
-                                && allowsInlineCompletionRefresh(recovered, relativeTo: baseline)) else {
+                                && allowsInlineCompletionRefresh(recovered, relativeTo: baseline,
+                                    browserAddressEntryScope: browserAddressEntryScope)) else {
                             lastSnapshot = recovered
                             failedFinalStateCheck = true
                             break
@@ -3627,7 +3731,8 @@ final class ComputerUseHostTools {
                 && after?.text.selection.length == 0
             guard afterAllowed, ProcessInfo.processInfo.systemUptime < deadline,
                   let after,
-                  after.hasSameDocumentTarget(as: strokeBaseline),
+                  Self.hasSameNativeTypingTarget(after, as: strokeBaseline,
+                      browserAddressEntryScope: browserAddressEntryScope),
                   after.text.isEditable, !after.text.isSecure,
                   after.text.selection.location == expectedLocation,
                   after.text.value.utf8.count <= ComputerUseTextEditor.maximumObservedValueBytes,

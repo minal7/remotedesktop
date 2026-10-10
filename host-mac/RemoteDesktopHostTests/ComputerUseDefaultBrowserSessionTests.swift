@@ -286,6 +286,7 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
         var hasUnrecognizedSheets = false
         var additionalAction: ((ComputerUsePredictedAction) throws -> Void)?
         var screenColor = CIColor.black
+        var isActive = true
 
         func snapshot(application: ComputerUseApplicationIdentity) -> ComputerUseDefaultBrowserSession.WindowSnapshot {
             .init(application: application, windows: windows, focusedWindowID: focusedID,
@@ -302,22 +303,21 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
         private let writableValues: [Bool]
         private let defaultWritable: Bool
         private let focusDelayAfterCommandL: Int?
-        private let writeStatus: AXError
         private let deactivateOnWritableRead: Int?
         private var writableReadCount = 0
         private var focusedReadCountAfterCommandL = 0
         private var commandLDispatched = false
-        private var addressValue = ""
-        private(set) var writeCount = 0
+        private var addressValue = "https://mail.google.com/mail/u/0/#drafts?compose=fixture"
+        private var selectedRange = CFRange(location: 5, length: 8)
+        private(set) var nativeTypeCount = 0
+        private(set) var selectAllCount = 0
         private(set) var isActive = true
 
         init(processIdentifier: pid_t, writableValues: [Bool], defaultWritable: Bool = true,
-             focusDelayAfterCommandL: Int? = nil, writeStatus: AXError = .cannotComplete,
-             deactivateOnWritableRead: Int? = nil) {
+             focusDelayAfterCommandL: Int? = nil, deactivateOnWritableRead: Int? = nil) {
             self.writableValues = writableValues
             self.defaultWritable = defaultWritable
             self.focusDelayAfterCommandL = focusDelayAfterCommandL
-            self.writeStatus = writeStatus
             self.deactivateOnWritableRead = deactivateOnWritableRead
             applicationElement = AXUIElementCreateApplication(processIdentifier)
             window = AXUIElementCreateApplication(processIdentifier + 100)
@@ -338,12 +338,21 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
 
         var hasDispatchedCommandL: Bool { commandLDispatched }
 
-        func setValue(_ element: AXUIElement, _ value: String) -> AXError {
-            guard CFEqual(element, field) else { return .illegalArgument }
-            writeCount += 1
-            if writeStatus == .success { addressValue = value }
-            return writeStatus
+        func selectAll() {
+            selectAllCount += 1
+            selectedRange = CFRange(location: 0, length: addressValue.utf16.count)
         }
+
+        func recordNativeTyping(_ value: String) {
+            nativeTypeCount += 1
+            let existing = addressValue as NSString
+            let replacementRange = NSRange(location: selectedRange.location, length: selectedRange.length)
+            guard replacementRange.location >= 0, NSMaxRange(replacementRange) <= existing.length else { return }
+            addressValue = existing.replacingCharacters(in: replacementRange, with: value)
+            selectedRange = CFRange(location: replacementRange.location + value.utf16.count, length: 0)
+        }
+
+        var currentAddressValue: String { addressValue }
 
         func markCommandLDispatched() {
             commandLDispatched = true
@@ -381,6 +390,10 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                 if attribute == "AXHidden" || attribute == "AXProtectedContent" { return NSNumber(value: false) }
                 if attribute == (kAXChildrenAttribute as String) { return [] as CFArray }
                 if attribute == (kAXValueAttribute as String) { return addressValue as CFTypeRef }
+                if attribute == (kAXSelectedTextRangeAttribute as String) {
+                    var range = selectedRange
+                    return AXValueCreate(.cfRange, &range)
+                }
             }
             return nil
         }
@@ -2826,6 +2839,89 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
         XCTAssertEqual(session.currentFileOpenPanel?.parentWindowID, target.id)
     }
 
+    @MainActor
+    func testValidationRecapturesOneTransientWindowsReadBeforeApplyingRetainedWindowGuards() async throws {
+        for scenario in ["transient-picker", "persistent", "replaced-window", "authentication-sheet", "cancelled", "revoked-gate"] {
+            let fixture = try Fixture()
+            defer { try? FileManager.default.removeItem(at: fixture.root) }
+            var injectFailure = false
+            var captureAttempts = 0
+            var captureReason: String?
+            var captureAXError: Int?
+            let session = try fixture.session(retainedWindowCapture: { identity, expected in
+                guard injectFailure else { return fixture.desktop.snapshot(application: identity) }
+                captureAttempts += 1
+                if captureAttempts == 1 || scenario == "persistent" {
+                    captureReason = "windows_read"
+                    captureAXError = Int(AXError.cannotComplete.rawValue)
+                    if scenario == "cancelled" { withUnsafeCurrentTask { $0?.cancel() } }
+                    if scenario == "revoked-gate" { fixture.desktop.isActive = false }
+                    throw ComputerUseDefaultBrowserSession.Failure.targetLost
+                }
+                captureReason = nil
+                captureAXError = nil
+                switch scenario {
+                case "replaced-window":
+                    let replacement = fixture.window(expected.id,
+                        pid: identity.processIdentifier,
+                        hash: expected.identity.accessibilityWindowHash + 1)
+                    return .init(application: identity, windows: [replacement],
+                        focusedWindowID: expected.id, hasSheets: false)
+                case "authentication-sheet":
+                    let target = try XCTUnwrap(fixture.desktop.windows.first(where: { $0.id == expected.id }))
+                    return .init(application: identity, windows: [target],
+                        focusedWindowID: expected.id, hasSheets: true, hasUnrecognizedSheets: true)
+                default:
+                    return fixture.desktop.snapshot(application: identity)
+                }
+            }, captureDiagnosticProvider: { captureReason },
+                captureDiagnosticAXErrorProvider: { captureAXError })
+            let taskID = "task-(scenario)"
+            let goal = "Use the default browser"
+            let target = try await session.ensure(taskID: taskID, goal: goal, tools: fixture.tools)
+            if scenario == "transient-picker" {
+                fixture.desktop.fileOpenPanel = fixture.fileOpenPanel(parentWindowID: target.id,
+                    bounds: CGRect(x: 200, y: 120, width: 640, height: 440), focused: true)
+            }
+            let initialInputCount = fixture.desktop.keyCount
+            injectFailure = true
+
+            if scenario == "transient-picker" {
+                try session.validate(taskID: taskID, goal: goal, tools: fixture.tools)
+                XCTAssertEqual(captureAttempts, 2)
+                XCTAssertEqual(session.currentFileOpenPanel?.parentWindowID, target.id)
+                XCTAssertEqual(fixture.desktop.keyCount, initialInputCount,
+                    "Validation recovery must not dispatch another action")
+            } else if scenario == "cancelled" {
+                let validation = Task { @MainActor in
+                    try session.validate(taskID: taskID, goal: goal, tools: fixture.tools)
+                }
+                do {
+                    try await validation.value
+                    XCTFail("A cancelled validation must not recapture the retained window")
+                } catch is CancellationError {
+                } catch {
+                    XCTFail("Cancellation must win over the injected capture failure: \(error)")
+                }
+                XCTAssertEqual(captureAttempts, 1)
+            } else if scenario == "revoked-gate" {
+                XCTAssertThrowsError(try session.validate(taskID: taskID, goal: goal, tools: fixture.tools)) { error in
+                    XCTAssertEqual(error.localizedDescription,
+                        ComputerUseHostTools.ToolError.paused.localizedDescription)
+                }
+                XCTAssertEqual(captureAttempts, 1)
+            } else {
+                XCTAssertThrowsError(try session.validate(taskID: taskID, goal: goal, tools: fixture.tools))
+                XCTAssertEqual(captureAttempts, 2,
+                    "A qualifying capture error gets one fresh snapshot before unchanged identity and sheet guards")
+                if scenario == "authentication-sheet" {
+                    XCTAssertNil(session.currentFileOpenPanel)
+                }
+            }
+            XCTAssertEqual(fixture.desktop.keyCount, initialInputCount)
+        }
+    }
+
     func testTargetAwareValidationHonorsCancellationBeforeCapture() async throws {
         let fixture = try Fixture()
         defer { try? FileManager.default.removeItem(at: fixture.root) }
@@ -2845,7 +2941,7 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
         XCTAssertEqual(targetAwareCaptures, capturesAfterEnsure)
     }
 
-    func testSafariNavigationLatchRetriesOnlyBeforeAddressWriteBegins() async throws {
+    func testSafariNavigationLatchRetriesOnlyBeforeNativeURLTypingBegins() async throws {
         let destination = try XCTUnwrap(URL(string: "https://mail.google.com/mail/u/0/#inbox"))
 
         for scenario in ["pre-write-authority", "uncertain-write", "delayed-focus", "never-focused",
@@ -2870,7 +2966,6 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                 focusDelayAfterCommandL: scenario == "delayed-focus" ? 2
                     : scenario == "never-focused" ? Int.max
                     : ["transient-capture-read", "persistent-capture-read", "transient-bounds-read", "persistent-bounds-read"].contains(scenario) ? 0 : nil,
-                writeStatus: ["delayed-focus", "transient-capture-read", "transient-bounds-read"].contains(scenario) ? .success : .cannotComplete,
                 deactivateOnWritableRead: scenario == "inactive-after-focus" ? 2 : nil)
             let existing = ComputerUseDefaultBrowserSession.Window(id: "existing", application: app,
                 accessibilityElement: AXUIElementCreateApplication(pid + 199),
@@ -2879,6 +2974,7 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
             var retained: ComputerUseDefaultBrowserSession.Window?
             var launches = 0
             var focusDispatches = 0
+            var selectionDispatches = 0
             var returnDispatches = 0
             var transientCaptureFailures = 0
             var captureReason: String?
@@ -2889,27 +2985,30 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                         accessibilityIdentity: "retained-safari-window")
                 },
                 actionPerformer: { action in
-                    guard case .key(let usage, let modifiers) = action else {
-                        throw ComputerUseDefaultBrowserSession.Failure.interrupted
-                    }
-                    if usage == 0x0F, modifiers == (1 << 3) {
+                    switch action {
+                    case .key(let usage, let modifiers) where usage == 0x0F && modifiers == (1 << 3):
                         focusDispatches += 1
                         graph.markCommandLDispatched()
-                        return
-                    }
-                    if usage == 0x28, modifiers == 0 {
+                    case .key(let usage, let modifiers) where usage == 0x04 && modifiers == (1 << 3):
+                        selectionDispatches += 1
+                        graph.selectAll()
+                    case .typeText(let value):
+                        graph.recordNativeTyping(value)
+                        if scenario == "uncertain-write" {
+                            throw ComputerUseDefaultBrowserSession.Failure.interrupted
+                        }
+                    case .key(let usage, let modifiers) where usage == 0x28 && modifiers == 0:
                         returnDispatches += 1
-                        return
-                    }
-                    guard usage == 0x11, modifiers == (1 << 3) else {
+                    case .key(let usage, let modifiers) where usage == 0x11 && modifiers == (1 << 3):
+                        launches += 1
+                        retained = .init(id: "retained", application: app,
+                            accessibilityElement: graph.window,
+                            identity: .init(applicationProcessIdentifier: pid,
+                                accessibilityWindowHash: 41,
+                                bounds: CGRect(x: 10, y: 20, width: 900, height: 700)))
+                    default:
                         throw ComputerUseDefaultBrowserSession.Failure.interrupted
                     }
-                    launches += 1
-                    retained = .init(id: "retained", application: app,
-                        accessibilityElement: graph.window,
-                        identity: .init(applicationProcessIdentifier: pid,
-                            accessibilityWindowHash: 41,
-                            bounds: CGRect(x: 10, y: 20, width: 900, height: 700)))
                 },
                 screenProvider: {
                     .init(image: CIImage(color: .black).cropped(to: CGRect(x: 0, y: 0, width: 640, height: 480)),
@@ -2944,8 +3043,7 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                 },
                 safariAddressBarAX: .init(read: { graph.read($0, $1) },
                     processIdentifier: { _ in pid },
-                    valueIsSettable: { graph.isSettable($0) },
-                    setValue: { graph.setValue($0, $1) }),
+                    valueIsSettable: { graph.isSettable($0) }),
                 captureDiagnosticProvider: { captureReason },
                 captureDiagnosticAXErrorProvider: { captureAXErrorCode })
 
@@ -2961,7 +3059,9 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                 XCTAssertEqual(firstDiagnostics.last, "phase=ax_navigation_dispatched")
                 XCTAssertEqual(focusDispatches, 1, "A delayed focus must follow exactly one Cmd-L dispatch")
                 XCTAssertEqual(returnDispatches, 1)
-                XCTAssertEqual(graph.writeCount, 1)
+                XCTAssertEqual(selectionDispatches, 1)
+                XCTAssertEqual(graph.nativeTypeCount, 1)
+                XCTAssertEqual(graph.currentAddressValue, destination.absoluteString)
                 if scenario == "transient-bounds-read" {
                     XCTAssertEqual(transientCaptureFailures, 1, "Only one exact transient bounds failure is recovered")
                 }
@@ -2974,33 +3074,40 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                 } catch let error as ComputerUseHostTools.ToolError where scenario == "inactive-after-focus" {
                     XCTAssertEqual(error.localizedDescription, ComputerUseHostTools.ToolError.paused.localizedDescription)
                 } catch let failure as ComputerUseDefaultBrowserSession.Failure {
-                    XCTAssertEqual(failure, scenario == "persistent-bounds-read" ? .ambiguousWindows : .targetLost)
+                    XCTAssertEqual(failure, scenario == "uncertain-write" ? .interrupted
+                        : scenario == "persistent-bounds-read" ? .ambiguousWindows : .targetLost)
                 }
             }
             if scenario == "never-focused" {
                 XCTAssertEqual(focusDispatches, 1, "A single navigation invocation may dispatch Cmd-L only once")
-                XCTAssertEqual(graph.writeCount, 0)
+                XCTAssertEqual(graph.nativeTypeCount, 0)
             }
             if scenario == "persistent-capture-read" {
                 XCTAssertEqual(focusDispatches, 1, "A persistent AX read failure must not replay Cmd-L")
-                XCTAssertEqual(graph.writeCount, 0, "Unverified retained focus must never authorize the URL write")
+                XCTAssertEqual(graph.nativeTypeCount, 0, "Unverified retained focus must never authorize URL typing")
                 XCTAssertEqual(returnDispatches, 0)
                 XCTAssertTrue(firstDiagnostics.contains("phase=address_field_not_focused_before_navigation"))
                 continue
             }
             if scenario == "persistent-bounds-read" {
                 XCTAssertEqual(focusDispatches, 1, "A persistent bounds read failure must not replay Cmd-L")
-                XCTAssertEqual(graph.writeCount, 0, "Unverified retained geometry must never authorize the URL write")
+                XCTAssertEqual(graph.nativeTypeCount, 0, "Unverified retained geometry must never authorize URL typing")
                 XCTAssertEqual(returnDispatches, 0)
                 XCTAssertGreaterThan(transientCaptureFailures, 1)
                 XCTAssertTrue(firstDiagnostics.contains("phase=address_field_not_focused_before_navigation"))
                 continue
             }
             if scenario == "inactive-after-focus" {
-                XCTAssertEqual(graph.writeCount, 0, "Inactive state after focus observation must block URL writes")
-                XCTAssertFalse(firstDiagnostics.contains("phase=ax_navigation_latched"),
-                    "The URL must remain retryable until the write latch is set")
+                XCTAssertEqual(graph.nativeTypeCount, 0, "Inactive state after focus observation must block URL typing")
+                XCTAssertFalse(firstDiagnostics.contains("phase=native_url_entry_latched"),
+                    "The URL must remain retryable until typing begins")
                 graph.reactivate()
+                try await session.navigateRetainedSafariTab(to: destination, taskID: taskID, goal: goal,
+                    tools: tools)
+                XCTAssertEqual(selectionDispatches, 1)
+                XCTAssertEqual(graph.nativeTypeCount, 1, "A later active retry must be allowed to type once")
+                XCTAssertEqual(returnDispatches, 1)
+                continue
             }
 
             var retryDiagnostics: [String] = []
@@ -3016,22 +3123,158 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                 XCTAssertTrue(firstDiagnostics.contains("phase=address_field_not_focused_before_navigation"))
                 XCTAssertTrue(retryDiagnostics.contains("phase=address_field_not_found"))
                 XCTAssertFalse(retryDiagnostics.contains("phase=already_latched"))
-                XCTAssertEqual(focusDispatches, 0)
-                XCTAssertEqual(graph.writeCount, 0)
+                XCTAssertEqual(focusDispatches, 1, "Location editing activates before changed write authority is rejected")
+                XCTAssertEqual(graph.nativeTypeCount, 0)
             } else if scenario == "never-focused" {
                 XCTAssertTrue(firstDiagnostics.contains("phase=address_field_not_focused_before_navigation"))
                 XCTAssertTrue(retryDiagnostics.contains("phase=address_field_not_focused_before_navigation"))
                 XCTAssertEqual(focusDispatches, 2, "A fresh Resume may dispatch one Cmd-L in its own invocation")
-                XCTAssertEqual(graph.writeCount, 0)
-            } else if scenario == "inactive-after-focus" {
-                XCTAssertFalse(firstDiagnostics.contains("phase=ax_navigation_latched"))
-                XCTAssertTrue(retryDiagnostics.contains("phase=ax_navigation_latched"))
-                XCTAssertTrue(retryDiagnostics.contains(where: { $0.hasPrefix("phase=ax_address_value_write_failed") }))
-                XCTAssertEqual(graph.writeCount, 1, "A later active retry must still be allowed to begin one write")
-            } else {
-                XCTAssertTrue(firstDiagnostics.contains(where: { $0.hasPrefix("phase=ax_address_value_write_failed") }))
+                XCTAssertEqual(graph.nativeTypeCount, 0)
+            } else if scenario == "uncertain-write" {
+                XCTAssertTrue(firstDiagnostics.contains("phase=native_url_entry_latched"))
                 XCTAssertEqual(retryDiagnostics.last, "phase=already_latched")
-                XCTAssertEqual(graph.writeCount, 1)
+                XCTAssertEqual(graph.nativeTypeCount, 1)
+                XCTAssertEqual(selectionDispatches, 1)
+                XCTAssertEqual(returnDispatches, 0)
+            } else {
+                XCTAssertTrue(firstDiagnostics.contains("phase=address_select_all_readback_failed"))
+                XCTAssertEqual(retryDiagnostics.last, "phase=already_latched")
+                XCTAssertEqual(graph.nativeTypeCount, 1)
+            }
+        }
+    }
+
+    func testSafariNavigationUsesNativeURLTypingAndDoesNotReplayUncertainDispatch() async throws {
+        let destination = try XCTUnwrap(URL(string: "https://mail.google.com/mail/u/0/#inbox"))
+
+        for scenario in ["success", "selection-refusal", "uncertain-native-typing"] {
+            let root = FileManager.default.temporaryDirectory
+                .appendingPathComponent("SafariNativeURLTyping-\(UUID().uuidString)", isDirectory: true)
+            defer { try? FileManager.default.removeItem(at: root) }
+            let pid: pid_t = scenario == "success" ? 733 : 734
+            let bundlePath = "/System/Applications/Safari.app"
+            let code = ComputerUseApplicationCodeIdentity(authority: .runningCode,
+                bundleIdentifier: "com.apple.Safari", canonicalBundlePath: bundlePath,
+                canonicalExecutablePath: "\(bundlePath)/Contents/MacOS/Safari",
+                designatedRequirement: "fixture", teamIdentifier: "TEST", platformIdentifier: nil)
+            let app = try XCTUnwrap(ComputerUseApplicationIdentity(bundleIdentifier: "com.apple.Safari",
+                processIdentifier: pid, launchGeneration: 1, codeIdentity: code))
+            let handler = ComputerUseDefaultBrowserTarget.Handler(
+                bundleURL: URL(fileURLWithPath: bundlePath), bundleIdentifier: "com.apple.Safari")
+            let graph = SafariAddressBarAXGraph(processIdentifier: pid, writableValues: [], defaultWritable: true)
+            let existing = ComputerUseDefaultBrowserSession.Window(id: "existing", application: app,
+                accessibilityElement: AXUIElementCreateApplication(pid + 199),
+                identity: .init(applicationProcessIdentifier: pid, accessibilityWindowHash: 40,
+                    bounds: CGRect(x: 10, y: 20, width: 900, height: 700)))
+            var retained: ComputerUseDefaultBrowserSession.Window?
+            var focusDispatches = 0
+            var selectionDispatches = 0
+            var returnDispatches = 0
+            var nativeNavigationEffects: [String] = []
+            let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { graph.isActive },
+                approvalTargetProvider: { _ in
+                    .init(context: "Safari focused window", applicationID: app.bundleIdentifier,
+                        accessibilityIdentity: "retained-safari-window")
+                },
+                actionPerformer: { action in
+                    switch action {
+                    case .key(let usage, let modifiers) where usage == 0x11 && modifiers == (1 << 3):
+                        retained = .init(id: "retained", application: app, accessibilityElement: graph.window,
+                            identity: .init(applicationProcessIdentifier: pid, accessibilityWindowHash: 41,
+                                bounds: CGRect(x: 10, y: 20, width: 900, height: 700)))
+                    case .key(let usage, let modifiers) where usage == 0x0F && modifiers == (1 << 3):
+                        focusDispatches += 1
+                        nativeNavigationEffects.append("CmdL")
+                        graph.markCommandLDispatched()
+                    case .key(let usage, let modifiers) where usage == 0x04 && modifiers == (1 << 3):
+                        selectionDispatches += 1
+                        nativeNavigationEffects.append("CmdA")
+                        if scenario != "selection-refusal" || selectionDispatches > 1 {
+                            graph.selectAll()
+                        }
+                    case .typeText(let value):
+                        nativeNavigationEffects.append("type")
+                        graph.recordNativeTyping(value)
+                        if scenario == "uncertain-native-typing" {
+                            throw ComputerUseDefaultBrowserSession.Failure.interrupted
+                        }
+                    case .key(let usage, let modifiers) where usage == 0x28 && modifiers == 0:
+                        returnDispatches += 1
+                        nativeNavigationEffects.append("Return")
+                    default:
+                        throw ComputerUseDefaultBrowserSession.Failure.interrupted
+                    }
+                },
+                screenProvider: {
+                    .init(image: CIImage(color: .black).cropped(to: CGRect(x: 0, y: 0, width: 640, height: 480)),
+                        displayBounds: CGRect(x: 0, y: 0, width: 640, height: 480),
+                        frontmostWindowBounds: CGRect(x: 0, y: 0, width: 640, height: 480))
+                },
+                frontmostApplicationIdentityProvider: { app },
+                frontmostApplicationProvider: { app.bundleIdentifier })
+            let session = try ComputerUseDefaultBrowserSession(journalDirectory: root,
+                resolveHandler: { handler },
+                launchApplication: { _, beforeOpen in
+                    try beforeOpen()
+                    return app
+                },
+                captureWindows: { identity in
+                    guard identity == app else { throw ComputerUseDefaultBrowserSession.Failure.targetLost }
+                    return .init(application: app, windows: [existing] + (retained.map { [$0] } ?? []),
+                        focusedWindowID: retained?.id ?? existing.id, hasSheets: false)
+                },
+                safariAddressBarAX: .init(read: { graph.read($0, $1) },
+                    processIdentifier: { _ in pid },
+                    valueIsSettable: { graph.isSettable($0) }))
+
+            _ = try await session.ensure(taskID: "task-\(scenario)", goal: "Open the signed-in Gmail inbox.", tools: tools)
+
+            if scenario == "selection-refusal" {
+                var firstDiagnostics: [String] = []
+                do {
+                    try await session.navigateRetainedSafariTab(to: destination, taskID: "task-\(scenario)",
+                        goal: "Open the signed-in Gmail inbox.", tools: tools,
+                        diagnostic: { firstDiagnostics.append($0) })
+                    XCTFail("A partial selection readback must block URL typing")
+                } catch {}
+                XCTAssertTrue(firstDiagnostics.contains("phase=address_select_all_readback_failed"))
+                XCTAssertFalse(firstDiagnostics.contains("phase=native_url_entry_latched"),
+                    "Selection uncertainty must leave the destination retryable")
+                XCTAssertEqual(graph.nativeTypeCount, 0)
+                XCTAssertEqual(returnDispatches, 0)
+                try await session.navigateRetainedSafariTab(to: destination, taskID: "task-\(scenario)",
+                    goal: "Open the signed-in Gmail inbox.", tools: tools)
+                XCTAssertEqual(selectionDispatches, 2)
+                XCTAssertEqual(graph.nativeTypeCount, 1)
+                XCTAssertEqual(returnDispatches, 1)
+            } else if scenario == "success" {
+                try await session.navigateRetainedSafariTab(to: destination, taskID: "task-\(scenario)",
+                    goal: "Open the signed-in Gmail inbox.", tools: tools)
+                XCTAssertEqual(graph.nativeTypeCount, 1, "The destination must be entered through native keyboard input once")
+                XCTAssertEqual(graph.currentAddressValue, destination.absoluteString)
+                XCTAssertEqual(selectionDispatches, 1, "A nonempty address must be explicitly selected before replacement")
+                XCTAssertEqual(focusDispatches, 1, "Cmd-L must activate Safari's location editor even when AX focus already names the address field")
+                XCTAssertEqual(nativeNavigationEffects, ["CmdL", "CmdA", "type", "Return"])
+                XCTAssertEqual(returnDispatches, 1)
+            } else {
+                do {
+                    try await session.navigateRetainedSafariTab(to: destination, taskID: "task-\(scenario)",
+                        goal: "Open the signed-in Gmail inbox.", tools: tools)
+                    XCTFail("An uncertain native typing dispatch must stop navigation")
+                } catch {}
+                XCTAssertEqual(graph.nativeTypeCount, 1)
+                XCTAssertEqual(graph.currentAddressValue, destination.absoluteString)
+                XCTAssertEqual(selectionDispatches, 1)
+                XCTAssertEqual(returnDispatches, 0, "Return must not follow an uncertain URL typing dispatch")
+                do {
+                    try await session.navigateRetainedSafariTab(to: destination, taskID: "task-\(scenario)",
+                        goal: "Open the signed-in Gmail inbox.", tools: tools)
+                    XCTFail("An uncertain URL dispatch must not be replayed")
+                } catch let failure as ComputerUseDefaultBrowserSession.Failure {
+                    XCTAssertEqual(failure, .targetLost)
+                }
+                XCTAssertEqual(graph.nativeTypeCount, 1)
+                XCTAssertEqual(returnDispatches, 0)
             }
         }
     }
@@ -3071,6 +3314,15 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
         }
         var reachedInbox = false
         defer {
+            let typingDiagnostic = tools.nativeVisualTypingDiagnostic
+            for key in ["stage", "failureType", "attemptedStrokes", "completedStrokes", "snapshotAvailable",
+                        "samePhysicalTarget", "sameApplication", "sameWindow", "sameElement", "sameDocument", "sameFrame", "sameRole", "sameWebClassification", "selectionLocation", "selectionLength", "expectedLocation",
+                        "editable", "secure", "cancelled", "mayActAtLastSuccessfulCheck", "deadlineExceeded",
+                        "elapsedMilliseconds"] {
+                if let value = typingDiagnostic[key] {
+                    screenEvidence["native_typing_\(key)"] = value
+                }
+            }
             Self.writeNavigationProbeResultIfRequested(success: reachedInbox,
                 diagnostics: diagnostics + captureDiagnostics,
                 screenEvidence: screenEvidence)
@@ -6088,7 +6340,9 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
         }
 
         func session(hasSheets override: Bool? = nil,
-                     retainedWindowCapture: ComputerUseDefaultBrowserSession.CaptureRetainedWindow? = nil) throws -> ComputerUseDefaultBrowserSession {
+                     retainedWindowCapture: ComputerUseDefaultBrowserSession.CaptureRetainedWindow? = nil,
+                     captureDiagnosticProvider: @escaping @MainActor () -> String? = { nil },
+                     captureDiagnosticAXErrorProvider: @escaping @MainActor () -> Int? = { nil}) throws -> ComputerUseDefaultBrowserSession {
             try ComputerUseDefaultBrowserSession(journalDirectory: root,
                 resolveHandler: { handler },
                 launchApplication: { _, beforeOpen in try beforeOpen(); desktop.launchCount += 1; return app },
@@ -6120,7 +6374,9 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                     }
                     return snapshot
                 },
-                captureRetainedWindow: retainedWindowCapture)
+                captureRetainedWindow: retainedWindowCapture,
+                captureDiagnosticProvider: captureDiagnosticProvider,
+                captureDiagnosticAXErrorProvider: captureDiagnosticAXErrorProvider)
         }
 
         func window(_ id: String, pid: pid_t, hash: CFHashCode) -> ComputerUseDefaultBrowserSession.Window {
@@ -6157,7 +6413,7 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
         }
 
         private static func tools(app: ComputerUseApplicationIdentity, desktop: FakeDesktop) -> ComputerUseHostTools {
-            ComputerUseHostTools(injector: InputInjector(), mayAct: { true },
+            ComputerUseHostTools(injector: InputInjector(), mayAct: { desktop.isActive },
                 approvalTargetProvider: { _ in .init(context: "Browser focused window", applicationID: app.bundleIdentifier,
                     accessibilityIdentity: "window:\(desktop.focusedID ?? "none")") },
                 actionPerformer: { action in
