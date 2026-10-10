@@ -211,7 +211,6 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
         var window: ComputerUseDefaultBrowserSession.Window?
         var taskID: String?
         var goal: String?
-        var attempted = false
         var tools: ComputerUseHostTools?
         var continuingClarification = false
         let localFileCatalogFactory: ComputerUseDefaultBrowserFileCatalogFactory
@@ -307,8 +306,10 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
                 gmailRecipientEscapeDispatched = false
                 return
             }
-            guard !attempted else { throw ComputerUseDefaultBrowserSession.Failure.targetLost }
-            attempted = true; window = try await session.ensure(taskID: id, goal: goal, tools: tools)
+            // Session.ensure owns the durable attempt boundary. It can retry
+            // startup while the journal remains planned, and rejects resumes
+            // after Cmd+N may have begun.
+            window = try await session.ensure(taskID: id, goal: goal, tools: tools)
         }
         func check(_ action: ComputerUsePredictedAction?, _ tools: ComputerUseHostTools) throws {
             pendingPickerConfirmation = nil

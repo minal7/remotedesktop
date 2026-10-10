@@ -174,6 +174,9 @@ final class ComputerUseDefaultBrowserSession {
     private var runState: RunState?
     private(set) var lastValidationPhaseForDiagnostics: ValidationPhase?
     private(set) var lastWindowTransitionDiagnostic: String?
+    /// Failure-only scalar evidence for the bounded Safari address-focus wait.
+    /// Contains no page text, URL, AX label, or identifier.
+    private(set) var lastAddressFocusWaitDiagnostic: [String: String] = [:]
     var currentWindow: Window? { runState?.target }
     var currentFileOpenPanel: FileOpenPanel? { runState?.currentFileOpenPanel }
     var currentActionBounds: CGRect? { runState?.currentActionBounds }
@@ -461,62 +464,130 @@ final class ComputerUseDefaultBrowserSession {
                         : "phase=ax_address_value_write_status_uncertain")
                 })
         } catch { diagnostic("phase=ax_address_value_write_failed"); throw error }
-        try Task.checkCancellation()
-        try tools.requireActive()
-        do { try validate(taskID: taskID, goal: goal, tools: tools) }
-        catch { diagnostic("phase=post_address_value_write_scope_validation_failed"); throw error }
         let addressReadbackDeadline = ContinuousClock.now.advanced(by: .seconds(2))
         while true {
             try Task.checkCancellation()
             try tools.requireActive()
+            guard ContinuousClock.now < addressReadbackDeadline else {
+                diagnostic("phase=ax_address_value_readback_deadline")
+                throw Failure.targetLost
+            }
             do { try validate(taskID: taskID, goal: goal, tools: tools) }
             catch {
-                diagnostic("phase=ax_address_value_readback_scope_failed")
-                throw error
+                guard isTransientValidationCaptureFailure(error),
+                      ContinuousClock.now < addressReadbackDeadline else {
+                    diagnostic("phase=ax_address_value_readback_scope_failed")
+                    throw error
+                }
+                diagnostic("phase=ax_address_value_readback_scope_unavailable")
+                try await Task.sleep(for: .milliseconds(50))
+                continue
             }
-            guard let current = runState?.target, Self.sameWindow(current, target),
-                  isCurrentSafariAddressField(addressField, target: current) else {
-                diagnostic("phase=ax_address_value_readback_field_unconfirmed")
-                throw Failure.targetLost
-            }
-            guard let currentFocus = focusedSafariAddressField(in: current),
-                  CFEqual(currentFocus, addressField) else {
-                diagnostic("phase=ax_address_value_readback_focus_unconfirmed")
-                throw Failure.targetLost
-            }
-            let observedValue = safariAddressBarAX.read(kAXValueAttribute as String, addressField) as? String
-            if observedValue == url.absoluteString {
+            switch addressReadbackReadiness(field: addressField, target: target,
+                                            url: url, previousValue: addressValue) {
+            case .ready:
                 guard ContinuousClock.now < addressReadbackDeadline else {
                     diagnostic("phase=ax_address_value_readback_deadline")
                     throw Failure.targetLost
                 }
                 diagnostic("phase=ax_address_value_readback_verified")
                 break
-            }
-            if let observedValue, observedValue != addressValue {
-                diagnostic("phase=ax_address_value_readback_value_mismatch")
-                throw Failure.targetLost
-            }
-            guard ContinuousClock.now < addressReadbackDeadline else {
-                diagnostic("phase=ax_address_value_readback_deadline")
-                throw Failure.targetLost
-            }
-            try await Task.sleep(for: .milliseconds(50))
-        }
-        do {
-            try tools.performNativeBrowserHostCommand(.commitAddress,
-                expectedApplication: target.application, willBeginEffect: {
-                try Task.checkCancellation()
-                try tools.requireActive()
-                try self.validate(taskID: taskID, goal: goal, tools: tools)
-                guard self.runState?.currentFileOpenPanel == nil,
-                      self.isCurrentSafariAddressField(addressField, target: target),
-                      self.focusedSafariAddressField(in: target).map({ CFEqual($0, addressField) }) == true,
-                      self.safariAddressBarAX.read(kAXValueAttribute as String, addressField) as? String == url.absoluteString else {
+            case .temporarilyUnavailable(let phase):
+                guard ContinuousClock.now < addressReadbackDeadline else {
+                    diagnostic("phase=ax_address_value_readback_deadline")
                     throw Failure.targetLost
                 }
-            })
-        } catch { diagnostic("phase=return_dispatch_failed"); throw error }
+                diagnostic("phase=\(phase)")
+                try await Task.sleep(for: .milliseconds(50))
+                continue
+            case .rejected(let phase):
+                switch phase {
+                case "return_field_process_changed", "return_field_role_changed", "return_field_identifier_changed",
+                     "return_field_secure", "return_field_protected", "return_field_disabled",
+                     "return_field_not_writable", "return_field_window_unconfirmed", "return_window_changed":
+                    diagnostic("phase=ax_address_value_readback_field_unconfirmed")
+                case "return_focus_changed", "return_focus_unavailable":
+                    diagnostic("phase=ax_address_value_readback_focus_unconfirmed")
+                default:
+                    diagnostic("phase=ax_address_value_readback_value_mismatch")
+                }
+                throw Failure.targetLost
+            }
+            break
+        }
+        let returnPreparationDeadline = ContinuousClock.now.advanced(by: .seconds(3))
+        var returnEffectReady = false
+        var transientReturnFailure: String?
+        var returnPreparationPhase: String?
+        while true {
+            try Task.checkCancellation()
+            try tools.requireActive()
+            guard ContinuousClock.now < returnPreparationDeadline else {
+                diagnostic("phase=return_preparation_deadline")
+                throw Failure.targetLost
+            }
+            returnEffectReady = false
+            transientReturnFailure = nil
+            returnPreparationPhase = nil
+            do {
+                try tools.performNativeBrowserHostCommand(.commitAddress,
+                    expectedApplication: target.application, willBeginEffect: {
+                    try Task.checkCancellation()
+                    try tools.requireActive()
+                    do {
+                        try self.validate(taskID: taskID, goal: goal, tools: tools)
+                    } catch {
+                        guard self.isTransientValidationCaptureFailure(error) else {
+                            returnPreparationPhase = "return_scope_changed"
+                            diagnostic("phase=return_scope_changed")
+                            throw error
+                        }
+                        transientReturnFailure = "return_scope_unavailable"
+                        returnPreparationPhase = "return_scope_unavailable"
+                        diagnostic("phase=return_scope_unavailable")
+                        throw Failure.targetLost
+                    }
+                    switch self.returnPreparationReadiness(field: addressField, target: target, url: url) {
+                    case .ready:
+                        guard ContinuousClock.now < returnPreparationDeadline else {
+                            transientReturnFailure = "return_preparation_deadline"
+                            returnPreparationPhase = "return_preparation_deadline"
+                            diagnostic("phase=return_preparation_deadline")
+                            throw Failure.targetLost
+                        }
+                    case .temporarilyUnavailable(let phase):
+                        transientReturnFailure = phase
+                        returnPreparationPhase = phase
+                        diagnostic("phase=\(phase)")
+                        throw Failure.targetLost
+                    case .rejected(let phase):
+                        transientReturnFailure = nil
+                        returnPreparationPhase = phase
+                        diagnostic("phase=\(phase)")
+                        throw Failure.targetLost
+                    }
+                    // This must remain the final statement after fresh scope, panel,
+                    // exact field, focus, and exact URL checks. The host command
+                    // performs its own app/gate check before posting Return.
+                    returnEffectReady = true
+                })
+                break
+            } catch {
+                guard !returnEffectReady,
+                      (error as? Failure) == .targetLost,
+                      transientReturnFailure != nil else {
+                    if returnPreparationPhase == nil { diagnostic("phase=return_dispatch_failed") }
+                    throw error
+                }
+                try Task.checkCancellation()
+                try tools.requireActive()
+                guard ContinuousClock.now < returnPreparationDeadline else {
+                    diagnostic("phase=return_preparation_deadline")
+                    throw Failure.targetLost
+                }
+                try await Task.sleep(for: .milliseconds(50))
+            }
+        }
         try Task.checkCancellation()
         try tools.requireActive()
         do { try validate(taskID: taskID, goal: goal, tools: tools) }
@@ -694,17 +765,172 @@ final class ComputerUseDefaultBrowserSession {
         return addressFieldBelongsToRetainedWindow(field, target: target, deadline: deadline)
     }
 
+    private enum ReturnPreparationReadiness {
+        case ready
+        case temporarilyUnavailable(String)
+        case rejected(String)
+    }
+
+    private func returnPreparationReadiness(field: AXUIElement, target: Window, url: URL) -> ReturnPreparationReadiness {
+        addressReadbackReadiness(field: field, target: target, url: url, previousValue: nil)
+    }
+
+    private func addressReadbackReadiness(field: AXUIElement, target: Window, url: URL,
+                                          previousValue: String?) -> ReturnPreparationReadiness {
+        guard let state = runState, let current = state.target, Self.sameWindow(current, target) else {
+            return .rejected("return_window_changed")
+        }
+        guard state.currentFileOpenPanel == nil else { return .rejected("return_picker_present") }
+        let fieldReadiness = safariAddressFieldReadiness(field, target: current)
+        guard case .ready = fieldReadiness else { return fieldReadiness }
+        switch focusedSafariAddressFieldReadiness(in: current, expected: field) {
+        case .ready: break
+        case .temporarilyUnavailable(let reason): return .temporarilyUnavailable(reason)
+        case .rejected(let reason): return .rejected(reason)
+        }
+        guard let valueValue = safariAddressBarAX.read(kAXValueAttribute as String, field) else {
+            return .temporarilyUnavailable("return_value_unavailable")
+        }
+        guard let value = valueValue as? String else { return .rejected("return_value_changed") }
+        guard value != url.absoluteString else { return .ready }
+        if let previousValue, value == previousValue {
+            return .temporarilyUnavailable("return_value_unavailable")
+        }
+        return .rejected("return_value_changed")
+    }
+
+    private func isTransientValidationCaptureFailure(_ error: Error) -> Bool {
+        (error as? Failure) == .targetLost
+            && lastValidationPhaseForDiagnostics == .capture
+            && ["windows_read", "focused_window_read"].contains(lastCaptureReasonForDiagnostics ?? "")
+            && lastCaptureAXErrorCodeForDiagnostics == Int(AXError.cannotComplete.rawValue)
+    }
+
+    private func safariAddressFieldReadiness(_ field: AXUIElement, target: Window) -> ReturnPreparationReadiness {
+        let deadline = ContinuousClock.now.advanced(by: .milliseconds(750))
+        func read(_ attribute: String) -> CFTypeRef? {
+            guard ContinuousClock.now < deadline else { return nil }
+            return safariAddressBarAX.read(attribute, field)
+        }
+        guard safariAddressBarAX.processIdentifier(field) == target.application.processIdentifier else {
+            return .rejected("return_field_process_changed")
+        }
+        guard let roleValue = read(kAXRoleAttribute as String) else {
+            return .temporarilyUnavailable("return_field_metadata_unavailable")
+        }
+        guard let role = roleValue as? String else { return .rejected("return_field_metadata_malformed") }
+        guard role == "AXTextField" || role == "AXComboBox" else {
+            return .rejected("return_field_role_changed")
+        }
+        guard let identifierValue = read("AXIdentifier") else {
+            return .temporarilyUnavailable("return_field_metadata_unavailable")
+        }
+        guard let identifier = identifierValue as? String else {
+            return .rejected("return_field_metadata_malformed")
+        }
+        guard identifier == "WEB_BROWSER_ADDRESS_AND_SEARCH_FIELD" else {
+            return .rejected("return_field_identifier_changed")
+        }
+        if (read(kAXSubroleAttribute as String) as? String) == (kAXSecureTextFieldSubrole as String) {
+            return .rejected("return_field_secure")
+        }
+        if (read("AXHidden") as? NSNumber)?.boolValue == true
+            || (read("AXProtectedContent") as? NSNumber)?.boolValue == true {
+            return .rejected("return_field_protected")
+        }
+        guard let enabledValue = read(kAXEnabledAttribute as String) else {
+            return .temporarilyUnavailable("return_field_metadata_unavailable")
+        }
+        guard let enabled = enabledValue as? NSNumber else {
+            return .rejected("return_field_metadata_malformed")
+        }
+        guard enabled.boolValue else { return .rejected("return_field_disabled") }
+        guard ContinuousClock.now < deadline else {
+            return .temporarilyUnavailable("return_field_observation_deadline")
+        }
+        guard safariAddressBarAX.valueIsSettable(field) else {
+            return .rejected("return_field_not_writable")
+        }
+        guard ContinuousClock.now < deadline else {
+            return .temporarilyUnavailable("return_field_observation_deadline")
+        }
+        guard addressFieldBelongsToRetainedWindow(field, target: target, deadline: deadline) else {
+            return ContinuousClock.now >= deadline
+                ? .temporarilyUnavailable("return_field_observation_deadline")
+                : .rejected("return_field_window_unconfirmed")
+        }
+        return .ready
+    }
+
+    private func focusedSafariAddressFieldReadiness(in target: Window,
+                                                     expected: AXUIElement) -> ReturnPreparationReadiness {
+        let root = AXUIElementCreateApplication(target.application.processIdentifier)
+        guard let focusedWindowValue = safariAddressBarAX.read(kAXFocusedWindowAttribute as String, root) else {
+            return .temporarilyUnavailable("return_focus_unavailable")
+        }
+        guard CFGetTypeID(focusedWindowValue) == AXUIElementGetTypeID() else {
+            return .rejected("return_focus_changed")
+        }
+        let focusedWindow = unsafeBitCast(focusedWindowValue, to: AXUIElement.self)
+        guard CFEqual(focusedWindow, target.accessibilityElement) else {
+            return .rejected("return_focus_changed")
+        }
+        guard let focusedValue = safariAddressBarAX.read(kAXFocusedUIElementAttribute as String, root) else {
+            return .temporarilyUnavailable("return_focus_unavailable")
+        }
+        guard CFGetTypeID(focusedValue) == AXUIElementGetTypeID() else {
+            return .rejected("return_focus_changed")
+        }
+        let focused = unsafeBitCast(focusedValue, to: AXUIElement.self)
+        guard CFEqual(focused, expected) else { return .rejected("return_focus_changed") }
+        return .ready
+    }
+
     private func waitForFocusedSafariAddressField(initiallyObserved: AXUIElement, target: Window,
                                                   taskID: String, goal: String,
                                                   tools: ComputerUseHostTools,
                                                   diagnostic: (String) -> Void) async throws -> AXUIElement {
         let deadline = ContinuousClock.now.advanced(by: .seconds(1))
+        let started = ContinuousClock.now
+        var validationCount = 0
+        var focusCheckCount = 0
+        var reacquisitionCount = 0
+        var validationElapsed = Duration.zero
+        var focusCheckElapsed = Duration.zero
+        var reacquisitionElapsed = Duration.zero
+        var sawFocusedUIElement = false
+        var sawInitiallyObservedField = false
+        var sawReacquiredCurrentField = false
+        func elapsedMilliseconds(_ duration: Duration) -> String {
+            let components = duration.components
+            return String(components.seconds * 1_000
+                + components.attoseconds / 1_000_000_000_000_000)
+        }
+        func recordFailure(_ reason: String) {
+            lastAddressFocusWaitDiagnostic = [
+                "reason": reason,
+                "validation_count": String(validationCount),
+                "validation_elapsed_ms": elapsedMilliseconds(validationElapsed),
+                "focus_check_count": String(focusCheckCount),
+                "focus_check_elapsed_ms": elapsedMilliseconds(focusCheckElapsed),
+                "reacquisition_count": String(reacquisitionCount),
+                "reacquisition_elapsed_ms": elapsedMilliseconds(reacquisitionElapsed),
+                "elapsed_ms": elapsedMilliseconds(started.duration(to: ContinuousClock.now)),
+                "saw_focused_ui_element": String(sawFocusedUIElement),
+                "saw_initial_field": String(sawInitiallyObservedField),
+                "saw_reacquired_current_field": String(sawReacquiredCurrentField),
+            ]
+        }
+        lastAddressFocusWaitDiagnostic = [:]
         while ContinuousClock.now < deadline {
             try Task.checkCancellation()
             try tools.requireActive()
+            let validationStarted = ContinuousClock.now
             do {
                 try validate(taskID: taskID, goal: goal, tools: tools)
             } catch let failure as Failure {
+                validationCount += 1
+                validationElapsed += validationStarted.duration(to: ContinuousClock.now)
                 let transientAXRead = failure == .targetLost
                     && (lastCaptureReasonForDiagnostics == "windows_read"
                         || lastCaptureReasonForDiagnostics == "focused_window_read")
@@ -712,18 +938,35 @@ final class ComputerUseDefaultBrowserSession {
                 let transientBoundsRead = failure == .ambiguousWindows
                     && lastCaptureReasonForDiagnostics == "bounds_read"
                     && lastCaptureAXErrorCodeForDiagnostics == Int(AXError.cannotComplete.rawValue)
-                guard transientAXRead || transientBoundsRead, ContinuousClock.now < deadline else { throw failure }
+                guard transientAXRead || transientBoundsRead, ContinuousClock.now < deadline else {
+                    recordFailure("validation_failed")
+                    throw failure
+                }
                 try await Task.sleep(for: .milliseconds(50))
                 continue
             }
-            if let focused = focusedSafariAddressField(in: target) {
-                if CFEqual(focused, initiallyObserved),
+            validationCount += 1
+            validationElapsed += validationStarted.duration(to: ContinuousClock.now)
+            let focusStarted = ContinuousClock.now
+            let focused = focusedSafariAddressField(in: target)
+            focusCheckCount += 1
+            focusCheckElapsed += focusStarted.duration(to: ContinuousClock.now)
+            if let focused {
+                sawFocusedUIElement = true
+                let isInitiallyObserved = CFEqual(focused, initiallyObserved)
+                if isInitiallyObserved { sawInitiallyObservedField = true }
+                if isInitiallyObserved,
                    isCurrentSafariAddressField(focused, target: target),
                    ContinuousClock.now < deadline { return focused }
-                if let reacquired = try? uniqueSafariAddressField(in: target, diagnostic: diagnostic),
+                let reacquisitionStarted = ContinuousClock.now
+                let reacquired = try? uniqueSafariAddressField(in: target, diagnostic: diagnostic)
+                reacquisitionCount += 1
+                reacquisitionElapsed += reacquisitionStarted.duration(to: ContinuousClock.now)
+                if let reacquired,
                    ContinuousClock.now < deadline,
                    isCurrentSafariAddressField(reacquired, target: target),
                    let currentFocus = focusedSafariAddressField(in: target), CFEqual(currentFocus, reacquired) {
+                    sawReacquiredCurrentField = true
                     if ContinuousClock.now < deadline { return reacquired }
                 }
             }
@@ -732,6 +975,7 @@ final class ComputerUseDefaultBrowserSession {
         try Task.checkCancellation()
         try tools.requireActive()
         try validate(taskID: taskID, goal: goal, tools: tools)
+        recordFailure("focus_deadline")
         diagnostic("phase=address_focus_observation_timeout")
         throw Failure.targetLost
     }
@@ -899,12 +1143,13 @@ final class ComputerUseDefaultBrowserSession {
             entities: [.init(id: "browser", authorityDigest: authority)],
             predicates: [
                 .init(id: "handler-current", entityID: "browser", kind: "https-handler", expectedDigest: handlerDigest),
+                .init(id: "foreground-ready", entityID: "browser", kind: "signed-foreground-window-snapshot", expectedDigest: authority),
                 .init(id: "new-window", entityID: "browser", kind: "focused-window", expectedDigest: authority),
             ],
             steps: [.init(id: "create-window", dependencies: [],
                 operation: .init(capabilityID: "defaultBrowser.createWindow", entityID: "browser",
                     payloadDigest: authority, payloadVersion: 1),
-                preconditions: ["handler-current"], postconditions: ["new-window"])],
+                preconditions: ["handler-current", "foreground-ready"], postconditions: ["new-window"])],
             invariants: ["handler-current"], outcomes: ["new-window"])
         let store = try makeStore(journalDirectory)
         state.saved = try store.load(taskID: state.sessionTaskID)
@@ -926,6 +1171,26 @@ final class ComputerUseDefaultBrowserSession {
                 try tools.requireActive()
                 switch predicate.id {
                 case "handler-current": return try resolveHandler() == state.handler
+                case "foreground-ready":
+                    guard try resolveHandler() == state.handler else { throw Failure.interrupted }
+                    let app = try await launchApplication(state.handler, {
+                        try Task.checkCancellation()
+                        try tools.requireActive()
+                    })
+                    try Task.checkCancellation()
+                    try tools.requireActive()
+                    try Self.validate(application: app, matches: state.handler)
+                    state.app = app
+                    if app.bundleIdentifier == "com.apple.Safari" {
+                        recordWindowTransition("phase=startup_foreground_read")
+                    }
+                    let before = try await Self.waitForForegroundSnapshot(
+                        app: app, tools: tools, captureWindows: captureWindows)
+                    if app.bundleIdentifier == "com.apple.Safari" {
+                        recordWindowTransition("phase=startup_foreground_ready")
+                    }
+                    state.before = before
+                    return true
                 case "new-window":
                     guard let app = state.app, let before = state.before, let target = state.target else { return false }
                     let current = try await Self.waitForNewFocusedWindow(
@@ -939,23 +1204,13 @@ final class ComputerUseDefaultBrowserSession {
                 guard step.id == "create-window" else { throw ComputerUseTaskExecutionError.invalidContract }
                 try Task.checkCancellation()
                 try tools.requireActive()
-                let app = try await launchApplication(state.handler, {
-                    try Task.checkCancellation()
-                    try tools.requireActive()
-                })
+                guard let app = state.app, let before = state.before else {
+                    throw ComputerUseTaskExecutionError.preconditionFailed("foreground-ready")
+                }
                 try Task.checkCancellation()
                 try tools.requireActive()
+                guard try resolveHandler() == state.handler else { throw Failure.interrupted }
                 try Self.validate(application: app, matches: state.handler)
-                state.app = app
-                if app.bundleIdentifier == "com.apple.Safari" {
-                    recordWindowTransition("phase=startup_foreground_read")
-                }
-                let before = try await Self.waitForForegroundSnapshot(
-                    app: app, tools: tools, captureWindows: captureWindows)
-                if app.bundleIdentifier == "com.apple.Safari" {
-                    recordWindowTransition("phase=startup_foreground_ready")
-                }
-                state.before = before
                 if app.bundleIdentifier == "com.apple.Safari" {
                     try tools.performNativeBrowserHostCommand(.newWindow,
                         expectedApplication: app) { [weak state, captureWindows] in
@@ -1149,6 +1404,28 @@ final class ComputerUseDefaultBrowserSession {
         return added
     }
 
+    private static func isTransientMissingBaselineWindow(before: WindowSnapshot,
+                                                          after: WindowSnapshot) -> Bool {
+        guard before.application == after.application,
+              !before.hasSheets, !after.hasSheets,
+              !after.hasUnrecognizedSheets, after.fileOpenPanel == nil,
+              before.windows.count > 1,
+              after.windows.count == before.windows.count,
+              uniqueWindows(before.windows), uniqueWindows(after.windows),
+              let focused = after.windows.first(where: { $0.id == after.focusedWindowID }) else { return false }
+        let added = after.windows.filter { candidate in
+            !before.windows.contains(where: { sameWindowReference($0, candidate, in: before.application) })
+        }
+        guard added.count == 1, sameWindowReference(added[0], focused, in: before.application) else { return false }
+        let removed = before.windows.filter { prior in
+            !after.windows.contains(where: { sameWindowReference($0, prior, in: before.application) })
+        }
+        guard removed.count == 1 else { return false }
+        return before.windows.filter { prior in
+            after.windows.contains(where: { sameWindowReference($0, prior, in: before.application) })
+        }.count == before.windows.count - 1
+    }
+
     private static func isExactlyOneNewWindow(before: WindowSnapshot, after: WindowSnapshot, target: Window) -> Bool {
         guard let current = newFocusedWindow(before: before, after: after) else { return false }
         return sameWindowReference(current, target, in: before.application)
@@ -1216,7 +1493,7 @@ final class ComputerUseDefaultBrowserSession {
         app: ComputerUseApplicationIdentity, tools: ComputerUseHostTools,
         captureWindows: @escaping CaptureWindows
     ) async throws -> WindowSnapshot {
-        let deadline = ContinuousClock.now.advanced(by: .seconds(1.5))
+        let deadline = ContinuousClock.now.advanced(by: .seconds(5))
         while ContinuousClock.now < deadline {
             try Task.checkCancellation()
             try tools.requireActive()
@@ -1285,6 +1562,13 @@ final class ComputerUseDefaultBrowserSession {
             // One newly created but not yet focused AX window is a normal
             // browser startup transition; wait without sending another key.
             if Self.singleNewWindow(before: before, after: after) != nil {
+                try await Task.sleep(for: .milliseconds(50))
+                continue
+            }
+            if Self.isTransientMissingBaselineWindow(before: before, after: after) {
+                // Safari can briefly omit one background AX reference as the new
+                // window appears. Reobserve; ownership still requires the full
+                // original exact-reference set plus the one new focused window.
                 try await Task.sleep(for: .milliseconds(50))
                 continue
             }
