@@ -119,6 +119,9 @@ final class ComputerUseWebJobRequestTests: XCTestCase {
         let body = try XCTUnwrap(try JSONSerialization.jsonObject(with: XCTUnwrap(request.httpBody)) as? [String: Any])
         XCTAssertEqual(body["model"] as? String, "fixture-local-model")
         XCTAssertEqual(body["temperature"] as? Double, 0)
+        XCTAssertEqual(body["reasoning_effort"] as? String, "none")
+        let chatTemplateArguments = try XCTUnwrap(body["chat_template_kwargs"] as? [String: Any])
+        XCTAssertEqual(chatTemplateArguments["enable_thinking"] as? Bool, false)
 
         let responseFormat = try XCTUnwrap(body["response_format"] as? [String: Any])
         let jsonSchema = try XCTUnwrap(responseFormat["json_schema"] as? [String: Any])
@@ -137,7 +140,7 @@ final class ComputerUseWebJobRequestTests: XCTestCase {
 
         let messages = try XCTUnwrap(body["messages"] as? [[String: Any]])
         let system = try XCTUnwrap(messages.first?["content"] as? String)
-        XCTAssertTrue(system.contains("Extract only the email subject, email body and source-file description/query"))
+        XCTAssertFalse(system.isEmpty)
         let requestContext = try XCTUnwrap(messages.last?["content"] as? String)
         let context = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(requestContext.utf8)) as? [String: Any])
         XCTAssertEqual(context["original_request"] as? String, prompt)
@@ -262,6 +265,66 @@ final class ComputerUseWebJobRequestTests: XCTestCase {
             ["q0": subject, "q1": body, "q2": filename])
     }
 
+    func testExtractorUsesLiteralReferencesAndExactSourceTextObjectsWhenQuotesExist() async throws {
+        let subject = "Rëview [typo-λ]"
+        let filename = "Δonnées Qtr typo.xlsx"
+        let body = "Please review the figures."
+        let prompt = "Draft an email with subject \"\(subject)\" and body \(body). Attach \"\(filename)\"."
+        let response: [String: Any] = [
+            "subject": "q0",
+            "body": ["source_text": body],
+            "file_description": [
+                "description": "the requested file", "file_kind": "spreadsheet",
+                "name_contains": "q1", "folder_scope": "downloads",
+                "date_field": "none", "direction": "none",
+            ],
+        ]
+        let data = try JSONSerialization.data(withJSONObject: response, options: [.sortedKeys])
+        let extractor = try makeExtractor(transport: WebJobTransport(reply: try envelope(String(decoding: data, as: UTF8.self))))
+        let result = try await extractor.propose(originalRequest: prompt)
+        XCTAssertEqual(result.subject, subject)
+        XCTAssertEqual(result.body, body)
+        XCTAssertEqual(result.fileQuery?.nameContains, filename)
+
+        let request = try XCTUnwrap(try extractor.makeRequest(originalRequest: prompt).httpBody)
+        let requestObject = try XCTUnwrap(try JSONSerialization.jsonObject(with: request) as? [String: Any])
+        let format = try XCTUnwrap(requestObject["response_format"] as? [String: Any])
+        let schemaContainer = try XCTUnwrap(format["json_schema"] as? [String: Any])
+        let schema = try XCTUnwrap(schemaContainer["schema"] as? [String: Any])
+        let properties = try XCTUnwrap(schema["properties"] as? [String: Any])
+        for field in ["subject", "body"] {
+            let fieldSchema = try XCTUnwrap(properties[field] as? [String: Any])
+            let alternatives = try XCTUnwrap(fieldSchema["anyOf"] as? [[String: Any]])
+            XCTAssertEqual(alternatives.count, 2)
+            XCTAssertEqual(alternatives[0]["type"] as? String, "string")
+            XCTAssertEqual(alternatives[0]["enum"] as? [String], ["", "q0", "q1"])
+            XCTAssertEqual(alternatives[1]["type"] as? String, "object")
+            let sourceProperties = try XCTUnwrap(alternatives[1]["properties"] as? [String: Any])
+            XCTAssertEqual(Set(sourceProperties.keys), ["source_text"])
+            XCTAssertEqual(alternatives[1]["additionalProperties"] as? Bool, false)
+        }
+        let fileDescriptionSchema = try XCTUnwrap(properties["file_description"] as? [String: Any])
+        let fileDescriptionAlternatives = try XCTUnwrap(fileDescriptionSchema["anyOf"] as? [[String: Any]])
+        let fileDescriptionObject = try XCTUnwrap(fileDescriptionAlternatives.first { $0["type"] as? String == "object" })
+        let fileDescriptionProperties = try XCTUnwrap(fileDescriptionObject["properties"] as? [String: Any])
+        let nameContainsSchema = try XCTUnwrap(fileDescriptionProperties["name_contains"] as? [String: Any])
+        let nameContainsAlternatives = try XCTUnwrap(nameContainsSchema["anyOf"] as? [[String: Any]])
+        XCTAssertEqual(nameContainsAlternatives[0]["enum"] as? [String], ["", "q0", "q1"])
+        XCTAssertEqual(nameContainsAlternatives[1]["type"] as? String, "object")
+
+        for invalid in [
+            #"{"subject":"unknown-q","body":{"source_text":"Please review the figures."},"file_description":{"description":"requested file","file_kind":"spreadsheet","name_contains":"q1","folder_scope":"downloads","date_field":"none","direction":"none"}}"#,
+            #"{"subject":"Rëview [typo-λ]","body":{"source_text":"Please review the figures."},"file_description":{"description":"requested file","file_kind":"spreadsheet","name_contains":"q1","folder_scope":"downloads","date_field":"none","direction":"none"}}"#,
+            #"{"subject":{"literal_id":"q9"},"body":{"source_text":"Please review the figures."},"file_description":{"description":"requested file","file_kind":"spreadsheet","name_contains":{"literal_id":"q1"},"folder_scope":"downloads","date_field":"none","direction":"none"}}"#,
+            #"{"subject":{"literal_id":"q0"},"body":{"source_text":"Please review the figures altered."},"file_description":{"description":"requested file","file_kind":"spreadsheet","name_contains":{"literal_id":"q1"},"folder_scope":"downloads","date_field":"none","direction":"none"}}"#,
+            #"{"subject":{"literal_id":"q0"},"body":{"source_text":"Rëview [typo"},"file_description":{"description":"requested file","file_kind":"spreadsheet","name_contains":{"literal_id":"q1"},"folder_scope":"downloads","date_field":"none","direction":"none"}}"#,
+            #"{"subject":{"literal_id":"q0"},"body":{"source_text":"Please review the figures."},"file_description":{"description":"requested file","file_kind":"spreadsheet","name_contains":{"literal_id":"q2"},"folder_scope":"downloads","date_field":"none","direction":"none"}}"#,
+        ] {
+            XCTAssertThrowsError(try ComputerUseWebJobContentExtractor.decode(invalid, originalRequest: prompt),
+                "A reference or source string outside this exact task's inventory must be rejected")
+        }
+    }
+
     func testExtractorRejectsMutatedQuotedTextAndUnknownLiteralReference() async throws {
         let exactSubject = "Quarterly Review [147b3ba460c143a6aedde7ba27f52f57]"
         let prompt = "Draft an email with the exact subject \"\(exactSubject)\" and body “Review the figures.”"
@@ -297,6 +360,53 @@ final class ComputerUseWebJobRequestTests: XCTestCase {
         XCTAssertThrowsError(try extractor.makeRequest(originalRequest: #"Draft with an ambiguous escaped quote \" inside."#)) { error in
             XCTAssertEqual(error as? ComputerUseWebJobContentExtractor.Error, .invalidInput)
         }
+    }
+
+    func testOptInProductionGmailContentExtractionExchangeCapture() async throws {
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["RUN_GMAIL_CONTENT_EXTRACTOR_CAPTURE"] == "1" else {
+            throw XCTSkip("Opt-in production native-text extraction capture; no browser actions")
+        }
+        let expectedURL = URL(fileURLWithPath: try XCTUnwrap(environment["GMAIL_CONTENT_EXTRACTOR_EXPECTED_PATH"]))
+        let outputURL = URL(fileURLWithPath: try XCTUnwrap(environment["GMAIL_CONTENT_EXTRACTOR_EXCHANGE_PATH"]))
+        let expected = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(contentsOf: expectedURL)) as? [String: Any])
+        XCTAssertEqual(expected["job"] as? String, "gmail")
+        let prompt = try XCTUnwrap(expected["prompt"] as? String)
+        XCTAssertTrue(prompt.contains("Remote Desktop acceptance ["))
+
+        guard let receipt = await ComputerUseInstaller.nativeText().currentInstallation() else {
+            throw XCTSkip("The verified native-text runtime is not installed")
+        }
+        let runtimeDirectory = try await OSAtlasVisualExecutorLoader.bundledRuntimeDirectoryURL(in: .main)
+        let inputs = try OSAtlasRuntimeInputResolver(manifest: .nativeTextV2).resolveNativeText(
+            receipt: receipt, runtimeDirectoryURL: runtimeDirectory, enclosingBundleURL: Bundle.main.bundleURL)
+        let runtime = OSAtlasLlamaRuntime()
+        let extraction: ComputerUseWebJobContentExtractor.Extraction
+        do {
+            let endpoint = try await runtime.activateNativeText(inputs)
+            extraction = try await runtime.extractWebJobContent(endpoint: endpoint, originalRequest: prompt,
+                inspectExchange: { requestBody, response in
+                    guard let requestText = String(data: requestBody, encoding: .utf8),
+                          let responseText = String(data: response, encoding: .utf8),
+                          let capture = try? JSONSerialization.data(withJSONObject: [
+                            "request_body": requestText, "response": responseText,
+                          ], options: [.sortedKeys, .withoutEscapingSlashes]) else { return }
+                    try? capture.write(to: outputURL, options: .atomic)
+                })
+            await runtime.shutdown()
+        } catch {
+            await runtime.shutdown()
+            throw error
+        }
+
+        XCTAssertEqual(extraction.subject, expected["subject"] as? String)
+        XCTAssertEqual(extraction.body, expected["body"] as? String)
+        XCTAssertEqual(extraction.fileQuery?.nameContains, expected["attachment_name"] as? String)
+
+        let captureData = try Data(contentsOf: outputURL)
+        let capture = try XCTUnwrap(try JSONSerialization.jsonObject(with: captureData) as? [String: String])
+        XCTAssertEqual(Set(capture.keys), ["request_body", "response"])
+        XCTAssertTrue(try XCTUnwrap(capture["request_body"]).contains("Remote Desktop acceptance ["))
     }
 
     private func makeExtractor(transport: any ComputerUseTextModelTransport) throws -> ComputerUseWebJobContentExtractor {

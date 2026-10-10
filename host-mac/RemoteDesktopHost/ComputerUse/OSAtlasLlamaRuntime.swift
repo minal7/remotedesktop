@@ -1936,7 +1936,8 @@ actor OSAtlasLlamaRuntime {
     }
 
     func extractWebJobContent(endpoint: OSAtlasLlamaEndpoint,
-        originalRequest: String, clarifications: [[String: String]] = []
+        originalRequest: String, clarifications: [[String: String]] = [],
+        inspectExchange: (@Sendable (Data, Data) -> Void)? = nil
     ) async throws -> ComputerUseWebJobContentExtractor.Extraction {
         try Task.checkCancellation()
         let lease = try await acquireModelAccessLease()
@@ -1948,7 +1949,8 @@ actor OSAtlasLlamaRuntime {
             try validateResources(minimumReclaimableBytes: server.resourceProfile.minimumInferenceMemoryBytes)
             let connection = try ComputerUseTextModelConnection(baseURL: endpoint.baseURL,
                 bearerToken: endpoint.bearerToken, modelAlias: ComputerUseNativeTextRuntimeInputs.modelAlias)
-            let planner = ComputerUseWebJobContentExtractor(connection: connection, transport: server.transport)
+            let planner = ComputerUseWebJobContentExtractor(connection: connection, transport: server.transport,
+                inspectExchange: inspectExchange)
             let plan = try await withTaskCancellationHandler {
                 try await planner.propose(originalRequest: originalRequest, clarifications: clarifications)
             } onCancel: {

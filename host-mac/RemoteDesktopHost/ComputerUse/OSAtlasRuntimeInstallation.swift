@@ -446,6 +446,7 @@ final class OSAtlasVisualExecutorLoader: ComputerUseVisualExecutorLoading {
     private let bundle: Bundle
     private let runtime: OSAtlasLlamaRuntime
     private let nativeControlInspectExchange: (@Sendable (Data, Data) -> Void)?
+    private let webJobContentInspectExchange: (@Sendable (Data, Data) -> Void)?
     private let browserRevalidationFailureObserver:
         ComputerUseDefaultBrowserExecutor.RevalidationFailureObserver?
     private let gmailExistingDraftURL: URL?
@@ -460,6 +461,7 @@ final class OSAtlasVisualExecutorLoader: ComputerUseVisualExecutorLoading {
         bundle: Bundle = .main,
         runtime: OSAtlasLlamaRuntime = .shared,
         nativeControlInspectExchange: (@Sendable (Data, Data) -> Void)? = nil,
+        webJobContentInspectExchange: (@Sendable (Data, Data) -> Void)? = nil,
         browserRevalidationFailureObserver:
             ComputerUseDefaultBrowserExecutor.RevalidationFailureObserver? = nil,
         gmailExistingDraftURL: URL? = nil,
@@ -476,6 +478,7 @@ final class OSAtlasVisualExecutorLoader: ComputerUseVisualExecutorLoading {
         self.bundle = bundle
         self.runtime = runtime
         self.nativeControlInspectExchange = nativeControlInspectExchange
+        self.webJobContentInspectExchange = webJobContentInspectExchange
         self.browserRevalidationFailureObserver = browserRevalidationFailureObserver
         self.gmailExistingDraftURL = gmailExistingDraftURL
         self.faraJournalDirectory = faraJournalDirectory
@@ -553,6 +556,7 @@ final class OSAtlasVisualExecutorLoader: ComputerUseVisualExecutorLoading {
     ) throws -> ComputerUseDefaultBrowserExecutor {
         let runtime = self.runtime
         let nativeControlInspectExchange = self.nativeControlInspectExchange
+        let webJobContentInspectExchange = self.webJobContentInspectExchange
         let propose: ComputerUseDesktopExecutor.Propose = { input in
             let endpoint = try await runtime.activateFara(resolveInputs())
             return .init(try await runtime.proposeFara(endpoint: endpoint, input: input))
@@ -579,7 +583,8 @@ final class OSAtlasVisualExecutorLoader: ComputerUseVisualExecutorLoading {
                     throw OSAtlasLlamaRuntimeError.inactiveSession
                 }
                 let endpoint = try await runtime.activateNativeText(inputs)
-                return try await runtime.extractWebJobContent(endpoint: endpoint, originalRequest: prompt)
+                return try await runtime.extractWebJobContent(endpoint: endpoint, originalRequest: prompt,
+                    inspectExchange: webJobContentInspectExchange)
             }
             nativeControlPlanner = { input, page in
                 guard let inputs = try await resolveNativeInputs() else {

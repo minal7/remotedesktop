@@ -266,7 +266,7 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
         var gmailRecipientEscapeDispatched = false
         var gmailNavigationTargetURL: URL?
         var gmailFlowStage: GmailFlowStage = .compose
-        var gmailStandaloneDraftNormalizationComplete = false
+        var gmailStandaloneComposeContext: ComputerUseGmailRecipientVerifier.StandaloneComposeContext?
         var gmailSavedDraftReopenVerification = false
         var gmailJob: ComputerUseGmailJob?
         var gmailNavigationStage: GmailNavigationStage = .navigateTarget
@@ -377,6 +377,11 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
                     windowTitle: title, accountControlLabel: accountLabel, expected: account) else {
                     throw ComputerUseDesktopExecutor.Failure.scopedSurfaceChanged
                 }
+                if let standaloneContext = gmailStandaloneComposeContext,
+                   !standaloneContext.matchesCurrent(pageURL: accountURL, windowTitle: title,
+                       accountControlLabel: accountLabel) {
+                    throw ComputerUseDesktopExecutor.Failure.scopedSurfaceChanged
+                }
                 try Task.checkCancellation()
                 try session.validate(taskID: taskID, goal: goal, tools: tools)
             }
@@ -389,6 +394,7 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
                 guard let taskID = self.taskID, let goal = self.goal else { throw Failure.noRetainedWindow }
                 let observed = try ComputerUseGmailRecipientVerifier.recipientMenuObservation(
                     window: currentWindow.accessibilityElement, application: currentWindow.application,
+                    standaloneContext: gmailStandaloneComposeContext,
                     revalidate: { try session.validate(taskID: taskID, goal: goal, tools: tools) })
                 switch ComputerUseGmailRecipientVerifier.dismissalDecision(observation: observed,
                     expectedAddress: expectedAddress, escapeDispatched: gmailRecipientEscapeDispatched) {
@@ -1381,8 +1387,33 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
                         "The selected Gmail account could not be confirmed for this draft. Review the account before continuing."),
                         includeInModelHistory: false)
                 }
+                scope.gmailStandaloneComposeContext = ComputerUseGmailRecipientVerifier.StandaloneComposeContext(
+                    pageURL: page.url, windowTitle: currentWindowTitle, accountControlLabel: currentLabel,
+                    account: account, expectedSubject: job.request.subject, expectedBody: job.request.body)
             }
             if var job = scope.gmailJob {
+                @MainActor func revalidateComposeRegion(
+                    _ standaloneContext: ComputerUseGmailRecipientVerifier.StandaloneComposeContext?
+                ) throws {
+                    try scope.check(nil, tools)
+                    guard let standaloneContext else { return }
+                    guard let currentWindow = scope.session.currentWindow,
+                          let currentURL = try scope.pageReader.readRetainedPageURL(
+                            window: currentWindow.accessibilityElement, application: currentWindow.application,
+                            mayAct: { (try? tools.requireActive()) != nil }) else {
+                        throw ComputerUseDesktopExecutor.Failure.scopedSurfaceChanged
+                    }
+                    let title = try ComputerUseGmailAccountDirectory.observedWindowTitle(
+                        window: currentWindow.accessibilityElement, application: currentWindow.application,
+                        revalidate: { try scope.check(nil, tools) })
+                    let accountLabel = try ComputerUseGmailRecipientVerifier.accountControlLabel(
+                        window: currentWindow.accessibilityElement, application: currentWindow.application,
+                        revalidate: { try scope.check(nil, tools) })
+                    guard standaloneContext.matchesCurrent(pageURL: currentURL, windowTitle: title,
+                        accountControlLabel: accountLabel) else {
+                        throw ComputerUseDesktopExecutor.Failure.scopedSurfaceChanged
+                    }
+                }
                 if scope.gmailFlowStage == .normalizeDrafts {
                     guard let account = job.request.account,
                           ComputerUseGmailAccountDirectory.accountIndex(from: page.url) == account.index else {
@@ -1488,7 +1519,6 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
                             includeInModelHistory: false)
                     }
                     scope.gmailSavedDraftReopenURL = recoveredURL
-                    scope.gmailStandaloneDraftNormalizationComplete = true
                     scope.gmailRecipientsVerified = false
                     scope.gmailFlowStage = .compose
                     scope.gmailNavigationStage = .ready
@@ -1508,6 +1538,7 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
                     }
                     let observedMenu = try ComputerUseGmailRecipientVerifier.recipientMenuObservation(
                         window: recipientWindow.accessibilityElement, application: recipientWindow.application,
+                        standaloneContext: scope.gmailStandaloneComposeContext,
                         revalidate: { try scope.check(nil, tools) })
                     switch ComputerUseGmailRecipientVerifier.dismissalDecision(observation: observedMenu,
                         expectedAddress: expectedAddress, escapeDispatched: scope.gmailRecipientEscapeDispatched) {
@@ -1525,30 +1556,37 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
                 }
                 if composerIsExpected && job.verifiesComposeContents(page) {
                     scope.gmailFieldDiagnostics = [:]
-                    if scope.gmailFlowStage == .compose, !scope.gmailStandaloneDraftNormalizationComplete,
-                       let account = job.request.account {
-                        let title = try ComputerUseGmailAccountDirectory.observedWindowTitle(
-                            window: window.accessibilityElement, application: window.application,
-                            revalidate: { try scope.check(nil, tools) })
-                        if ComputerUseGmailAccountDirectory.standaloneComposerEmail(title, currentURL: page.url)?
-                            .caseInsensitiveCompare(account.email) == .orderedSame {
-                            guard let draftsURL = ComputerUseGmailAccountDirectory.draftsURL(index: account.index) else {
-                                return .init(response: "", decision: .handoff(
-                                    "The selected Gmail Drafts address could not be prepared safely."), includeInModelHistory: false)
-                            }
-                            scope.gmailFlowStage = .normalizeDrafts
-                            scope.gmailNavigationTargetURL = draftsURL
-                            scope.gmailNavigationStage = .navigateTarget
-                            return .init(response: "", decision: .refreshObservation, includeInModelHistory: false)
-                        }
-                    }
                     scope.gmailNavigationStage = .ready
                     scope.gmailNavigationWaitCount = 0
                     if !scope.gmailRecipientsVerified {
-                        guard let currentWindow = scope.session.currentWindow,
-                              try ComputerUseGmailRecipientVerifier.verify(
+                        guard let currentWindow = scope.session.currentWindow else {
+                            return .init(response: "", decision: .handoff(
+                                "Gmail’s exact recipient addresses could not be verified by their compose fields. Review the draft before continuing."),
+                                includeInModelHistory: false)
+                        }
+                        var recipientFailure: String?
+                        let recipientsVerified = try ComputerUseGmailRecipientVerifier.verify(
                             window: currentWindow.accessibilityElement, application: currentWindow.application,
-                            expected: job.request, revalidate: { try scope.check(nil, tools) }) else {
+                            expected: job.request, standaloneContext: scope.gmailStandaloneComposeContext,
+                            revalidate: { try revalidateComposeRegion(scope.gmailStandaloneComposeContext) },
+                            diagnostic: { recipientFailure = $0 })
+                        guard recipientsVerified else {
+                            let allowedReasons: Set<String> = [
+                                "frontmost_mismatch", "compose_discovery_or_tree_incomplete", "subject_field_missing",
+                                "collapsed_to_menu_action_failed", "collapsed_to_menu_tree_unavailable",
+                                "collapsed_to_menu_cancel_failed", "collapsed_to_menu_item_unparsed",
+                                "to_chips_not_expanded", "to_chip_count_mismatch", "cc_chip_count_mismatch",
+                                "bcc_chip_count_mismatch", "compose_lost_before_to_menu", "compose_lost_before_cc_menu",
+                                "compose_lost_before_bcc_menu", "to_chips_changed", "cc_chips_changed", "bcc_chips_changed",
+                                "to_menu_action_failed", "cc_menu_action_failed", "bcc_menu_action_failed",
+                                "to_menu_tree_unavailable", "cc_menu_tree_unavailable", "bcc_menu_tree_unavailable",
+                                "to_menu_cancel_failed", "cc_menu_cancel_failed", "bcc_menu_cancel_failed",
+                                "to_menu_item_unparsed", "cc_menu_item_unparsed", "bcc_menu_item_unparsed",
+                                "to_address_set_mismatch", "cc_address_set_mismatch", "bcc_address_set_mismatch",
+                            ]
+                            if let recipientFailure, allowedReasons.contains(recipientFailure) {
+                                scope.gmailFieldDiagnostics["gmailRecipientVerificationFailure"] = recipientFailure
+                            }
                             return .init(response: "", decision: .handoff(
                                 "Gmail’s exact recipient addresses could not be verified by their compose fields. Review the draft before continuing."),
                                 includeInModelHistory: false)
@@ -1556,7 +1594,8 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
                         scope.gmailRecipientsVerified = true
                         let menu = try ComputerUseGmailRecipientVerifier.recipientMenuObservation(
                             window: currentWindow.accessibilityElement, application: currentWindow.application,
-                            revalidate: { try scope.check(nil, tools) })
+                            standaloneContext: scope.gmailStandaloneComposeContext,
+                            revalidate: { try revalidateComposeRegion(scope.gmailStandaloneComposeContext) })
                         switch menu {
                         case .absent:
                             break
@@ -1654,11 +1693,16 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
                         }
                         switch try ComputerUseGmailRecipientVerifier.attachmentEvidence(
                             window: currentWindow.accessibilityElement, application: currentWindow.application,
-                            expected: attachment, revalidate: { try scope.check(nil, tools) }) {
+                            expected: attachment, standaloneContext: scope.gmailStandaloneComposeContext,
+                            revalidate: { try revalidateComposeRegion(scope.gmailStandaloneComposeContext) }) {
                         case .matching:
                             if scope.gmailSavedDraftReopenVerification {
                                 scope.gmailSavedDraftReopenVerification = false
-                                scope.gmailFlowStage = .complete
+                                switch ComputerUseGmailJob.verifiedStandaloneDraftContinuation(
+                                    sendRequested: job.request.sendRequested) {
+                                case .send: scope.gmailFlowStage = .send
+                                case .complete: scope.gmailFlowStage = .complete
+                                }
                             } else {
                                 guard attachment.candidateID == candidate.id,
                                       attachment.displayName == candidate.displayName,
@@ -1695,7 +1739,11 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
                                 includeInModelHistory: false)
                         }
                         scope.gmailSavedDraftReopenVerification = false
-                        scope.gmailFlowStage = .complete
+                        switch ComputerUseGmailJob.verifiedStandaloneDraftContinuation(
+                            sendRequested: job.request.sendRequested) {
+                        case .send: scope.gmailFlowStage = .send
+                        case .complete: scope.gmailFlowStage = .complete
+                        }
                     }
                 } else if composerIsExpected {
                     scope.gmailFieldDiagnostics = job.composeFieldDiagnostics(page)
@@ -1716,7 +1764,8 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
                           attachment.byteCount == candidate.byteCount,
                           try ComputerUseGmailRecipientVerifier.attachmentEvidence(
                             window: currentWindow.accessibilityElement, application: currentWindow.application,
-                            expected: attachment, revalidate: { try scope.check(nil, tools) }) == .matching else {
+                            expected: attachment, standaloneContext: scope.gmailStandaloneComposeContext,
+                            revalidate: { try revalidateComposeRegion(scope.gmailStandaloneComposeContext) }) == .matching else {
                         scope.gmailWaitCount += 1
                         if scope.gmailWaitCount <= 3 {
                             return .init(response: "", action: .wait(0.5), includeInModelHistory: false)
@@ -1739,6 +1788,25 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
                         return .init(response: "", action: .wait(0.5), includeInModelHistory: false)
                     }
                     return .init(response: "", decision: .handoff(message), includeInModelHistory: false)
+                }
+                @MainActor func beginStandaloneDraftNormalization() -> ComputerUseDesktopProposal {
+                    guard let account = job.request.account,
+                          let draftsURL = ComputerUseGmailAccountDirectory.draftsURL(index: account.index) else {
+                        return .init(response: "", decision: .handoff(
+                            "The selected Gmail Drafts address could not be prepared safely."), includeInModelHistory: false)
+                    }
+                    // Verify the standalone draft is saved through its unique
+                    // Drafts row before completing or sending it.
+                    scope.gmailSavedDraftReopenURL = nil
+                    scope.gmailSavedDraftReopenVerification = true
+                    scope.gmailRecipientsVerified = false
+                    scope.gmailStandaloneComposeContext = nil
+                    scope.gmailFlowStage = .normalizeDrafts
+                    scope.gmailNavigationTargetURL = draftsURL
+                    scope.gmailNavigationStage = .navigateTarget
+                    scope.gmailWaitCount = 0
+                    scope.gmailNavigationWaitCount = 0
+                    return .init(response: "", decision: .refreshObservation, includeInModelHistory: false)
                 }
                 switch scope.gmailFlowStage {
                 case .normalizeDrafts, .waitingForDraftReopen:
@@ -1777,6 +1845,9 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
                     scope.gmailWaitCount = 0
                     scope.gmailFlowStage = job.request.sendRequested ? .send : .saveDraft
                 case .send:
+                    if scope.gmailStandaloneComposeContext != nil {
+                        return beginStandaloneDraftNormalization()
+                    }
                     let sendControl: ComputerUseDefaultBrowserPageReader.Control? = page.controls.first { control in
                         let isSend = control.label == "Send" || control.label.hasPrefix("Send ")
                         return control.role == "AXButton" && control.enabled == true && isSend
@@ -1788,6 +1859,9 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
                     }
                     return proposal
                 case .saveDraft:
+                    if scope.gmailStandaloneComposeContext != nil {
+                        return beginStandaloneDraftNormalization()
+                    }
                     let closeControl: ComputerUseDefaultBrowserPageReader.Control? = page.controls.first { control in
                         let isClose = control.label == "Close" || control.label == "Save & close"
                         return control.role == "AXButton" && control.enabled == true && isClose

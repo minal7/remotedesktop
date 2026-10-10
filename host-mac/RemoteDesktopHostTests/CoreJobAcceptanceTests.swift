@@ -248,6 +248,21 @@ final class CoreJobAcceptanceTests: XCTestCase {
         XCTAssertNil(Self.sanitizedGmailAddressValueWriteCount(nil))
     }
 
+    func testGmailAcceptanceSanitizesAddressValueReadbackFailureReason() {
+        for reason in ["return_field_process_changed", "return_field_role_changed",
+            "return_field_identifier_changed", "return_field_secure", "return_field_protected",
+            "return_field_disabled", "return_field_not_writable", "return_field_window_unconfirmed",
+            "return_window_changed"] {
+            XCTAssertEqual(Self.sanitizedGmailAddressValueReadbackFailure(
+                "phase=ax_address_value_readback_field_unconfirmed_reason_\(reason)"), reason)
+        }
+        for rejected in [nil, "phase=ax_address_value_readback_field_unconfirmed_reason_unknown",
+            "phase=ax_address_value_readback_field_unconfirmed_reason_recipient@example.com",
+            "https://mail.google.com/mail/u/0/"] {
+            XCTAssertNil(Self.sanitizedGmailAddressValueReadbackFailure(rejected))
+        }
+    }
+
     func testGmailAcceptanceSanitizesSessionCaptureReasonAndAXErrorCode() {
         for reason in ["frontmost_unavailable", "frontmost_process_mismatch", "frontmost_identity_mismatch",
             "windows_read", "windows_malformed", "windows_unconvertible", "focused_window_read",
@@ -268,6 +283,8 @@ final class CoreJobAcceptanceTests: XCTestCase {
     func testGmailAcceptanceSanitizesWindowTransitionDiagnostic() {
         let generated = "phase=new_window_transition before=48 after=49 added=1 removed=0 changed=0 focused_added=1 unique_before=1 unique_after=1"
         XCTAssertEqual(Self.sanitizedSessionWindowTransitionDiagnostic(generated), generated)
+        let extended = "phase=new_window_transition before=86 after=86 added=1 removed=1 changed=0 focused_added=1 unique_before=1 unique_after=1 removed_was_before_focused=0 removed_role=AXDialog removed_subrole=unavailable same_safari_uuid_replacement=0"
+        XCTAssertEqual(Self.sanitizedSessionWindowTransitionDiagnostic(extended), extended)
         for phase in ["startup_foreground_read", "startup_foreground_ready", "startup_pre_effect_read",
             "startup_pre_effect_verified", "startup_cmd_n_returned"] {
             let value = "phase=\(phase)"
@@ -281,6 +298,8 @@ final class CoreJobAcceptanceTests: XCTestCase {
             "phase=new_window_transition before=999999 after=49 added=1 removed=0 changed=0 focused_added=1 unique_before=1 unique_after=1",
             "phase=new_window_transition before=48 after=49 added=50 removed=0 changed=0 focused_added=1 unique_before=1 unique_after=1",
             "phase=new_window_transition before=48 after=49 added=1 removed=0 changed=0 focused_added=true unique_before=1 unique_after=1",
+            "phase=new_window_transition before=86 after=86 added=1 removed=1 changed=0 focused_added=1 unique_before=1 unique_after=1 removed_was_before_focused=0 removed_role=AXDialog removed_subrole=private-title same_safari_uuid_replacement=0",
+            "phase=new_window_transition before=86 after=86 added=1 removed=1 changed=0 focused_added=1 unique_before=1 unique_after=1 removed_was_before_focused=0 removed_role=recipient@example.com removed_subrole=unavailable same_safari_uuid_replacement=0",
         ] {
             XCTAssertNil(Self.sanitizedSessionWindowTransitionDiagnostic(rejected))
         }
@@ -998,6 +1017,33 @@ final class CoreJobAcceptanceTests: XCTestCase {
             let pendingStore = CompositionPendingStore()
             let diagnosticLock = NSLock()
             if job == "gmail" {
+                let contentExchangeSubject = expected.subject
+                let contentExchangeBody = expected.body
+                let mayCaptureContentExchange = expected.job == "gmail"
+                    && contentExchangeSubject?.hasPrefix("Remote Desktop acceptance [") == true
+                    && contentExchangeSubject.flatMap { subject in
+                        contentExchangeBody.map { body in
+                            expected.prompt.contains("Use the exact subject \"\(subject)\" and exact body \"\(body)\".")
+                        }
+                    } == true
+                let webJobContentInspectExchange: (@Sendable (Data, Data) -> Void)?
+                if mayCaptureContentExchange {
+                    webJobContentInspectExchange = { (requestBody: Data, response: Data) in
+                        guard let requestText = String(data: requestBody, encoding: .utf8),
+                              let responseText = String(data: response, encoding: .utf8),
+                              let data = try? JSONSerialization.data(withJSONObject: [
+                                "request_body": requestText, "response": responseText,
+                              ], options: [.sortedKeys]) else { return }
+                        diagnosticLock.withLock {
+                            let path = trace.appendingPathComponent("gmail-content-exchange.json")
+                            guard !FileManager.default.fileExists(atPath: path.path) else { return }
+                            try? data.write(to: path, options: .atomic)
+                            try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: path.path)
+                        }
+                    }
+                } else {
+                    webJobContentInspectExchange = nil
+                }
                 let base = OSAtlasVisualExecutorLoader(nativeControlInspectExchange: { request, response in
                     guard let event = GmailAcceptanceControlTrace.compactEvent(request: request, response: response) else { return }
                     diagnosticLock.withLock {
@@ -1006,7 +1052,8 @@ final class CoreJobAcceptanceTests: XCTestCase {
                         data.append(event); data.append(0x0A)
                         try? Data(data.suffix(65_536)).write(to: path, options: .atomic)
                     }
-                }, browserRevalidationFailureObserver: { expected, fresh, action, diagnostic in
+                }, webJobContentInspectExchange: webJobContentInspectExchange,
+                    browserRevalidationFailureObserver: { expected, fresh, action, diagnostic in
                     diagnosticLock.withLock {
                         let path = trace.appendingPathComponent("gmail-revalidation.jsonl")
                         let facts: [String: Any] = ["action": String(describing: action),
@@ -1235,6 +1282,14 @@ final class CoreJobAcceptanceTests: XCTestCase {
            phase.range(of: #"^phase=[a-z_]+$"#, options: .regularExpression) != nil {
             result["gmailNavigationPhase"] = phase
         }
+        if let reason = raw["gmailRecipientVerificationFailure"], !reason.isEmpty,
+           reason.utf8.count <= 96,
+           reason.range(of: #"^[a-z_]+$"#, options: .regularExpression) != nil {
+            result["gmailRecipientVerificationFailure"] = reason
+        }
+        if let reason = Self.sanitizedGmailAddressValueReadbackFailure(raw["gmailNavigationPhase"]) {
+            result["gmailAddressValueReadbackFailure"] = reason
+        }
         if let phase = Self.sanitizedSessionValidationPhase(raw["sessionValidationPhase"]) {
             result["sessionValidationPhase"] = phase
         }
@@ -1294,6 +1349,17 @@ final class CoreJobAcceptanceTests: XCTestCase {
         return count
     }
 
+    private static func sanitizedGmailAddressValueReadbackFailure(_ raw: String?) -> String? {
+        let prefix = "phase=ax_address_value_readback_field_unconfirmed_reason_"
+        guard let raw, raw.hasPrefix(prefix) else { return nil }
+        let reason = String(raw.dropFirst(prefix.count))
+        let allowed: Set<String> = ["return_field_process_changed", "return_field_role_changed",
+            "return_field_identifier_changed", "return_field_secure", "return_field_protected",
+            "return_field_disabled", "return_field_not_writable", "return_field_window_unconfirmed",
+            "return_window_changed"]
+        return allowed.contains(reason) ? reason : nil
+    }
+
     private static func sanitizedSessionWindowTransitionDiagnostic(_ raw: String?) -> String? {
         guard let raw, raw.utf8.count <= 256 else { return nil }
         let fields = raw.split(separator: " ", omittingEmptySubsequences: false)
@@ -1303,7 +1369,7 @@ final class CoreJobAcceptanceTests: XCTestCase {
             let phase = String(fields[0].dropFirst("phase=".count))
             return startupPhases.contains(phase) ? raw : nil
         }
-        guard fields.count == 9, fields[0] == "phase=new_window_transition" else { return nil }
+        guard (fields.count == 9 || fields.count == 13), fields[0] == "phase=new_window_transition" else { return nil }
         let names = ["before", "after", "added", "removed", "changed"]
         var counts: [Int] = []
         for (index, name) in names.enumerated() {
@@ -1327,7 +1393,24 @@ final class CoreJobAcceptanceTests: XCTestCase {
             }
             booleans.append(value)
         }
-        return "phase=new_window_transition before=\(counts[0]) after=\(counts[1]) added=\(counts[2]) removed=\(counts[3]) changed=\(counts[4]) focused_added=\(booleans[0]) unique_before=\(booleans[1]) unique_after=\(booleans[2])"
+        let base = "phase=new_window_transition before=\(counts[0]) after=\(counts[1]) added=\(counts[2]) removed=\(counts[3]) changed=\(counts[4]) focused_added=\(booleans[0]) unique_before=\(booleans[1]) unique_after=\(booleans[2])"
+        guard fields.count == 13 else { return base }
+        guard fields[9].hasPrefix("removed_was_before_focused="),
+              let removedWasFocused = Int(fields[9].dropFirst("removed_was_before_focused=".count)),
+              (0...1).contains(removedWasFocused),
+              fields[10].hasPrefix("removed_role="),
+              fields[11].hasPrefix("removed_subrole="),
+              fields[12].hasPrefix("same_safari_uuid_replacement="),
+              let uuidReplacement = Int(fields[12].dropFirst("same_safari_uuid_replacement=".count)),
+              (0...1).contains(uuidReplacement) else { return nil }
+        let role = String(fields[10].dropFirst("removed_role=".count))
+        let subrole = String(fields[11].dropFirst("removed_subrole=".count))
+        let allowedRoles: Set<String> = ["AXWindow", "AXDialog", "AXSheet", "AXPopover", "AXUnknown",
+            "unavailable", "other", "none", "multiple"]
+        let allowedSubroles: Set<String> = ["AXStandardWindow", "AXDialog", "AXSystemDialog",
+            "AXFloatingWindow", "AXSecureWindow", "AXUnknown", "unavailable", "other", "none", "multiple"]
+        guard allowedRoles.contains(role), allowedSubroles.contains(subrole) else { return nil }
+        return "\(base) removed_was_before_focused=\(removedWasFocused) removed_role=\(role) removed_subrole=\(subrole) same_safari_uuid_replacement=\(uuidReplacement)"
     }
 
     private static func sanitizedDesktopRevalidationDiagnostic(_ raw: [String: String]) -> [String: Any] {

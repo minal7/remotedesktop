@@ -543,7 +543,7 @@ final class ComputerUseDefaultBrowserSession {
                 case "return_field_process_changed", "return_field_role_changed", "return_field_identifier_changed",
                      "return_field_secure", "return_field_protected", "return_field_disabled",
                      "return_field_not_writable", "return_field_window_unconfirmed", "return_window_changed":
-                    diagnostic("phase=ax_address_value_readback_field_unconfirmed")
+                    diagnostic("phase=ax_address_value_readback_field_unconfirmed_reason_\(phase)")
                 case "return_focus_changed", "return_focus_unavailable":
                     diagnostic("phase=ax_address_value_readback_focus_unconfirmed")
                 default:
@@ -628,8 +628,63 @@ final class ComputerUseDefaultBrowserSession {
         }
         try Task.checkCancellation()
         try tools.requireActive()
-        do { try validate(taskID: taskID, goal: goal, tools: tools) }
-        catch { diagnostic("phase=post_navigation_scope_validation_failed"); throw error }
+        let postReturnValidationDeadline = ContinuousClock.now.advanced(by: .seconds(15))
+        var lastQualifyingCaptureFailure: Error?
+        while true {
+            try Task.checkCancellation()
+            try tools.requireActive()
+            guard ContinuousClock.now < postReturnValidationDeadline else {
+                diagnostic("phase=post_navigation_scope_validation_failed")
+                throw lastQualifyingCaptureFailure ?? Failure.targetLost
+            }
+            guard runState === state,
+                  state.taskID == taskID,
+                  state.goalDigest == ComputerUseTextTaskContract.digest(goal),
+                  state.app == target.application,
+                  let currentTarget = state.target,
+                  Self.sameWindow(currentTarget, target) else {
+                diagnostic("phase=post_navigation_scope_validation_failed")
+                throw Failure.targetLost
+            }
+            let frontmost = tools.frontmostApplicationSnapshot()
+            guard frontmost.identityIsAuthoritative,
+                  frontmost.identity == target.application else {
+                diagnostic("phase=post_navigation_scope_validation_failed")
+                throw Failure.targetLost
+            }
+            do {
+                try validate(taskID: taskID, goal: goal, tools: tools)
+                break
+            } catch {
+                guard isTransientValidationCaptureFailure(error) else {
+                    diagnostic("phase=post_navigation_scope_validation_failed")
+                    throw error
+                }
+                lastQualifyingCaptureFailure = error
+                guard ContinuousClock.now < postReturnValidationDeadline else {
+                    diagnostic("phase=post_navigation_scope_validation_failed")
+                    throw error
+                }
+                try Task.checkCancellation()
+                try tools.requireActive()
+                guard runState === state,
+                      state.taskID == taskID,
+                      state.goalDigest == ComputerUseTextTaskContract.digest(goal),
+                      state.app == target.application,
+                      let currentTarget = state.target,
+                      Self.sameWindow(currentTarget, target) else {
+                    diagnostic("phase=post_navigation_scope_validation_failed")
+                    throw Failure.targetLost
+                }
+                let retryFrontmost = tools.frontmostApplicationSnapshot()
+                guard retryFrontmost.identityIsAuthoritative,
+                      retryFrontmost.identity == target.application else {
+                    diagnostic("phase=post_navigation_scope_validation_failed")
+                    throw Failure.targetLost
+                }
+                try await Task.sleep(for: .milliseconds(50))
+            }
+        }
         guard let after = state.target, after.id == target.id,
               after.application == target.application else {
             diagnostic("phase=post_navigation_identity_mismatch")
@@ -1557,7 +1612,7 @@ final class ComputerUseDefaultBrowserSession {
     ) async throws -> Window {
         // A capture can spend up to two seconds reading Safari's window list;
         // keep observing for a delayed Cmd+N result without ever replaying it.
-        let deadline = ContinuousClock.now.advanced(by: .seconds(5))
+        let deadline = ContinuousClock.now.advanced(by: .seconds(15))
         var transitionDiagnostics = 0
         while ContinuousClock.now < deadline {
             try Task.checkCancellation()
@@ -1586,7 +1641,45 @@ final class ComputerUseDefaultBrowserSession {
                 let focusedIsAdded = after.windows.first(where: { $0.id == after.focusedWindowID }).map { focused in
                     !before.windows.contains(where: { CFEqual($0.accessibilityElement, focused.accessibilityElement) })
                 } ?? false
-                diagnostic("phase=new_window_transition before=\(before.windows.count) after=\(after.windows.count) added=\(addedExactCFEqualCount) removed=\(removedExactCFEqualCount) changed=\(changedIDorElementCount) focused_added=\(focusedIsAdded ? 1 : 0) unique_before=\(uniqueWindows(before.windows) ? 1 : 0) unique_after=\(uniqueWindows(after.windows) ? 1 : 0)")
+                let removedWindows = before.windows.filter { prior in
+                    !after.windows.contains(where: { sameWindowReference($0, prior, in: before.application) })
+                }
+                let addedWindows = after.windows.filter { candidate in
+                    !before.windows.contains(where: { sameWindowReference($0, candidate, in: before.application) })
+                }
+                let removedWasBeforeFocused: Bool
+                if removedWindows.count == 1,
+                   let beforeFocused = before.windows.first(where: { $0.id == before.focusedWindowID }) {
+                    removedWasBeforeFocused = sameWindowReference(beforeFocused, removedWindows[0], in: before.application)
+                } else {
+                    removedWasBeforeFocused = false
+                }
+                func diagnosticAttribute(_ window: Window, _ attribute: CFString,
+                                         allowed: Set<String>) -> String {
+                    AXUIElementSetMessagingTimeout(window.accessibilityElement, 0.1)
+                    var value: CFTypeRef?
+                    guard AXUIElementCopyAttributeValue(window.accessibilityElement, attribute, &value) == .success,
+                          let scalar = value as? String else { return "unavailable" }
+                    return allowed.contains(scalar) ? scalar : "other"
+                }
+                let removedRole = removedWindows.count == 1
+                    ? diagnosticAttribute(removedWindows[0], kAXRoleAttribute as CFString,
+                        allowed: ["AXWindow", "AXDialog", "AXSheet", "AXPopover", "AXUnknown"])
+                    : removedWindows.isEmpty ? "none" : "multiple"
+                let removedSubrole = removedWindows.count == 1
+                    ? diagnosticAttribute(removedWindows[0], kAXSubroleAttribute as CFString,
+                        allowed: ["AXStandardWindow", "AXDialog", "AXSystemDialog", "AXFloatingWindow",
+                                  "AXSecureWindow", "AXUnknown"])
+                    : removedWindows.isEmpty ? "none" : "multiple"
+                func safariUUID(from window: Window) -> UUID? {
+                    let marker = ":safari-uuid:"
+                    guard let range = window.id.range(of: marker) else { return nil }
+                    return UUID(uuidString: String(window.id[range.upperBound...]))
+                }
+                let sameSafariUUIDReplacement = removedWindows.count == 1 && addedWindows.count == 1
+                    && safariUUID(from: removedWindows[0]) != nil
+                    && safariUUID(from: removedWindows[0]) == safariUUID(from: addedWindows[0])
+                diagnostic("phase=new_window_transition before=\(before.windows.count) after=\(after.windows.count) added=\(addedExactCFEqualCount) removed=\(removedExactCFEqualCount) changed=\(changedIDorElementCount) focused_added=\(focusedIsAdded ? 1 : 0) unique_before=\(uniqueWindows(before.windows) ? 1 : 0) unique_after=\(uniqueWindows(after.windows) ? 1 : 0) removed_was_before_focused=\(removedWasBeforeFocused ? 1 : 0) removed_role=\(removedRole) removed_subrole=\(removedSubrole) same_safari_uuid_replacement=\(sameSafariUUIDReplacement ? 1 : 0)")
                 transitionDiagnostics += 1
             }
             guard after.application == app else { throw Failure.targetLost }

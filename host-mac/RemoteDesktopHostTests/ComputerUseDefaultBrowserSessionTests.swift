@@ -312,6 +312,7 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
         private var commandLDispatched = false
         private var commandLDispatchUptime: TimeInterval?
         private var addressValue = "https://mail.google.com/mail/u/0/#drafts?compose=fixture"
+        var forceAddressRoleChange = false
         private var delayedAddressValue: String?
         private var delayedAddressValueReadsRemaining = 0
         private var unavailableAddressValueReadsRemaining = 0
@@ -424,7 +425,9 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                 return nil
             }
             if CFEqual(element, field) {
-                if attribute == (kAXRoleAttribute as String) { return "AXTextField" as CFTypeRef }
+                if attribute == (kAXRoleAttribute as String) {
+                    return (forceAddressRoleChange ? "AXButton" : "AXTextField") as CFTypeRef
+                }
                 if attribute == (kAXParentAttribute as String) { return toolbar as CFTypeRef }
                 if attribute == "AXIdentifier" { return "WEB_BROWSER_ADDRESS_AND_SEARCH_FIELD" as CFTypeRef }
                 if attribute == (kAXEnabledAttribute as String) { return NSNumber(value: true) }
@@ -598,6 +601,47 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
         XCTAssertEqual(dispatches, 1)
         XCTAssertEqual(fixture.desktop.keyCount, 1, "Waiting longer for the same window must not replay Cmd+N")
         XCTAssertEqual(fixture.desktop.windows.map(\.id), ["existing", "delayed"])
+    }
+
+    func testNewFocusedWindowRecoversAfterSixSecondTransientInventoryFailureWithoutRepeatingCmdN() async throws {
+        let fixture = try Fixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        var dispatches = 0
+        var commandDispatchedAt: TimeInterval?
+        let captureWindows: ComputerUseDefaultBrowserSession.CaptureWindows = { identity in
+            guard identity == fixture.app else { throw ComputerUseDefaultBrowserSession.Failure.targetLost }
+            if let commandDispatchedAt,
+               ProcessInfo.processInfo.systemUptime - commandDispatchedAt < 6.2 {
+                throw ComputerUseDefaultBrowserSession.Failure.targetLost
+            }
+            return fixture.desktop.snapshot(application: identity)
+        }
+        let session = try fixture.session(captureWindowsOverride: captureWindows)
+        let tools = retryTestTools(fixture,
+            target: { _ in
+                .init(context: "Browser focused window", applicationID: fixture.app.bundleIdentifier,
+                    accessibilityIdentity: "stable-target")
+            },
+            perform: { action in
+                guard case .key(let usage, let modifiers) = action,
+                      usage == 0x11, modifiers == (1 << 3) else {
+                    throw ComputerUseDefaultBrowserSession.Failure.interrupted
+                }
+                dispatches += 1
+                fixture.desktop.keyCount += 1
+                let created = fixture.window("inventory-recovered", pid: fixture.app.processIdentifier, hash: 2)
+                fixture.desktop.windows.append(created)
+                fixture.desktop.focusedID = created.id
+                commandDispatchedAt = ProcessInfo.processInfo.systemUptime
+            })
+
+        let window = try await session.ensure(taskID: "task-1", goal: "Use the default browser", tools: tools)
+
+        XCTAssertEqual(window.id, "inventory-recovered")
+        XCTAssertEqual(window.application, fixture.app)
+        XCTAssertEqual(dispatches, 1, "Transient window inventory must not replay Cmd+N")
+        XCTAssertEqual(fixture.desktop.keyCount, 1)
+        XCTAssertEqual(fixture.desktop.windows.map(\.id), ["existing", "inventory-recovered"])
     }
 
     func testStartupForegroundSnapshotWaitsForDelayedInventoryWithoutReplayingCmdN() async throws {
@@ -3435,7 +3479,8 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                          "changed-value-after-type-fingerprint", "revoked-gate-after-type-fingerprint",
                          "inactive-after-focus", "transient-capture-read", "persistent-capture-read",
                          "transient-bounds-read", "persistent-bounds-read", "transient-bounds-after-return",
-                         "persistent-bounds-after-return", "nonqualifying-bounds-after-return"] {
+                         "persistent-bounds-after-return", "nonqualifying-bounds-after-return",
+                         "revoked-gate-after-return"] {
             let root = FileManager.default.temporaryDirectory
                 .appendingPathComponent("SafariNavigationLatch-\(UUID().uuidString)", isDirectory: true)
             defer { try? FileManager.default.removeItem(at: root) }
@@ -3544,13 +3589,18 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                     guard identity == app else { throw ComputerUseDefaultBrowserSession.Failure.targetLost }
                     if scenario == "transient-bounds-after-return"
                         || scenario == "persistent-bounds-after-return"
-                        || scenario == "nonqualifying-bounds-after-return" {
+                        || scenario == "nonqualifying-bounds-after-return"
+                        || scenario == "revoked-gate-after-return" {
                         if returnDispatches > 0
-                            && (scenario != "transient-bounds-after-return" || transientCaptureFailures == 0) {
+                            && (scenario == "persistent-bounds-after-return"
+                                || scenario == "nonqualifying-bounds-after-return"
+                                || scenario == "revoked-gate-after-return"
+                                || (scenario == "transient-bounds-after-return" && transientCaptureFailures < 3)) {
                             transientCaptureFailures += 1
                             captureReason = "bounds_read"
                             captureAXErrorCode = scenario == "nonqualifying-bounds-after-return"
                                 ? Int(AXError.noValue.rawValue) : Int(AXError.cannotComplete.rawValue)
+                            if scenario == "revoked-gate-after-return" { graph.deactivate() }
                             throw ComputerUseDefaultBrowserSession.Failure.ambiguousWindows
                         }
                     }
@@ -3591,6 +3641,7 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
             XCTAssertEqual(launches, 1)
 
             var firstDiagnostics: [String] = []
+            var failedNavigationStarted: TimeInterval?
             if scenario == "transient-type-fingerprint" {
                 try await session.navigateRetainedSafariTab(to: destination, taskID: taskID, goal: goal,
                     tools: tools, diagnostic: { firstDiagnostics.append($0) })
@@ -3656,13 +3707,27 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                 XCTAssertEqual(focusDispatches, 1)
                 XCTAssertEqual(addressValueWriteCount, 1)
                 XCTAssertEqual(returnDispatches, 1)
-                XCTAssertEqual(transientCaptureFailures, 1,
-                    "A transient post-Return bounds read may be freshly recaptured once without replaying input")
+                XCTAssertEqual(transientCaptureFailures, 3,
+                    "A post-Return validation that exhausts its inner recapture budget may retry observation without replaying input")
                 XCTAssertEqual(graph.nativeTypeCount, 0)
                 XCTAssertEqual(graph.currentAddressValue, destination.absoluteString)
                 XCTAssertEqual(firstDiagnostics.last, "phase=ax_navigation_dispatched")
                 continue
+            } else if scenario == "revoked-gate-after-return" {
+                do {
+                    try await session.navigateRetainedSafariTab(to: destination, taskID: taskID, goal: goal,
+                        tools: tools, diagnostic: { firstDiagnostics.append($0) })
+                    XCTFail("A gate revoked after Return must stop post-navigation observation")
+                } catch let error as ComputerUseHostTools.ToolError {
+                    XCTAssertEqual(error.localizedDescription, ComputerUseHostTools.ToolError.paused.localizedDescription)
+                }
+                XCTAssertEqual(focusDispatches, 1)
+                XCTAssertEqual(addressValueWriteCount, 1)
+                XCTAssertEqual(returnDispatches, 1)
+                XCTAssertEqual(transientCaptureFailures, 1)
+                continue
             } else {
+                failedNavigationStarted = ProcessInfo.processInfo.systemUptime
                 do {
                     try await session.navigateRetainedSafariTab(to: destination, taskID: taskID, goal: goal,
                         tools: tools, diagnostic: { firstDiagnostics.append($0) })
@@ -3699,9 +3764,18 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                 XCTAssertEqual(addressValueWriteCount, 1, "A post-Return capture failure must not replay the URL write")
                 XCTAssertEqual(returnDispatches, 1, "A post-Return capture failure must not replay Return")
                 XCTAssertEqual(graph.nativeTypeCount, 0)
-                XCTAssertEqual(transientCaptureFailures,
-                    scenario == "persistent-bounds-after-return" ? 3 : 1,
-                    "Persistent or nonqualifying bounds failures remain bounded and fail closed")
+                if scenario == "persistent-bounds-after-return" {
+                    let elapsed = ProcessInfo.processInfo.systemUptime - (failedNavigationStarted ?? ProcessInfo.processInfo.systemUptime)
+                    XCTAssertGreaterThan(transientCaptureFailures, 3,
+                        "A qualifying persistent capture failure may use the bounded read-only post-Return retry")
+                    XCTAssertGreaterThanOrEqual(elapsed, 14,
+                        "The persistent qualifying case should exercise the full 15-second observation bound")
+                    XCTAssertLessThan(elapsed, 20,
+                        "Post-Return observation must stop at its fixed deadline")
+                } else {
+                    XCTAssertEqual(transientCaptureFailures, 1,
+                        "A nonqualifying failure must not receive the outer read-only retry")
+                }
                 continue
             }
             if scenario == "inactive-after-focus" {
@@ -3770,6 +3844,7 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                          "ax-setter-delayed-readback", "ax-setter-gate-revoked-after-write",
                          "ax-setter-cancelled-after-write", "ax-setter-readback-timeout",
                          "ax-setter-unsupported", "ax-setter-changed-authority", "ax-setter-changed-value",
+                         "ax-setter-changed-role",
                          "ax-setter-error", "ax-setter-error-applied",
                          "ax-setter-error-applied-gate-revoked-after-write",
                          "ax-setter-error-applied-cancelled-after-write", "ax-setter-partial"] {
@@ -3917,6 +3992,7 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                             graph.setAddressValue(value, partial: scenario == "ax-setter-partial",
                                 delayedReads: scenario == "ax-setter-delayed-readback" ? 2
                                     : scenario == "ax-setter-readback-timeout" ? Int.max : 0)
+                            if scenario == "ax-setter-changed-role" { graph.forceAddressRoleChange = true }
                         }
                         if scenario == "ax-setter-postwrite-transient-scope" {
                             // Exhaust the existing three-capture validation batch to
@@ -4011,6 +4087,15 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                     XCTAssertEqual(graph.nativeTypeCount, 0, "Uncertain AX writes never fall back to typing")
                     XCTAssertTrue(navigationDiagnostics.contains("phase=ax_address_value_write_status_uncertain"))
                     XCTAssertEqual(navigationDiagnostics.last, "phase=ax_navigation_dispatched")
+                    continue
+                }
+                if scenario == "ax-setter-changed-role" {
+                    XCTAssertNotNil(navigationError)
+                    XCTAssertTrue(navigationDiagnostics.contains(
+                        "phase=ax_address_value_readback_field_unconfirmed_reason_return_field_role_changed"))
+                    XCTAssertEqual(axValueWrites, 1, "A post-write role change must be diagnosed without replay")
+                    XCTAssertEqual(returnDispatches, 0)
+                    XCTAssertEqual(graph.nativeTypeCount, 0)
                     continue
                 }
                 if scenario == "ax-setter-unsupported" || scenario == "ax-setter-changed-authority"

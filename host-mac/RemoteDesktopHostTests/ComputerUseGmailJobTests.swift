@@ -103,6 +103,67 @@ final class ComputerUseGmailJobTests: XCTestCase {
             accountControlLabel: nil, expected: selected), "Duplicate composer markers are ambiguous")
     }
 
+    @MainActor
+    func testStandaloneComposeRegionNeedsExactUniqueRootAndFields() {
+        typealias Candidate = ComputerUseGmailRecipientVerifier.ComposeRegionCandidateEvidence
+        typealias Context = ComputerUseGmailRecipientVerifier.ComposeRegionContext
+        let account = ComputerUseGmailAccountDirectory.Account(email: "current@example.com",
+            displayName: "Current", index: 0)
+        let url = "https://mail.google.com/mail/u/0/?fs=1&to=recipient%40example.com&su=Review&body=Please%20review.&tf=cm"
+        let title = "Compose Mail - current@example.com - Gmail"
+        let fields: [ComputerUseGmailJob.ComposeContentField] = [
+            .init(label: "Subject", role: "AXTextField", value: "Review"),
+            .init(label: "Message Body", role: "AXTextArea", value: "Please review."),
+        ]
+        let exact = Candidate(labels: [], rootTitle: "Review", fields: fields)
+        let conflictingBody = Candidate(labels: [], rootTitle: "Review", fields: [
+            fields[0], .init(label: "Message Body", role: "AXTextArea", value: "different")
+        ])
+        func qualifies(_ candidates: [Candidate], pageURL: String = url,
+                       windowTitle: String? = title, context: Context = .standalone) -> Int? {
+            guard let standalone = ComputerUseGmailRecipientVerifier.StandaloneComposeContext(
+                    pageURL: pageURL, windowTitle: windowTitle, accountControlLabel: nil, account: account,
+                    expectedSubject: "Review", expectedBody: "Please review.") else { return nil }
+            return ComputerUseGmailRecipientVerifier.uniqueComposeRegionCandidateIndex(candidates,
+                context: context, expectedSubject: standalone.expectedSubject, expectedBody: standalone.expectedBody)
+        }
+
+        XCTAssertEqual(qualifies([exact]), 0,
+            "A host-verified standalone page with one exact subject/body root should select that root")
+        XCTAssertNil(qualifies([exact, exact]), "Duplicate standalone roots remain ambiguous")
+        XCTAssertNil(qualifies([exact, conflictingBody]),
+            "A second same-subject root with conflicting fields makes the page ambiguous")
+        XCTAssertNil(qualifies([Candidate(labels: [], rootTitle: "Other", fields: fields)]),
+            "A nearby group with a different title is not the compose root")
+        XCTAssertNil(qualifies([Candidate(labels: [], rootTitle: "Review", fields: [fields[0]])]),
+            "Missing body field cannot qualify the root")
+        XCTAssertNil(qualifies([Candidate(labels: [], rootTitle: "Review", fields: fields + [fields[1]])]),
+            "Duplicate body fields cannot qualify the root")
+        XCTAssertNil(qualifies([exact], pageURL: url.replacingOccurrences(of: "/u/0/", with: "/u/1/")),
+            "A different numeric account route cannot select the standalone root")
+        XCTAssertNil(qualifies([exact], pageURL: "https://mail.google.com.evil.test/mail/u/0/?fs=1&tf=cm"),
+            "A foreign origin cannot select the standalone root")
+        XCTAssertNil(qualifies([exact], context: .regular),
+            "A standalone subject root cannot substitute for a normal Compose: region")
+        XCTAssertEqual(ComputerUseGmailJob.verifiedStandaloneDraftContinuation(sendRequested: false), .complete,
+            "A verified reopened standalone draft completes draft-only work")
+        XCTAssertEqual(ComputerUseGmailJob.verifiedStandaloneDraftContinuation(sendRequested: true), .send,
+            "A verified reopened standalone draft proceeds to the existing Send stage")
+    }
+
+    @MainActor
+    func testStandaloneComposePageURLAcceptsStringOrURLScalars() {
+        let rawURL = "https://mail.google.com/mail/u/0/?fs=1&to=recipient%40example.com&tf=cm"
+        let nativeURL = CFURLCreateWithString(kCFAllocatorDefault, rawURL as CFString, nil)!
+        XCTAssertEqual(ComputerUseGmailRecipientVerifier.composePageURLString(nativeURL), rawURL,
+            "AXURL may be returned as a CFURL and must compare by its exact absolute string")
+        XCTAssertEqual(ComputerUseGmailRecipientVerifier.composePageURLString(rawURL as CFString), rawURL)
+        XCTAssertNil(ComputerUseGmailRecipientVerifier.composePageURLString(nil))
+        XCTAssertNil(ComputerUseGmailRecipientVerifier.composePageURLString(NSNumber(value: 1)))
+        XCTAssertEqual(ComputerUseGmailRecipientVerifier.composePageURLString("not a URL" as CFString), "not a URL",
+            "Scalar conversion preserves malformed strings for downstream exact-context rejection")
+    }
+
     func testGmailComposeVerificationRejectsDuplicateComposerFieldsWithMixedValues() throws {
         let account = ComputerUseGmailAccountDirectory.Account(email: "current@example.com",
             displayName: "Current", index: 0)
@@ -682,5 +743,38 @@ final class ComputerUseGmailJobTests: XCTestCase {
             labelsByNode: [["Unexpected.pdf (unknown)"]], attachmentContainerCount: 0,
             attachmentContainerLinkCount: nil, removalControlCount: 0, expected: nil), .conflicting,
             "Unknown-size attachment evidence must not be mistaken for an empty draft")
+    }
+
+    @MainActor
+    func testAttachmentContainerStaticLabelsRequireOneExactNameSizeAndRemoval() {
+        typealias Evidence = ComputerUseGmailRecipientVerifier.AttachmentEvidence
+        let expected = ComputerUseGmailJob.Attachment(candidateID: "candidate-1", displayName: "Review.pptx",
+            byteCount: 2_793)
+        func classify(_ staticLabels: [[String]], groups: Int = 1, removals: Int = 1,
+                      containerRemovals: Int? = nil,
+                      expected: ComputerUseGmailJob.Attachment? = nil,
+                      pageLabels: [[String]] = []) -> Evidence {
+            ComputerUseGmailRecipientVerifier.classifyAttachmentEvidence(labelsByNode: pageLabels,
+                attachmentContainerCount: groups, attachmentContainerLinkCount: 0,
+                removalControlCount: removals, containerStaticLabelsByNode: staticLabels,
+                containerRemovalControlCount: groups == 1 ? (containerRemovals ?? removals) : nil,
+                expected: expected)
+        }
+        XCTAssertEqual(classify([["Review.pptx"], ["(3K)"]], expected: expected), .matching,
+            "A unique attachment container may expose its exact name and rounded size as static children")
+        XCTAssertEqual(classify([["Review.pptx"], ["3K"]], expected: expected), .matching,
+            "A plain size child is also parsed using the existing attachment label rules")
+        XCTAssertEqual(classify([["Review-final.pptx"], ["3K"]], expected: expected), .conflicting)
+        XCTAssertEqual(classify([["Review.pptx"], ["4K"]], expected: expected), .conflicting)
+        XCTAssertEqual(classify([["Review.pptx"]], expected: expected), .conflicting)
+        XCTAssertEqual(classify([["Review.pptx"], ["Review.pptx"], ["3K"]], expected: expected), .conflicting)
+        XCTAssertEqual(classify([["Review.pptx"], ["3K"]], groups: 2, expected: expected), .conflicting)
+        XCTAssertEqual(classify([["Review.pptx"], ["3K"]], removals: 0, expected: expected), .conflicting)
+        XCTAssertEqual(classify([["Review.pptx"], ["3K"]], removals: 2, expected: expected), .conflicting)
+        XCTAssertEqual(classify([["Review.pptx"], ["3K"]], containerRemovals: 0, expected: expected), .conflicting,
+            "A removal button elsewhere on the page cannot prove this container's attachment")
+        XCTAssertEqual(classify([["Review.pptx"], ["3K"]], expected: nil), .conflicting)
+        XCTAssertEqual(classify([], expected: expected, pageLabels: [["Review.pptx"], ["3K"]]), .conflicting,
+            "Separate page-wide text nodes cannot substitute for labels inside the attachment container")
     }
 }

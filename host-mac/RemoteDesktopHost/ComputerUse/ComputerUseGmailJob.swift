@@ -5,6 +5,15 @@ import ApplicationServices
 /// A small host-owned description of one Gmail operation. It stores only
 /// values already resolved from the user's request or the host file catalog.
 struct ComputerUseGmailJob: Equatable, Sendable {
+    enum VerifiedStandaloneDraftContinuation: Equatable {
+        case send
+        case complete
+    }
+
+    static func verifiedStandaloneDraftContinuation(sendRequested: Bool) -> VerifiedStandaloneDraftContinuation {
+        sendRequested ? .send : .complete
+    }
+
     struct ComposeContentField: Equatable {
         let label: String
         let role: String
@@ -639,6 +648,92 @@ final class ComputerUseGmailAccountPreferences {
 /// item; visible names and account headers are never treated as addresses.
 @MainActor
 enum ComputerUseGmailRecipientVerifier {
+    static func composePageURLString(_ raw: CFTypeRef?) -> String? {
+        if let string = raw as? String { return string }
+        if let url = raw as? URL { return url.absoluteString }
+        return nil
+    }
+
+    struct ComposeRegionCandidateEvidence {
+        let labels: [String]
+        let rootTitle: String?
+        let fields: [ComputerUseGmailJob.ComposeContentField]
+    }
+
+    struct StandaloneComposeContext {
+        let pageURL: String
+        let windowTitle: String?
+        let accountControlLabel: String?
+        let account: ComputerUseGmailAccountDirectory.Account
+        let expectedSubject: String
+        let expectedBody: String
+
+        init?(pageURL: String, windowTitle: String?, accountControlLabel: String?,
+              account: ComputerUseGmailAccountDirectory.Account, expectedSubject: String, expectedBody: String) {
+            guard ComputerUseGmailAccountDirectory.standaloneComposerEmail(windowTitle, currentURL: pageURL)?
+                    .caseInsensitiveCompare(account.email) == .orderedSame,
+                  ComputerUseGmailAccountDirectory.confirmsActiveAccount(currentURL: pageURL,
+                    windowTitle: windowTitle, accountControlLabel: accountControlLabel, expected: account) else {
+                return nil
+            }
+            self.pageURL = pageURL
+            self.windowTitle = windowTitle
+            self.accountControlLabel = accountControlLabel
+            self.account = account
+            self.expectedSubject = expectedSubject
+            self.expectedBody = expectedBody
+        }
+
+        var isVerified: Bool {
+            ComputerUseGmailAccountDirectory.standaloneComposerEmail(windowTitle, currentURL: pageURL)?
+                .caseInsensitiveCompare(account.email) == .orderedSame
+                && ComputerUseGmailAccountDirectory.confirmsActiveAccount(currentURL: pageURL,
+                    windowTitle: windowTitle, accountControlLabel: accountControlLabel, expected: account)
+        }
+
+        func matchesCurrent(pageURL: String, windowTitle: String?, accountControlLabel: String?) -> Bool {
+            guard pageURL == self.pageURL,
+                  ComputerUseGmailAccountDirectory.standaloneComposerEmail(windowTitle, currentURL: pageURL)?
+                    .caseInsensitiveCompare(account.email) == .orderedSame else { return false }
+            return ComputerUseGmailAccountDirectory.confirmsActiveAccount(currentURL: pageURL,
+                windowTitle: windowTitle, accountControlLabel: accountControlLabel, expected: account)
+        }
+    }
+
+    enum ComposeRegionContext {
+        case regular
+        case standalone
+    }
+
+    /// Pure qualification for the AX region candidates collected below. The
+    /// regular path intentionally retains its existing Compose: label rule.
+    /// Standalone compose qualification uses its exact page context and field evidence.
+    static func uniqueComposeRegionCandidateIndex(
+        _ candidates: [ComposeRegionCandidateEvidence], context: ComposeRegionContext,
+        expectedSubject: String, expectedBody: String
+    ) -> Int? {
+        let matches = candidates.indices.filter { index in
+            let candidate = candidates[index]
+            switch context {
+            case .regular:
+                return candidate.labels.contains(where: {
+                    $0.trimmingCharacters(in: .whitespacesAndNewlines).range(of: "^Compose:",
+                        options: [.regularExpression, .caseInsensitive]) != nil
+                })
+            case .standalone:
+                return candidate.rootTitle == expectedSubject
+            }
+        }
+        guard matches.count == 1 else { return nil }
+        if case .standalone = context {
+            let candidate = candidates[matches[0]]
+            guard ComputerUseGmailJob.exactComposeFieldValuesMatch(composerCount: 1,
+                scanComplete: true, fields: candidate.fields,
+                expectedSubject: expectedSubject, expectedBody: expectedBody) else { return nil }
+        }
+        return matches[0]
+    }
+
     static func pressExactDraftSubjectRow(window: AXUIElement, application: ComputerUseApplicationIdentity,
         subject: String, expectedCell: AXUIElement, expectedRow: AXUIElement, expectedBounds: CGRect,
         revalidate: @MainActor () throws -> Void, willDispatch: @MainActor () -> Void) throws -> Bool {
@@ -711,11 +806,12 @@ enum ComputerUseGmailRecipientVerifier {
 
     static func verify(window: AXUIElement, application: ComputerUseApplicationIdentity,
                        expected: ComputerUseGmailJob.Request,
+                       standaloneContext: StandaloneComposeContext? = nil,
                        revalidate: @MainActor () throws -> Void,
                        diagnostic: @MainActor (String) -> Void = { _ in }) throws -> Bool {
         try revalidate()
         guard frontmostMatches(application) else { diagnostic("frontmost_mismatch"); return false }
-        guard var current = try composeRegion(window: window) else {
+        guard var current = try composeRegion(window: window, standaloneContext: standaloneContext) else {
             diagnostic("compose_discovery_or_tree_incomplete"); return false
         }
         guard let subject = descendants(of: current).first(where: isSubjectField) else {
@@ -734,7 +830,7 @@ enum ComputerUseGmailRecipientVerifier {
                 diagnostic("collapsed_to_menu_action_failed"); return false
             }
             try revalidate()
-            guard let menuState = try composeRegion(window: window) else {
+            guard let menuState = try composeRegion(window: window, standaloneContext: standaloneContext) else {
                 diagnostic("collapsed_to_menu_tree_unavailable"); return false
             }
             let copyAddress = try copyAddress(in: menuState)
@@ -743,7 +839,7 @@ enum ComputerUseGmailRecipientVerifier {
                 diagnostic("collapsed_to_menu_cancel_failed"); return false
             }
             try revalidate()
-            guard copyAddress != nil, let expanded = try composeRegion(window: window),
+            guard copyAddress != nil, let expanded = try composeRegion(window: window, standaloneContext: standaloneContext),
                   !recipientChips(in: expanded, field: .to).isEmpty else {
                 diagnostic(copyAddress == nil ? "collapsed_to_menu_item_unparsed" : "to_chips_not_expanded")
                 return false
@@ -766,7 +862,7 @@ enum ComputerUseGmailRecipientVerifier {
             var addresses: [String] = []
             for index in chips.indices {
                 try revalidate()
-                guard let currentState = try composeRegion(window: window) else {
+                guard let currentState = try composeRegion(window: window, standaloneContext: standaloneContext) else {
                     diagnostic("compose_lost_before_\(field.rawValue)_menu"); return false
                 }
                 let currentChips = recipientChips(in: currentState, field: field)
@@ -779,7 +875,7 @@ enum ComputerUseGmailRecipientVerifier {
                     diagnostic("\(field.rawValue)_menu_action_failed"); return false
                 }
                 try revalidate()
-                guard let currentState = try composeRegion(window: window) else {
+                guard let currentState = try composeRegion(window: window, standaloneContext: standaloneContext) else {
                     diagnostic("\(field.rawValue)_menu_tree_unavailable"); return false
                 }
                 let menuAddress = try copyAddress(in: currentState)
@@ -812,9 +908,11 @@ enum ComputerUseGmailRecipientVerifier {
 
     static func verifiesComposeContents(window: AXUIElement, application: ComputerUseApplicationIdentity,
         expectedSubject: String, expectedBody: String,
+        standaloneContext: StandaloneComposeContext? = nil,
         revalidate: @MainActor () throws -> Void) throws -> Bool {
         try revalidate()
-        guard frontmostMatches(application), let groups = findComposeGroups(window), groups.count == 1,
+        guard frontmostMatches(application), let groups = findComposeGroups(window,
+                standaloneContext: standaloneContext), groups.count == 1,
               let compose = buildTree(groups[0], limit: 256,
                 excludedRoles: ["AXTable", "AXOutline", "AXList", "AXWebArea", "AXSecureTextField"],
                 includeMessageBodyLeaf: true) else { return false }
@@ -840,9 +938,11 @@ enum ComputerUseGmailRecipientVerifier {
     /// compose region. A successful AXCancel call alone is not evidence that
     /// the recipient menu actually disappeared.
     static func recipientMenuObservation(window: AXUIElement, application: ComputerUseApplicationIdentity,
+                                         standaloneContext: StandaloneComposeContext? = nil,
                                          revalidate: @MainActor () throws -> Void) throws -> RecipientMenuObservation {
         try revalidate()
-        guard frontmostMatches(application), let compose = try composeRegion(window: window) else {
+        guard frontmostMatches(application), let compose = try composeRegion(window: window,
+            standaloneContext: standaloneContext) else {
             return .unrecognized
         }
         let menus = descendants(of: compose).filter { $0.role == "AXMenu" }
@@ -1016,16 +1116,24 @@ enum ComputerUseGmailRecipientVerifier {
 
     static func attachmentEvidence(window: AXUIElement, application: ComputerUseApplicationIdentity,
                                    expected: ComputerUseGmailJob.Attachment?,
+                                   standaloneContext: StandaloneComposeContext? = nil,
                                    revalidate: @MainActor () throws -> Void) throws -> AttachmentEvidence {
         try revalidate()
-        guard frontmostMatches(application), let compose = try composeRegion(window: window) else {
+        guard frontmostMatches(application), let compose = try composeRegion(window: window,
+            standaloneContext: standaloneContext) else {
             return .conflicting
         }
         let nodes = descendants(of: compose)
         let containers = nodes.filter(isAttachmentContainer)
-        let linksInContainer = containers.count == 1
-            ? descendants(of: containers[0]).filter { $0.role == "AXLink" }
-            : []
+        let containerNodes = containers.count == 1 ? descendants(of: containers[0]) : []
+        let linksInContainer = containerNodes.filter { $0.role == "AXLink" }
+        let containerStaticLabelsByNode = containerNodes.filter { $0.role == "AXStaticText" }
+            .map(attachmentLabels(for:))
+        let containerRemovalControlCount = containerNodes.filter { node in
+            node.role == "AXButton" && (node.title.map { isRemoveAttachmentLabel($0) } == true
+                || node.description.map { isRemoveAttachmentLabel($0) } == true
+                || node.value.map { isRemoveAttachmentLabel($0) } == true)
+        }.count
         let candidateNodes = containers.isEmpty ? nodes.filter { $0.role == "AXStaticText" } : linksInContainer
         let labelsByNode = candidateNodes.map(attachmentLabels(for:))
         let removalControlCount = nodes.filter { node in
@@ -1037,17 +1145,39 @@ enum ComputerUseGmailRecipientVerifier {
         return classifyAttachmentEvidence(labelsByNode: labelsByNode,
             attachmentContainerCount: containers.count,
             attachmentContainerLinkCount: containers.count == 1 ? linksInContainer.count : nil,
-            removalControlCount: removalControlCount, expected: expected)
+            removalControlCount: removalControlCount,
+            containerStaticLabelsByNode: containerStaticLabelsByNode,
+            containerRemovalControlCount: containers.count == 1 ? containerRemovalControlCount : nil,
+            expected: expected)
     }
 
     static func classifyAttachmentEvidence(labelsByNode: [[String]], attachmentContainerCount: Int,
                                            attachmentContainerLinkCount: Int?, removalControlCount: Int,
+                                           containerStaticLabelsByNode: [[String]] = [],
+                                           containerRemovalControlCount: Int? = nil,
                                            expected: ComputerUseGmailJob.Attachment?) -> AttachmentEvidence {
         guard attachmentContainerCount >= 0, removalControlCount >= 0 else { return .conflicting }
         if attachmentContainerCount > 1 { return .conflicting }
         if removalControlCount > 1 { return .conflicting }
-        if attachmentContainerCount == 1,
-           (attachmentContainerLinkCount != 1 || removalControlCount != 1) { return .conflicting }
+        if attachmentContainerCount == 1 {
+            guard removalControlCount == 1, let linkCount = attachmentContainerLinkCount else { return .conflicting }
+            if linkCount == 0 {
+                guard let expected, containerRemovalControlCount == 1,
+                      containerStaticLabelsByNode.count == 2 else { return .conflicting }
+                let labels = containerStaticLabelsByNode.map { Array(Set($0)) }
+                guard labels.allSatisfy({ $0.count == 1 }) else { return .conflicting }
+                let nameNodes = labels.indices.filter { labels[$0][0] == expected.displayName }
+                guard nameNodes.count == 1,
+                      let sizeNode = labels.indices.first(where: { $0 != nameNodes[0] }) else { return .conflicting }
+                let observedSize = labels[sizeNode][0]
+                let combinedLabels = ["\(expected.displayName) \(observedSize)",
+                    "\(expected.displayName), \(observedSize)"]
+                return combinedLabels.contains(where: {
+                    ComputerUseGmailJob.attachmentLabelMatches($0, expected: expected)
+                }) ? .matching : .conflicting
+            }
+            guard linkCount == 1 else { return .conflicting }
+        }
 
         let parsed = labelsByNode.flatMap { labels in
             Array(Set(labels)).filter(ComputerUseGmailJob.isAttachmentLabel)
@@ -1149,20 +1279,26 @@ enum ComputerUseGmailRecipientVerifier {
         return uniqueLabels.count == 1 ? uniqueLabels[0] : nil
     }
 
-    private static func composeRegion(window: AXUIElement) throws -> Node? {
+    private static func composeRegion(window: AXUIElement,
+                                      standaloneContext: StandaloneComposeContext? = nil) throws -> Node? {
         let excluded: Set<String> = ["AXTable", "AXOutline", "AXList", "AXTextArea", "AXWebArea", "AXSecureTextField"]
-        guard let groups = findComposeGroups(window), groups.count == 1,
+        guard let groups = findComposeGroups(window, standaloneContext: standaloneContext), groups.count == 1,
               let compose = buildTree(groups[0], limit: 256, excludedRoles: excluded) else { return nil }
         guard descendants(of: compose).contains(where: isSubjectField) else { return nil }
         return compose
     }
 
-    private static func findComposeGroups(_ window: AXUIElement) -> [AXUIElement]? {
+    private static func findComposeGroups(_ window: AXUIElement,
+                                          standaloneContext: StandaloneComposeContext? = nil) -> [AXUIElement]? {
+        if let standaloneContext {
+            guard standaloneContext.isVerified else { return nil }
+        }
         let deadline = ContinuousClock.now.advanced(by: .milliseconds(750))
         var visited = 0
         var overflow = false
         var outerWebAreaSeen = false
         var matches: [AXUIElement] = []
+        var standaloneCandidates: [ComposeRegionCandidateEvidence] = []
         func read(_ element: AXUIElement, _ attribute: String) -> CFTypeRef? {
             guard !Task.isCancelled, ContinuousClock.now < deadline else { overflow = true; return nil }
             AXUIElementSetMessagingTimeout(element, 0.1)
@@ -1181,20 +1317,53 @@ enum ComputerUseGmailRecipientVerifier {
             let role = read(element, kAXRoleAttribute as String) as? String ?? ""
             let subrole = read(element, kAXSubroleAttribute as String) as? String ?? ""
             guard subrole != (kAXSecureTextFieldSubrole as String),
-                  !["AXTable", "AXOutline", "AXList", "AXSecureTextField"].contains(role) else { return }
+                  !["AXTable", "AXOutline", "AXList", "AXTextArea", "AXSecureTextField"].contains(role) else { return }
             if role == "AXWebArea" {
                 guard !outerWebAreaSeen else { return }
                 outerWebAreaSeen = true
+                if let standaloneContext {
+                    let pageURL = composePageURLString(read(element, "AXURL"))
+                        ?? composePageURLString(read(element, kAXDocumentAttribute as String))
+                    guard pageURL == standaloneContext.pageURL else { return }
+                }
             }
             if role == "AXGroup" {
                 let labels = [kAXTitleAttribute, kAXDescriptionAttribute]
                     .compactMap { read(element, $0 as String) as? String }
-                if labels.contains(where: {
-                    $0.trimmingCharacters(in: .whitespacesAndNewlines).range(of: "Compose:",
-                        options: [.anchored, .caseInsensitive]) != nil
-                }) {
-                    matches.append(element)
-                    return
+                if let standaloneContext {
+                    if let exactRootTitle = labels.first(where: { $0 == standaloneContext.expectedSubject }) {
+                        let excluded: Set<String> = ["AXTable", "AXOutline", "AXList", "AXWebArea", "AXSecureTextField"]
+                        let fields: [ComputerUseGmailJob.ComposeContentField]
+                        if let tree = buildTree(element, limit: 256, excludedRoles: excluded,
+                            includeMessageBodyLeaf: true) {
+                            fields = descendants(of: tree).compactMap { node in
+                                guard node.role == "AXTextField" || node.role == "AXTextArea" else { return nil }
+                                let label = node.strings.first(where: {
+                                    ($0.localizedCaseInsensitiveCompare("Subject") == .orderedSame
+                                        && node.role == "AXTextField")
+                                    || ($0.localizedCaseInsensitiveCompare("Message Body") == .orderedSame
+                                        && node.role == "AXTextArea")
+                                })
+                                guard let label else { return nil }
+                                return .init(label: label, role: node.role, value: node.value)
+                            }
+                        } else { fields = [] }
+                        let candidate = ComposeRegionCandidateEvidence(labels: labels,
+                            rootTitle: exactRootTitle, fields: fields)
+                        standaloneCandidates.append(candidate)
+                        matches.append(element)
+                        // A titled group is one candidate boundary. Never
+                        // descend into it and accidentally count its own fields
+                        // as another compose root.
+                        return
+                    }
+                } else {
+                    let candidate = ComposeRegionCandidateEvidence(labels: labels, rootTitle: nil, fields: [])
+                    if uniqueComposeRegionCandidateIndex([candidate], context: .regular,
+                        expectedSubject: "", expectedBody: "") == 0 {
+                        matches.append(element)
+                        return
+                    }
                 }
             }
             guard let rawChildren = read(element, kAXChildrenAttribute as String) else {
@@ -1208,6 +1377,12 @@ enum ComputerUseGmailRecipientVerifier {
         }
         visit(window, depth: 0)
         guard !overflow, !Task.isCancelled, ContinuousClock.now < deadline else { return nil }
+        if let standaloneContext {
+            guard let index = uniqueComposeRegionCandidateIndex(standaloneCandidates, context: .standalone,
+                expectedSubject: standaloneContext.expectedSubject,
+                expectedBody: standaloneContext.expectedBody), matches.indices.contains(index) else { return nil }
+            return [matches[index]]
+        }
         return matches
     }
 
