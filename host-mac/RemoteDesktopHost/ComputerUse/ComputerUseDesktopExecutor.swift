@@ -138,6 +138,7 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
     private var routedClarifiedGoal: (taskID: String, goal: ComputerUseUnresolvedTextGoal)?
     private var isExecuting = false
     private static let screenRecognitionFailureGuidance = "The current screen could not be verified for a system permission dialog. Computer use is paused before the next action. Review any dialog, then choose Resume. If this repeats, restart the app."
+    private static let screenRecognitionUnavailableGuidance = "Screen verification is unavailable because a previous check is still running or timed out. No further action was taken. Wait a moment, then choose Resume to verify a fresh screen."
     private(set) var lastRevalidationDiagnostic: [String: String] = [:]
     /// Equality flags only: never retain action payloads, app content or hashes.
     private(set) var lastApprovalDiagnostic: [String: String] = [:]
@@ -203,7 +204,7 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
     private func waitForPostActionSurface(_ observation: Observation, tools: ComputerUseHostTools) async throws {
         try await Task.sleep(for: .milliseconds(100))
         guard surfaceScopeCheck != nil else { return }
-        let scopeDeadline = ContinuousClock.now.advanced(by: .seconds(1))
+        let scopeDeadline = ContinuousClock.now.advanced(by: .seconds(3))
         func scopedFailure(_ stage: String) -> Failure {
             lastRevalidationDiagnostic = ["blockedAt": stage]
             return .scopedSurfaceChanged
@@ -221,6 +222,36 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
             try checkActiveApplication(activeAfter)
             return true
         }
+        func waitForScopeRecovery(_ stage: String) async throws {
+            while true {
+                guard ContinuousClock.now < scopeDeadline else { throw scopedFailure(stage) }
+                if try currentScopeIsValid(activeBefore: "\(stage)-active-app-before-check",
+                                           activeAfter: "\(stage)-active-app-after-check") {
+                    guard ContinuousClock.now < scopeDeadline else { throw scopedFailure(stage) }
+                    return
+                }
+                guard ContinuousClock.now < scopeDeadline else { throw scopedFailure(stage) }
+                try await Task.sleep(for: .milliseconds(100))
+            }
+        }
+        func freshEditorSample(_ stage: String) async throws -> (token: String?, recovered: Bool) {
+            var recovered = false
+            while true {
+                if try !currentScopeIsValid(activeBefore: "\(stage)-active-app-before-editor-sample",
+                                            activeAfter: "\(stage)-active-app-before-editor-sample-check") {
+                    recovered = true
+                    try await waitForScopeRecovery("\(stage)-scope-recovery-deadline")
+                    continue
+                }
+                let token = try tools.nativeFocusedEditorObservation()?.stabilityToken
+                if try currentScopeIsValid(activeBefore: "\(stage)-active-app-before-post-sample-check",
+                                           activeAfter: "\(stage)-active-app-after-post-sample-check") {
+                    return (token, recovered)
+                }
+                recovered = true
+                try await waitForScopeRecovery("\(stage)-scope-recovery-deadline")
+            }
+        }
         while true {
             try checkActiveApplication("scope-wait-active-app-before-check")
             do { try checkScopedSurface() }
@@ -237,11 +268,8 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
         }
 
         let settleStarted = ContinuousClock.now
-        let currentToken = try tools.nativeFocusedEditorObservation()?.stabilityToken
-        guard try currentScopeIsValid(activeBefore: "initial-editor-sample-active-app-before-check",
-                                      activeAfter: "initial-editor-sample-active-app-after-check") else {
-            throw scopedFailure("initial-editor-sample-scope-invalid")
-        }
+        let initialSample = try await freshEditorSample("initial-editor-sample")
+        let currentToken = initialSample.token
 
         // A newly focused native field may appear after this first sample, and
         // can emit delayed AX title/ancestry events. Settle the exact observed
@@ -254,19 +282,17 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
         var nilSampleCount = currentToken == nil ? 1 : 0
         while ContinuousClock.now < settleDeadline {
             try await Task.sleep(for: .milliseconds(250))
-            guard try currentScopeIsValid(activeBefore: "settle-active-app-before-editor-sample",
-                                          activeAfter: "settle-active-app-after-pre-sample-scope") else {
-                throw scopedFailure("settle-scope-invalid-before-editor-sample")
-            }
-            let token = try tools.nativeFocusedEditorObservation()?.stabilityToken
+            let sample = try await freshEditorSample("settle-editor-sample")
+            let token = sample.token
             sampleCount += 1
             if token == nil { nilSampleCount += 1 }
-            guard try currentScopeIsValid(activeBefore: "settle-active-app-before-post-sample-check",
-                                          activeAfter: "settle-active-app-after-post-sample-scope") else {
-                throw scopedFailure("settle-scope-invalid-after-editor-sample")
-            }
             if token != lastToken {
                 tokenChangeCount += 1
+                lastToken = token
+                quietSince = ContinuousClock.now
+            } else if sample.recovered {
+                // A lost scope invalidates the earlier token and quiet time,
+                // even when the newly sampled editor looks unchanged.
                 lastToken = token
                 quietSince = ContinuousClock.now
             } else if ContinuousClock.now - quietSince >= .seconds(1.25) {
@@ -278,9 +304,13 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
         // Editor metadata can keep changing while the retained window remains
         // valid (for example, an asynchronous upload). Reobserve at the bounded
         // deadline; every later effect still needs a fresh target and fingerprint.
-        guard try currentScopeIsValid(activeBefore: "settle-active-app-before-editor-sample",
-                                      activeAfter: "settle-active-app-after-post-sample-scope") else {
-            throw scopedFailure("settle-scope-invalid-after-editor-sample")
+        let finalSample = try await freshEditorSample("settle-final-editor-sample")
+        if finalSample.recovered {
+            sampleCount += 1
+            if finalSample.token == nil { nilSampleCount += 1 }
+            if finalSample.token != lastToken { tokenChangeCount += 1 }
+            lastToken = finalSample.token
+            quietSince = ContinuousClock.now
         }
         let timedOutAt = ContinuousClock.now
         func milliseconds(_ duration: Duration) -> String {
@@ -433,6 +463,22 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
                     "recognitionErrorCode": String(code),
                 ]
                 result = .userInterventionRequired(Self.screenRecognitionFailureGuidance)
+            }
+            catch let failure as ComputerUseObservationWorker.Failure where failure == .timedOut || failure == .busy {
+                try Task.checkCancellation()
+                try tools.requireActive()
+                try checkScopedSurface()
+                let failureName: String
+                switch failure {
+                case .timedOut: failureName = "timedOut"
+                case .busy: failureName = "busy"
+                case .recognitionFailed: failureName = "unavailable"
+                }
+                lastRevalidationDiagnostic = [
+                    "blockedAt": "screen-consent-recognition",
+                    "recognitionWorkerFailure": failureName,
+                ]
+                result = .userInterventionRequired(Self.screenRecognitionUnavailableGuidance)
             }
             await finishRun()
             return result

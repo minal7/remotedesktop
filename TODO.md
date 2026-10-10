@@ -2,8 +2,8 @@
 
 | Job | Status | Blocker |
 | --- | --- | --- |
-| W1 Gmail with attachment | not accepted (latest batch 3/10) | Runs efbbd7d4, 810a8313, and 44c92438 passed; a502f354 stopped before Return after AX setValue returned an error, though the retained focused field showed the exact canonical URL. Ambiguous 33a403d0 token stays quarantined. |
-| Build / regression checkpoint | compiled / tested | Full `w1-account-full-20261010-023553`: 3,117 passed /156 failed /371 skipped, 965.2 s. All 155 baseline failures remain; the extra unchanged `test_managerAuthenticationWithoutABrowserCannotSilentlyResume` failed on asynchronous status-message delivery and passed alone in `w1-account-handoff-regression-20261010-025259` (1/1, 10.4 s). Focused Safari/Gmail/typing: 134 passed /0 failed /20 skipped; fresh Gmail completion checks previously 62 passed /0 failed /4 skipped. Full suite is not green. Raw traces remain outside Git, capped at 20 runs. |
+| W1 Gmail with attachment | in progress | Latest batch 1/10, median 126.3 s: recovery `3e66e5c1` passed; `4685d30e` paused while its picker opened. Bounded fresh-scope recovery is implemented, compiled and focused-tested; ten distinct exact saved drafts and three Send-approval stops remain pending. Keep ambiguous `33a403d0` quarantined. |
+| Build / regression checkpoint | in progress | Compiled/tested: full `w1-account-full-20261010-042627`, 3,120 passed /155 failed /371 skipped in 1,038.3 s; exact baseline failure set, no added failures. Final settling checks 12/12 passed (`w1-account-settling-scope-green-20261010-042446`); broader Safari/Gmail/picker checks 141 passed /0 failed /20 skipped. Full suite remains non-green due to the recorded baseline. Raw traces stay outside Git, capped at 20 runs. |
 | W2 Drive / Dropbox web upload | not started | After W1; reuse its picker and signed-in test accounts. |
 | W3 Flights | not started | After W2; read-only search/extraction, no approvals. |
 | W4 Safari / Chrome DOM bridge | not started | After W3; keep W1–W3 acceptance gates unchanged. |
@@ -12,6 +12,6 @@
 | Apple Mail | passing 10/10 | Frozen; historical 3/3 Send-approval stops. Keep tests green. |
 | Sync-folder copy / native apps | in progress | Paused by A6: sync work committed behind computerUseV2, unrouted; acceptance disabled. |
 
-A1 bounded repair (≤1 day): batch stopped at 3/10 when a502f354 reported an AX setter error although the retained focused address field contained the exact URL; no Return was sent.
-The compiled repair uses fresh exact same-field/value readback after an attempted setter returns any status, retaining the window, focus, task, and gate checks; no setter replay or typing fallback. Error-with-no-effect, error-after-effect, cancellation, and gate-loss cases pass.
-Retry the ten distinct saved-draft cases, then three Send-approval stops. W1 stays unaccepted until both pass. Send/fingerprint authority and paused OS-level acceptance remain unchanged.
+A1 bounded repair (≤1 day): the picker inventory read was healthy with and without the sheet (65 windows; whole reads 24–40 ms; slices at most 28 ms), so no paging or timeout change is warranted.
+During post-action settling, allow a transient scope-read failure after an initially valid sample to be revalidated within the existing deadline; restart editor sampling and the quiet interval only from fresh authority.
+Never reuse cached scope, replay the original effect, or relax per-action checks. Preserve the verified draft recovery URL and recipient/Send gates; OS-level acceptance remains paused under A6.

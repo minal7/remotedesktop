@@ -2366,7 +2366,9 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
             effects += 1
             scopeValid = false
             Task { @MainActor in
-                try? await Task.sleep(for: .milliseconds(300))
+                // The Session layer may need more than one second to finish its
+                // already-bounded fresh AX recapture while a native picker opens.
+                try? await Task.sleep(for: .milliseconds(1_300))
                 scopeValid = true
             }
         })
@@ -2388,6 +2390,92 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
         XCTAssertEqual(proposals, 2)
         XCTAssertEqual(executor.diagnosticHistory.filter { $0.response == "click" }.count, 1)
         XCTAssertEqual(executor.diagnosticHistory.first?.response, "click")
+    }
+
+    func testScopedDesktopReobservesAfterTransientScopeLossDuringPostActionSettling() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        var current: ComputerUseTextSnapshot? = ComputerUseTextSnapshot(targetID: "before-click", value: "before",
+            selection: NSRange(location: 6, length: 0), isEditable: true, isSecure: false)
+        let editor = ComputerUseTextEditor(read: { current }, select: { _, _ in false },
+            replaceSelectedText: { _, _ in false }, postUnicode: { _, _ in }, mayAct: { true })
+        var effects = 0
+        var proposals = 0
+        var postActionScopeChecks = 0
+        let tools = desktopTestTools(focus: { current?.preconditionDigest ?? "no-focused-editor" },
+            textEditor: editor, perform: { _ in effects += 1 })
+        let executor = try ComputerUseDesktopExecutor(journalDirectory: directory, propose: { input in
+            proposals += 1
+            if proposals == 1 {
+                XCTAssertEqual(input.focusedTextState?.valuePrefix, "before")
+                return .init(response: "click", action: .pointer(.leftClick, .init(x: 500, y: 300)))
+            }
+            XCTAssertEqual(input.history.count, 1, "The original effect must be recorded once before fresh planning")
+            XCTAssertEqual(input.focusedTextState?.valuePrefix, "restored",
+                "After recovery, the next proposal must use a fresh editor sample")
+            return .init(response: "ready", decision: .handoff("The page is ready for review."))
+        }, surfaceScopeCheck: { _ in
+            guard effects > 0 else { return }
+            postActionScopeChecks += 1
+            if postActionScopeChecks == 2 {
+                current = ComputerUseTextSnapshot(targetID: "restored", value: "restored",
+                    selection: NSRange(location: 8, length: 0), isEditable: true, isSecure: false)
+                throw ComputerUseDesktopExecutor.Failure.scopedSurfaceChanged
+            }
+        }, screenConsentRecognizer: { _ in false })
+
+        let result = try await executor.execute(taskID: "transient-post-action-scope-loss",
+            prompt: "Open the picker", trustedUserPrompt: "Open the picker", tools: tools, progress: { _ in })
+        XCTAssertEqual(result, .userInterventionRequired("The page is ready for review."))
+        XCTAssertEqual(effects, 1, "Scope recovery must never replay the original click")
+        XCTAssertEqual(proposals, 2)
+        XCTAssertEqual(executor.diagnosticHistory.filter { $0.response == "click" }.count, 1)
+        XCTAssertGreaterThanOrEqual(postActionScopeChecks, 4,
+            "The transient invalid sample must be followed by fresh scope checks")
+    }
+
+    func testScopedDesktopBoundsRepeatedScopeOscillationDuringPostActionSettling() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        var effects = 0
+        var proposals = 0
+        var postActionScopeChecks = 0
+        let tools = desktopTestTools(perform: { _ in effects += 1 })
+        let executor = try ComputerUseDesktopExecutor(journalDirectory: directory, propose: { _ in
+            proposals += 1
+            return .init(response: "click", action: .pointer(.leftClick, .init(x: 500, y: 300)))
+        }, surfaceScopeCheck: { _ in
+            guard effects > 0 else { return }
+            postActionScopeChecks += 1
+            // The post-action outer check and sample precheck pass. Every
+            // sample's postcheck then loses scope; the immediate recovery read
+            // succeeds, exposing an oscillating retained surface.
+            if postActionScopeChecks >= 3 && (postActionScopeChecks - 3) % 3 == 0 {
+                throw ComputerUseDesktopExecutor.Failure.scopedSurfaceChanged
+            }
+        }, screenConsentRecognizer: { _ in false })
+        let run = Task {
+            try await executor.execute(taskID: "oscillating-post-action-scope", prompt: "Open the picker",
+                trustedUserPrompt: "Open the picker", tools: tools, progress: { _ in })
+        }
+        let watchdog = Task.detached {
+            try? await Task.sleep(for: .seconds(8))
+            run.cancel()
+        }
+        defer { watchdog.cancel(); run.cancel() }
+
+        do {
+            _ = try await run.value
+            XCTFail("Repeated scope oscillation must stop at the shared recovery deadline")
+        } catch ComputerUseDesktopExecutor.Failure.scopedSurfaceChanged {
+            // Expected: the recovery budget is absolute, not reset after each
+            // successful intermediate scope read.
+        } catch {
+            XCTFail("Expected bounded scope loss, not watchdog cancellation: \(error)")
+        }
+        XCTAssertEqual(effects, 1, "Recovery observation must not replay the original click")
+        XCTAssertEqual(proposals, 1, "No fresh proposal is safe while scope keeps oscillating")
+        XCTAssertGreaterThanOrEqual(postActionScopeChecks, 6)
     }
 
     func testReadOnlyWaitAcceptsRepaintAndRevalidatesFollowingClick() async throws {
@@ -4542,34 +4630,42 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: directory) }
         let release = DispatchSemaphore(value: 0)
         let finished = DispatchSemaphore(value: 0)
+        let recognitionCalls = ConsentDiagnosticCounter()
         var proposals = 0, effects = 0
         let tools = desktopTestTools(perform: { _ in effects += 1 })
+        defer { release.signal() }
         let executor = try ComputerUseDesktopExecutor(journalDirectory: directory, propose: { _ in
             proposals += 1
             return .init(response: "review", decision: .handoff("Review the current screen."))
         }, screenConsentRecognizer: { _ in
-            _ = release.wait(timeout: .now() + .seconds(1))
-            finished.signal()
+            if recognitionCalls.incrementAndRead() == 1 {
+                _ = release.wait()
+                finished.signal()
+            }
             return false
         }, screenConsentTimeout: 0.1)
-        let releaseTask = Task.detached(priority: .userInitiated) {
-            try? await Task.sleep(for: .milliseconds(350))
-            release.signal()
-        }
         let started = ContinuousClock.now
-        do {
-            _ = try await executor.execute(taskID: "screen-consent-timeout", prompt: "Review the page.",
-                trustedUserPrompt: "Review the page.", tools: tools, progress: { _ in })
-            XCTFail("A timed-out recognizer must fail closed")
-        } catch {
-            XCTAssertEqual(error as? ComputerUseObservationWorker.Failure, .timedOut)
-        }
+        let timeout = try await executor.execute(taskID: "screen-consent-timeout", prompt: "Review the page.",
+            trustedUserPrompt: "Review the page.", tools: tools, progress: { _ in })
         let elapsed = ContinuousClock.now - started
-        await releaseTask.value
+        let guidance = "Screen verification is unavailable because a previous check is still running or timed out. No further action was taken. Wait a moment, then choose Resume to verify a fresh screen."
+        XCTAssertEqual(timeout, .userInterventionRequired(guidance))
+        XCTAssertLessThan(elapsed, .milliseconds(300), "The main executor must not wait for blocked recognition")
+        let busy = try await executor.execute(taskID: "screen-consent-timeout", prompt: "Review the page.",
+            trustedUserPrompt: "Review the page.", tools: tools, progress: { _ in })
+        XCTAssertEqual(busy, .userInterventionRequired(guidance),
+            "Resume during an outstanding screen check must pause without using a cached image")
+        XCTAssertEqual(recognitionCalls.value, 1, "The busy result must not invoke another screen recognizer")
+        XCTAssertEqual(proposals, 0)
+        XCTAssertEqual(effects, 0)
+        release.signal()
         XCTAssertEqual(finished.wait(timeout: .now() + .seconds(1)), .success)
         try await waitForScreenConsentRecognizerWorker()
-        XCTAssertLessThan(elapsed, .milliseconds(300), "The main executor must not wait for blocked recognition")
-        XCTAssertEqual(proposals, 0)
+        let resumed = try await executor.execute(taskID: "screen-consent-timeout", prompt: "Review the page.",
+            trustedUserPrompt: "Review the page.", tools: tools, progress: { _ in })
+        XCTAssertEqual(resumed, .userInterventionRequired("Review the current screen."))
+        XCTAssertEqual(recognitionCalls.value, 2, "Resume must perform a fresh screen check")
+        XCTAssertEqual(proposals, 1)
         XCTAssertEqual(effects, 0)
     }
 

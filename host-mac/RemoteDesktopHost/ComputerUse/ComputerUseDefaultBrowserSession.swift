@@ -947,8 +947,14 @@ final class ComputerUseDefaultBrowserSession {
                 try tools.requireActive()
                 try Self.validate(application: app, matches: state.handler)
                 state.app = app
+                if app.bundleIdentifier == "com.apple.Safari" {
+                    recordWindowTransition("phase=startup_foreground_read")
+                }
                 let before = try await Self.waitForForegroundSnapshot(
                     app: app, tools: tools, captureWindows: captureWindows)
+                if app.bundleIdentifier == "com.apple.Safari" {
+                    recordWindowTransition("phase=startup_foreground_ready")
+                }
                 state.before = before
                 if app.bundleIdentifier == "com.apple.Safari" {
                     try tools.performNativeBrowserHostCommand(.newWindow,
@@ -957,11 +963,17 @@ final class ComputerUseDefaultBrowserSession {
                             try tools.requireActive()
                             guard try resolveHandler() == state?.handler,
                                   let state, let currentApp = state.app, currentApp == app,
-                                  let originalBefore = state.before,
-                                  try Self.sameSnapshot(originalBefore, captureWindows(currentApp)) else {
+                                  let originalBefore = state.before else {
                                 throw Failure.interrupted
                             }
+                            recordWindowTransition("phase=startup_pre_effect_read")
+                            let currentSnapshot = try captureWindows(currentApp)
+                            guard try Self.sameSnapshot(originalBefore, currentSnapshot) else {
+                                throw Failure.interrupted
+                            }
+                            recordWindowTransition("phase=startup_pre_effect_verified")
                         }
+                    recordWindowTransition("phase=startup_cmd_n_returned")
                 } else {
                     let action = ComputerUsePredictedAction.key(usage: 0x11, modifiers: 1 << 3)
                     var effectBegan = false

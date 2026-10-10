@@ -257,8 +257,15 @@ final class CoreJobAcceptanceTests: XCTestCase {
     func testGmailAcceptanceSanitizesWindowTransitionDiagnostic() {
         let generated = "phase=new_window_transition before=48 after=49 added=1 removed=0 changed=0 focused_added=1 unique_before=1 unique_after=1"
         XCTAssertEqual(Self.sanitizedSessionWindowTransitionDiagnostic(generated), generated)
+        for phase in ["startup_foreground_read", "startup_foreground_ready", "startup_pre_effect_read",
+            "startup_pre_effect_verified", "startup_cmd_n_returned"] {
+            let value = "phase=\(phase)"
+            XCTAssertEqual(Self.sanitizedSessionWindowTransitionDiagnostic(value), value)
+        }
         for rejected in [
             "https://mail.google.com/ recipient@example.com",
+            "phase=startup_foreground_ready private",
+            "phase=startup_unrecognized",
             "phase=new_window_transition before=48 after=49 added=1 removed=0 changed=0 focused_added=1 unique_before=1 unique_after=1 private",
             "phase=new_window_transition before=999999 after=49 added=1 removed=0 changed=0 focused_added=1 unique_before=1 unique_after=1",
             "phase=new_window_transition before=48 after=49 added=50 removed=0 changed=0 focused_added=1 unique_before=1 unique_after=1",
@@ -297,7 +304,8 @@ final class CoreJobAcceptanceTests: XCTestCase {
 
     func testGmailAcceptanceSanitizesDesktopRevalidationEvidence() {
         let diagnostic = Self.sanitizedDesktopRevalidationDiagnostic([
-            "blockedAt": "editor-settle-timeout", "sampleCount": "13", "tokenChangeCount": "2",
+            "blockedAt": "screen-consent-recognition", "recognitionWorkerFailure": "timedOut",
+            "sampleCount": "13", "tokenChangeCount": "2",
             "nilSampleCount": "1", "elapsedMs": "3250", "quietMs": "10",
             "pointerTargetFrame": "recipient@example.com", "sampleCountExtra": "500000",
             "approvedVisualContinuationFailure": "desktopFailure",
@@ -307,7 +315,8 @@ final class CoreJobAcceptanceTests: XCTestCase {
             "gmailFlowStage": "normalizeDrafts", "gmailNavigationStage": "waitForTarget",
             "gmailPendingFlowStage": "waitingForAttachment",
         ])
-        XCTAssertEqual(diagnostic["blockedAt"] as? String, "editor-settle-timeout")
+        XCTAssertEqual(diagnostic["blockedAt"] as? String, "screen-consent-recognition")
+        XCTAssertEqual(diagnostic["recognitionWorkerFailure"] as? String, "timedOut")
         XCTAssertEqual(diagnostic["sampleCount"] as? Int, 13)
         XCTAssertEqual(diagnostic["tokenChangeCount"] as? Int, 2)
         XCTAssertEqual(diagnostic["nilSampleCount"] as? Int, 1)
@@ -327,6 +336,7 @@ final class CoreJobAcceptanceTests: XCTestCase {
         XCTAssertEqual(diagnostic["gmailPendingFlowStage"] as? String, "waitingForAttachment")
         XCTAssertTrue(Self.sanitizedDesktopRevalidationDiagnostic([
             "blockedAt": "recipient@example.com", "sampleCount": "999999",
+            "recognitionWorkerFailure": "private text",
             "rejectedFailure": "private text", "rejectedCount": "4", "decisionKind": "https://private.invalid/",
             "completionVerificationPhase": "private text", "completionOutcomeAccepted": "yes",
             "gmailFlowStage": "recipient@example.com", "gmailNavigationStage": "private text",
@@ -1179,6 +1189,12 @@ final class CoreJobAcceptanceTests: XCTestCase {
     private static func sanitizedSessionWindowTransitionDiagnostic(_ raw: String?) -> String? {
         guard let raw, raw.utf8.count <= 256 else { return nil }
         let fields = raw.split(separator: " ", omittingEmptySubsequences: false)
+        let startupPhases: Set<String> = ["startup_foreground_read", "startup_foreground_ready",
+            "startup_pre_effect_read", "startup_pre_effect_verified", "startup_cmd_n_returned"]
+        if fields.count == 1, fields[0].hasPrefix("phase=") {
+            let phase = String(fields[0].dropFirst("phase=".count))
+            return startupPhases.contains(phase) ? raw : nil
+        }
         guard fields.count == 9, fields[0] == "phase=new_window_transition" else { return nil }
         let names = ["before", "after", "added", "removed", "changed"]
         var counts: [Int] = []
@@ -1224,6 +1240,9 @@ final class CoreJobAcceptanceTests: XCTestCase {
             if let value = raw[key], let count = Int(value), (0...4_096).contains(count) {
                 result[key] = count
             }
+        }
+        if let failure = raw["recognitionWorkerFailure"], ["timedOut", "busy"].contains(failure) {
+            result["recognitionWorkerFailure"] = failure
         }
         for key in ["elapsedMs", "quietMs"] {
             if let value = raw[key], let milliseconds = Int(value), (0...120_000).contains(milliseconds) {
@@ -1343,6 +1362,9 @@ final class CoreJobAcceptanceTests: XCTestCase {
             text: "Complete sign-in or the system permission step, then choose Resume."), "permission")
         XCTAssertEqual(Self.failureClass(outcome: intervention,
             text: "The intended browser window changed or is unavailable. Restore it, then choose Resume."), "window-lost")
+        XCTAssertEqual(Self.failureClass(outcome: intervention,
+            text: "Screen verification is unavailable because a previous check is still running or timed out. No further action was taken. Wait a moment, then choose Resume to verify a fresh screen."),
+            "timeout")
         XCTAssertEqual(Self.failureClass(outcome: intervention,
             text: "The app did not confirm the exact text edit. Check the field before continuing; the edit was not retried."),
             "text-entry")
@@ -1754,22 +1776,55 @@ final class CoreJobAcceptanceTests: XCTestCase {
             index: accountIndex)
         let reader = ComputerUseDefaultBrowserPageReader()
         var accountRevalidationFailed = false
+        var accountRevalidationFailure: String?
         var revalidatedWindowBounds = window.identity.bounds
         var retainedPageURL = page.url
+        func failAccountRevalidation(_ category: String) -> HarnessError {
+            accountRevalidationFailed = true
+            if accountRevalidationFailure == nil { accountRevalidationFailure = category }
+            return .missingEvidence("The owned Gmail page changed during the independent account proof")
+        }
         let revalidateAccountPage: @MainActor () throws -> Void = {
-            guard !Task.isCancelled,
-                  let snapshot = try? ComputerUseDefaultBrowserSession.captureWindowsForApplication(application),
-                  snapshot.application == application,
-                  snapshot.focusedWindowID == window.id,
-                  !snapshot.hasSheets, !snapshot.hasUnrecognizedSheets, snapshot.fileOpenPanel == nil,
-                  snapshot.windows.filter({ $0.id == window.id }).count == 1,
-                  let currentWindow = snapshot.windows.first(where: { $0.id == window.id }),
-                  CFEqual(currentWindow.accessibilityElement, window.accessibilityElement),
-                  let currentURL = try? reader.readRetainedPageURL(window: currentWindow.accessibilityElement,
-                    application: application, mayAct: { !Task.isCancelled }),
-                  currentURL == retainedPageURL else {
-                accountRevalidationFailed = true
-                throw HarnessError.missingEvidence("The owned Gmail page changed during the independent account proof")
+            guard !Task.isCancelled else { throw failAccountRevalidation("cancelled") }
+            let snapshot: ComputerUseDefaultBrowserSession.WindowSnapshot
+            do {
+                snapshot = try ComputerUseDefaultBrowserSession.captureWindowsForApplication(application)
+            } catch {
+                throw failAccountRevalidation("window_capture_failed")
+            }
+            guard snapshot.application == application else {
+                throw failAccountRevalidation("snapshot_application_mismatch")
+            }
+            guard snapshot.focusedWindowID == window.id else {
+                throw failAccountRevalidation("snapshot_focus_mismatch")
+            }
+            guard !snapshot.hasSheets, !snapshot.hasUnrecognizedSheets, snapshot.fileOpenPanel == nil else {
+                throw failAccountRevalidation("snapshot_sheet_or_panel_present")
+            }
+            guard snapshot.windows.filter({ $0.id == window.id }).count == 1 else {
+                throw failAccountRevalidation("retained_window_count_mismatch")
+            }
+            guard let currentWindow = snapshot.windows.first(where: { $0.id == window.id }) else {
+                throw failAccountRevalidation("retained_window_missing")
+            }
+            guard CFEqual(currentWindow.accessibilityElement, window.accessibilityElement) else {
+                throw failAccountRevalidation("retained_window_element_mismatch")
+            }
+            let currentURL: String
+            do {
+                guard let observedURL = try reader.readRetainedPageURL(window: currentWindow.accessibilityElement,
+                    application: application, mayAct: { !Task.isCancelled }) else {
+                    throw failAccountRevalidation("retained_page_url_unavailable")
+                }
+                currentURL = observedURL
+            } catch {
+                if accountRevalidationFailure == nil {
+                    _ = failAccountRevalidation("retained_page_url_read_failed")
+                }
+                throw error
+            }
+            guard currentURL == retainedPageURL else {
+                throw failAccountRevalidation("retained_page_url_mismatch")
             }
             revalidatedWindowBounds = currentWindow.identity.bounds
         }
@@ -2474,6 +2529,7 @@ final class CoreJobAcceptanceTests: XCTestCase {
                     "recipient_reacquisition_visible": reacquisitionCandidateVisible as Any? ?? NSNull(),
                     "recipient_reacquisition_unprotected": reacquisitionCandidateUnprotected as Any? ?? NSNull(),
                     "recipient_reacquisition_supports_menu": reacquisitionCandidateSupportsMenu as Any? ?? NSNull(),
+                    "account_revalidation_failure": accountRevalidationFailure ?? "none",
                     "recipient_container_count": recipientContainers.count,
                     "recipient_container_roles": recipientContainers.map(\.role),
                     "chip_candidate_ancestor_diagnostics": chipCandidateAncestorDiagnostics,
@@ -3123,6 +3179,9 @@ final class CoreJobAcceptanceTests: XCTestCase {
             return "text-entry"
         }
         if outcome == RemoteDesktopClientCore.ComputerUseTerminalOutcome.userInterventionRequired.rawValue {
+            if text?.localizedCaseInsensitiveContains("Screen verification is unavailable because a previous check is still running or timed out") == true {
+                return "timeout"
+            }
             if text?.localizedCaseInsensitiveContains("Close the covering window") == true
                 || text?.localizedCaseInsensitiveContains("Move the intended window fully onto one active display") == true
                 || text?.localizedCaseInsensitiveContains("selected Gmail account could not be confirmed") == true {
