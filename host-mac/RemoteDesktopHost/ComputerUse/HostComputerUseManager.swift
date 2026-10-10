@@ -3040,6 +3040,7 @@ final class ComputerUseHostTools {
         browserPageEvidence: ComputerUseBrowserPageEvidence?,
         nativeVisualKeyboard: Bool = false,
         nativeBrowserAddressEntryScope: ComputerUseNativeBrowserAddressEntryScope? = nil,
+        nativeBrowserAddressValueWrite: (() throws -> Void)? = nil,
         willBeginEffect: () throws -> Void
     ) async throws {
         if nativeVisualKeyboard, case .typeText(let payload) = action {
@@ -3076,7 +3077,9 @@ final class ComputerUseHostTools {
         }
         try willBeginEffect()
         if case .typeText = action {
-            if nativeVisualKeyboard, case .typeText(let payload) = action {
+            if let nativeBrowserAddressValueWrite {
+                try nativeBrowserAddressValueWrite()
+            } else if nativeVisualKeyboard, case .typeText(let payload) = action {
                 if actionPerformer != nil, textEditorOverride == nil {
                     // Preserve the explicitly injected virtual performer path.
                     try perform(action)
@@ -3338,6 +3341,37 @@ final class ComputerUseHostTools {
                                   nativeVisualKeyboard: true,
                                   nativeBrowserAddressEntryScope: scope,
                                   willBeginEffect: willBeginEffect)
+    }
+
+    func performNativeBrowserAddressValueWrite(_ payload: String,
+                                               scope: ComputerUseNativeBrowserAddressEntryScope,
+                                               fingerprint: ComputerUseApprovalFingerprint,
+                                               willBeginEffect: () throws -> Void,
+                                               writeValue: @escaping () throws -> Void) async throws {
+        guard !payload.isEmpty, payload.utf8.count <= ComputerUseTextEditor.maximumPayloadBytes,
+              !payload.unicodeScalars.contains(where: { $0.value < 0x20 || $0.value == 0x7F }) else {
+            throw ComputerUseTextEditError.valueNotRepresentable
+        }
+        if actionPerformer == nil || textEditorOverride != nil {
+            guard scope.isBoundToVerifiedSafariAddressField() else {
+                throw ComputerUseTextEditError.preconditionChanged
+            }
+        }
+        try await performApproved(.typeText(payload), fingerprint: fingerprint, browserPageEvidence: nil,
+            nativeVisualKeyboard: true, nativeBrowserAddressEntryScope: scope,
+            nativeBrowserAddressValueWrite: {
+                try self.injector.performHostEffectIfAllowed(
+                    ifAllowed: { !Task.isCancelled && self.mayAct() }) {
+                    try Task.checkCancellation()
+                    guard self.mayAct() else { throw ToolError.paused }
+                    if self.actionPerformer == nil || self.textEditorOverride != nil {
+                        guard scope.isBoundToVerifiedSafariAddressField() else {
+                            throw ComputerUseTextEditError.preconditionChanged
+                        }
+                    }
+                    try writeValue()
+                }
+            }, willBeginEffect: willBeginEffect)
     }
 
     /// Native visual text proposals use keyboard events only. The semantic

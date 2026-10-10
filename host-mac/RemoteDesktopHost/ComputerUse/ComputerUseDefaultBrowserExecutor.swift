@@ -250,6 +250,8 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
         var nativeControlErrorCodeForDiagnostics: Int?
         var gmailFieldDiagnostics: [String: String] = [:]
         var gmailNavigationPhase: String?
+        var gmailAddressValueWriteAttemptCount = 0
+        var gmailAddressValueWriteCompletedCount = 0
         enum GmailNavigationStage { case navigateTarget, waitForTarget, ready }
         enum GmailFlowStage { case compose, normalizeDrafts, waitingForDraftReopen, attach, waitingForPicker, waitingForAttachment, send, saveDraft, verifySend, verifyDraft, complete }
         struct GmailSetup {
@@ -713,6 +715,12 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
         }
         diagnostic.merge(scope.gmailFieldDiagnostics) { _, new in new }
         if let phase = scope.gmailNavigationPhase { diagnostic["gmailNavigationPhase"] = phase }
+        if scope.gmailAddressValueWriteAttemptCount > 0 {
+            diagnostic["gmailAddressValueWriteAttemptCount"] = String(scope.gmailAddressValueWriteAttemptCount)
+        }
+        if scope.gmailAddressValueWriteCompletedCount > 0 {
+            diagnostic["gmailAddressValueWriteCompletedCount"] = String(scope.gmailAddressValueWriteCompletedCount)
+        }
         if scope.gmailJob != nil {
             diagnostic["gmailFlowStage"] = String(describing: scope.gmailFlowStage)
             diagnostic["gmailNavigationStage"] = String(describing: scope.gmailNavigationStage)
@@ -1817,7 +1825,13 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
                         diagnostic: { value in
                             guard let phase = value.split(separator: " ", maxSplits: 1).first,
                                   phase.range(of: #"^phase=[a-z_]+$"#, options: .regularExpression) != nil else { return }
-                            scope.gmailNavigationPhase = String(phase)
+                            let phaseValue = String(phase)
+                            scope.gmailNavigationPhase = phaseValue
+                            if phaseValue == "phase=ax_address_value_write_latched" {
+                                scope.gmailAddressValueWriteAttemptCount += 1
+                            } else if phaseValue == "phase=ax_address_value_write_completed" {
+                                scope.gmailAddressValueWriteCompletedCount += 1
+                            }
                         })
                 } catch ComputerUseDefaultBrowserSession.Failure.browserAutomationPermissionRequired {
                     scope.gmailNavigationStage = .navigateTarget

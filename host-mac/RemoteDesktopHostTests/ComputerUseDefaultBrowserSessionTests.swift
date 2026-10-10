@@ -308,6 +308,8 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
         private var focusedReadCountAfterCommandL = 0
         private var commandLDispatched = false
         private var addressValue = "https://mail.google.com/mail/u/0/#drafts?compose=fixture"
+        private var delayedAddressValue: String?
+        private var delayedAddressValueReadsRemaining = 0
         private var selectedRange = CFRange(location: 5, length: 8)
         private(set) var nativeTypeCount = 0
         private(set) var selectAllCount = 0
@@ -352,7 +354,18 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
             selectedRange = CFRange(location: replacementRange.location + value.utf16.count, length: 0)
         }
 
+        func setAddressValue(_ value: String, partial: Bool = false, delayedReads: Int = 0) {
+            if delayedReads > 0 {
+                delayedAddressValue = value
+                delayedAddressValueReadsRemaining = delayedReads
+                return
+            }
+            addressValue = partial ? String(value.prefix(max(1, value.count / 2))) : value
+            selectedRange = CFRange(location: addressValue.utf16.count, length: 0)
+        }
+
         var currentAddressValue: String { addressValue }
+        var fieldElement: AXUIElement { field }
 
         func markCommandLDispatched() {
             commandLDispatched = true
@@ -389,7 +402,17 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                 if attribute == (kAXSubroleAttribute as String) { return "" as CFTypeRef }
                 if attribute == "AXHidden" || attribute == "AXProtectedContent" { return NSNumber(value: false) }
                 if attribute == (kAXChildrenAttribute as String) { return [] as CFArray }
-                if attribute == (kAXValueAttribute as String) { return addressValue as CFTypeRef }
+                if attribute == (kAXValueAttribute as String) {
+                    if let delayedAddressValue {
+                        if delayedAddressValueReadsRemaining > 0 {
+                            delayedAddressValueReadsRemaining -= 1
+                            return addressValue as CFTypeRef
+                        }
+                        addressValue = delayedAddressValue
+                        self.delayedAddressValue = nil
+                    }
+                    return addressValue as CFTypeRef
+                }
                 if attribute == (kAXSelectedTextRangeAttribute as String) {
                     var range = selectedRange
                     return AXValueCreate(.cfRange, &range)
@@ -2972,7 +2995,11 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
 
     @MainActor
     func testValidationRecapturesOneTransientWindowsReadBeforeApplyingRetainedWindowGuards() async throws {
-        for scenario in ["transient-picker", "persistent", "replaced-window", "authentication-sheet", "cancelled", "revoked-gate"] {
+        for scenario in ["transient-picker", "two-transient-picker", "transient-focused-picker",
+                         "two-transient-focused-picker", "persistent", "persistent-focused-read",
+                         "replaced-window", "authentication-sheet", "nonqualifying-error",
+                         "nonqualifying-focused-error", "missing-focus", "cancelled", "cancelled-after-second",
+                         "revoked-gate", "revoked-gate-after-second"] {
             let fixture = try Fixture()
             defer { try? FileManager.default.removeItem(at: fixture.root) }
             var injectFailure = false
@@ -2982,12 +3009,38 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
             let session = try fixture.session(retainedWindowCapture: { identity, expected in
                 guard injectFailure else { return fixture.desktop.snapshot(application: identity) }
                 captureAttempts += 1
-                if captureAttempts == 1 || scenario == "persistent" {
+                let repeatedTransient = scenario == "two-transient-picker" || scenario == "cancelled-after-second"
+                    || scenario == "revoked-gate-after-second" || scenario == "two-transient-focused-picker"
+                let focusedRead = scenario.contains("focused")
+                let persistentRead = scenario == "persistent" || scenario == "persistent-focused-read"
+                if !["nonqualifying-error", "nonqualifying-focused-error", "missing-focus"].contains(scenario)
+                    && (captureAttempts == 1 || persistentRead || (repeatedTransient && captureAttempts <= 2)) {
+                    captureReason = focusedRead ? "focused_window_read" : "windows_read"
+                    captureAXError = Int(AXError.cannotComplete.rawValue)
+                    if scenario == "cancelled" || (scenario == "cancelled-after-second" && captureAttempts == 2) {
+                        withUnsafeCurrentTask { $0?.cancel() }
+                    }
+                    if scenario == "revoked-gate" || (scenario == "revoked-gate-after-second" && captureAttempts == 2) {
+                        fixture.desktop.isActive = false
+                    }
+                    throw ComputerUseDefaultBrowserSession.Failure.targetLost
+                }
+                if scenario == "nonqualifying-error" {
                     captureReason = "windows_read"
                     captureAXError = Int(AXError.cannotComplete.rawValue)
-                    if scenario == "cancelled" { withUnsafeCurrentTask { $0?.cancel() } }
-                    if scenario == "revoked-gate" { fixture.desktop.isActive = false }
+                    throw ComputerUseDefaultBrowserSession.Failure.ambiguousWindows
+                }
+                if scenario == "nonqualifying-focused-error" {
+                    captureReason = "focused_window_read"
+                    captureAXError = Int(AXError.noValue.rawValue)
                     throw ComputerUseDefaultBrowserSession.Failure.targetLost
+                }
+                if scenario == "missing-focus" {
+                    captureReason = nil
+                    captureAXError = nil
+                    let snapshot = fixture.desktop.snapshot(application: identity)
+                    return .init(application: identity, windows: snapshot.windows, focusedWindowID: nil,
+                        hasSheets: snapshot.hasSheets)
                 }
                 captureReason = nil
                 captureAXError = nil
@@ -3007,44 +3060,53 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                 }
             }, captureDiagnosticProvider: { captureReason },
                 captureDiagnosticAXErrorProvider: { captureAXError })
-            let taskID = "task-(scenario)"
+            let taskID = "task-\(scenario)"
             let goal = "Use the default browser"
             let target = try await session.ensure(taskID: taskID, goal: goal, tools: fixture.tools)
-            if scenario == "transient-picker" {
+            if ["transient-picker", "two-transient-picker", "transient-focused-picker",
+                "two-transient-focused-picker"].contains(scenario) {
                 fixture.desktop.fileOpenPanel = fixture.fileOpenPanel(parentWindowID: target.id,
                     bounds: CGRect(x: 200, y: 120, width: 640, height: 440), focused: true)
             }
             let initialInputCount = fixture.desktop.keyCount
             injectFailure = true
 
-            if scenario == "transient-picker" {
+            if scenario == "transient-picker" || scenario == "transient-focused-picker" {
                 try session.validate(taskID: taskID, goal: goal, tools: fixture.tools)
                 XCTAssertEqual(captureAttempts, 2)
                 XCTAssertEqual(session.currentFileOpenPanel?.parentWindowID, target.id)
                 XCTAssertEqual(fixture.desktop.keyCount, initialInputCount,
                     "Validation recovery must not dispatch another action")
-            } else if scenario == "cancelled" {
+            } else if scenario == "cancelled" || scenario == "cancelled-after-second" {
                 let validation = Task { @MainActor in
                     try session.validate(taskID: taskID, goal: goal, tools: fixture.tools)
                 }
                 do {
                     try await validation.value
-                    XCTFail("A cancelled validation must not recapture the retained window")
+                    XCTFail("A cancelled validation must not perform another retained-window capture")
                 } catch is CancellationError {
                 } catch {
                     XCTFail("Cancellation must win over the injected capture failure: \(error)")
                 }
-                XCTAssertEqual(captureAttempts, 1)
-            } else if scenario == "revoked-gate" {
+                XCTAssertEqual(captureAttempts, scenario == "cancelled" ? 1 : 2)
+            } else if scenario == "revoked-gate" || scenario == "revoked-gate-after-second" {
                 XCTAssertThrowsError(try session.validate(taskID: taskID, goal: goal, tools: fixture.tools)) { error in
                     XCTAssertEqual(error.localizedDescription,
                         ComputerUseHostTools.ToolError.paused.localizedDescription)
                 }
-                XCTAssertEqual(captureAttempts, 1)
+                XCTAssertEqual(captureAttempts, scenario == "revoked-gate" ? 1 : 2)
+            } else if scenario == "two-transient-picker" || scenario == "two-transient-focused-picker" {
+                try session.validate(taskID: taskID, goal: goal, tools: fixture.tools)
+                XCTAssertEqual(captureAttempts, 3, "Two failed reads must be followed by one fresh recognized-picker proof")
+                XCTAssertEqual(session.currentFileOpenPanel?.parentWindowID, target.id)
+                XCTAssertEqual(fixture.desktop.keyCount, initialInputCount,
+                    "Repeated read recovery must never dispatch another action")
             } else {
                 XCTAssertThrowsError(try session.validate(taskID: taskID, goal: goal, tools: fixture.tools))
-                XCTAssertEqual(captureAttempts, 2,
-                    "A qualifying capture error gets one fresh snapshot before unchanged identity and sheet guards")
+                let expectedAttempts = (scenario == "persistent" || scenario == "persistent-focused-read") ? 3
+                    : ["nonqualifying-error", "nonqualifying-focused-error", "missing-focus"].contains(scenario) ? 1 : 2
+                XCTAssertEqual(captureAttempts, expectedAttempts,
+                    "Capture recovery stays bounded and unchanged identity/sheet guards still decide")
                 if scenario == "authentication-sheet" {
                     XCTAssertNil(session.currentFileOpenPanel)
                 }
@@ -3072,7 +3134,7 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
         XCTAssertEqual(targetAwareCaptures, capturesAfterEnsure)
     }
 
-    func testSafariNavigationLatchRetriesOnlyBeforeNativeURLTypingBegins() async throws {
+    func testSafariNavigationLatchRetriesOnlyBeforeAXValueWriteBegins() async throws {
         let destination = try XCTUnwrap(URL(string: "https://mail.google.com/mail/u/0/#inbox"))
 
         for scenario in ["pre-write-authority", "uncertain-write", "delayed-focus", "never-focused",
@@ -3107,6 +3169,7 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
             var focusDispatches = 0
             var selectionDispatches = 0
             var returnDispatches = 0
+            var addressValueWriteCount = 0
             var transientCaptureFailures = 0
             var captureReason: String?
             var captureAXErrorCode: Int?
@@ -3174,7 +3237,16 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                 },
                 safariAddressBarAX: .init(read: { graph.read($0, $1) },
                     processIdentifier: { _ in pid },
-                    valueIsSettable: { graph.isSettable($0) }),
+                    valueIsSettable: { graph.isSettable($0) },
+                    setValue: { value, element in
+                        guard CFEqual(element, graph.fieldElement), let value = value as? String else {
+                            return .invalidUIElement
+                        }
+                        addressValueWriteCount += 1
+                        guard scenario != "uncertain-write" else { return .cannotComplete }
+                        graph.setAddressValue(value)
+                        return .success
+                    }),
                 captureDiagnosticProvider: { captureReason },
                 captureDiagnosticAXErrorProvider: { captureAXErrorCode })
 
@@ -3190,8 +3262,9 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                 XCTAssertEqual(firstDiagnostics.last, "phase=ax_navigation_dispatched")
                 XCTAssertEqual(focusDispatches, 1, "A delayed focus must follow exactly one Cmd-L dispatch")
                 XCTAssertEqual(returnDispatches, 1)
-                XCTAssertEqual(selectionDispatches, 1)
-                XCTAssertEqual(graph.nativeTypeCount, 1)
+                XCTAssertEqual(addressValueWriteCount, 1)
+                XCTAssertEqual(selectionDispatches, 0)
+                XCTAssertEqual(graph.nativeTypeCount, 0)
                 XCTAssertEqual(graph.currentAddressValue, destination.absoluteString)
                 if scenario == "transient-bounds-read" {
                     XCTAssertEqual(transientCaptureFailures, 1, "Only one exact transient bounds failure is recovered")
@@ -3205,8 +3278,7 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                 } catch let error as ComputerUseHostTools.ToolError where scenario == "inactive-after-focus" {
                     XCTAssertEqual(error.localizedDescription, ComputerUseHostTools.ToolError.paused.localizedDescription)
                 } catch let failure as ComputerUseDefaultBrowserSession.Failure {
-                    XCTAssertEqual(failure, scenario == "uncertain-write" ? .interrupted
-                        : scenario == "persistent-bounds-read" ? .ambiguousWindows : .targetLost)
+                    XCTAssertEqual(failure, scenario == "persistent-bounds-read" ? .ambiguousWindows : .targetLost)
                 }
             }
             if scenario == "never-focused" {
@@ -3230,13 +3302,14 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
             }
             if scenario == "inactive-after-focus" {
                 XCTAssertEqual(graph.nativeTypeCount, 0, "Inactive state after focus observation must block URL typing")
-                XCTAssertFalse(firstDiagnostics.contains("phase=native_url_entry_latched"),
-                    "The URL must remain retryable until typing begins")
+                XCTAssertFalse(firstDiagnostics.contains("phase=ax_address_value_write_latched"),
+                    "The URL must remain retryable until the AX write begins")
                 graph.reactivate()
                 try await session.navigateRetainedSafariTab(to: destination, taskID: taskID, goal: goal,
                     tools: tools)
-                XCTAssertEqual(selectionDispatches, 1)
-                XCTAssertEqual(graph.nativeTypeCount, 1, "A later active retry must be allowed to type once")
+                XCTAssertEqual(addressValueWriteCount, 1)
+                XCTAssertEqual(selectionDispatches, 0)
+                XCTAssertEqual(graph.nativeTypeCount, 0, "A later active retry must write once")
                 XCTAssertEqual(returnDispatches, 1)
                 continue
             }
@@ -3255,32 +3328,41 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                 XCTAssertTrue(retryDiagnostics.contains("phase=address_field_not_found"))
                 XCTAssertFalse(retryDiagnostics.contains("phase=already_latched"))
                 XCTAssertEqual(focusDispatches, 1, "Location editing activates before changed write authority is rejected")
+                XCTAssertEqual(addressValueWriteCount, 0)
                 XCTAssertEqual(graph.nativeTypeCount, 0)
             } else if scenario == "never-focused" {
                 XCTAssertTrue(firstDiagnostics.contains("phase=address_field_not_focused_before_navigation"))
                 XCTAssertTrue(retryDiagnostics.contains("phase=address_field_not_focused_before_navigation"))
                 XCTAssertEqual(focusDispatches, 2, "A fresh Resume may dispatch one Cmd-L in its own invocation")
+                XCTAssertEqual(addressValueWriteCount, 0)
                 XCTAssertEqual(graph.nativeTypeCount, 0)
             } else if scenario == "uncertain-write" {
-                XCTAssertTrue(firstDiagnostics.contains("phase=native_url_entry_latched"))
+                XCTAssertTrue(firstDiagnostics.contains("phase=ax_address_value_write_latched"))
                 XCTAssertEqual(retryDiagnostics.last, "phase=already_latched")
-                XCTAssertEqual(graph.nativeTypeCount, 1)
-                XCTAssertEqual(selectionDispatches, 1)
+                XCTAssertEqual(addressValueWriteCount, 1)
+                XCTAssertEqual(graph.nativeTypeCount, 0)
+                XCTAssertEqual(selectionDispatches, 0)
                 XCTAssertEqual(returnDispatches, 0)
             } else {
-                XCTAssertTrue(firstDiagnostics.contains("phase=address_select_all_readback_failed"))
+                XCTAssertTrue(firstDiagnostics.contains("phase=ax_address_value_write_latched"))
                 XCTAssertEqual(retryDiagnostics.last, "phase=already_latched")
-                XCTAssertEqual(graph.nativeTypeCount, 1)
+                XCTAssertEqual(addressValueWriteCount, 1)
+                XCTAssertEqual(graph.nativeTypeCount, 0)
             }
         }
     }
 
-    func testSafariNavigationUsesNativeURLTypingAndDoesNotReplayUncertainDispatch() async throws {
+    func testSafariNavigationUsesScopedAXValueWriteAndDoesNotReplayUncertainDispatch() async throws {
         let inboxDestination = try XCTUnwrap(URL(string: "https://mail.google.com/mail/u/0/#inbox"))
 
-        for scenario in ["success", "selection-refusal", "uncertain-native-typing", "uncertain-native-return",
+        for scenario in ["success", "uncertain-ax-write", "uncertain-native-return",
                          "focus-pre-effect-retry", "focus-persistent-rejection", "focus-post-effect-rejection",
-                         "focus-gate-revoked", "focus-cancelled", "drafts-success"] {
+                         "focus-gate-revoked", "focus-cancelled", "drafts-success",
+                         "ax-setter-gate-revoked",
+                         "ax-setter-delayed-readback", "ax-setter-gate-revoked-after-write",
+                         "ax-setter-cancelled-after-write", "ax-setter-readback-timeout",
+                         "ax-setter-unsupported", "ax-setter-changed-authority", "ax-setter-changed-value",
+                         "ax-setter-error", "ax-setter-partial"] {
             let destination = scenario == "drafts-success"
                 ? try XCTUnwrap(URL(string: "https://mail.google.com/mail/u/0/#drafts")) : inboxDestination
             let root = FileManager.default.temporaryDirectory
@@ -3296,7 +3378,8 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                 processIdentifier: pid, launchGeneration: 1, codeIdentity: code))
             let handler = ComputerUseDefaultBrowserTarget.Handler(
                 bundleURL: URL(fileURLWithPath: bundlePath), bundleIdentifier: "com.apple.Safari")
-            let graph = SafariAddressBarAXGraph(processIdentifier: pid, writableValues: [], defaultWritable: true)
+            let graph = SafariAddressBarAXGraph(processIdentifier: pid, writableValues: [],
+                defaultWritable: scenario != "ax-setter-unsupported")
             let existing = ComputerUseDefaultBrowserSession.Window(id: "existing", application: app,
                 accessibilityElement: AXUIElementCreateApplication(pid + 199),
                 identity: .init(applicationProcessIdentifier: pid, accessibilityWindowHash: 40,
@@ -3308,9 +3391,21 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
             var active = true
             var selectionDispatches = 0
             var returnDispatches = 0
+            var axValueWrites = 0
+            var typeTargetReads = 0
             var nativeNavigationEffects: [String] = []
             let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { active && graph.isActive },
                 approvalTargetProvider: { action in
+                    if case .typeText(_) = action {
+                        typeTargetReads += 1
+                        if scenario == "ax-setter-changed-authority" && typeTargetReads == 2 {
+                            return .init(context: "Safari focused window", applicationID: app.bundleIdentifier,
+                                accessibilityIdentity: "changed-safari-window")
+                        }
+                        if scenario == "ax-setter-changed-value" && typeTargetReads == 2 {
+                            graph.setAddressValue("https://mail.google.com/mail/u/0/#changed")
+                        }
+                    }
                     if case .key(let usage, let modifiers) = action, usage == 0x0F, modifiers == (1 << 3) {
                         focusTargetReads += 1
                         let targetRead = focusTargetReads
@@ -3345,15 +3440,10 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                     case .key(let usage, let modifiers) where usage == 0x04 && modifiers == (1 << 3):
                         selectionDispatches += 1
                         nativeNavigationEffects.append("CmdA")
-                        if scenario != "selection-refusal" || selectionDispatches > 1 {
-                            graph.selectAll()
-                        }
+                        graph.selectAll()
                     case .typeText(let value):
                         nativeNavigationEffects.append("type")
                         graph.recordNativeTyping(value)
-                        if scenario == "uncertain-native-typing" {
-                            throw ComputerUseDefaultBrowserSession.Failure.interrupted
-                        }
                     case .key(let usage, let modifiers) where usage == 0x28 && modifiers == 0:
                         returnDispatches += 1
                         nativeNavigationEffects.append("Return")
@@ -3384,7 +3474,19 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                 },
                 safariAddressBarAX: .init(read: { graph.read($0, $1) },
                     processIdentifier: { _ in pid },
-                    valueIsSettable: { graph.isSettable($0) }))
+                    valueIsSettable: { graph.isSettable($0) },
+                    setValue: { value, element in
+                        guard CFEqual(element, graph.fieldElement), let value = value as? String else {
+                            return .invalidUIElement
+                        }
+                        axValueWrites += 1
+                        nativeNavigationEffects.append("AXSetValue")
+                        graph.setAddressValue(value, partial: scenario == "ax-setter-partial",
+                            delayedReads: scenario == "ax-setter-delayed-readback" ? 2
+                                : scenario == "ax-setter-readback-timeout" ? Int.max : 0)
+                        return (scenario == "ax-setter-error" || scenario == "uncertain-ax-write")
+                            ? .cannotComplete : .success
+                    }))
 
             _ = try await session.ensure(taskID: "task-\(scenario)", goal: "Open the signed-in Gmail inbox.", tools: tools)
 
@@ -3398,9 +3500,10 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                     if scenario == "focus-pre-effect-retry" {
                         XCTAssertEqual(focusDispatches, 1, "One pre-effect fingerprint retry must dispatch Cmd-L once")
                         XCTAssertEqual(focusTargetReads, 4)
-                        XCTAssertEqual(graph.nativeTypeCount, 1)
+                        XCTAssertEqual(axValueWrites, 1)
+                        XCTAssertEqual(graph.nativeTypeCount, 0)
                         XCTAssertEqual(returnDispatches, 1)
-                        XCTAssertEqual(nativeNavigationEffects, ["CmdL", "CmdA", "type", "Return"])
+                        XCTAssertEqual(nativeNavigationEffects, ["CmdL", "AXSetValue", "Return"])
                     } else {
                         XCTFail("The injected focus failure must stop navigation for \(scenario)")
                     }
@@ -3423,38 +3526,140 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                 }
                 if scenario != "focus-pre-effect-retry" {
                     XCTAssertEqual(graph.nativeTypeCount, 0, "A failed focus action must not type the destination")
+                    XCTAssertEqual(axValueWrites, 0, "A failed focus action must not write the address value")
                     XCTAssertEqual(selectionDispatches, 0)
                     XCTAssertEqual(returnDispatches, 0)
                 }
                 continue
             }
 
-            if scenario == "selection-refusal" {
-                var firstDiagnostics: [String] = []
+            if scenario.hasPrefix("ax-setter-") && scenario != "ax-setter-gate-revoked" {
+                var navigationError: Error?
+                var navigationDiagnostics: [String] = []
+                if scenario == "ax-setter-cancelled-after-write" {
+                    let navigation = Task { @MainActor in
+                        try await session.navigateRetainedSafariTab(to: destination, taskID: "task-\(scenario)",
+                            goal: "Open the signed-in Gmail inbox.", tools: tools,
+                            diagnostic: { value in
+                                navigationDiagnostics.append(value)
+                                if value == "phase=ax_address_value_write_completed" {
+                                    withUnsafeCurrentTask { $0?.cancel() }
+                                }
+                            })
+                    }
+                    do { try await navigation.value } catch { navigationError = error }
+                } else {
+                    do {
+                        try await session.navigateRetainedSafariTab(to: destination, taskID: "task-\(scenario)",
+                            goal: "Open the signed-in Gmail inbox.", tools: tools,
+                            diagnostic: { value in
+                                navigationDiagnostics.append(value)
+                                if scenario == "ax-setter-gate-revoked-after-write",
+                                   value == "phase=ax_address_value_write_completed" { active = false }
+                            })
+                    } catch {
+                        navigationError = error
+                    }
+                }
+                if scenario == "ax-setter-delayed-readback" {
+                    XCTAssertNil(navigationError, "Transient AX read lag should be observed until exact URL is present")
+                    XCTAssertEqual(axValueWrites, 1, "Readback polling must never repeat the setter")
+                    XCTAssertEqual(returnDispatches, 1, "Return requires fresh exact value proof")
+                    XCTAssertEqual(graph.currentAddressValue, destination.absoluteString)
+                    continue
+                }
+                if scenario == "ax-setter-readback-timeout" {
+                    XCTAssertNotNil(navigationError, "Unconfirmed value must time out without pressing Return")
+                    XCTAssertTrue(navigationDiagnostics.contains("phase=ax_address_value_readback_deadline"))
+                    XCTAssertEqual(axValueWrites, 1)
+                    XCTAssertEqual(returnDispatches, 0)
+                    continue
+                }
+                if scenario == "ax-setter-gate-revoked-after-write"
+                    || scenario == "ax-setter-cancelled-after-write" {
+                    XCTAssertNotNil(navigationError, "Revocation after the setter must stop before Return")
+                    XCTAssertEqual(axValueWrites, 1)
+                    XCTAssertEqual(returnDispatches, 0)
+                    XCTAssertEqual(graph.nativeTypeCount, 0)
+                    continue
+                }
+                if scenario == "ax-setter-unsupported" || scenario == "ax-setter-changed-authority"
+                            || scenario == "ax-setter-changed-value" {
+                    XCTAssertNotNil(navigationError)
+                    if scenario == "ax-setter-changed-authority" {
+                        XCTAssertEqual(typeTargetReads, 2,
+                            "The target changes only at the fresh pre-effect fingerprint read")
+                    }
+                    XCTAssertEqual(axValueWrites, 0, "Unsupported or changed write authority must not call AX setValue")
+                    XCTAssertEqual(graph.nativeTypeCount, 0)
+                    XCTAssertEqual(selectionDispatches, 0)
+                    XCTAssertEqual(returnDispatches, 0)
+                } else {
+                    XCTAssertNotNil(navigationError, "A failed or partial AX write must stop navigation")
+                    XCTAssertEqual(axValueWrites, 1)
+                    XCTAssertEqual(graph.nativeTypeCount, 0, "A failed AX write must never fall back to typing")
+                    XCTAssertEqual(returnDispatches, 0, "Return requires an exact successful value readback")
+                    if scenario == "ax-setter-partial" {
+                        XCTAssertTrue(navigationDiagnostics.contains("phase=ax_address_value_readback_value_mismatch"))
+                    }
+                }
+                continue
+            }
+
+            if scenario == "ax-setter-gate-revoked" {
                 do {
                     try await session.navigateRetainedSafariTab(to: destination, taskID: "task-\(scenario)",
                         goal: "Open the signed-in Gmail inbox.", tools: tools,
-                        diagnostic: { firstDiagnostics.append($0) })
-                    XCTFail("A partial selection readback must block URL typing")
+                        diagnostic: { value in
+                            if value == "phase=ax_address_value_write_latched" { active = false }
+                        })
+                    XCTFail("A revoked host-effect gate must block the AX write")
+                } catch { }
+                XCTAssertEqual(axValueWrites, 0, "The injector gate must guard the AX mutation itself")
+                XCTAssertEqual(returnDispatches, 0)
+                XCTAssertEqual(graph.nativeTypeCount, 0)
+                active = true
+                do {
+                    try await session.navigateRetainedSafariTab(to: destination, taskID: "task-\(scenario)",
+                        goal: "Open the signed-in Gmail inbox.", tools: tools)
+                    XCTFail("A latched URL write must not be retried after gate recovery")
+                } catch let failure as ComputerUseDefaultBrowserSession.Failure {
+                    XCTAssertEqual(failure, .targetLost)
+                }
+                XCTAssertEqual(axValueWrites, 0)
+                XCTAssertEqual(returnDispatches, 0)
+                continue
+            }
+
+            if scenario == "uncertain-ax-write" {
+                do {
+                    try await session.navigateRetainedSafariTab(to: destination, taskID: "task-\(scenario)",
+                        goal: "Open the signed-in Gmail inbox.", tools: tools)
+                    XCTFail("An uncertain AX write must stop navigation")
                 } catch {}
-                XCTAssertTrue(firstDiagnostics.contains("phase=address_select_all_readback_failed"))
-                XCTAssertFalse(firstDiagnostics.contains("phase=native_url_entry_latched"),
-                    "Selection uncertainty must leave the destination retryable")
+                XCTAssertEqual(axValueWrites, 1)
                 XCTAssertEqual(graph.nativeTypeCount, 0)
                 XCTAssertEqual(returnDispatches, 0)
-                try await session.navigateRetainedSafariTab(to: destination, taskID: "task-\(scenario)",
-                    goal: "Open the signed-in Gmail inbox.", tools: tools)
-                XCTAssertEqual(selectionDispatches, 2)
-                XCTAssertEqual(graph.nativeTypeCount, 1)
-                XCTAssertEqual(returnDispatches, 1)
+                do {
+                    try await session.navigateRetainedSafariTab(to: destination, taskID: "task-\(scenario)",
+                        goal: "Open the signed-in Gmail inbox.", tools: tools,
+                        diagnostic: { _ in })
+                    XCTFail("An uncertain AX write must never be retried")
+                } catch let failure as ComputerUseDefaultBrowserSession.Failure {
+                    XCTAssertEqual(failure, .targetLost)
+                }
+                XCTAssertEqual(axValueWrites, 1)
+                XCTAssertEqual(graph.nativeTypeCount, 0)
+                XCTAssertEqual(returnDispatches, 0)
             } else if scenario == "success" || scenario == "drafts-success" {
                 try await session.navigateRetainedSafariTab(to: destination, taskID: "task-\(scenario)",
                     goal: "Open the signed-in Gmail inbox.", tools: tools)
-                XCTAssertEqual(graph.nativeTypeCount, 1, "The destination must be entered through native keyboard input once")
+                XCTAssertEqual(axValueWrites, 1, "The verified address field should receive one scoped AX write")
+                XCTAssertEqual(graph.nativeTypeCount, 0, "AX write success must not fall back to keyboard typing")
                 XCTAssertEqual(graph.currentAddressValue, destination.absoluteString)
-                XCTAssertEqual(selectionDispatches, 1, "A nonempty address must be explicitly selected before replacement")
+                XCTAssertEqual(selectionDispatches, 0, "Whole-value AX replacement does not need keyboard selection")
                 XCTAssertEqual(focusDispatches, 1, "Cmd-L must activate Safari's location editor even when AX focus already names the address field")
-                XCTAssertEqual(nativeNavigationEffects, ["CmdL", "CmdA", "type", "Return"])
+                XCTAssertEqual(nativeNavigationEffects, ["CmdL", "AXSetValue", "Return"])
                 func mayRearm(to target: URL, observed: URL) throws -> Bool {
                     try session.rearmStableGmailNavigationRetry(to: target, observedPageURL: observed,
                         accountIndex: 0, taskID: "task-\(scenario)", goal: "Open the signed-in Gmail inbox.", tools: tools)
@@ -3530,12 +3735,13 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                     "A completed canonical navigation may receive one retry after a same-account mismatch")
                 try await session.navigateRetainedSafariTab(to: destination, taskID: "task-\(scenario)",
                     goal: "Open the signed-in Gmail inbox.", tools: tools)
-                XCTAssertEqual(graph.nativeTypeCount, 2, "The retry must perform one complete second URL entry")
-                XCTAssertEqual(selectionDispatches, 2)
+                XCTAssertEqual(axValueWrites, 2, "The retry must perform one complete second URL entry")
+                XCTAssertEqual(graph.nativeTypeCount, 0)
+                XCTAssertEqual(selectionDispatches, 0)
                 XCTAssertEqual(focusDispatches, 2)
                 XCTAssertEqual(returnDispatches, 2)
-                XCTAssertEqual(nativeNavigationEffects, ["CmdL", "CmdA", "type", "Return",
-                    "CmdL", "CmdA", "type", "Return"])
+                XCTAssertEqual(nativeNavigationEffects, ["CmdL", "AXSetValue", "Return",
+                    "CmdL", "AXSetValue", "Return"])
                 XCTAssertFalse(try mayRearm(to: destination, observed: mismatchURL),
                     "A navigation URL may be rearmed only once")
                 do {
@@ -3545,8 +3751,9 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                 } catch let failure as ComputerUseDefaultBrowserSession.Failure {
                     XCTAssertEqual(failure, .targetLost)
                 }
-                XCTAssertEqual(graph.nativeTypeCount, 2)
-                XCTAssertEqual(selectionDispatches, 2)
+                XCTAssertEqual(axValueWrites, 2)
+                XCTAssertEqual(graph.nativeTypeCount, 0)
+                XCTAssertEqual(selectionDispatches, 0)
                 XCTAssertEqual(focusDispatches, 2)
                 XCTAssertEqual(returnDispatches, 2)
                 retained = .init(id: "replacement", application: app, accessibilityElement: graph.window,
@@ -3560,9 +3767,10 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                         goal: "Open the signed-in Gmail inbox.", tools: tools)
                     XCTFail("An uncertain native typing dispatch must stop navigation")
                 } catch {}
-                XCTAssertEqual(graph.nativeTypeCount, 1)
+                XCTAssertEqual(axValueWrites, 1)
+                XCTAssertEqual(graph.nativeTypeCount, 0)
                 XCTAssertEqual(graph.currentAddressValue, destination.absoluteString)
-                XCTAssertEqual(selectionDispatches, 1)
+                XCTAssertEqual(selectionDispatches, 0)
                 XCTAssertEqual(returnDispatches, scenario == "uncertain-native-return" ? 1 : 0,
                     "Return must not follow an uncertain URL typing dispatch")
                 let observedDraftsURL = try XCTUnwrap(URL(string: "https://mail.google.com/mail/u/0/#drafts"))
@@ -3577,7 +3785,7 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                 } catch let failure as ComputerUseDefaultBrowserSession.Failure {
                     XCTAssertEqual(failure, .targetLost)
                 }
-                XCTAssertEqual(graph.nativeTypeCount, 1)
+                XCTAssertEqual(graph.nativeTypeCount, 0)
                 XCTAssertEqual(returnDispatches, scenario == "uncertain-native-return" ? 1 : 0)
             }
         }
@@ -3795,13 +4003,13 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
             "Fresh startup windows continue to use validated Safari UUIDs")
     }
 
-    func testOptInSafariHostNavigationUsesOwnedWindowAndGmailInboxOnly() async throws {
+    func testOptInSafariHostNavigationUsesOwnedWindowForGmailInboxAndDrafts() async throws {
         guard ProcessInfo.processInfo.environment["RUN_DEFAULT_BROWSER_AX_NAVIGATION_PROBE"] == "1" else {
-            throw XCTSkip("Set RUN_DEFAULT_BROWSER_AX_NAVIGATION_PROBE=1 for an inbox-only Safari navigation check.")
+            throw XCTSkip("Set RUN_DEFAULT_BROWSER_AX_NAVIGATION_PROBE=1 for the read-only Gmail Inbox-to-Drafts Safari check.")
         }
         let handler = try XCTUnwrap(ComputerUseDefaultBrowserTarget.currentDefaultHTTPSHandler())
         guard handler.bundleIdentifier == "com.apple.Safari" else {
-            throw XCTSkip("The inbox-only host-navigation check is limited to the default Safari app.")
+            throw XCTSkip("The host-navigation check is limited to the default Safari app.")
         }
         let journal = FileManager.default.temporaryDirectory
             .appendingPathComponent("SafariHostNavigation-\(UUID().uuidString)", isDirectory: true)
@@ -3835,7 +4043,12 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
         }
         let accountRoot = try XCTUnwrap(URL(string: "https://mail.google.com/mail/u/0/"))
         let inbox = try XCTUnwrap(URL(string: "https://mail.google.com/mail/u/0/#inbox"))
+        let drafts = try XCTUnwrap(URL(string: "https://mail.google.com/mail/u/0/#drafts"))
         var diagnostics: [String] = []
+        var inboxNavigationDiagnostics: [String] = []
+        var draftsNavigationDiagnostics: [String] = []
+        let typingDiagnosticBeforeInbox = tools.nativeVisualTypingDiagnostic
+        var typingDiagnosticAfterInbox: [String: String]?
         var screenEvidence = Self.sanitizedVisibleWindowEvidence(window: target.accessibilityElement,
             application: target.application)
         do {
@@ -3847,6 +4060,8 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
             screenEvidence["current_screen"] = "other_error"
         }
         var reachedInbox = false
+        var reachedDrafts = false
+        var typingDiagnosticBeforeDrafts: [String: String]?
         defer {
             let typingDiagnostic = tools.nativeVisualTypingDiagnostic
             for key in ["stage", "failureType", "attemptedStrokes", "completedStrokes", "snapshotAvailable",
@@ -3857,7 +4072,46 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                     screenEvidence["native_typing_\(key)"] = value
                 }
             }
-            Self.writeNavigationProbeResultIfRequested(success: reachedInbox,
+            if let typingDiagnosticBeforeDrafts,
+               typingDiagnosticBeforeDrafts != typingDiagnostic {
+                for key in ["stage", "failureType", "attemptedStrokes", "completedStrokes", "snapshotAvailable",
+                            "samePhysicalTarget", "sameApplication", "sameWindow", "sameElement", "sameDocument", "sameFrame", "sameRole", "sameWebClassification", "selectionLocation", "selectionLength", "expectedLocation",
+                            "editable", "secure", "cancelled", "mayActAtLastSuccessfulCheck", "deadlineExceeded",
+                            "elapsedMilliseconds"] {
+                    if let value = typingDiagnostic[key] {
+                        screenEvidence["drafts_native_typing_\(key)"] = value
+                    }
+                }
+            }
+            screenEvidence["drafts_navigation_route_reached"] = reachedDrafts ? "true" : "false"
+            screenEvidence["inbox_navigation_route_reached"] = reachedInbox ? "true" : "false"
+            screenEvidence["inbox_navigation_ax_write_latched_count"] = String(
+                inboxNavigationDiagnostics.filter { $0 == "phase=ax_address_value_write_latched" }.count)
+            screenEvidence["inbox_navigation_ax_write_completed_count"] = String(
+                inboxNavigationDiagnostics.filter { $0 == "phase=ax_address_value_write_completed" }.count)
+            screenEvidence["inbox_navigation_ax_readback_verified_count"] = String(
+                inboxNavigationDiagnostics.filter { $0 == "phase=ax_address_value_readback_verified" }.count)
+            screenEvidence["inbox_navigation_return_completed_count"] = String(
+                inboxNavigationDiagnostics.filter { $0 == "phase=ax_navigation_dispatched" }.count)
+            screenEvidence["inbox_navigation_return_failure_count"] = String(
+                inboxNavigationDiagnostics.filter { $0 == "phase=return_dispatch_failed" }.count)
+            let inboxKeyboardStrokeCount = typingDiagnosticAfterInbox == typingDiagnosticBeforeInbox
+                ? 0 : Int(typingDiagnosticAfterInbox?["completedStrokes"] ?? "") ?? 0
+            screenEvidence["inbox_navigation_keyboard_url_completed_strokes"] = String(inboxKeyboardStrokeCount)
+            screenEvidence["drafts_navigation_ax_write_latched_count"] = String(
+                draftsNavigationDiagnostics.filter { $0 == "phase=ax_address_value_write_latched" }.count)
+            screenEvidence["drafts_navigation_ax_write_completed_count"] = String(
+                draftsNavigationDiagnostics.filter { $0 == "phase=ax_address_value_write_completed" }.count)
+            screenEvidence["drafts_navigation_ax_readback_verified_count"] = String(
+                draftsNavigationDiagnostics.filter { $0 == "phase=ax_address_value_readback_verified" }.count)
+            screenEvidence["drafts_navigation_return_completed_count"] = String(
+                draftsNavigationDiagnostics.filter { $0 == "phase=ax_navigation_dispatched" }.count)
+            screenEvidence["drafts_navigation_return_failure_count"] = String(
+                draftsNavigationDiagnostics.filter { $0 == "phase=return_dispatch_failed" }.count)
+            let draftsKeyboardStrokeCount = typingDiagnosticBeforeDrafts == typingDiagnostic
+                ? 0 : Int(typingDiagnostic["completedStrokes"] ?? "") ?? 0
+            screenEvidence["drafts_navigation_keyboard_url_completed_strokes"] = String(draftsKeyboardStrokeCount)
+            Self.writeNavigationProbeResultIfRequested(success: reachedInbox && reachedDrafts,
                 diagnostics: diagnostics + captureDiagnostics,
                 screenEvidence: screenEvidence)
         }
@@ -3929,7 +4183,8 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
         XCTAssertEqual(session.currentWindow?.id, target.id, "The first navigation must keep the retained window")
 
         try await session.navigateRetainedSafariTab(to: inbox, taskID: taskID, goal: goal,
-            tools: tools, diagnostic: { diagnostics.append($0) })
+            tools: tools, diagnostic: { inboxNavigationDiagnostics.append($0) })
+        typingDiagnosticAfterInbox = tools.nativeVisualTypingDiagnostic
         let deadline = ContinuousClock.now.advanced(by: .seconds(8))
         var observed: ComputerUseDefaultBrowserPageReader.Observation?
         while ContinuousClock.now < deadline {
@@ -3969,6 +4224,34 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
         let resumed = try await session.ensure(taskID: taskID, goal: goal, tools: tools)
         XCTAssertEqual(resumed.id, target.id)
         XCTAssertTrue(CFEqual(resumed.accessibilityElement, target.accessibilityElement))
+
+        // Observe a canonical Inbox-to-Drafts navigation without creating or opening a composer.
+        typingDiagnosticBeforeDrafts = tools.nativeVisualTypingDiagnostic
+        try await session.navigateRetainedSafariTab(to: drafts, taskID: taskID, goal: goal,
+            tools: tools, diagnostic: {
+                diagnostics.append($0)
+                draftsNavigationDiagnostics.append($0)
+            })
+        let draftsDeadline = ContinuousClock.now.advanced(by: .seconds(8))
+        while ContinuousClock.now < draftsDeadline {
+            try Task.checkCancellation()
+            if let current = session.currentWindow,
+               current.id == target.id,
+               CFEqual(current.accessibilityElement, target.accessibilityElement),
+               let observation = try? ComputerUseDefaultBrowserPageReader().read(
+                    window: target.accessibilityElement, application: target.application,
+                    mayAct: { (try? tools.requireActive()) != nil }),
+               let parts = URLComponents(string: observation.url),
+               parts.scheme == "https", parts.host == "mail.google.com",
+               ComputerUseGmailAccountDirectory.accountIndex(from: observation.url) == 0,
+               parts.fragment?.localizedCaseInsensitiveContains("drafts") == true {
+                reachedDrafts = true
+                break
+            }
+            try await Task.sleep(for: .milliseconds(200))
+        }
+        XCTAssertTrue(reachedDrafts, "The same retained Safari window must reach the signed-in account's Drafts route")
+        XCTAssertEqual(session.currentWindow?.id, target.id)
     }
 
     private static func safeToolErrorName(_ error: ComputerUseHostTools.ToolError) -> String {

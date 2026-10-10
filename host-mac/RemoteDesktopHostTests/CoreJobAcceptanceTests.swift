@@ -227,6 +227,16 @@ final class CoreJobAcceptanceTests: XCTestCase {
         XCTAssertNil(Self.sanitizedSessionValidationPhase(nil))
     }
 
+    func testGmailAcceptanceSanitizesAXAddressValueWriteCounts() {
+        for count in ["0", "1", "2", "8"] {
+            XCTAssertEqual(Self.sanitizedGmailAddressValueWriteCount(count), Int(count))
+        }
+        for rejected in ["-1", "9", "999999", "private", "1 URL"] {
+            XCTAssertNil(Self.sanitizedGmailAddressValueWriteCount(rejected))
+        }
+        XCTAssertNil(Self.sanitizedGmailAddressValueWriteCount(nil))
+    }
+
     func testGmailAcceptanceSanitizesSessionCaptureReasonAndAXErrorCode() {
         for reason in ["frontmost_unavailable", "frontmost_process_mismatch", "frontmost_identity_mismatch",
             "windows_read", "windows_malformed", "windows_unconvertible", "focused_window_read",
@@ -1065,6 +1075,11 @@ final class CoreJobAcceptanceTests: XCTestCase {
                 result[key] = count
             }
         }
+        for key in ["gmailAddressValueWriteAttemptCount", "gmailAddressValueWriteCompletedCount"] {
+            if let count = Self.sanitizedGmailAddressValueWriteCount(raw[key]) {
+                result[key] = count
+            }
+        }
         for key in ["gmailSubjectValueMatches", "gmailMessageBodyValueMatches"] {
             if raw[key] == "true" { result[key] = true }
             if raw[key] == "false" { result[key] = false }
@@ -1106,6 +1121,11 @@ final class CoreJobAcceptanceTests: XCTestCase {
             result["lastSessionFailureForDiagnostics"] = failure
         }
         return result
+    }
+
+    private static func sanitizedGmailAddressValueWriteCount(_ raw: String?) -> Int? {
+        guard let raw, let count = Int(raw), (0...8).contains(count) else { return nil }
+        return count
     }
 
     private static func sanitizedSessionWindowTransitionDiagnostic(_ raw: String?) -> String? {
