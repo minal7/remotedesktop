@@ -1064,6 +1064,31 @@ struct ComputerUseMCPFocusedTextSnapshot: Equatable {
     }
 }
 
+/// Closed host-owned commands used only by the retained default-browser flow.
+/// This type is internal and is never decoded from a model proposal.
+enum ComputerUseNativeBrowserHostCommand {
+    case newWindow
+    case focusAddress
+    case commitAddress
+
+    var usage: Int {
+        switch self {
+        case .newWindow: return 0x11 // N
+        case .focusAddress: return 0x0F // L
+        case .commitAddress: return 0x28 // Return
+        }
+    }
+
+    var modifiers: UInt16 {
+        switch self {
+        case .newWindow, .focusAddress: return 1 << 3 // Command
+        case .commitAddress: return 0
+        }
+    }
+
+    var action: ComputerUsePredictedAction { .key(usage: usage, modifiers: modifiers) }
+}
+
 /// Narrow authority for typing a destination into a verified browser chrome
 /// address field. Ordinary native text entry continues to require document,
 /// frame, and element identity to remain unchanged.
@@ -1510,6 +1535,62 @@ final class ComputerUseHostTools {
     func requireActive() throws {
         try Task.checkCancellation()
         guard mayAct() else { throw ToolError.paused }
+    }
+
+    /// Closed host-owned browser commands. These cannot be created by a model
+    /// proposal and intentionally carry no user-selected key payload.
+    func performNativeBrowserHostCommand(
+        _ command: ComputerUseNativeBrowserHostCommand,
+        expectedApplication: ComputerUseApplicationIdentity,
+        willBeginEffect: @escaping () throws -> Void
+    ) throws {
+        func validateFrontmostSafari() throws {
+            guard expectedApplication.bundleIdentifier == "com.apple.Safari",
+                  let expectedCode = expectedApplication.codeIdentity,
+                  expectedCode.bundleIdentifier == "com.apple.Safari" else {
+                throw ToolError.approvalTargetChanged
+            }
+            let frontmost = frontmostApplicationSnapshot()
+            guard frontmost.identityIsAuthoritative,
+                  let current = frontmost.identity,
+                  current == expectedApplication,
+                  current.codeIdentity == expectedCode else {
+                throw ToolError.approvalTargetChanged
+            }
+        }
+
+        try Task.checkCancellation()
+        try requireActive()
+        try validateFrontmostSafari()
+
+        let beforePosting = {
+            try Task.checkCancellation()
+            try self.requireActive()
+            try validateFrontmostSafari()
+            try willBeginEffect()
+            // Session checks may perform bounded Accessibility reads. Recheck
+            // the signed frontmost app and task gate immediately before input.
+            try Task.checkCancellation()
+            try self.requireActive()
+            try validateFrontmostSafari()
+        }
+        do {
+            if actionPerformer != nil {
+                // Deterministic virtual fixtures keep the same checks and latch;
+                // production has no actionPerformer and always posts via injector.
+                try injector.performHostEffectIfAllowed(
+                    ifAllowed: { !Task.isCancelled && self.mayAct() }) {
+                    try beforePosting()
+                    try self.perform(command.action, reportsPartialApprovedEffect: false)
+                }
+            } else {
+                try injector.applyHostKeyStroke(usage: command.usage, modifiers: command.modifiers,
+                    ifAllowed: { !Task.isCancelled && self.mayAct() }, beforePosting: beforePosting)
+            }
+        } catch InputInjector.AutomationGateError.interrupted {
+            try Task.checkCancellation()
+            throw ToolError.paused
+        }
     }
 
     func frontmostApplicationName() -> String? {

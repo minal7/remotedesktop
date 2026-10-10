@@ -713,6 +713,30 @@ final class ComputerUseTextEditorTests: XCTestCase {
         XCTAssertEqual(effects, 1)
     }
 
+    func testHostBrowserCommandRechecksGateBeforePostingAndReleasesKey() throws {
+        let events = HostCommandEventProbe()
+        let injector = InputInjector(eventPoster: { events.record($0.type) })
+
+        XCTAssertThrowsError(try injector.applyHostKeyStroke(usage: 0x0F, modifiers: 1 << 3,
+            ifAllowed: { events.isAllowed }, beforePosting: { events.closeGate() }))
+        XCTAssertEqual(events.counts.down, 0, "A gate revoked at the final boundary must post no key")
+        XCTAssertEqual(events.counts.up, 0)
+
+        events.openGate()
+        try injector.applyHostKeyStroke(usage: 0x0F, modifiers: 1 << 3,
+            ifAllowed: { events.isAllowed }, beforePosting: {})
+        XCTAssertEqual(events.counts.down, 1)
+        XCTAssertEqual(events.counts.up, 1, "A host command posts one complete, released keystroke")
+
+        events.closeGateOnNextDown()
+        events.openGate()
+        try injector.applyHostKeyStroke(usage: 0x0F, modifiers: 1 << 3,
+            ifAllowed: { events.isAllowed }, beforePosting: {})
+        XCTAssertEqual(events.counts.down, 2)
+        XCTAssertEqual(events.counts.up, 2, "Key-up must still post if the gate closes after key-down")
+        XCTAssertFalse(events.isAllowed)
+    }
+
     func testWholeValueSetterFailureNeverFallsBackToAnotherEffect() async {
         let field = Field("original")
         field.axSupported = true
@@ -783,6 +807,44 @@ private final class PacedEventCounts: @unchecked Sendable {
     var counts: (down: Int, up: Int) {
         lock.lock(); defer { lock.unlock() }
         return (down, up)
+    }
+}
+
+private final class HostCommandEventProbe: @unchecked Sendable {
+    private let lock = NSLock()
+    private var allowed = true
+    private var closeOnDown = false
+    private var down = 0
+    private var up = 0
+
+    var isAllowed: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return allowed
+    }
+    var counts: (down: Int, up: Int) {
+        lock.lock(); defer { lock.unlock() }
+        return (down, up)
+    }
+    func openGate() {
+        lock.lock(); defer { lock.unlock() }
+        allowed = true
+    }
+    func closeGate() {
+        lock.lock(); defer { lock.unlock() }
+        allowed = false
+    }
+    func closeGateOnNextDown() {
+        lock.lock(); defer { lock.unlock() }
+        closeOnDown = true
+    }
+    func record(_ type: CGEventType) {
+        lock.lock(); defer { lock.unlock() }
+        if type == .keyDown {
+            down += 1
+            if closeOnDown { allowed = false; closeOnDown = false }
+        } else if type == .keyUp {
+            up += 1
+        }
     }
 }
 

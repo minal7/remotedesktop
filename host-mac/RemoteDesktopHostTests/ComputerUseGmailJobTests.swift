@@ -145,6 +145,43 @@ final class ComputerUseGmailJobTests: XCTestCase {
             "The Gmail writing assistant editor is not the message body field")
     }
 
+    func testGmailCompletionContentProofRequiresCompleteUniqueExactComposeFields() {
+        typealias Field = ComputerUseGmailJob.ComposeContentField
+        let fields: [Field] = [
+            .init(label: "Subject", role: "AXTextField", value: "Review"),
+            .init(label: "Message Body", role: "AXTextArea", value: "Please review."),
+            .init(label: "Describe your message", role: "AXTextArea", value: "Write with AI"),
+        ]
+        let matches = { (composerCount: Int, scanComplete: Bool, observed: [Field]) in
+            ComputerUseGmailJob.exactComposeFieldValuesMatch(composerCount: composerCount,
+                scanComplete: scanComplete, fields: observed,
+                expectedSubject: "Review", expectedBody: "Please review.")
+        }
+        XCTAssertTrue(matches(1, true, fields), "The unrelated writing assistant is not the message body")
+        XCTAssertFalse(matches(2, true, fields), "Multiple compose regions remain ambiguous")
+        XCTAssertFalse(matches(1, false, fields), "An incomplete unique compose traversal cannot prove content")
+        XCTAssertFalse(matches(1, true, fields + [.init(label: "Subject", role: "AXTextField", value: "Other")]),
+            "A second conflicting Subject field must invalidate the proof")
+        XCTAssertFalse(matches(1, true, fields + [.init(label: "Message Body", role: "AXTextArea", value: "Other")]),
+            "A second conflicting Message Body field must invalidate the proof")
+        XCTAssertFalse(matches(1, true, [fields[0], .init(label: "Message Body", role: "AXTextArea", value: "Wrong")]))
+        XCTAssertFalse(matches(1, true, [fields[0]]), "Missing body content cannot be inferred from other text")
+        XCTAssertFalse(matches(1, true, [fields[0],
+            .init(label: "Message Body", role: "AXStaticText", value: "Please review.")]),
+            "Matching body text outside the editable message field is not content proof")
+        XCTAssertFalse(matches(1, true, [fields[0],
+            .init(label: "Describe your message", role: "AXTextArea", value: "Please review.")]),
+            "Another editor cannot substitute for the exact Message Body field")
+        XCTAssertTrue(ComputerUseGmailJob.exactComposeFieldValuesMatch(composerCount: 1, scanComplete: true, fields: [
+            .init(label: "Subject", role: "AXTextField", value: ""),
+            .init(label: "Message Body", role: "AXTextArea", value: ""),
+        ], expectedSubject: "", expectedBody: ""), "Readable empty values may match an intentionally empty request")
+        XCTAssertFalse(ComputerUseGmailJob.exactComposeFieldValuesMatch(composerCount: 1, scanComplete: true, fields: [
+            .init(label: "Subject", role: "AXTextField", value: nil),
+            .init(label: "Message Body", role: "AXTextArea", value: nil),
+        ], expectedSubject: "", expectedBody: ""), "Unreadable AXValues cannot be treated as empty strings")
+    }
+
     func testGmailDraftRecoveryRequiresOneExactSubjectCellAndCompleteScan() {
         let subject = "Quarterly review"
         XCTAssertEqual(ComputerUseGmailJob.uniqueDraftSubjectCellIndex(

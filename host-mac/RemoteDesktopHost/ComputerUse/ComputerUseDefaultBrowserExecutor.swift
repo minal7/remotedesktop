@@ -244,6 +244,7 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
         var dispatchedPickerConfirmationCandidateID: String?
         var gmailVerifiedAttachmentCandidateID: String?
         var lastVerifiedGmailComposeURL: URL?
+        var gmailSavedDraftReopenURL: URL?
         private var fileOperationRevision: UInt64 = 0
         var lastSessionFailureForDiagnostics: ComputerUseDefaultBrowserSession.Failure?
         var nativeControlErrorDomainForDiagnostics: String?
@@ -290,6 +291,7 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
                 dispatchedPickerConfirmationCandidateID = nil
                 gmailVerifiedAttachmentCandidateID = nil
                 lastVerifiedGmailComposeURL = nil
+                gmailSavedDraftReopenURL = nil
             }
             visualFallbackPending = false
             pendingVisualDirective = nil
@@ -400,6 +402,125 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
                     throw ComputerUseDesktopExecutor.Failure.unsupportedAction
                 }
             }
+        }
+
+        func verifyFreshSavedGmailDraftCompletion(_ tools: ComputerUseHostTools) throws -> Bool? {
+            guard let job = gmailJob, !job.request.sendRequested, gmailFlowStage == .complete else { return nil }
+            func phase(_ value: String) { gmailFieldDiagnostics["gmailCompletionProofPhase"] = value }
+            for key in ["gmailCompletionSavedRowURLPresent", "gmailCompletionPendingWorkClear",
+                "gmailCompletionPageObserved", "gmailCompletionPageTruncated", "gmailCompletionURLMatches",
+                "gmailCompletionFieldsMatch", "gmailCompletionAccountMatches",
+                "gmailCompletionAttachmentMatches", "gmailCompletionRecipientsMatch"] {
+                gmailFieldDiagnostics[key] = "false"
+            }
+            phase("preflight")
+            gmailFieldDiagnostics["gmailCompletionSavedRowURLPresent"] = String(gmailSavedDraftReopenURL != nil)
+            gmailFieldDiagnostics["gmailCompletionPendingWorkClear"] = String(
+                gmailPendingSendAction == nil && pendingGmailFlowStage == nil
+                    && pendingPickerConfirmation == nil && session.currentFileOpenPanel == nil)
+            guard gmailPendingSendAction == nil, pendingGmailFlowStage == nil,
+                  pendingPickerConfirmation == nil, session.currentFileOpenPanel == nil,
+                  let savedURL = gmailSavedDraftReopenURL,
+                  ComputerUseGmailJob.isOpaqueComposeDraftURL(savedURL),
+                  let account = selectedGmailAccount,
+                  job.request.account?.index == account.index,
+                  ComputerUseGmailAccountDirectory.accountIndex(from: savedURL.absoluteString) == account.index,
+                  let initialWindow = session.currentWindow else { return false }
+
+            func checkScope() throws {
+                try Task.checkCancellation()
+                try tools.requireActive()
+                try check(nil, tools)
+                guard session.currentFileOpenPanel == nil,
+                      let current = session.currentWindow,
+                      current.id == initialWindow.id,
+                      current.application == initialWindow.application,
+                      CFEqual(current.accessibilityElement, initialWindow.accessibilityElement) else {
+                    throw ComputerUseDesktopExecutor.Failure.completionUnverified
+                }
+            }
+            func readVerifiedPage(_ stage: String) throws -> ComputerUseDefaultBrowserPageReader.Observation? {
+                phase("\(stage)_page_read")
+                gmailFieldDiagnostics["gmailCompletionPageObserved"] = "false"
+                gmailFieldDiagnostics["gmailCompletionPageTruncated"] = "false"
+                gmailFieldDiagnostics["gmailCompletionURLMatches"] = "false"
+                gmailFieldDiagnostics["gmailCompletionFieldsMatch"] = "false"
+                gmailFieldDiagnostics["gmailCompletionAccountMatches"] = "false"
+                try checkScope()
+                guard let current = session.currentWindow,
+                      let page = try pageReader.read(window: current.accessibilityElement,
+                        application: current.application,
+                        mayAct: { (try? tools.requireActive()) != nil }) else { return nil }
+                try checkScope()
+                gmailFieldDiagnostics["gmailCompletionPageObserved"] = "true"
+                gmailFieldDiagnostics["gmailCompletionPageTruncated"] = String(page.truncated)
+                phase("\(stage)_url")
+                let urlMatches = page.application == current.application && page.url == savedURL.absoluteString
+                    && ComputerUseGmailJob.isOpaqueComposeDraftURL(savedURL)
+                    && ComputerUseGmailAccountDirectory.accountIndex(from: page.url) == account.index
+                gmailFieldDiagnostics["gmailCompletionURLMatches"] = String(urlMatches)
+                guard urlMatches else { return nil }
+                phase("\(stage)_fields")
+                let fieldsMatch = try ComputerUseGmailRecipientVerifier.verifiesComposeContents(
+                    window: current.accessibilityElement, application: current.application,
+                    expectedSubject: job.request.subject, expectedBody: job.request.body,
+                    revalidate: checkScope)
+                gmailFieldDiagnostics["gmailCompletionFieldsMatch"] = String(fieldsMatch)
+                guard fieldsMatch else { return nil }
+                phase("\(stage)_account")
+                let accountLabel = try page.controls.first(where: {
+                    $0.role == "AXButton" && $0.label.hasPrefix("Google Account:")
+                })?.label ?? ComputerUseGmailRecipientVerifier.accountControlLabel(
+                    window: current.accessibilityElement, application: current.application,
+                    revalidate: checkScope)
+                let title = try ComputerUseGmailAccountDirectory.observedWindowTitle(
+                    window: current.accessibilityElement, application: current.application,
+                    revalidate: checkScope)
+                let accountMatches = ComputerUseGmailAccountDirectory.confirmsActiveAccount(currentURL: page.url,
+                    windowTitle: title, accountControlLabel: accountLabel, expected: account)
+                gmailFieldDiagnostics["gmailCompletionAccountMatches"] = String(accountMatches)
+                guard accountMatches else { return nil }
+                return page
+            }
+            func attachmentMatches(_ stage: String) throws -> Bool {
+                phase("\(stage)_attachment")
+                gmailFieldDiagnostics["gmailCompletionAttachmentMatches"] = "false"
+                try checkScope()
+                guard let current = session.currentWindow else { return false }
+                if let attachment = job.attachment {
+                    guard let candidate = selectedCandidate,
+                          attachment.candidateID == candidate.id,
+                          attachment.displayName == candidate.displayName,
+                          attachment.byteCount == candidate.byteCount,
+                          gmailVerifiedAttachmentCandidateID == candidate.id else { return false }
+                    let matches = try ComputerUseGmailRecipientVerifier.attachmentEvidence(
+                        window: current.accessibilityElement, application: current.application,
+                        expected: attachment, revalidate: checkScope) == .matching
+                    gmailFieldDiagnostics["gmailCompletionAttachmentMatches"] = String(matches)
+                    return matches
+                }
+                guard !job.requiresAttachment else { return false }
+                let absent = try ComputerUseGmailRecipientVerifier.attachmentEvidence(
+                    window: current.accessibilityElement, application: current.application,
+                    expected: nil, revalidate: checkScope) == .absent
+                gmailFieldDiagnostics["gmailCompletionAttachmentMatches"] = String(absent)
+                return absent
+            }
+
+            guard try readVerifiedPage("initial") != nil, try attachmentMatches("initial") else { return false }
+            phase("recipients")
+            gmailFieldDiagnostics["gmailCompletionRecipientsMatch"] = "false"
+            try checkScope()
+            guard let current = session.currentWindow,
+                  try ComputerUseGmailRecipientVerifier.verify(window: current.accessibilityElement,
+                    application: current.application, expected: job.request,
+                    revalidate: checkScope) else { return false }
+            gmailFieldDiagnostics["gmailCompletionRecipientsMatch"] = "true"
+            try checkScope()
+            guard try readVerifiedPage("final") != nil, try attachmentMatches("final") else { return false }
+            try checkScope()
+            phase("verified")
+            return true
         }
 
         func checkGmailDraftsPage(_ action: ComputerUsePredictedAction, _ tools: ComputerUseHostTools) throws {
@@ -832,6 +953,13 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
                 return try await completionCheck(answer)
             }
         } else { scopedCompletionCheck = nil }
+        let hostCompletionProof: ComputerUseDesktopExecutor.HostCompletionProof?
+        if gmailContentExtractor != nil {
+            hostCompletionProof = {
+                guard let tools = scope.tools else { return false }
+                return try scope.verifyFreshSavedGmailDraftCompletion(tools)
+            }
+        } else { hostCompletionProof = nil }
         desktop = try ComputerUseDesktopExecutor(journalDirectory: journalDirectory, propose: { input in
             scope.nativeControlErrorDomainForDiagnostics = nil
             scope.nativeControlErrorCodeForDiagnostics = nil
@@ -1351,6 +1479,7 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
                             "The recovered Gmail draft did not match the requested fields. Review it before continuing."),
                             includeInModelHistory: false)
                     }
+                    scope.gmailSavedDraftReopenURL = recoveredURL
                     scope.gmailStandaloneDraftNormalizationComplete = true
                     scope.gmailRecipientsVerified = false
                     scope.gmailFlowStage = .compose
@@ -1672,6 +1801,7 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
                         return .init(response: "", decision: .handoff(
                             "The selected Gmail Drafts address could not be prepared safely."), includeInModelHistory: false)
                     }
+                    scope.gmailSavedDraftReopenURL = nil
                     scope.gmailSavedDraftReopenVerification = true
                     scope.gmailRecipientsVerified = false
                     scope.gmailFlowStage = .normalizeDrafts
@@ -1770,7 +1900,8 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
                 catch is CancellationError { throw CancellationError() }
                 catch ComputerUseDesktopExecutor.Failure.unsupportedAction { throw ComputerUseDesktopExecutor.Failure.unsupportedAction }
                 catch { throw ComputerUseDesktopExecutor.Failure.scopedSurfaceChanged }
-            }, completeCheck: scopedCompletionCheck, outcomeCheck: scopedOutcomeCheck,
+            }, completeCheck: scopedCompletionCheck, hostCompletionProof: hostCompletionProof,
+            outcomeCheck: scopedOutcomeCheck,
             completionAnswerTransform: { answer in
                 if let job = scope.gmailJob, scope.gmailFlowStage == .complete {
                     guard let tools = scope.tools else {

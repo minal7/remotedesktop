@@ -3814,6 +3814,109 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
         XCTAssertGreaterThan(scopeChecks, 0)
     }
 
+    func testHostCompletionStatusCanCompleteAfterFreshProofDespitePixelChange() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let display = CGRect(x: 0, y: 0, width: 640, height: 400)
+        let window = CGRect(x: 100, y: 50, width: 400, height: 300)
+        let code = ComputerUseApplicationCodeIdentity(authority: .runningCode, bundleIdentifier: "com.apple.Safari",
+            canonicalBundlePath: "/Applications/Safari.app", canonicalExecutablePath: "/Applications/Safari.app/Contents/MacOS/Safari",
+            designatedRequirement: "test", teamIdentifier: nil, platformIdentifier: nil)
+        let app = ComputerUseApplicationIdentity(bundleIdentifier: "com.apple.Safari", processIdentifier: 91,
+            launchGeneration: 1, codeIdentity: code)!
+        var screenSamples = 0, proposals = 0, proofChecks = 0, scopeChecks = 0, effects = 0
+        let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { true }, actionPerformer: { _ in effects += 1 },
+            screenProvider: {
+                screenSamples += 1
+                let color = screenSamples.isMultiple(of: 2)
+                    ? CIColor(red: 0, green: 0, blue: 1, alpha: 1)
+                    : CIColor(red: 0, green: 0, blue: 0, alpha: 1)
+                return .init(image: CIImage(color: color).cropped(to: display), displayBounds: display,
+                    frontmostWindowBounds: window)
+            }, transientSystemOverlayProvider: { _ in false }, accessibilityContextProvider: { _ in "" },
+            authenticationContextProvider: { nil }, screenCaptureConsentContextProvider: { nil },
+            planningAccessibilityIdentityProvider: { "safari-window" },
+            frontmostApplicationIdentityProvider: { app }, frontmostApplicationProvider: { "Safari" })
+        let executor = try ComputerUseDesktopExecutor(journalDirectory: directory, propose: { _ in
+            proposals += 1
+            // Every capture changes pixels while retained scope stays stable.
+            return .init(response: "Draft saved", decision: .completionStatus(success: true))
+        }, surfaceScopeCheck: { _ in scopeChecks += 1 }, hostCompletionProof: {
+            proofChecks += 1
+            return true
+        })
+
+        let result = try await executor.execute(taskID: "host-read-only-completion-proof",
+            prompt: "Save this draft.", trustedUserPrompt: "Save this draft.", tools: tools, progress: { _ in })
+
+        XCTAssertEqual(result, .completed("The model reported completion."))
+        XCTAssertEqual(proofChecks, 1, "The host proof must be consulted once before stale-pixel revalidation")
+        XCTAssertEqual(proposals, 1)
+        XCTAssertGreaterThan(scopeChecks, 0)
+        XCTAssertEqual(effects, 0, "Read-only completion proof must not dispatch input")
+    }
+
+    func testHostCompletionProofRejectsFalseAndDoesNotReplaceModelReportOrRevokedScope() async throws {
+        for scenario in ["false-proof", "nil-proof", "model-report", "scope-revoked", "gate-revoked"] {
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: directory) }
+            let display = CGRect(x: 0, y: 0, width: 640, height: 400)
+            let window = CGRect(x: 100, y: 50, width: 400, height: 300)
+            let code = ComputerUseApplicationCodeIdentity(authority: .runningCode, bundleIdentifier: "com.apple.Safari",
+                canonicalBundlePath: "/Applications/Safari.app", canonicalExecutablePath: "/Applications/Safari.app/Contents/MacOS/Safari",
+                designatedRequirement: "test", teamIdentifier: nil, platformIdentifier: nil)
+            let app = ComputerUseApplicationIdentity(bundleIdentifier: "com.apple.Safari", processIdentifier: 91,
+                launchGeneration: 1, codeIdentity: code)!
+            var screenSamples = 0, proposals = 0, proofChecks = 0, effects = 0
+            var mayAct = true, scopeValid = true
+            let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { mayAct }, actionPerformer: { _ in effects += 1 },
+                screenProvider: {
+                    screenSamples += 1
+                    let color = screenSamples.isMultiple(of: 2)
+                        ? CIColor(red: 0, green: 0, blue: 1, alpha: 1)
+                        : CIColor(red: 0, green: 0, blue: 0, alpha: 1)
+                    return .init(image: CIImage(color: color).cropped(to: display), displayBounds: display,
+                        frontmostWindowBounds: window)
+                }, transientSystemOverlayProvider: { _ in false }, accessibilityContextProvider: { _ in "" },
+                authenticationContextProvider: { nil }, screenCaptureConsentContextProvider: { nil },
+                planningAccessibilityIdentityProvider: { "safari-window" },
+                frontmostApplicationIdentityProvider: { app }, frontmostApplicationProvider: { "Safari" })
+            let executor = try ComputerUseDesktopExecutor(journalDirectory: directory, propose: { _ in
+                proposals += 1
+                if proposals == 1 {
+                    return .init(response: "candidate", decision: scenario == "model-report"
+                        ? .action(.reportCompletion("Model claim")) : .completionStatus(success: true))
+                }
+                return .init(response: "stop", decision: .handoff("Review the current page."))
+            }, surfaceScopeCheck: { _ in
+                if !scopeValid { throw ComputerUseDesktopExecutor.Failure.scopedSurfaceChanged }
+            }, hostCompletionProof: {
+                proofChecks += 1
+                if scenario == "scope-revoked" { scopeValid = false }
+                if scenario == "gate-revoked" { mayAct = false }
+                if scenario == "false-proof" { return false }
+                if scenario == "nil-proof" { return nil }
+                return true
+            }, screenConsentRecognizer: { _ in false })
+
+            if scenario == "scope-revoked" || scenario == "gate-revoked" {
+                do {
+                    _ = try await executor.execute(taskID: "host-proof-\(scenario)", prompt: "Finish",
+                        trustedUserPrompt: "Finish", tools: tools, progress: { _ in })
+                    XCTFail("A revoked \(scenario) cannot complete")
+                } catch { }
+            } else {
+                let result = try await executor.execute(taskID: "host-proof-\(scenario)", prompt: "Finish",
+                    trustedUserPrompt: "Finish", tools: tools, progress: { _ in })
+                guard case .userInterventionRequired = result else {
+                    return XCTFail("\(scenario) must not complete without fresh host proof")
+                }
+            }
+            XCTAssertEqual(proofChecks, scenario == "model-report" ? 0 : 1, scenario)
+            XCTAssertEqual(effects, 0, scenario)
+        }
+    }
+
     func testScopedCompletionScreenChangeRequiresFreshEvidenceBeforeCompleting() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }

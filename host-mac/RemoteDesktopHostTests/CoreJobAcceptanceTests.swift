@@ -269,6 +269,32 @@ final class CoreJobAcceptanceTests: XCTestCase {
         XCTAssertNil(Self.sanitizedSessionWindowTransitionDiagnostic(nil))
     }
 
+    func testGmailAcceptanceSanitizesCompletionProofDiagnostic() {
+        let valid = Self.sanitizedGmailCompletionProofDiagnostic([
+            "gmailCompletionProofPhase": "final_attachment",
+            "gmailCompletionSavedRowURLPresent": "true",
+            "gmailCompletionPendingWorkClear": "true",
+            "gmailCompletionPageObserved": "true",
+            "gmailCompletionPageTruncated": "false",
+            "gmailCompletionURLMatches": "true",
+            "gmailCompletionFieldsMatch": "true",
+            "gmailCompletionAccountMatches": "true",
+            "gmailCompletionAttachmentMatches": "false",
+            "gmailCompletionRecipientsMatch": "true",
+            "private": "user@example.com https://mail.google.com/secret",
+        ])
+        XCTAssertEqual(valid["gmailCompletionProofPhase"] as? String, "final_attachment")
+        XCTAssertEqual(valid["gmailCompletionSavedRowURLPresent"] as? Bool, true)
+        XCTAssertEqual(valid["gmailCompletionPageTruncated"] as? Bool, false)
+        XCTAssertEqual(valid["gmailCompletionAttachmentMatches"] as? Bool, false)
+        XCTAssertNil(valid["private"])
+        XCTAssertTrue(Self.sanitizedGmailCompletionProofDiagnostic([
+            "gmailCompletionProofPhase": "final_attachment https://mail.google.com/",
+            "gmailCompletionFieldsMatch": "maybe",
+            "gmailCompletionURLMatches": "user@example.com",
+        ]).isEmpty)
+    }
+
     func testGmailAcceptanceSanitizesDesktopRevalidationEvidence() {
         let diagnostic = Self.sanitizedDesktopRevalidationDiagnostic([
             "blockedAt": "editor-settle-timeout", "sampleCount": "13", "tokenChangeCount": "2",
@@ -1084,6 +1110,9 @@ final class CoreJobAcceptanceTests: XCTestCase {
             if raw[key] == "true" { result[key] = true }
             if raw[key] == "false" { result[key] = false }
         }
+        for (key, value) in Self.sanitizedGmailCompletionProofDiagnostic(raw) {
+            result[key] = value
+        }
         if let phase = raw["gmailNavigationPhase"],
            phase.range(of: #"^phase=[a-z_]+$"#, options: .regularExpression) != nil {
             result["gmailNavigationPhase"] = phase
@@ -1119,6 +1148,25 @@ final class CoreJobAcceptanceTests: XCTestCase {
             }
         } else if let failure = raw["lastSessionFailureForDiagnostics"], sessionFailures.contains(failure) {
             result["lastSessionFailureForDiagnostics"] = failure
+        }
+        return result
+    }
+
+    private static func sanitizedGmailCompletionProofDiagnostic(_ raw: [String: String]) -> [String: Any] {
+        let phases: Set<String> = ["preflight", "initial_page_read", "initial_url", "initial_fields",
+            "initial_account", "initial_attachment", "recipients", "final_page_read", "final_url",
+            "final_fields", "final_account", "final_attachment", "verified"]
+        let booleans: Set<String> = ["gmailCompletionSavedRowURLPresent", "gmailCompletionPendingWorkClear",
+            "gmailCompletionPageObserved", "gmailCompletionPageTruncated", "gmailCompletionURLMatches",
+            "gmailCompletionFieldsMatch", "gmailCompletionAccountMatches",
+            "gmailCompletionAttachmentMatches", "gmailCompletionRecipientsMatch"]
+        var result: [String: Any] = [:]
+        if let phase = raw["gmailCompletionProofPhase"], phases.contains(phase) {
+            result["gmailCompletionProofPhase"] = phase
+        }
+        for key in booleans {
+            if raw[key] == "true" { result[key] = true }
+            if raw[key] == "false" { result[key] = false }
         }
         return result
     }

@@ -228,6 +228,38 @@ final class InputInjector: @unchecked Sendable {
         return try effect()
     }
 
+    /// Posts one fixed host-owned key stroke under the same gate and posting
+    /// lock as other native input. The key-up is unconditional once key-down
+    /// is posted, including when a later callback or task is interrupted.
+    func applyHostKeyStroke(usage: Int, modifiers: UInt16,
+                            ifAllowed: () -> Bool,
+                            beforePosting: () throws -> Void) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        guard ifAllowed() else {
+            releaseHeldAutomationInputLocked()
+            throw AutomationGateError.interrupted
+        }
+        try beforePosting()
+        guard ifAllowed() else {
+            releaseHeldAutomationInputLocked()
+            throw AutomationGateError.interrupted
+        }
+        guard let keyCode = HIDUsage.toMacKeyCode(usage),
+              let down = CGEvent(keyboardEventSource: source, virtualKey: keyCode, keyDown: true),
+              let up = CGEvent(keyboardEventSource: source, virtualKey: keyCode, keyDown: false) else {
+            throw HostKeyStrokeError.unavailable
+        }
+        down.flags = flags(from: modifiers)
+        up.flags = flags(from: modifiers)
+        post(down)
+        pressedKeys[usage] = modifiers
+        post(up)
+        pressedKeys.removeValue(forKey: usage)
+    }
+
+    enum HostKeyStrokeError: Error { case unavailable }
+
     /// Checks the automation gate while holding the same lock used for event
     /// injection. If a person's WebRTC input closes the gate while an AI
     /// action is queued, that queued action is dropped before it reaches

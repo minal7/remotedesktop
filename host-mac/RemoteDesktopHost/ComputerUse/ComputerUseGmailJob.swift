@@ -5,6 +5,11 @@ import ApplicationServices
 /// A small host-owned description of one Gmail operation. It stores only
 /// values already resolved from the user's request or the host file catalog.
 struct ComputerUseGmailJob: Equatable, Sendable {
+    struct ComposeContentField: Equatable {
+        let label: String
+        let role: String
+        let value: String?
+    }
     struct Request: Equatable, Sendable {
         let to: [String]
         let cc: [String]
@@ -115,6 +120,22 @@ struct ComputerUseGmailJob: Equatable, Sendable {
         }
         return subjects.count == 1 && subjects[0].value == request.subject
             && bodies.count == 1 && bodies[0].value == request.body
+    }
+
+    static func exactComposeFieldValuesMatch(composerCount: Int, scanComplete: Bool,
+        fields: [ComposeContentField],
+        expectedSubject: String, expectedBody: String) -> Bool {
+        let subjects = fields.filter {
+            $0.role == "AXTextField" && $0.label.trimmingCharacters(in: .whitespacesAndNewlines)
+                .localizedCaseInsensitiveCompare("Subject") == .orderedSame
+        }
+        let bodies = fields.filter {
+            $0.role == "AXTextArea" && $0.label.trimmingCharacters(in: .whitespacesAndNewlines)
+                .localizedCaseInsensitiveCompare("Message Body") == .orderedSame
+        }
+        guard composerCount == 1, scanComplete, subjects.count == 1, bodies.count == 1 else { return false }
+        guard let subject = subjects[0].value, let body = bodies[0].value else { return false }
+        return subject == expectedSubject && body == expectedBody
     }
 
     func composeFieldDiagnostics(_ observation: ComputerUseDefaultBrowserPageReader.Observation) -> [String: String] {
@@ -789,6 +810,32 @@ enum ComputerUseGmailRecipientVerifier {
         return true
     }
 
+    static func verifiesComposeContents(window: AXUIElement, application: ComputerUseApplicationIdentity,
+        expectedSubject: String, expectedBody: String,
+        revalidate: @MainActor () throws -> Void) throws -> Bool {
+        try revalidate()
+        guard frontmostMatches(application), let groups = findComposeGroups(window), groups.count == 1,
+              let compose = buildTree(groups[0], limit: 256,
+                excludedRoles: ["AXTable", "AXOutline", "AXList", "AXWebArea", "AXSecureTextField"],
+                includeMessageBodyLeaf: true) else { return false }
+        let nodes = descendants(of: compose)
+        let fields = nodes.compactMap { node -> ComputerUseGmailJob.ComposeContentField? in
+            guard node.role == "AXTextField" || node.role == "AXTextArea" else { return nil }
+            let label = node.strings.first(where: {
+                ($0.localizedCaseInsensitiveCompare("Subject") == .orderedSame
+                    && node.role == "AXTextField")
+                || ($0.localizedCaseInsensitiveCompare("Message Body") == .orderedSame
+                    && node.role == "AXTextArea")
+            })
+            guard let label else { return nil }
+            return .init(label: label, role: node.role, value: node.value)
+        }
+        try revalidate()
+        return ComputerUseGmailJob.exactComposeFieldValuesMatch(composerCount: groups.count,
+            scanComplete: true, fields: fields,
+            expectedSubject: expectedSubject, expectedBody: expectedBody)
+    }
+
     /// Identifies only a unique Copy-address menu inside the unique Gmail
     /// compose region. A successful AXCancel call alone is not evidence that
     /// the recipient menu actually disappeared.
@@ -1164,7 +1211,8 @@ enum ComputerUseGmailRecipientVerifier {
         return matches
     }
 
-    private static func buildTree(_ root: AXUIElement, limit: Int, excludedRoles: Set<String>) -> Node? {
+    private static func buildTree(_ root: AXUIElement, limit: Int, excludedRoles: Set<String>,
+                                  includeMessageBodyLeaf: Bool = false) -> Node? {
         let deadline = ContinuousClock.now.advanced(by: .milliseconds(750))
         var visited = 0
         var overflow = false
@@ -1184,7 +1232,9 @@ enum ComputerUseGmailRecipientVerifier {
             visited += 1
             if let hidden = read(element, kAXHiddenAttribute as String) as? Bool, hidden { return nil }
             if let protected = read(element, "AXProtectedContent") as? Bool, protected { return nil }
-            let role = read(element, kAXRoleAttribute as String) as? String ?? ""
+            let roleValue = read(element, kAXRoleAttribute as String) as? String
+            if includeMessageBodyLeaf && (roleValue?.isEmpty != false) { overflow = true; return nil }
+            let role = roleValue ?? ""
             let subrole = read(element, kAXSubroleAttribute as String) as? String ?? ""
             guard subrole != (kAXSecureTextFieldSubrole as String), !excludedRoles.contains(role) else { return nil }
             if role == "AXWebArea" {
@@ -1196,8 +1246,13 @@ enum ComputerUseGmailRecipientVerifier {
             let strings = [title, description].compactMap { $0 }
                 + [kAXHelpAttribute, kAXIdentifierAttribute, kAXPlaceholderValueAttribute]
                 .compactMap { read(element, $0 as String) as? String }
-            let value = role == "AXStaticText" ? read(element, kAXValueAttribute as String) as? String : nil
-            let childValue = read(element, kAXChildrenAttribute as String)
+            let value = (role == "AXStaticText" || (includeMessageBodyLeaf &&
+                (role == "AXTextField" || role == "AXTextArea")))
+                ? read(element, kAXValueAttribute as String) as? String : nil
+            // The message editor can expose a large editable subtree. Its exact
+            // AXTextArea value is the content proof, so observe it as a leaf.
+            let childValue = includeMessageBodyLeaf && role == "AXTextArea"
+                ? nil : read(element, kAXChildrenAttribute as String)
             let childElements = childValue as? [AXUIElement]
             if childValue == nil && ["AXWindow", "AXGroup", "AXWebArea", "AXComboBox", "AXScrollArea", "AXMenu"].contains(role) {
                 overflow = true

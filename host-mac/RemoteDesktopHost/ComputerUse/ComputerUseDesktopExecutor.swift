@@ -53,6 +53,8 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
     typealias SurfaceScopeCheck = @MainActor @Sendable (ComputerUsePredictedAction?) throws -> Void
     /// Optional task-specific verifier, run after the model sees a fresh screenshot.
     typealias CompleteCheck = @MainActor @Sendable (String) async throws -> Bool
+    /// Closed host-owned proof for a completion status; nil means not applicable.
+    typealias HostCompletionProof = @MainActor @Sendable () async throws -> Bool?
     /// Contextual task-outcome verifier. The input is the exact model input for
     /// the completion candidate; callers may enrich it with current host context.
     typealias OutcomeCheck = @MainActor @Sendable (ComputerUseFaraModel.Input, String) async throws -> Bool
@@ -119,6 +121,7 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
     private let propose: Propose
     private let surfaceScopeCheck: SurfaceScopeCheck?
     private let completeCheck: CompleteCheck?
+    private let hostCompletionProof: HostCompletionProof?
     private let outcomeCheck: OutcomeCheck?
     private let completionAnswerTransform: CompletionAnswerTransform?
     private let revalidationFailureObserver: RevalidationFailureObserver?
@@ -148,6 +151,7 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
 
     init(journalDirectory: URL, propose: @escaping Propose,
          surfaceScopeCheck: SurfaceScopeCheck? = nil, completeCheck: CompleteCheck? = nil,
+         hostCompletionProof: HostCompletionProof? = nil,
          outcomeCheck: OutcomeCheck? = nil,
          completionAnswerTransform: CompletionAnswerTransform? = nil,
          revalidationFailureObserver: RevalidationFailureObserver? = nil,
@@ -160,6 +164,7 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
          finishRun: @escaping @MainActor @Sendable () async -> Void = {}) throws {
         store = try .init(directory: journalDirectory); self.propose = propose
         self.surfaceScopeCheck = surfaceScopeCheck; self.completeCheck = completeCheck
+        self.hostCompletionProof = hostCompletionProof
         self.outcomeCheck = outcomeCheck
         self.completionAnswerTransform = completionAnswerTransform
         self.revalidationFailureObserver = revalidationFailureObserver
@@ -690,6 +695,7 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
                 ]) { _, latest in latest }
             }
             var preservesRejectedActionFeedback = false
+            var hostCompletionProofVerified = false
             try Task.checkCancellation(); try lease.assertOwnership()
             if case .refreshObservation = proposal.decision {
                 // A planner may need a new frame after a long, read-only inference.
@@ -712,6 +718,23 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
                     // Waiting has no native input effect. Keep task and retained
                     // surface authority, then capture a fresh screen next turn.
                     try checkScopedSurface()
+                } else if case .completionStatus(true) = proposal.decision,
+                          let hostCompletionProof {
+                    // A task-specific host proof may replace stale pixels only
+                    // for its own completion status. It cannot authorize model
+                    // reportCompletion or any native effect.
+                    try Task.checkCancellation(); try lease.assertOwnership()
+                    try tools.requireActive(); try checkScopedSurface()
+                    let proof = try await hostCompletionProof()
+                    try Task.checkCancellation(); try lease.assertOwnership()
+                    try tools.requireActive(); try checkScopedSurface()
+                    if let proof {
+                        guard proof else { throw Failure.completionUnverified }
+                        hostCompletionProofVerified = true
+                    } else {
+                        do { try await revalidate(observation, action: nil, tools: tools) }
+                        catch Failure.changedScreen { throw Failure.completionUnverified }
+                    }
                 } else {
                     do { try await revalidate(observation, action: action, tools: tools) }
                     catch Failure.changedScreen {
@@ -767,8 +790,13 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
                         continue
                     case .completionStatus(let success):
                         if success {
-                            try await verifyCompletionCandidate("The model reported completion.", input: input, observation: observation,
-                                tools: tools, assertOwnership: { try lease.assertOwnership() })
+                            if hostCompletionProofVerified {
+                                try Task.checkCancellation(); try lease.assertOwnership()
+                                try tools.requireActive(); try checkScopedSurface()
+                            } else {
+                                try await verifyCompletionCandidate("The model reported completion.", input: input, observation: observation,
+                                    tools: tools, assertOwnership: { try lease.assertOwnership() })
+                            }
                             return try complete("The model reported completion.", session: session)
                         }
                         let result = ComputerUseExecutionResult.unableToComplete("The model reported that it could not complete the task.")

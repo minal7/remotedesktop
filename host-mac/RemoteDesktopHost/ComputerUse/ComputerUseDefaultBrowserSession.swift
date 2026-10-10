@@ -388,50 +388,16 @@ final class ComputerUseDefaultBrowserSession {
         try validate(taskID: taskID, goal: goal, tools: tools)
         // AX focus can name Safari's address control before Cmd+L has
         // activated location editing, so always establish that native mode.
-        let focusAction = ComputerUsePredictedAction.key(usage: 0x0F, modifiers: 1 << 3) // Command+L
-        var focusEffectBegan = false
         do {
-            for attempt in 0..<2 {
-                try Task.checkCancellation()
-                try tools.requireActive()
-                try validate(taskID: taskID, goal: goal, tools: tools)
-                guard let current = runState?.target, Self.sameWindow(current, target),
-                      focusedSafariAddressField(in: current) != nil else { throw Failure.targetLost }
-                do {
-                    let fingerprint = try tools.prepareNativeActionFingerprint(for: focusAction)
+            try tools.performNativeBrowserHostCommand(.focusAddress,
+                expectedApplication: target.application, willBeginEffect: {
                     try Task.checkCancellation()
                     try tools.requireActive()
-                    try validate(taskID: taskID, goal: goal, tools: tools)
-                    guard let current = runState?.target, Self.sameWindow(current, target),
-                          focusedSafariAddressField(in: current) != nil else { throw Failure.targetLost }
-                    try await tools.performNativeAction(focusAction, fingerprint: fingerprint, willBeginEffect: {
-                        try Task.checkCancellation()
-                        try tools.requireActive()
-                        try self.validate(taskID: taskID, goal: goal, tools: tools)
-                        guard let current = self.runState?.target, Self.sameWindow(current, target),
-                              self.focusedSafariAddressField(in: current) != nil else { throw Failure.targetLost }
-                        focusEffectBegan = true
-                    })
-                    break
-                } catch ComputerUseHostTools.ToolError.approvalTargetChanged {
-                    try Task.checkCancellation()
-                    try tools.requireActive()
-                    guard !focusEffectBegan, attempt == 0 else {
-                        throw ComputerUseHostTools.ToolError.approvalTargetChanged
-                    }
-                    try validate(taskID: taskID, goal: goal, tools: tools)
-                    guard let current = runState?.target, Self.sameWindow(current, target) else {
-                        throw Failure.targetLost
-                    }
-                    await Task.yield()
-                    try Task.checkCancellation()
-                    try tools.requireActive()
-                    try validate(taskID: taskID, goal: goal, tools: tools)
-                    guard let current = runState?.target, Self.sameWindow(current, target) else {
-                        throw Failure.targetLost
-                    }
-                }
-            }
+                    try self.validate(taskID: taskID, goal: goal, tools: tools)
+                    guard let currentState = self.runState, currentState.currentFileOpenPanel == nil,
+                          let current = currentState.target, Self.sameWindow(current, target),
+                          self.focusedSafariAddressField(in: current) != nil else { throw Failure.targetLost }
+                })
         } catch { diagnostic("phase=address_field_focus_dispatch_failed"); throw error }
         diagnostic("phase=address_editing_activated")
         let addressField: AXUIElement
@@ -490,8 +456,9 @@ final class ComputerUseDefaultBrowserSession {
                         throw Failure.targetLost
                     }
                     let result = self.safariAddressBarAX.setValue(url.absoluteString as CFTypeRef, addressField)
-                    guard result == .success else { throw Failure.targetLost }
-                    diagnostic("phase=ax_address_value_write_completed")
+                    diagnostic(result == .success
+                        ? "phase=ax_address_value_write_completed"
+                        : "phase=ax_address_value_write_status_uncertain")
                 })
         } catch { diagnostic("phase=ax_address_value_write_failed"); throw error }
         try Task.checkCancellation()
@@ -536,14 +503,14 @@ final class ComputerUseDefaultBrowserSession {
             }
             try await Task.sleep(for: .milliseconds(50))
         }
-        let returnAction = ComputerUsePredictedAction.key(usage: 0x28, modifiers: 0)
-        let fingerprint = try tools.prepareNativeActionFingerprint(for: returnAction)
         do {
-            try await tools.performNativeAction(returnAction, fingerprint: fingerprint, willBeginEffect: {
+            try tools.performNativeBrowserHostCommand(.commitAddress,
+                expectedApplication: target.application, willBeginEffect: {
                 try Task.checkCancellation()
                 try tools.requireActive()
                 try self.validate(taskID: taskID, goal: goal, tools: tools)
-                guard self.isCurrentSafariAddressField(addressField, target: target),
+                guard self.runState?.currentFileOpenPanel == nil,
+                      self.isCurrentSafariAddressField(addressField, target: target),
                       self.focusedSafariAddressField(in: target).map({ CFEqual($0, addressField) }) == true,
                       self.safariAddressBarAX.read(kAXValueAttribute as String, addressField) as? String == url.absoluteString else {
                     throw Failure.targetLost
@@ -860,8 +827,9 @@ final class ComputerUseDefaultBrowserSession {
         }
         var retryDeadline: ContinuousClock.Instant?
         for attempt in 0..<3 {
+            let snapshot: WindowSnapshot
             do {
-                return try capture()
+                snapshot = try capture()
             } catch {
                 guard attempt < 2,
                       (error as? Failure) == .targetLost,
@@ -870,22 +838,52 @@ final class ComputerUseDefaultBrowserSession {
                       lastCaptureAXErrorCodeForDiagnostics == Int(AXError.cannotComplete.rawValue) else {
                     throw error
                 }
-                let now = ContinuousClock.now
-                let deadline = retryDeadline ?? now.advanced(by: .seconds(2))
-                retryDeadline = deadline
-                guard now < deadline else { throw error }
-                try Task.checkCancellation()
-                try tools.requireActive()
-                let frontmost = tools.frontmostApplicationSnapshot()
-                guard frontmost.identityIsAuthoritative, frontmost.identity == application else {
-                    throw error
-                }
-                try Task.checkCancellation()
-                try tools.requireActive()
-                guard ContinuousClock.now < deadline else { throw error }
+                try authorizeValidationRecapture(application: application, tools: tools,
+                    deadline: &retryDeadline, originalError: error)
+                continue
             }
+            guard attempt < 2,
+                  Self.isTransientUnfocusedRetainedWindowSnapshot(snapshot, application: application,
+                    target: target) else { return snapshot }
+            try authorizeValidationRecapture(application: application, tools: tools,
+                deadline: &retryDeadline, originalError: Failure.targetLost)
         }
         throw Failure.targetLost
+    }
+
+    private static func isTransientUnfocusedRetainedWindowSnapshot(
+        _ snapshot: WindowSnapshot,
+        application: ComputerUseApplicationIdentity,
+        target: Window
+    ) -> Bool {
+        guard snapshot.application == application,
+              !snapshot.hasSheets, !snapshot.hasUnrecognizedSheets,
+              snapshot.fileOpenPanel == nil,
+              snapshot.focusedWindowID != target.id,
+              uniqueWindows(snapshot.windows),
+              snapshot.windows.filter({ sameWindow($0, target) }).count == 1 else { return false }
+        return true
+    }
+
+    private func authorizeValidationRecapture(
+        application: ComputerUseApplicationIdentity,
+        tools: ComputerUseHostTools,
+        deadline: inout ContinuousClock.Instant?,
+        originalError: Error
+    ) throws {
+        let now = ContinuousClock.now
+        let limit = deadline ?? now.advanced(by: .seconds(2))
+        deadline = limit
+        guard now < limit else { throw originalError }
+        try Task.checkCancellation()
+        try tools.requireActive()
+        let frontmost = tools.frontmostApplicationSnapshot()
+        guard frontmost.identityIsAuthoritative, frontmost.identity == application else {
+            throw originalError
+        }
+        try Task.checkCancellation()
+        try tools.requireActive()
+        guard ContinuousClock.now < limit else { throw originalError }
     }
 
     private func makeExecution(state: RunState, goalDigest: String,
@@ -952,41 +950,55 @@ final class ComputerUseDefaultBrowserSession {
                 let before = try await Self.waitForForegroundSnapshot(
                     app: app, tools: tools, captureWindows: captureWindows)
                 state.before = before
-                let action = ComputerUsePredictedAction.key(usage: 0x11, modifiers: 1 << 3)
-                var effectBegan = false
-                for attempt in 0..<2 {
-                    try Task.checkCancellation()
-                    try tools.requireActive()
-                    guard try resolveHandler() == state.handler,
-                          try Self.sameSnapshot(before, captureWindows(app)) else { throw Failure.interrupted }
-                    do {
-                        let fingerprint = try tools.prepareNativeActionFingerprint(for: action)
-                        guard try Self.sameSnapshot(before, captureWindows(app)) else { throw Failure.interrupted }
-                        try Task.checkCancellation()
-                        try tools.requireActive()
-                        try await tools.performNativeAction(action, fingerprint: fingerprint) { [weak state, captureWindows] in
+                if app.bundleIdentifier == "com.apple.Safari" {
+                    try tools.performNativeBrowserHostCommand(.newWindow,
+                        expectedApplication: app) { [weak state, captureWindows] in
                             try Task.checkCancellation()
                             try tools.requireActive()
-                            guard let state, let app = state.app, let originalBefore = state.before,
-                                  try Self.sameSnapshot(originalBefore, captureWindows(app)) else {
+                            guard try resolveHandler() == state?.handler,
+                                  let state, let currentApp = state.app, currentApp == app,
+                                  let originalBefore = state.before,
+                                  try Self.sameSnapshot(originalBefore, captureWindows(currentApp)) else {
                                 throw Failure.interrupted
                             }
-                            effectBegan = true
                         }
-                        break
-                    } catch ComputerUseHostTools.ToolError.approvalTargetChanged {
-                        try Task.checkCancellation()
-                        try tools.requireActive()
-                        guard !effectBegan, attempt == 0 else {
-                            throw ComputerUseHostTools.ToolError.approvalTargetChanged
-                        }
-                        guard try resolveHandler() == state.handler,
-                              try Self.sameSnapshot(before, captureWindows(app)) else { throw Failure.interrupted }
-                        await Task.yield()
+                } else {
+                    let action = ComputerUsePredictedAction.key(usage: 0x11, modifiers: 1 << 3)
+                    var effectBegan = false
+                    for attempt in 0..<2 {
                         try Task.checkCancellation()
                         try tools.requireActive()
                         guard try resolveHandler() == state.handler,
                               try Self.sameSnapshot(before, captureWindows(app)) else { throw Failure.interrupted }
+                        do {
+                            let fingerprint = try tools.prepareNativeActionFingerprint(for: action)
+                            guard try Self.sameSnapshot(before, captureWindows(app)) else { throw Failure.interrupted }
+                            try Task.checkCancellation()
+                            try tools.requireActive()
+                            try await tools.performNativeAction(action, fingerprint: fingerprint) { [weak state, captureWindows] in
+                                try Task.checkCancellation()
+                                try tools.requireActive()
+                                guard let state, let app = state.app, let originalBefore = state.before,
+                                      try Self.sameSnapshot(originalBefore, captureWindows(app)) else {
+                                    throw Failure.interrupted
+                                }
+                                effectBegan = true
+                            }
+                            break
+                        } catch ComputerUseHostTools.ToolError.approvalTargetChanged {
+                            try Task.checkCancellation()
+                            try tools.requireActive()
+                            guard !effectBegan, attempt == 0 else {
+                                throw ComputerUseHostTools.ToolError.approvalTargetChanged
+                            }
+                            guard try resolveHandler() == state.handler,
+                                  try Self.sameSnapshot(before, captureWindows(app)) else { throw Failure.interrupted }
+                            await Task.yield()
+                            try Task.checkCancellation()
+                            try tools.requireActive()
+                            guard try resolveHandler() == state.handler,
+                                  try Self.sameSnapshot(before, captureWindows(app)) else { throw Failure.interrupted }
+                        }
                     }
                 }
                 state.target = try await Self.waitForNewFocusedWindow(

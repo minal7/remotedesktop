@@ -2982,15 +2982,125 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
 
         fixture.desktop.focusedID = "existing"
         XCTAssertThrowsError(try session.validate(taskID: "task-1", goal: "Use the default browser", tools: fixture.tools))
-        XCTAssertEqual(targetAwareCaptures, capturesAfterEnsure + 2,
-            "A wrong focused window must still fail through validation")
+        XCTAssertEqual(targetAwareCaptures, capturesAfterEnsure + 4,
+            "A stable wrong-focus snapshot gets two bounded read-only recaptures, then still fails validation")
 
         let panel = fixture.fileOpenPanel(parentWindowID: target.id,
             bounds: CGRect(x: 250, y: 180, width: 700, height: 500), focused: true)
         fixture.desktop.fileOpenPanel = panel
         try session.validate(taskID: "task-1", goal: "Use the default browser", tools: fixture.tools)
-        XCTAssertEqual(targetAwareCaptures, capturesAfterEnsure + 3)
+        XCTAssertEqual(targetAwareCaptures, capturesAfterEnsure + 5)
         XCTAssertEqual(session.currentFileOpenPanel?.parentWindowID, target.id)
+    }
+
+    @MainActor
+    func testValidationRecapturesTransientMissingGoToPanelBeforeApplyingFocusGuards() async throws {
+        let fixture = try Fixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        var armed = false
+        var capturesAfterArming = 0
+        let session = try fixture.session(retainedWindowCapture: { identity, expected in
+            guard armed else { return fixture.desktop.snapshot(application: identity) }
+            capturesAfterArming += 1
+            if capturesAfterArming == 1 {
+                // Model a transient AX read where the retained browser window is
+                // still listed, but its detached Go To sheet is missing and focus
+                // has not yet settled back into the parent window.
+                return .init(application: identity, windows: fixture.desktop.windows,
+                    focusedWindowID: "existing", hasSheets: false)
+            }
+            XCTAssertTrue(fixture.desktop.windows.contains(where: {
+                CFEqual($0.accessibilityElement, expected.accessibilityElement)
+            }))
+            return fixture.desktop.snapshot(application: identity)
+        })
+        let target = try await session.ensure(taskID: "task-1", goal: "Use the default browser", tools: fixture.tools)
+        fixture.desktop.focusedID = "existing"
+        fixture.desktop.fileOpenPanel = fixture.fileOpenPanel(parentWindowID: target.id,
+            bounds: CGRect(x: 250, y: 180, width: 700, height: 500), focused: true,
+            goToFolderBounds: CGRect(x: 420, y: 330, width: 450, height: 180))
+        let inputCount = fixture.desktop.keyCount
+        armed = true
+
+        try session.validate(taskID: "task-1", goal: "Use the default browser", tools: fixture.tools)
+
+        XCTAssertEqual(capturesAfterArming, 2)
+        XCTAssertEqual(session.currentFileOpenPanel?.parentWindowID, target.id)
+        XCTAssertTrue(session.currentFileOpenPanel?.isNavigatingPath == true)
+        XCTAssertEqual(fixture.desktop.keyCount, inputCount,
+            "Read-only recapture must not replay or dispatch native input")
+    }
+
+    @MainActor
+    func testMissingGoToPanelRecaptureStopsForPersistentOrChangedAuthority() async throws {
+        for scenario in ["persistent", "unknown-sheet", "changed-app", "replaced-window", "revoked-gate", "cancelled"] {
+            let fixture = try Fixture()
+            defer { try? FileManager.default.removeItem(at: fixture.root) }
+            var armed = false
+            var capturesAfterArming = 0
+            var cancelledDuringCapture = false
+            let session = try fixture.session(retainedWindowCapture: { identity, expected in
+                guard armed else { return fixture.desktop.snapshot(application: identity) }
+                capturesAfterArming += 1
+                if scenario == "persistent" || capturesAfterArming == 1 {
+                    if scenario == "revoked-gate" { fixture.desktop.isActive = false }
+                    if scenario == "cancelled", !cancelledDuringCapture {
+                        cancelledDuringCapture = true
+                        withUnsafeCurrentTask { $0?.cancel() }
+                    }
+                    if scenario == "unknown-sheet" {
+                        return .init(application: identity, windows: fixture.desktop.windows,
+                            focusedWindowID: "existing", hasSheets: true, hasUnrecognizedSheets: true)
+                    }
+                    if scenario == "changed-app" {
+                        let other = try XCTUnwrap(ComputerUseApplicationIdentity(
+                            bundleIdentifier: identity.bundleIdentifier,
+                            processIdentifier: identity.processIdentifier + 1,
+                            launchGeneration: identity.launchGeneration,
+                            codeIdentity: identity.codeIdentity))
+                        return .init(application: other, windows: fixture.desktop.windows,
+                            focusedWindowID: "existing", hasSheets: false)
+                    }
+                    if scenario == "replaced-window" {
+                        return .init(application: identity,
+                            windows: [fixture.window(expected.id, pid: identity.processIdentifier, hash: 999)],
+                            focusedWindowID: "existing", hasSheets: false)
+                    }
+                    return .init(application: identity, windows: fixture.desktop.windows,
+                        focusedWindowID: "existing", hasSheets: false)
+                }
+                return fixture.desktop.snapshot(application: identity)
+            })
+            let taskID = "task-missing-panel-\(scenario)"
+            let goal = "Use the default browser"
+            let target = try await session.ensure(taskID: taskID, goal: goal, tools: fixture.tools)
+            fixture.desktop.focusedID = "existing"
+            fixture.desktop.fileOpenPanel = fixture.fileOpenPanel(parentWindowID: target.id,
+                bounds: CGRect(x: 250, y: 180, width: 700, height: 500), focused: true,
+                goToFolderBounds: CGRect(x: 420, y: 330, width: 450, height: 180))
+            let inputCount = fixture.desktop.keyCount
+            armed = true
+
+            if scenario == "cancelled" {
+                let validation = Task { @MainActor in
+                    try session.validate(taskID: taskID, goal: goal, tools: fixture.tools)
+                }
+                do {
+                    try await validation.value
+                    XCTFail("Cancellation must prevent a recapture")
+                } catch is CancellationError {
+                } catch {
+                    XCTFail("Cancellation must win: \(error)")
+                }
+                XCTAssertEqual(capturesAfterArming, 1)
+            } else {
+                XCTAssertThrowsError(try session.validate(taskID: taskID, goal: goal, tools: fixture.tools))
+                let expectedCaptures = scenario == "persistent" ? 3 : 1
+                XCTAssertEqual(capturesAfterArming, expectedCaptures)
+            }
+            XCTAssertEqual(fixture.desktop.keyCount, inputCount,
+                "A failed validation recapture must never dispatch native input")
+        }
     }
 
     @MainActor
@@ -3103,8 +3213,9 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                     "Repeated read recovery must never dispatch another action")
             } else {
                 XCTAssertThrowsError(try session.validate(taskID: taskID, goal: goal, tools: fixture.tools))
-                let expectedAttempts = (scenario == "persistent" || scenario == "persistent-focused-read") ? 3
-                    : ["nonqualifying-error", "nonqualifying-focused-error", "missing-focus"].contains(scenario) ? 1 : 2
+                let expectedAttempts = (scenario == "persistent" || scenario == "persistent-focused-read"
+                    || scenario == "missing-focus") ? 3
+                    : ["nonqualifying-error", "nonqualifying-focused-error"].contains(scenario) ? 1 : 2
                 XCTAssertEqual(captureAttempts, expectedAttempts,
                     "Capture recovery stays bounded and unchanged identity/sheet guards still decide")
                 if scenario == "authentication-sheet" {
@@ -3355,14 +3466,15 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
     func testSafariNavigationUsesScopedAXValueWriteAndDoesNotReplayUncertainDispatch() async throws {
         let inboxDestination = try XCTUnwrap(URL(string: "https://mail.google.com/mail/u/0/#inbox"))
 
-        for scenario in ["success", "uncertain-ax-write", "uncertain-native-return",
-                         "focus-pre-effect-retry", "focus-persistent-rejection", "focus-post-effect-rejection",
-                         "focus-gate-revoked", "focus-cancelled", "drafts-success",
+        for scenario in ["success", "animated-chrome", "uncertain-ax-write", "uncertain-native-return",
+                         "drafts-success",
                          "ax-setter-gate-revoked",
                          "ax-setter-delayed-readback", "ax-setter-gate-revoked-after-write",
                          "ax-setter-cancelled-after-write", "ax-setter-readback-timeout",
                          "ax-setter-unsupported", "ax-setter-changed-authority", "ax-setter-changed-value",
-                         "ax-setter-error", "ax-setter-partial"] {
+                         "ax-setter-error", "ax-setter-error-applied",
+                         "ax-setter-error-applied-gate-revoked-after-write",
+                         "ax-setter-error-applied-cancelled-after-write", "ax-setter-partial"] {
             let destination = scenario == "drafts-success"
                 ? try XCTUnwrap(URL(string: "https://mail.google.com/mail/u/0/#drafts")) : inboxDestination
             let root = FileManager.default.temporaryDirectory
@@ -3409,16 +3521,10 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                     if case .key(let usage, let modifiers) = action, usage == 0x0F, modifiers == (1 << 3) {
                         focusTargetReads += 1
                         let targetRead = focusTargetReads
-                        let isRejectedRead = (scenario == "focus-pre-effect-retry" && targetRead == 2)
-                            || (scenario == "focus-persistent-rejection" && targetRead.isMultiple(of: 2))
-                            || ((scenario == "focus-gate-revoked" || scenario == "focus-cancelled") && targetRead == 2)
-                        if scenario == "focus-gate-revoked" && targetRead == 2 { active = false }
-                        if scenario == "focus-cancelled" && targetRead == 2 {
-                            withUnsafeCurrentTask { $0?.cancel() }
-                        }
-                        if isRejectedRead {
-                            return .init(context: "Safari focused window", applicationID: app.bundleIdentifier,
-                                accessibilityIdentity: "transient-focus-target")
+                        if scenario == "animated-chrome" && targetRead.isMultiple(of: 2) {
+                            // Model the observed final-dispatch rejection when
+                            // toolbar pixels animate but signed window/focus stay fixed.
+                            throw ComputerUseHostTools.ToolError.approvalTargetChanged
                         }
                     }
                     return .init(context: "Safari focused window", applicationID: app.bundleIdentifier,
@@ -3455,7 +3561,17 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                     }
                 },
                 screenProvider: {
-                    .init(image: CIImage(color: .black).cropped(to: CGRect(x: 0, y: 0, width: 640, height: 480)),
+                    let color: CIColor
+                    if scenario == "animated-chrome" {
+                        // A changing toolbar pixel digest must not invalidate a
+                        // fixed host navigation command on the retained Safari window.
+                        color = focusTargetReads.isMultiple(of: 2)
+                            ? CIColor(red: 0.1, green: 0.2, blue: 0.3)
+                            : CIColor(red: 0.8, green: 0.7, blue: 0.6)
+                    } else {
+                        color = .black
+                    }
+                    return .init(image: CIImage(color: color).cropped(to: CGRect(x: 0, y: 0, width: 640, height: 480)),
                         displayBounds: CGRect(x: 0, y: 0, width: 640, height: 480),
                         frontmostWindowBounds: CGRect(x: 0, y: 0, width: 640, height: 480))
                 },
@@ -3481,68 +3597,34 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                         }
                         axValueWrites += 1
                         nativeNavigationEffects.append("AXSetValue")
-                        graph.setAddressValue(value, partial: scenario == "ax-setter-partial",
-                            delayedReads: scenario == "ax-setter-delayed-readback" ? 2
-                                : scenario == "ax-setter-readback-timeout" ? Int.max : 0)
-                        return (scenario == "ax-setter-error" || scenario == "uncertain-ax-write")
+                        if scenario != "ax-setter-error" && scenario != "uncertain-ax-write" {
+                            graph.setAddressValue(value, partial: scenario == "ax-setter-partial",
+                                delayedReads: scenario == "ax-setter-delayed-readback" ? 2
+                                    : scenario == "ax-setter-readback-timeout" ? Int.max : 0)
+                        }
+                        return (scenario == "ax-setter-error" || scenario == "ax-setter-error-applied"
+                            || scenario == "ax-setter-error-applied-gate-revoked-after-write"
+                            || scenario == "ax-setter-error-applied-cancelled-after-write"
+                            || scenario == "uncertain-ax-write")
                             ? .cannotComplete : .success
                     }))
 
             _ = try await session.ensure(taskID: "task-\(scenario)", goal: "Open the signed-in Gmail inbox.", tools: tools)
 
-            if scenario.hasPrefix("focus-") {
-                let navigation = Task { @MainActor in
-                    try await session.navigateRetainedSafariTab(to: destination, taskID: "task-\(scenario)",
-                        goal: "Open the signed-in Gmail inbox.", tools: tools)
-                }
-                do {
-                    try await navigation.value
-                    if scenario == "focus-pre-effect-retry" {
-                        XCTAssertEqual(focusDispatches, 1, "One pre-effect fingerprint retry must dispatch Cmd-L once")
-                        XCTAssertEqual(focusTargetReads, 4)
-                        XCTAssertEqual(axValueWrites, 1)
-                        XCTAssertEqual(graph.nativeTypeCount, 0)
-                        XCTAssertEqual(returnDispatches, 1)
-                        XCTAssertEqual(nativeNavigationEffects, ["CmdL", "AXSetValue", "Return"])
-                    } else {
-                        XCTFail("The injected focus failure must stop navigation for \(scenario)")
-                    }
-                } catch ComputerUseHostTools.ToolError.paused where scenario == "focus-gate-revoked" {
-                    XCTAssertEqual(focusTargetReads, 2, "A revoked gate must block a retry")
-                    XCTAssertEqual(focusDispatches, 0)
-                } catch is CancellationError where scenario == "focus-cancelled" {
-                    XCTAssertEqual(focusTargetReads, 2, "Cancellation must block a retry")
-                    XCTAssertEqual(focusDispatches, 0)
-                } catch ComputerUseHostTools.ToolError.approvalTargetChanged
-                    where scenario == "focus-persistent-rejection" {
-                    XCTAssertEqual(focusTargetReads, 4, "Only one fresh pre-effect retry is allowed")
-                    XCTAssertEqual(focusDispatches, 0)
-                } catch ComputerUseHostTools.ToolError.approvalTargetChanged
-                    where scenario == "focus-post-effect-rejection" {
-                    XCTAssertEqual(focusTargetReads, 2)
-                    XCTAssertEqual(focusDispatches, 1, "An error after the effect boundary must not replay Cmd-L")
-                } catch {
-                    XCTFail("Unexpected navigation failure for \(scenario): \(error)")
-                }
-                if scenario != "focus-pre-effect-retry" {
-                    XCTAssertEqual(graph.nativeTypeCount, 0, "A failed focus action must not type the destination")
-                    XCTAssertEqual(axValueWrites, 0, "A failed focus action must not write the address value")
-                    XCTAssertEqual(selectionDispatches, 0)
-                    XCTAssertEqual(returnDispatches, 0)
-                }
-                continue
-            }
-
             if scenario.hasPrefix("ax-setter-") && scenario != "ax-setter-gate-revoked" {
                 var navigationError: Error?
                 var navigationDiagnostics: [String] = []
-                if scenario == "ax-setter-cancelled-after-write" {
+                if scenario == "ax-setter-cancelled-after-write"
+                    || scenario == "ax-setter-error-applied-cancelled-after-write" {
                     let navigation = Task { @MainActor in
                         try await session.navigateRetainedSafariTab(to: destination, taskID: "task-\(scenario)",
                             goal: "Open the signed-in Gmail inbox.", tools: tools,
                             diagnostic: { value in
                                 navigationDiagnostics.append(value)
-                                if value == "phase=ax_address_value_write_completed" {
+                                if (scenario == "ax-setter-cancelled-after-write"
+                                    && value == "phase=ax_address_value_write_completed")
+                                    || (scenario == "ax-setter-error-applied-cancelled-after-write"
+                                        && value == "phase=ax_address_value_write_status_uncertain") {
                                     withUnsafeCurrentTask { $0?.cancel() }
                                 }
                             })
@@ -3556,6 +3638,8 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                                 navigationDiagnostics.append(value)
                                 if scenario == "ax-setter-gate-revoked-after-write",
                                    value == "phase=ax_address_value_write_completed" { active = false }
+                                if scenario == "ax-setter-error-applied-gate-revoked-after-write",
+                                   value == "phase=ax_address_value_write_status_uncertain" { active = false }
                             })
                     } catch {
                         navigationError = error
@@ -3576,11 +3660,24 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                     continue
                 }
                 if scenario == "ax-setter-gate-revoked-after-write"
-                    || scenario == "ax-setter-cancelled-after-write" {
+                    || scenario == "ax-setter-cancelled-after-write"
+                    || scenario == "ax-setter-error-applied-gate-revoked-after-write"
+                    || scenario == "ax-setter-error-applied-cancelled-after-write" {
                     XCTAssertNotNil(navigationError, "Revocation after the setter must stop before Return")
                     XCTAssertEqual(axValueWrites, 1)
                     XCTAssertEqual(returnDispatches, 0)
                     XCTAssertEqual(graph.nativeTypeCount, 0)
+                    continue
+                }
+                if scenario == "ax-setter-error-applied" {
+                    XCTAssertNil(navigationError,
+                        "An error status is uncertain; fresh exact same-field readback can confirm the write")
+                    XCTAssertEqual(axValueWrites, 1, "The setter must never be replayed")
+                    XCTAssertEqual(graph.currentAddressValue, destination.absoluteString)
+                    XCTAssertEqual(returnDispatches, 1, "Return follows exact readback, not the setter status")
+                    XCTAssertEqual(graph.nativeTypeCount, 0, "Uncertain AX writes never fall back to typing")
+                    XCTAssertTrue(navigationDiagnostics.contains("phase=ax_address_value_write_status_uncertain"))
+                    XCTAssertEqual(navigationDiagnostics.last, "phase=ax_navigation_dispatched")
                     continue
                 }
                 if scenario == "ax-setter-unsupported" || scenario == "ax-setter-changed-authority"
@@ -3651,7 +3748,7 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                 XCTAssertEqual(axValueWrites, 1)
                 XCTAssertEqual(graph.nativeTypeCount, 0)
                 XCTAssertEqual(returnDispatches, 0)
-            } else if scenario == "success" || scenario == "drafts-success" {
+            } else if scenario == "success" || scenario == "animated-chrome" || scenario == "drafts-success" {
                 try await session.navigateRetainedSafariTab(to: destination, taskID: "task-\(scenario)",
                     goal: "Open the signed-in Gmail inbox.", tools: tools)
                 XCTAssertEqual(axValueWrites, 1, "The verified address field should receive one scoped AX write")
