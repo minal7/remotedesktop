@@ -53,4 +53,59 @@ final class ComputerUseDefaultBrowserExecutorTests: XCTestCase {
         }
     }
 
+    func testDriveUploadShortcutUsesOnlyBoundCommandsAndDoesNotReplayPartialSequence() throws {
+        let code = ComputerUseApplicationCodeIdentity(authority: .runningCode,
+            bundleIdentifier: "com.apple.Safari", canonicalBundlePath: "/Applications/Safari.app",
+            canonicalExecutablePath: "/Applications/Safari.app/Contents/MacOS/Safari",
+            designatedRequirement: "test requirement", teamIdentifier: nil, platformIdentifier: nil)
+        let application = try XCTUnwrap(ComputerUseApplicationIdentity(bundleIdentifier: "com.apple.Safari",
+            processIdentifier: 42, launchGeneration: 1, codeIdentity: code))
+
+        for failOnSecond in [false, true] {
+            var actions: [ComputerUsePredictedAction] = []
+            let allowed = true
+            let injector = InputInjector(eventPoster: { _ in XCTFail("Virtual host commands must not post native events") })
+            let tools = ComputerUseHostTools(injector: injector, mayAct: { allowed }, actionPerformer: { action in
+                actions.append(action)
+                if failOnSecond && actions.count == 2 { throw ShortcutFailure.injected }
+            }, frontmostApplicationIdentityProvider: { application })
+            var attempted = false
+            var validations = 0
+            var begins = 0
+            let sequence = {
+                try ComputerUseDefaultBrowserExecutor.performDriveUploadKeyboardSequence(tools: tools,
+                    expectedApplication: application,
+                    isAttempted: { attempted },
+                    validateContext: { validations += 1 },
+                    beginAttempt: {
+                        guard !attempted else { throw ComputerUseDesktopExecutor.Failure.scopedSurfaceChanged }
+                        attempted = true
+                        begins += 1
+                    })
+            }
+
+            if failOnSecond {
+                XCTAssertThrowsError(try sequence())
+                XCTAssertTrue(attempted, "The first key latches the macro before any partial/uncertain result")
+                XCTAssertThrowsError(try sequence(), "Resume must not replay either shortcut key")
+            } else {
+                try sequence()
+                XCTAssertTrue(attempted)
+            }
+            XCTAssertEqual(actions.count, 2)
+            XCTAssertEqual(validations, 2, "The retained context is rechecked immediately before each key")
+            XCTAssertEqual(begins, 1)
+            guard case .key(let firstUsage, let firstModifiers) = actions[0],
+                  case .key(let secondUsage, let secondModifiers) = actions[1] else {
+                return XCTFail("The fallback must contain only its two fixed keyboard commands")
+            }
+            XCTAssertEqual(firstUsage, 0x06) // Control-C opens Drive's New menu
+            XCTAssertEqual(firstModifiers, 1 << 1)
+            XCTAssertEqual(secondUsage, 0x18) // U chooses File upload
+            XCTAssertEqual(secondModifiers, 0)
+        }
+    }
+
+    private enum ShortcutFailure: Error { case injected }
+
 }

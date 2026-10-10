@@ -774,6 +774,95 @@ final class ComputerUseDefaultBrowserPageReaderTests: XCTestCase {
         XCTAssertTrue(graph.writes.isEmpty)
     }
 
+    func testWebUploadControlsPassFindsGlobalControlsWithoutClaimingListingCompleteness() throws {
+        let graph = PageAXGraph()
+        graph.makePage()
+        let rows = (0..<300).map { index -> AXUIElement in
+            let key = "virtual-row-\(index)"
+            let row = graph.element(key)
+            graph.set(key, kAXRoleAttribute, "AXRow" as NSString)
+            return row
+        }
+        let account = graph.element("drive-account")
+        let search = graph.element("drive-search")
+        graph.set("drive-account", kAXRoleAttribute, "AXButton" as NSString)
+        graph.set("drive-account", kAXTitleAttribute, "Google Account: Test User" as NSString)
+        graph.set("drive-account", kAXEnabledAttribute, NSNumber(value: true))
+        graph.set("drive-search", kAXRoleAttribute, "AXTextField" as NSString)
+        graph.set("drive-search", kAXTitleAttribute, "Search Google Drive" as NSString)
+        graph.set("drive-search", kAXValueAttribute, "" as NSString)
+        let additionalControls = (0..<43).map { index -> AXUIElement in
+            let key = "global-control-\(index)"
+            let control = graph.element(key)
+            graph.set(key, kAXRoleAttribute, "AXButton" as NSString)
+            graph.set(key, kAXTitleAttribute, "Control \(index)" as NSString)
+            graph.set(key, kAXEnabledAttribute, NSNumber(value: true))
+            return control
+        }
+        graph.set("web", kAXChildrenAttribute, (rows + [account, search] + additionalControls) as CFArray)
+
+        let reader = ComputerUseDefaultBrowserPageReader(access: graph.access)
+        let controls = try XCTUnwrap(reader.read(window: graph.window, application: graph.identity,
+            mayAct: { true }, mode: .webUploadControls))
+        XCTAssertTrue(controls.webUploadControlsComplete)
+        XCTAssertTrue(controls.truncated, "Pruning virtualized rows must not claim the listing is complete")
+        XCTAssertTrue(controls.controls.contains { $0.label == "Google Account: Test User" })
+        XCTAssertTrue(controls.formFieldValues.contains { $0.label == "Search Google Drive" })
+        let omittedListing = reader.lastWebUploadControlsDiagnosticForDiagnostics
+        XCTAssertEqual(omittedListing["complete"], "true")
+        XCTAssertEqual(omittedListing["truncated"], "true")
+        XCTAssertEqual(omittedListing["reasons"], "")
+        XCTAssertEqual(try XCTUnwrap(Int(omittedListing["pruned_listing_nodes"] ?? "0")), rows.count)
+        XCTAssertEqual(omittedListing["controls"], "45")
+        XCTAssertEqual(omittedListing["exact_text"], "45")
+        XCTAssertLessThanOrEqual(try XCTUnwrap(Int(omittedListing["visited"] ?? "999")), 256)
+
+        let listing = try XCTUnwrap(reader.read(window: graph.window, application: graph.identity,
+            mayAct: { true }, mode: .standard))
+        XCTAssertFalse(listing.webUploadControlsComplete)
+        XCTAssertTrue(listing.truncated)
+        XCTAssertFalse(listing.controls.contains { $0.label == "Google Account: Test User" },
+            "A row-heavy standard pass can exhaust its traversal bound before global controls")
+
+        let listingGraph = PageAXGraph()
+        listingGraph.makePage()
+        let listingControls = (0..<45).map { index -> AXUIElement in
+            let key = "listing-control-\(index)"
+            let control = listingGraph.element(key)
+            listingGraph.set(key, kAXRoleAttribute, "AXButton" as NSString)
+            listingGraph.set(key, kAXTitleAttribute, "C\(index)" as NSString)
+            listingGraph.set(key, kAXEnabledAttribute, NSNumber(value: true))
+            return control
+        }
+        listingGraph.set("web", kAXChildrenAttribute, listingControls as CFArray)
+        let listingReader = ComputerUseDefaultBrowserPageReader(access: listingGraph.access)
+        let uploadListing = try XCTUnwrap(listingReader.read(window: listingGraph.window,
+            application: listingGraph.identity, mayAct: { true }, mode: .webUploadListing))
+        XCTAssertFalse(uploadListing.truncated)
+        XCTAssertEqual(uploadListing.controls.count, 45,
+            "The W2 listing pass must retain the same expanded global-control bound")
+        XCTAssertEqual(uploadListing.exactTextValues.count, 45)
+
+        let cappedGraph = PageAXGraph()
+        cappedGraph.makePage()
+        let cappedControls = (0..<129).map { index -> AXUIElement in
+            let key = "global-control-\(index)"
+            let control = cappedGraph.element(key)
+            cappedGraph.set(key, kAXRoleAttribute, "AXButton" as NSString)
+            cappedGraph.set(key, kAXTitleAttribute, "C\(index)" as NSString)
+            cappedGraph.set(key, kAXEnabledAttribute, NSNumber(value: true))
+            return control
+        }
+        cappedGraph.set("web", kAXChildrenAttribute, cappedControls as CFArray)
+        let cappedReader = ComputerUseDefaultBrowserPageReader(access: cappedGraph.access)
+        let capped = try XCTUnwrap(cappedReader.read(window: cappedGraph.window, application: cappedGraph.identity,
+            mayAct: { true }, mode: .webUploadControls))
+        XCTAssertFalse(capped.webUploadControlsComplete)
+        XCTAssertEqual(cappedReader.lastWebUploadControlsDiagnosticForDiagnostics["reasons"], "control_count")
+        XCTAssertEqual(cappedReader.lastWebUploadControlsDiagnosticForDiagnostics["controls"], "128")
+        XCTAssertEqual(cappedReader.lastWebUploadControlsDiagnosticForDiagnostics["exact_text"], "128")
+    }
+
     func testObservationCarriesExactStaticTextAndControlLabelsFromOuterPage() throws {
         let graph = PageAXGraph()
         graph.makePage(text: "Current destination entry")

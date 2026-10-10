@@ -71,6 +71,8 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
     typealias HostPreparation = @MainActor @Sendable () async throws -> Void
     /// Called only after native input returned and its dispatch journal was verified.
     typealias SuccessfulDispatchHandler = @MainActor @Sendable (ComputerUsePredictedAction) -> Void
+    /// Called after dispatch guards and durable attempt recording, immediately before native input.
+    typealias WillBeginEffectHandler = @MainActor @Sendable (ComputerUsePredictedAction) -> Void
     /// Optional active envelope identity for host-managed clarifications.
     /// The durable desktop session and trusted goal remain rooted at taskID.
     typealias ApprovalTaskIDProvider = @MainActor @Sendable () -> String?
@@ -128,6 +130,7 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
     private let localFileOperationHandler: LocalFileOperationHandler?
     private let hostPreparation: HostPreparation?
     private let onSuccessfulDispatch: SuccessfulDispatchHandler
+    private let onWillBeginEffect: WillBeginEffectHandler
     private let approvalTaskIDProvider: ApprovalTaskIDProvider?
     private let screenConsentRecognizer: ScreenConsentRecognizer
     private let usesColdConsentStartupBudget: Bool
@@ -159,6 +162,7 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
          localFileOperationHandler: LocalFileOperationHandler? = nil,
          hostPreparation: HostPreparation? = nil,
          onSuccessfulDispatch: @escaping SuccessfulDispatchHandler = { _ in },
+         onWillBeginEffect: @escaping WillBeginEffectHandler = { _ in },
          approvalTaskIDProvider: ApprovalTaskIDProvider? = nil,
          screenConsentRecognizer: ScreenConsentRecognizer? = nil,
          screenConsentTimeout: TimeInterval? = nil,
@@ -172,6 +176,7 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
         self.localFileOperationHandler = localFileOperationHandler
         self.hostPreparation = hostPreparation; self.finishRun = finishRun
         self.onSuccessfulDispatch = onSuccessfulDispatch
+        self.onWillBeginEffect = onWillBeginEffect
         self.approvalTaskIDProvider = approvalTaskIDProvider
         self.screenConsentRecognizer = screenConsentRecognizer
             ?? { try ComputerUseScreenCaptureConsentDetector.requiresUserIntervention(from: $0) }
@@ -923,7 +928,9 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
                 try self.checkScopedSurface(action)
                 if !approved, tools.approvalReason(for: action) != nil { throw Failure.invalidApproval }
                 try self.store.save(attempted, replacing: nil)
-                began = true; willBeginEffect()
+                began = true
+                self.onWillBeginEffect(action)
+                willBeginEffect()
             })
             // This journal proves native input returned, not the resulting UI.
             // A click can open a sheet asynchronously. Inspect its settled

@@ -697,6 +697,56 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
         }
     }
 
+    func testWillBeginEffectCallbackRunsOnlyAtDispatchAndUncertainResumeDoesNotReplay() async throws {
+        enum DispatchFailure: Error { case uncertain }
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        var proposals = 0, began = 0, succeeded = 0, effects = 0
+        let tools = desktopTestTools(perform: { _ in
+            effects += 1
+            throw DispatchFailure.uncertain
+        })
+        let executor = try ComputerUseDesktopExecutor(journalDirectory: directory, propose: { _ in
+            proposals += 1
+            return .init(response: "Click the observed neutral control.",
+                action: .pointer(.leftClick, .init(x: 500, y: 500)))
+        }, onSuccessfulDispatch: { _ in succeeded += 1 }, onWillBeginEffect: { _ in began += 1 },
+           screenConsentRecognizer: { _ in false })
+
+        do {
+            _ = try await executor.execute(taskID: "w2-uncertain-dispatch", prompt: "Click the control",
+                trustedUserPrompt: "Click the control", tools: tools, progress: { _ in })
+            XCTFail("The native effect error must remain visible to the caller")
+        } catch DispatchFailure.uncertain {
+            // The executor intentionally propagates a possibly-applied host error.
+        }
+        XCTAssertEqual(proposals, 1)
+        XCTAssertEqual(began, 1, "The latch callback runs immediately before an actual effect attempt")
+        XCTAssertEqual(effects, 1)
+        XCTAssertEqual(succeeded, 0, "A thrown native action is not a successful dispatch")
+
+        _ = try await executor.execute(taskID: "w2-uncertain-dispatch", prompt: "Resume",
+            trustedUserPrompt: "Click the control", tools: tools, progress: { _ in })
+        XCTAssertEqual(proposals, 1, "An uncertain native effect cannot be proposed again on Resume")
+        XCTAssertEqual(began, 1)
+        XCTAssertEqual(effects, 1)
+
+        let approvalDirectory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: approvalDirectory) }
+        var approvalBegan = 0, approvalEffects = 0
+        let approvalTools = desktopTestTools(accessibilityContext: "Send button",
+            perform: { _ in approvalEffects += 1 })
+        let approvalExecutor = try ComputerUseDesktopExecutor(journalDirectory: approvalDirectory, propose: { _ in
+            .init(response: "Confirm the labeled control.",
+                action: .pointer(.leftClick, .init(x: 500, y: 500)))
+        }, onWillBeginEffect: { _ in approvalBegan += 1 }, screenConsentRecognizer: { _ in false })
+        let pending = try await approvalExecutor.execute(taskID: "w2-approval-not-dispatched", prompt: "Click the button",
+            trustedUserPrompt: "Click the button", tools: approvalTools, progress: { _ in })
+        guard case .approvalRequired = pending else { return XCTFail("A consequential control must await approval") }
+        XCTAssertEqual(approvalBegan, 0, "Approval presentation alone must not latch an upload effect")
+        XCTAssertEqual(approvalEffects, 0)
+    }
+
     func testDefaultBrowserFilePanelRequiresTheResolvedCandidateBeforeOpen() {
         let element = AXUIElementCreateSystemWide()
         let panel = ComputerUseDefaultBrowserSession.FileOpenPanel(parentWindowID: "window",
@@ -4409,6 +4459,7 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
         textEditor: ComputerUseTextEditor? = nil,
         injector: InputInjector = InputInjector(), mayAct: @escaping () -> Bool = { true },
         window: @escaping () -> CGRect = { CGRect(x: 0, y: 0, width: 640, height: 400) },
+        accessibilityContext: String = "AXTextField Query",
         perform: ((ComputerUsePredictedAction) throws -> Void)? = nil,
         nativeTextTarget: (any ComputerUseNativeTextTarget)? = nil,
         mcpFocusedTextSnapshotProvider: (() throws -> ComputerUseMCPFocusedTextSnapshot?)? = nil) -> ComputerUseHostTools {
@@ -4417,7 +4468,7 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
             actionPerformer: perform, textEditor: textEditor, nativeTextTarget: nativeTextTarget,
             screenProvider: { .init(image: CIImage(color: .black).cropped(to: CGRect(x: 0, y: 0, width: 640, height: 400)),
                 displayBounds: CGRect(x: 0, y: 0, width: 640, height: 400), frontmostWindowBounds: window()) },
-            transientSystemOverlayProvider: { _ in false }, accessibilityContextProvider: { _ in "AXTextField Query" },
+            transientSystemOverlayProvider: { _ in false }, accessibilityContextProvider: { _ in accessibilityContext },
             mcpFocusedTextSnapshotProvider: mcpFocusedTextSnapshotProvider,
             authenticationContextProvider: { nil }, screenCaptureConsentContextProvider: { nil },
             planningAccessibilityIdentityProvider: focus, frontmostApplicationProvider: { "Fixture" })

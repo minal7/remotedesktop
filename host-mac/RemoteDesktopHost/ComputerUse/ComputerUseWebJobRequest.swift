@@ -40,7 +40,9 @@ struct ComputerUseWebJobRequest: Sendable {
     static func route(_ prompt: String) -> Route {
         guard !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               prompt.utf8.count <= 32 * 1_024 else { return .none }
-        let words = tokens(maskingQuotedText(prompt))
+        // An account literal such as spiderali97@gmail.com contains the token
+        // "gmail" but is not a request to use Gmail as the destination.
+        let words = tokens(maskingQuotedText(maskingEmailAddressLiterals(prompt)))
         guard !words.isEmpty else { return .none }
 
         if explicitlySelectsAppleMail(words) {
@@ -268,6 +270,13 @@ struct ComputerUseWebJobRequest: Sendable {
         return normalized.split(whereSeparator: { !$0.isLetter && !$0.isNumber }).map(String.init)
     }
 
+    private static func maskingEmailAddressLiterals(_ value: String) -> String {
+        let pattern = #"[A-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?(?:\.[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?)+"#
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { return value }
+        let range = NSRange(value.startIndex..<value.endIndex, in: value)
+        return regex.stringByReplacingMatches(in: value, range: range, withTemplate: " ")
+    }
+
     private static func contains(_ words: [String], phrase: [String]) -> Bool {
         guard !phrase.isEmpty, words.count >= phrase.count else { return false }
         return (0...(words.count - phrase.count)).contains { index in
@@ -290,6 +299,12 @@ struct ComputerUseWebJobContentExtractor: Sendable {
             self.fileDescription = fileDescription
             self.fileQuery = fileQuery
         }
+    }
+
+    struct UploadExtraction: Equatable, Sendable {
+        let fileDescription: String
+        let fileQuery: ComputerUseLocalFileCatalog.Query
+        let destinationFolder: String?
     }
 
     enum Error: Swift.Error, Equatable {
@@ -336,6 +351,99 @@ struct ComputerUseWebJobContentExtractor: Sendable {
         } catch {
             throw Error.invalidResponse
         }
+    }
+
+    /// Extracts a storage upload's source query and optional UI folder label.
+    /// Provider identity and all paths/URLs remain host-owned.
+    func proposeUpload(originalRequest: String) async throws -> UploadExtraction {
+        let request = try makeUploadRequest(originalRequest: originalRequest)
+        let tokenCount = try await transport.exactInputTokenCount(completionRequest: request)
+        try Task.checkCancellation()
+        guard tokenCount > 0, tokenCount <= Self.contextTokens - Self.outputTokens - Self.framingReserve else {
+            throw Error.contextLimit
+        }
+        let response = try await transport.complete(request: request)
+        if let requestBody = request.httpBody { inspectExchange?(requestBody, response) }
+        try Task.checkCancellation()
+        do {
+            return try Self.decodeUpload(ComputerUseBrowserModelResponse.content(response, modelAlias: connection.modelAlias),
+                originalRequest: originalRequest)
+        } catch { throw Error.invalidResponse }
+    }
+
+    func makeUploadRequest(originalRequest: String) throws -> URLRequest {
+        guard !originalRequest.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              originalRequest.utf8.count <= Self.maximumOriginalRequestBytes else { throw Error.invalidInput }
+        let literals = try Self.literalPayloads(originalRequest: originalRequest, clarifications: [])
+        let textSchema: [String: Any] = literals.values.isEmpty
+            ? ["type": "string"] : Self.quotedTextSchema(ids: Array(literals.values.keys))
+        let fileSchema: [String: Any] = [
+            "type": "object", "additionalProperties": false,
+            "properties": [
+                "description": ["type": "string"],
+                "file_kind": ["type": "string", "enum": ["any", "presentation", "spreadsheet", "document"]],
+                "name_contains": textSchema,
+                "folder_scope": ["type": "string", "enum": ComputerUseLocalFileCatalog.FolderScope.allCases.map(\.rawValue)],
+                "date_field": ["type": "string", "enum": ["none", "modifiedAt", "createdAt", "addedToDirectoryAt"]],
+                "direction": ["type": "string", "enum": ["none", "ascending", "descending"]],
+            ],
+            "required": ["description", "file_kind", "name_contains", "folder_scope", "date_field", "direction"],
+        ]
+        let instructions = """
+        Extract a requested local source file and optional destination folder from original_request. Return only file_description and destination_folder. file_description describes the source file to upload; it is required when an upload is requested. Include description, file_kind (any/presentation/spreadsheet/document), name_contains (exact useful filename fragment or empty), folder_scope (all/downloads/documents/desktop/iCloud), date_field (none/modifiedAt/createdAt/addedToDirectoryAt), and direction (none/ascending/descending). destination_folder is an exact folder label from the request, or an empty string when the provider root is requested. Choose by meaning; preserve literal wording. Never return a path, URL, hash, provider, or credentials. This only extracts intent; the host resolves files and controls all browser effects and approvals.
+        """
+        let literalInstructions = literals.values.isEmpty ? "" : """
+        For quoted text choose its scalar enum ID in name_contains or destination_folder; the host resolves exact source bytes. For unquoted text use an exact {"source_text":"..."} substring from unquoted request text. Never copy quoted text into source_text.
+        """
+        var context: [String: Any] = ["original_request": originalRequest]
+        if !literals.values.isEmpty { context["literal_payloads"] = literals.values }
+        let contextData = try JSONSerialization.data(withJSONObject: context, options: [.sortedKeys, .withoutEscapingSlashes])
+        let body: [String: Any] = [
+            "model": connection.modelAlias,
+            "messages": [
+                ["role": "system", "content": instructions + "\n" + literalInstructions],
+                ["role": "user", "content": String(decoding: contextData, as: UTF8.self)],
+            ],
+            "temperature": 0, "top_p": 1, "top_k": 0,
+            "chat_template_kwargs": ["enable_thinking": false], "reasoning_effort": "none",
+            "max_tokens": 512, "cache_prompt": false,
+            "response_format": ["type": "json_schema", "json_schema": [
+                "name": "web_upload_extraction", "strict": true,
+                "schema": ["type": "object", "additionalProperties": false,
+                    "properties": ["file_description": fileSchema, "destination_folder": textSchema],
+                    "required": ["file_description", "destination_folder"]],
+            ]],
+        ]
+        var request = URLRequest(url: connection.baseURL.appendingPathComponent("v1/chat/completions"))
+        request.httpMethod = "POST"
+        request.timeoutInterval = 45
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("Bearer \(connection.bearerToken)", forHTTPHeaderField: "Authorization")
+        request.httpBody = try JSONSerialization.data(withJSONObject: body, options: [.sortedKeys, .withoutEscapingSlashes])
+        guard let data = request.httpBody, data.count <= Self.maximumRequestBytes else { throw Error.invalidInput }
+        return request
+    }
+
+    static func decodeUpload(_ content: String, originalRequest: String) throws -> UploadExtraction {
+        guard !content.isEmpty, content.utf8.count <= 16 * 1_024 else { throw Error.invalidResponse }
+        do {
+            let literals = try Self.literalPayloads(originalRequest: originalRequest, clarifications: [])
+            var parser = StrictSemanticJSONParser(content, maximumValueCount: 32)
+            guard case .object(let object) = try parser.parse(),
+                  Set(object.keys) == ["file_description", "destination_folder"],
+                  case .object(let fileObject)? = object["file_description"],
+                  let file = try Self.decodeFileDescription(.object(fileObject), payloads: literals),
+                  let folder = try Self.resolveText(object["destination_folder"], payloads: literals,
+                    allowLiteralReference: !literals.values.isEmpty),
+                  folder.utf8.count <= 512,
+                  !folder.contains("/"), !folder.contains("\\"),
+                  !folder.localizedCaseInsensitiveContains("://"),
+                  !folder.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) else {
+                throw Error.invalidResponse
+            }
+            return .init(fileDescription: file.description, fileQuery: file.query,
+                destinationFolder: folder.isEmpty ? nil : folder)
+        } catch { throw Error.invalidResponse }
     }
 
     func makeRequest(originalRequest: String,

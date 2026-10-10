@@ -42,6 +42,11 @@ final class ComputerUseDefaultBrowserPageReader {
         /// Bounded values for ordinary editable controls on the outer page.
         /// Secure/protected controls and nested web areas are excluded.
         let formFieldValues: [FormFieldValue]
+        let webUploadListingRows: [ComputerUseWebUploadJob.ListingRow]
+        /// True only when the bounded W2 control-focused pass finished its
+        /// non-listing traversal. `truncated` remains true when row trees were
+        /// intentionally pruned, so this never claims the listing is complete.
+        let webUploadControlsComplete: Bool
         let controls: [Control]
         /// Safari/Chromium AX trees may omit or flatten iframe contents.
         /// This reader does not claim those contents are complete.
@@ -52,13 +57,17 @@ final class ComputerUseDefaultBrowserPageReader {
         init(id: String, application: ComputerUseApplicationIdentity, url: String, renderedAXText: String,
              controls: [Control], iframeContentMayBeOmitted: Bool, truncated: Bool,
              focusedExpandedMenuHasNoActionableChildren: Bool = false, exactTextValues: [String] = [],
-             formFieldValues: [FormFieldValue] = []) {
+             formFieldValues: [FormFieldValue] = [],
+             webUploadListingRows: [ComputerUseWebUploadJob.ListingRow] = [],
+             webUploadControlsComplete: Bool = false) {
             self.id = id
             self.application = application
             self.url = url
             self.renderedAXText = renderedAXText
             self.exactTextValues = exactTextValues
             self.formFieldValues = formFieldValues
+            self.webUploadListingRows = webUploadListingRows
+            self.webUploadControlsComplete = webUploadControlsComplete
             self.controls = controls
             self.iframeContentMayBeOmitted = iframeContentMayBeOmitted
             self.truncated = truncated
@@ -105,6 +114,7 @@ final class ComputerUseDefaultBrowserPageReader {
         let url: String
         let controls: [String: AXUIElement]
         let controlMetadata: [String: Control]
+        let listingRows: [String: AXUIElement]
     }
 
     private struct OuterPageInventory {
@@ -115,6 +125,7 @@ final class ComputerUseDefaultBrowserPageReader {
 
     private let access: Access
     private var retained: [String: Retained] = [:]
+    private(set) var lastWebUploadControlsDiagnosticForDiagnostics: [String: String] = [:]
     private let contextByteLimit = 8_192
     /// Each bounded pass visits at most this many nodes; all passes share a
     /// 750ms deadline and each AX IPC is configured for at most 0.1s.
@@ -307,12 +318,16 @@ final class ComputerUseDefaultBrowserPageReader {
         return url
     }
 
+    enum ReadMode: Equatable { case standard, webUploadControls, webUploadListing }
+
     func read(window expectedWindow: AXUIElement,
               application expectedApplication: ComputerUseApplicationIdentity,
-              mayAct: () -> Bool, diagnostic: ((String, [String]) -> Void)? = nil) throws -> Observation? {
+              mayAct: () -> Bool, mode: ReadMode = .standard,
+              diagnostic: ((String, [String]) -> Void)? = nil) throws -> Observation? {
+        if mode == .webUploadControls { lastWebUploadControlsDiagnosticForDiagnostics = [:] }
         var focusedAncestorRoles: [String] = []
         let safeRoles: Set<String> = ["AXWindow", "AXWebArea", "AXGroup", "AXTextArea", "AXTextField",
-            "AXSecureTextField", "AXButton", "AXComboBox", "AXStaticText", "AXLink", "AXOther"]
+            "AXSecureTextField", "AXButton", "AXComboBox", "AXStaticText", "AXLink", "AXMenuItem", "AXOther"]
         func recordRole(_ role: String) {
             let safe = safeRoles.contains(role) ? role : "AXOther"
             if focusedAncestorRoles.count < 16 { focusedAncestorRoles.append(safe) }
@@ -365,6 +380,16 @@ final class ComputerUseDefaultBrowserPageReader {
         guard let (root, focused) = try currentScope() else { return fail("scope_unavailable") }
         let focusedUIElement = try element(kAXFocusedUIElementAttribute as String, root)
         var truncated = false
+        var controlPassIncomplete = false
+        var webUploadIncompleteReasons = Set<String>()
+        var prunedListingNodeCount = 0
+        func markIncomplete(_ reason: String) {
+            truncated = true
+            if mode == .webUploadControls {
+                controlPassIncomplete = true
+                webUploadIncompleteReasons.insert(reason)
+            }
+        }
         func isPruned(_ node: AXUIElement) throws -> Bool {
             let role = try string(kAXRoleAttribute as String, node) ?? ""
             let subrole = try string(kAXSubroleAttribute as String, node) ?? ""
@@ -375,7 +400,7 @@ final class ComputerUseDefaultBrowserPageReader {
         var selectedInventory: OuterPageInventory?
         func discoverOuterWebArea() throws -> AXUIElement? {
             let inventory = try discoverOuterPages(in: focused, value: value, check: check)
-            guard inventory.complete else { truncated = true; return nil }
+            guard inventory.complete else { markIncomplete("outer_page_incomplete"); return nil }
             selectedInventory = inventory
             return try selectOuterPage(from: inventory, window: focused, value: value, check: check)
         }
@@ -384,7 +409,7 @@ final class ComputerUseDefaultBrowserPageReader {
         guard let webArea = try discoverOuterWebArea(), let initialInventory = selectedInventory else {
             return fail(expired ? "outer_page_discovery_deadline" : "outer_page_discovery_incomplete_or_ambiguous")
         }
-        let controlRoles: Set<String> = ["AXButton", "AXLink", "AXTextField", "AXTextArea", "AXComboBox",
+        let controlRoles: Set<String> = ["AXButton", "AXMenuItem", "AXLink", "AXTextField", "AXTextArea", "AXComboBox",
             "AXPopUpButton", "AXCheckBox", "AXRadioButton"]
         var focusedControlIsInPage: Bool?
         var focusedNodeIsInPage = false
@@ -440,23 +465,28 @@ final class ComputerUseDefaultBrowserPageReader {
         var text = "", controls: [Control] = [], controlRefs: [String: AXUIElement] = [:]
         var exactTextValues: [String] = []
         var formFieldValues: [Observation.FormFieldValue] = []
+        var webUploadListingRows: [ComputerUseWebUploadJob.ListingRow] = []
+        var listingRowLabels: [[String]] = []
+        var listingRowRefs: [String: AXUIElement] = [:]
         var formFieldBytes = 0
         var exactTextBytes = 0
-        let exactTextValueLimit = 32
+        let isWebUploadRead = mode == .webUploadControls || mode == .webUploadListing
+        let exactTextValueLimit = isWebUploadRead ? 128 : 32
         let exactTextByteLimit = 4_096
         let formFieldValueLimit = 32
         let formFieldByteLimit = 4_096
+        let controlLimit = isWebUploadRead ? 128 : 32
         var focusedEmptyExpandedMenu: AXUIElement?
         var contextBytes = 0
         // Start at the exact outer page, preserving the normal pruning and
         // inherited-disabled checks while visiting the verified focus branch first.
-        var contentQueue: [(AXUIElement, Bool)] = [(webArea, false)]
+        var contentQueue: [(AXUIElement, Bool, Int?)] = [(webArea, false, nil)]
         var contentVisited: [AXUIElement] = []
         func bounded(_ chunk: String, to bytes: Int) -> String {
             var result = "", used = 0
             for scalar in chunk.unicodeScalars {
                 let value = String(scalar), count = value.utf8.count
-                guard used + count <= bytes else { truncated = true; break }
+                guard used + count <= bytes else { markIncomplete("rendered_text_bytes"); break }
                 result += value; used += count
             }
             return result
@@ -465,21 +495,21 @@ final class ComputerUseDefaultBrowserPageReader {
             guard !chunk.isEmpty else { return }
             let separator = text.isEmpty ? "" : "\n"
             let available = contextByteLimit - contextBytes - separator.utf8.count
-            guard available > 0 else { truncated = true; return }
+            guard available > 0 else { markIncomplete("context_bytes"); return }
             let prefix = bounded(chunk, to: available)
             if !prefix.isEmpty { text += separator + prefix; contextBytes += separator.utf8.count + prefix.utf8.count }
         }
         func appendExactText(_ value: String) {
             guard !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
             guard exactTextValues.count < exactTextValueLimit else {
-                truncated = true
+                markIncomplete("exact_text_count")
                 return
             }
             var byteCount = 0
             for _ in value.utf8 {
                 byteCount += 1
                 guard exactTextBytes + byteCount <= exactTextByteLimit else {
-                    truncated = true
+                    markIncomplete("exact_text_bytes")
                     return
                 }
             }
@@ -487,12 +517,32 @@ final class ComputerUseDefaultBrowserPageReader {
             exactTextBytes += byteCount
         }
         while !contentQueue.isEmpty, contentVisited.count < nodeLimitPerPass, !expired {
-            let (node, inheritedDisabled) = focusedPagePath.isEmpty
+            let (node, inheritedDisabled, inheritedRowIndex) = focusedPagePath.isEmpty
                 ? contentQueue.removeFirst() : contentQueue.removeLast()
             if contentVisited.contains(where: { CFEqual($0, node) }) { continue }
             contentVisited.append(node)
             if try isPruned(node) { continue }
             let role = try string(kAXRoleAttribute as String, node) ?? ""
+            if mode == .webUploadControls, ["AXTable", "AXOutline", "AXRow"].contains(role) {
+                // Drive can expose a virtualized table with dozens of rows
+                // before its global account/search controls. This pass is for
+                // those controls only; the ordinary pass still reports full
+                // listing completeness independently.
+                truncated = true
+                prunedListingNodeCount += 1
+                continue
+            }
+            var rowIndex = inheritedRowIndex
+            if role == "AXRow" {
+                if webUploadListingRows.count < 128 {
+                    rowIndex = webUploadListingRows.count
+                    let rowID = UUID().uuidString
+                    webUploadListingRows.append(.init(rowID: rowID, cellLabels: [],
+                        frame: mode == .webUploadListing ? try frame(node) : nil))
+                    listingRowRefs[rowID] = node
+                    listingRowLabels.append([])
+                } else { markIncomplete("listing_row_count") }
+            }
             let nodeEnabled = (try value(kAXEnabledAttribute as String, node) as? NSNumber)?.boolValue
             let effectiveEnabled = inheritedDisabled ? false : nodeEnabled
             // Nested AXWebAreas are iframe/document boundaries: deliberately omit their subtree.
@@ -500,6 +550,12 @@ final class ComputerUseDefaultBrowserPageReader {
             if role == "AXStaticText", let label = try string(kAXValueAttribute as String, node) ?? string(kAXTitleAttribute as String, node) {
                 appendText(label)
                 appendExactText(label)
+                if let rowIndex, listingRowLabels.indices.contains(rowIndex) { listingRowLabels[rowIndex].append(label) }
+            } else if role == "AXCell" {
+                let labels = [try string(kAXValueAttribute as String, node),
+                    try string(kAXTitleAttribute as String, node),
+                    try string(kAXDescriptionAttribute as String, node)].compactMap { $0 }
+                if let rowIndex, listingRowLabels.indices.contains(rowIndex) { listingRowLabels[rowIndex].append(contentsOf: labels) }
             }
             if role == "AXTextField" || role == "AXTextArea" || role == "AXComboBox",
                (try string(kAXSubroleAttribute as String, node)) != (kAXSecureTextFieldSubrole as String),
@@ -510,12 +566,16 @@ final class ComputerUseDefaultBrowserPageReader {
                     ?? string(kAXPlaceholderValueAttribute as String, node) ?? ""
                 let help = try string(kAXHelpAttribute as String, node) ?? ""
                 let cost = fieldLabel.utf8.count + role.utf8.count + fieldValue.utf8.count + help.utf8.count
-                if formFieldValues.count < formFieldValueLimit, formFieldBytes + cost <= formFieldByteLimit {
+                if formFieldValues.count >= formFieldValueLimit {
+                    markIncomplete("form_field_count")
+                } else if formFieldBytes + cost > formFieldByteLimit {
+                    markIncomplete("form_field_bytes")
+                } else {
                     formFieldValues.append(.init(label: fieldLabel, role: role, value: fieldValue, help: help))
                     formFieldBytes += cost
-                } else { truncated = true }
+                }
             }
-            if controlRoles.contains(role), controls.count < 32 {
+            if controlRoles.contains(role), controls.count < controlLimit {
                 let label = try string(kAXTitleAttribute as String, node) ?? string(kAXDescriptionAttribute as String, node)
                     ?? string(kAXPlaceholderValueAttribute as String, node) ?? ""
                 appendExactText(label)
@@ -533,27 +593,49 @@ final class ComputerUseDefaultBrowserPageReader {
                 let safeRole = bounded(role, to: max(0, contextByteLimit - contextBytes))
                 let safeLabel = bounded(label, to: min(256, max(0, contextByteLimit - contextBytes - safeRole.utf8.count)))
                 let cost = id.utf8.count + safeRole.utf8.count + safeLabel.utf8.count
-                if controls.count < 32, contextBytes + cost <= contextByteLimit {
+                if controls.count >= controlLimit {
+                    markIncomplete("control_count")
+                } else if contextBytes + cost > contextByteLimit {
+                    markIncomplete("context_bytes")
+                } else {
                     controls.append(Control(id: id, role: safeRole, label: safeLabel,
                                             frame: try frame(node), enabled: effectiveEnabled, expanded: expanded))
                     contextBytes += cost
                     controlRefs[id] = node
                     if hasKnownEmptyMenuChildren { focusedEmptyExpandedMenu = node }
-                } else { truncated = true }
+                }
             } else if controlRoles.contains(role) {
                 // A recognized control omitted at the item cap makes this page partial.
-                truncated = true
+                markIncomplete("control_count")
             }
             if let children = try value(kAXChildrenAttribute as String, node) as? [AXUIElement] {
+                var traversalChildren = children
+                if mode == .webUploadControls {
+                    traversalChildren = []
+                    for child in children {
+                        guard let childRole = try string(kAXRoleAttribute as String, child) else {
+                            // An unclassified child cannot safely be pruned as listing content.
+                            markIncomplete("child_role_unavailable")
+                            traversalChildren.append(child)
+                            continue
+                        }
+                        if ["AXTable", "AXOutline", "AXRow"].contains(childRole) {
+                            truncated = true
+                            prunedListingNodeCount += 1
+                        } else {
+                            traversalChildren.append(child)
+                        }
+                    }
+                }
                 let pathIndex = focusedPagePath.firstIndex(where: { CFEqual($0, node) })
                 let nextFocusedNode = pathIndex.flatMap { index in
                     index + 1 < focusedPagePath.count ? focusedPagePath[index + 1] : nil
                 }
                 let priorityNode = nextFocusedNode.flatMap { expected in
-                    children.first(where: { CFEqual($0, expected) })
+                    traversalChildren.first(where: { CFEqual($0, expected) })
                 }
-                let desiredCount = min(children.count, pathIndex == nil ? nodeLimitPerPass : 32)
-                var selectedChildren = Array(children.prefix(desiredCount))
+                let desiredCount = min(traversalChildren.count, pathIndex == nil ? nodeLimitPerPass : 32)
+                var selectedChildren = Array(traversalChildren.prefix(desiredCount))
                 if let priorityNode {
                     if let selectedIndex = selectedChildren.firstIndex(where: { CFEqual($0, priorityNode) }) {
                         selectedChildren.remove(at: selectedIndex)
@@ -567,17 +649,17 @@ final class ComputerUseDefaultBrowserPageReader {
                     let evictCount = contentQueue.count + desiredPendingCount - nodeLimitPerPass
                     if evictCount <= contentQueue.count {
                         contentQueue.removeFirst(evictCount)
-                        truncated = true
+                        markIncomplete("queue_eviction")
                     }
                 }
                 let room = max(0, nodeLimitPerPass - contentVisited.count - contentQueue.count)
                 if focusedPagePath.isEmpty {
                     // Preserve the existing breadth-first ordering and admission
                     // exactly when no verified in-page focus path is available.
-                    if children.count > room { truncated = true }
-                    contentQueue.append(contentsOf: children.prefix(room).map { ($0, inheritedDisabled || (effectiveEnabled == false)) })
+                    if traversalChildren.count > room { markIncomplete("queue_capacity") }
+                    contentQueue.append(contentsOf: traversalChildren.prefix(room).map { ($0, inheritedDisabled || (effectiveEnabled == false), rowIndex) })
                 } else {
-                    if children.count > desiredCount || selectedChildren.count > room { truncated = true }
+                    if traversalChildren.count > desiredCount || selectedChildren.count > room { markIncomplete("queue_capacity") }
                     if selectedChildren.count > room {
                         selectedChildren = pathIndex == nil
                             ? Array(selectedChildren.prefix(room)) : Array(selectedChildren.suffix(room))
@@ -591,11 +673,16 @@ final class ComputerUseDefaultBrowserPageReader {
                     } else {
                         selectedChildren.reverse()
                     }
-                    contentQueue.append(contentsOf: selectedChildren.map { ($0, inheritedDisabled || (effectiveEnabled == false)) })
+                    contentQueue.append(contentsOf: selectedChildren.map { ($0, inheritedDisabled || (effectiveEnabled == false), rowIndex) })
                 }
             }
         }
-        if !contentQueue.isEmpty || contentVisited.count >= nodeLimitPerPass { truncated = true }
+        if expired { markIncomplete("deadline") }
+        if !contentQueue.isEmpty || contentVisited.count >= nodeLimitPerPass { markIncomplete("node_limit") }
+        for index in webUploadListingRows.indices {
+            webUploadListingRows[index] = .init(rowID: webUploadListingRows[index].rowID,
+                cellLabels: listingRowLabels[index], frame: webUploadListingRows[index].frame)
+        }
         try check()
         guard !expired, let (afterRoot, afterWindow) = try currentScope(),
               CFEqual(afterRoot, root), CFEqual(afterWindow, expectedWindow),
@@ -655,14 +742,33 @@ final class ComputerUseDefaultBrowserPageReader {
         // Re-discover the same unique outer page after content collection.
         let finalURL = try string("AXURL", webArea) ?? string(kAXDocumentAttribute as String, webArea)
         guard finalURL == url, !expired else { return fail(expired ? "deadline_during_final_validation" : "outer_page_url_changed") }
+        let controlsComplete = mode == .webUploadControls && !expired && contentQueue.isEmpty
+            && contentVisited.count < nodeLimitPerPass && !controlPassIncomplete
+        if mode == .webUploadControls {
+            lastWebUploadControlsDiagnosticForDiagnostics = [
+                "complete": String(controlsComplete),
+                "truncated": String(truncated),
+                "reasons": webUploadIncompleteReasons.sorted().joined(separator: ","),
+                "visited": String(contentVisited.count),
+                "pending": String(contentQueue.count),
+                "controls": String(controls.count),
+                "exact_text": String(exactTextValues.count),
+                "form_fields": String(formFieldValues.count),
+                "context_bytes": String(contextBytes),
+                "pruned_listing_nodes": String(prunedListingNodeCount),
+            ]
+        }
         let observationID = UUID().uuidString
         let observation = Observation(id: observationID, application: expectedApplication, url: url,
             renderedAXText: text, controls: controls, iframeContentMayBeOmitted: true, truncated: truncated,
             focusedExpandedMenuHasNoActionableChildren: focusedExpandedMenuHasNoActionableChildren,
-            exactTextValues: exactTextValues, formFieldValues: formFieldValues)
+            exactTextValues: exactTextValues, formFieldValues: formFieldValues,
+            webUploadListingRows: webUploadListingRows,
+            webUploadControlsComplete: controlsComplete)
         retained[observationID] = Retained(application: expectedApplication, window: expectedWindow,
             webArea: webArea, url: url, controls: controlRefs,
-            controlMetadata: Dictionary(uniqueKeysWithValues: controls.map { ($0.id, $0) }))
+            controlMetadata: Dictionary(uniqueKeysWithValues: controls.map { ($0.id, $0) }),
+            listingRows: listingRowRefs)
         if retained.count > 32,
            let evictedID = retained.keys.first(where: { $0 != observationID }) {
             retained.removeValue(forKey: evictedID)
@@ -716,8 +822,43 @@ final class ComputerUseDefaultBrowserPageReader {
         return center
     }
 
+    /// A bounded selection click for a uniquely observed result row. It may
+    /// select that row for read-only Details inspection; it cannot target an
+    /// interactive descendant such as a checkbox, link, or button.
+    func validatedListingRowCenter(observation: Observation, rowID: String,
+                                   requiredLabels: Set<String>, window: AXUIElement,
+                                   windowBounds: CGRect, mayAct: () -> Bool) throws -> CGPoint? {
+        try Task.checkCancellation()
+        guard mayAct(), !requiredLabels.isEmpty,
+              let original = retained[observation.id], original.application == observation.application,
+              CFEqual(original.window, window), original.url == observation.url,
+              let originalElement = original.listingRows[rowID],
+              let originalRow = observation.webUploadListingRows.first(where: { $0.rowID == rowID }),
+              requiredLabels.isSubset(of: Set(originalRow.cellLabels)) else { return nil }
+        guard let fresh = try read(window: window, application: original.application,
+                                   mayAct: mayAct, mode: .webUploadListing),
+              fresh.application == original.application, fresh.url == original.url,
+              let current = retained[fresh.id], current.application == original.application,
+              CFEqual(current.window, window), CFEqual(current.webArea, original.webArea),
+              current.url == original.url else { return nil }
+        let sameReference = current.listingRows.first(where: { CFEqual($0.value, originalElement) })
+        guard let sameReference,
+              let freshRow = fresh.webUploadListingRows.first(where: { $0.rowID == sameReference.key }),
+              requiredLabels.isSubset(of: Set(freshRow.cellLabels)),
+              let frame = freshRow.frame,
+              [windowBounds.minX, windowBounds.minY, windowBounds.width, windowBounds.height,
+               frame.minX, frame.minY, frame.width, frame.height].allSatisfy(\.isFinite),
+              windowBounds.width > 0, windowBounds.height > 0, frame.width > 0, frame.height > 0,
+              windowBounds.contains(frame) else { return nil }
+        let point = CGPoint(x: frame.midX, y: frame.midY)
+        guard try hitPathAtPoint(point, contains: sameReference.value, webArea: original.webArea,
+            window: original.window, mayAct: mayAct, rejectInteractiveDescendants: true) else { return nil }
+        return point
+    }
+
     private func hitPathAtPoint(_ point: CGPoint, contains control: AXUIElement, webArea: AXUIElement,
-                                window: AXUIElement, mayAct: () -> Bool) throws -> Bool {
+                                window: AXUIElement, mayAct: () -> Bool,
+                                rejectInteractiveDescendants: Bool = false) throws -> Bool {
         let deadline = ContinuousClock.now.advanced(by: .milliseconds(750))
         func check() throws -> Bool {
             try Task.checkCancellation()
@@ -737,6 +878,14 @@ final class ComputerUseDefaultBrowserPageReader {
             guard let element = current else { return false }
             guard !ancestors.contains(where: { CFEqual($0, element) }) else { return false }
             ancestors.append(element)
+            if rejectInteractiveDescendants, !CFEqual(element, control) {
+                guard try check() else { return false }
+                access.timeout(element, 0.1)
+                let roleRaw = access.read(kAXRoleAttribute as String, element) as? String
+                guard try check() else { return false }
+                if ["AXButton", "AXLink", "AXMenuItem", "AXCheckBox", "AXRadioButton",
+                    "AXTextField", "AXTextArea", "AXComboBox"].contains(roleRaw ?? "") { return false }
+            }
             if CFEqual(element, control) { foundControl = true }
             if CFEqual(element, webArea) { foundWebArea = true }
             if CFEqual(element, window) { return foundControl && foundWebArea }

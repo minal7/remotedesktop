@@ -299,6 +299,7 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
         let applicationElement: AXUIElement
         let window: AXUIElement
         private let toolbar: AXUIElement
+        private let webArea: AXUIElement
         private let field: AXUIElement
         private let writableValues: [Bool]
         private let defaultWritable: Bool
@@ -316,6 +317,8 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
         private var delayedAddressValue: String?
         private var delayedAddressValueReadsRemaining = 0
         private var unavailableAddressValueReadsRemaining = 0
+        private var unavailableAddressParentReadsRemaining = 0
+        var forceAddressParentChange = false
         var forceAddressFocusLoss = false
         private var selectedRange = CFRange(location: 5, length: 8)
         private(set) var nativeTypeCount = 0
@@ -333,6 +336,7 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
             applicationElement = AXUIElementCreateApplication(processIdentifier)
             window = AXUIElementCreateApplication(processIdentifier + 100)
             toolbar = AXUIElementCreateApplication(processIdentifier + 101)
+            webArea = AXUIElementCreateApplication(processIdentifier + 103)
             field = AXUIElementCreateApplication(processIdentifier + 102)
         }
 
@@ -382,6 +386,10 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
             unavailableAddressValueReadsRemaining = count
         }
 
+        func makeAddressParentUnavailableForReads(_ count: Int) {
+            unavailableAddressParentReadsRemaining = count
+        }
+
         func delayNextWritableReads(_ count: Int, seconds: TimeInterval) {
             delayedWritableReadCount = count
             delayedWritableReadSeconds = seconds
@@ -424,11 +432,20 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                 if attribute == (kAXChildrenAttribute as String) { return [field] as CFArray }
                 return nil
             }
+            if CFEqual(element, webArea), attribute == (kAXRoleAttribute as String) {
+                return "AXWebArea" as CFTypeRef
+            }
             if CFEqual(element, field) {
                 if attribute == (kAXRoleAttribute as String) {
                     return (forceAddressRoleChange ? "AXButton" : "AXTextField") as CFTypeRef
                 }
-                if attribute == (kAXParentAttribute as String) { return toolbar as CFTypeRef }
+                if attribute == (kAXParentAttribute as String) {
+                    if unavailableAddressParentReadsRemaining > 0 {
+                        unavailableAddressParentReadsRemaining -= 1
+                        return nil
+                    }
+                    return (forceAddressParentChange ? webArea : toolbar) as CFTypeRef
+                }
                 if attribute == "AXIdentifier" { return "WEB_BROWSER_ADDRESS_AND_SEARCH_FIELD" as CFTypeRef }
                 if attribute == (kAXEnabledAttribute as String) { return NSNumber(value: true) }
                 if attribute == (kAXSubroleAttribute as String) { return "" as CFTypeRef }
@@ -565,6 +582,27 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
 
             XCTAssertEqual(fixture.desktop.keyCount, 0, "Changed startup ownership cannot dispatch input")
             XCTAssertEqual(captureCount, 2)
+        }
+    }
+
+    func testStartupInventoryClassifiesOnlyExplicitDocumentWindows() {
+        XCTAssertEqual(ComputerUseDefaultBrowserSession.startupWindowClassification(
+            role: "AXWindow", subrole: "AXStandardWindow"), .document)
+        XCTAssertEqual(ComputerUseDefaultBrowserSession.startupWindowClassification(
+            role: "AXWindow", subrole: "AXDialog"), .transientSurface)
+        XCTAssertEqual(ComputerUseDefaultBrowserSession.startupWindowClassification(
+            role: "AXPopover", subrole: nil), .transientSurface)
+        XCTAssertEqual(ComputerUseDefaultBrowserSession.startupWindowClassification(
+            role: "AXMenu", subrole: nil), .transientSurface)
+        XCTAssertEqual(ComputerUseDefaultBrowserSession.startupWindowClassification(
+            role: "AXScrollArea", subrole: nil), .transientSurface)
+
+        let unknownCases: [(String?, String?)] = [("AXWindow", nil),
+            ("AXWindow", "AXUnknown"), ("AXUnknown", nil), (nil, nil)]
+        for (role, subrole) in unknownCases {
+            XCTAssertEqual(ComputerUseDefaultBrowserSession.startupWindowClassification(
+                role: role, subrole: subrole), .unknown,
+                "Missing or unrecognized native window metadata must fail closed")
         }
     }
 
@@ -895,7 +933,7 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: fixture.root) }
         try FileManager.default.createDirectory(at: fixture.root, withIntermediateDirectories: true,
             attributes: [.posixPermissions: 0o700])
-        let goal = "Upload the last presentation in Downloads to Google Drive and verify completion"
+        let goal = "Upload the last presentation in Downloads to the open website and verify completion"
         let originatingTaskID = "file-choice-origin-task"
         let answerTaskID = "file-choice-answer-task"
         let downloads = fixture.root.appendingPathComponent("Downloads", isDirectory: true)
@@ -3835,6 +3873,7 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
 
         for scenario in ["success", "animated-chrome", "uncertain-ax-write", "uncertain-native-return",
                          "return-transient-value-read", "return-transient-windows-read",
+                         "return-transient-parent-read", "return-readable-parent-changed",
                          "return-field-observation-deadline",
                          "return-persistent-value-unavailable", "return-readable-value-mismatch",
                          "return-readable-focus-changed", "return-unavailable-gate-revoked",
@@ -3998,6 +4037,12 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                             // Exhaust the existing three-capture validation batch to
                             // prove the post-write path has its own bounded read-only recovery.
                             postWriteCaptureFailuresRemaining = 3
+                        }
+                        if scenario == "return-transient-parent-read" {
+                            graph.makeAddressParentUnavailableForReads(1)
+                        }
+                        if scenario == "return-readable-parent-changed" {
+                            graph.forceAddressParentChange = true
                         }
                         return (scenario == "ax-setter-error" || scenario == "ax-setter-error-applied"
                             || scenario == "ax-setter-error-applied-gate-revoked-after-write"
@@ -4197,11 +4242,14 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                 XCTAssertEqual(focusDispatches, 1)
                 XCTAssertEqual(returnDispatches, 0)
             } else if scenario == "return-persistent-value-unavailable"
-                || scenario == "return-readable-value-mismatch" || scenario == "return-readable-focus-changed" {
+                || scenario == "return-readable-value-mismatch" || scenario == "return-readable-focus-changed"
+                || scenario == "return-readable-parent-changed" {
                 var navigationError: Error?
+                var navigationDiagnostics: [String] = []
                 do {
                     try await session.navigateRetainedSafariTab(to: destination, taskID: "task-\(scenario)",
                         goal: "Open the signed-in Gmail inbox.", tools: tools, diagnostic: { value in
+                            navigationDiagnostics.append(value)
                             if value == "phase=ax_address_value_readback_verified" {
                                 switch scenario {
                                 case "return-persistent-value-unavailable": graph.makeAddressValueUnavailableForReads(Int.max)
@@ -4217,6 +4265,21 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                 XCTAssertEqual(axValueWrites, 1)
                 XCTAssertEqual(focusDispatches, 1)
                 XCTAssertEqual(returnDispatches, 0)
+                XCTAssertEqual(graph.nativeTypeCount, 0)
+                if scenario == "return-readable-parent-changed" {
+                    XCTAssertTrue(navigationDiagnostics.contains(
+                        "phase=ax_address_value_readback_field_unconfirmed_reason_return_field_ancestry_changed"))
+                }
+                continue
+            } else if scenario == "return-transient-parent-read" {
+                var navigationDiagnostics: [String] = []
+                try await session.navigateRetainedSafariTab(to: destination, taskID: "task-\(scenario)",
+                    goal: "Open the signed-in Gmail inbox.", tools: tools,
+                    diagnostic: { navigationDiagnostics.append($0) })
+                XCTAssertTrue(navigationDiagnostics.contains("phase=return_field_ancestry_unavailable"))
+                XCTAssertEqual(axValueWrites, 1, "Unavailable ancestry may only trigger fresh read-only validation")
+                XCTAssertEqual(focusDispatches, 1, "Ancestry recovery must not repeat Cmd-L")
+                XCTAssertEqual(returnDispatches, 1, "Return requires a fresh exact retained-window ancestry")
                 XCTAssertEqual(graph.nativeTypeCount, 0)
                 continue
             } else if scenario == "success" || scenario == "animated-chrome" || scenario == "drafts-success"
@@ -5471,6 +5534,33 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
     }
 
     @MainActor
+    func testWebUploadWithoutLocalExtractorStopsBeforePlanningOrInput() async throws {
+        let fixture = try Fixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let taskID = "web-upload-without-content-extractor"
+        let prompt = "Upload the selected report to Google Drive and verify completion."
+        let session = try fixture.session()
+        _ = try await session.ensure(taskID: taskID, goal: prompt, tools: fixture.tools)
+        let setupKeyCount = fixture.desktop.keyCount
+        var proposalCalls = 0
+        let executor = try ComputerUseDefaultBrowserExecutor(journalDirectory: fixture.root, session: session,
+            propose: { _ in
+                proposalCalls += 1
+                return .init(response: "Unexpected fallback", action: .reportCompletion("Unexpected fallback"))
+            }, screenConsentRecognizer: { _ in false })
+
+        let result = try await executor.execute(taskID: taskID, prompt: prompt, trustedUserPrompt: prompt,
+            tools: fixture.tools, progress: { _ in })
+
+        guard case .userInterventionRequired(let message) = result else {
+            return XCTFail("A missing local upload extractor must stop for setup, got \(result)")
+        }
+        XCTAssertTrue(message.localizedCaseInsensitiveContains("upload"))
+        XCTAssertEqual(proposalCalls, 0, "Missing local extraction must not reach visual planning")
+        XCTAssertEqual(fixture.desktop.keyCount, setupKeyCount, "Missing extraction must not send browser input")
+    }
+
+    @MainActor
     func testSelectedFileCompletionDoesNotPassWhileDispatchedChooserRemainsOpen() async throws {
         let run = try await runSelectedFileCompletionFixture(
             answer: try Self.live09RetainedCompletionAnswer(), dispatchChooserConfirmation: true,
@@ -5504,7 +5594,7 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
 
     @MainActor
     private func runSelectedFileCompletionFixture(answer: String,
-        goal: String = "Upload the selected presentation to Google Drive and verify completion.",
+        goal: String = "Upload the selected presentation to the open website and verify completion.",
         dispatchChooserConfirmation: Bool = true, dismissChooserAfterDispatch: Bool = true,
         observationText: String) async throws -> (result: RemoteDesktopHost.ComputerUseExecutionResult,
         selectedFileName: String, selectedCandidateID: String?, dispatchedCandidateID: String?, chooserRemainedOpen: Bool) {

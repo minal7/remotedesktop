@@ -35,6 +35,12 @@ final class ComputerUseDefaultBrowserSession {
         }
     }
 
+    enum StartupWindowClassification: Equatable {
+        case document
+        case transientSurface
+        case unknown
+    }
+
     struct FileOpenPanel {
         let parentWindowID: String
         let parentWindowElement: AXUIElement
@@ -200,7 +206,9 @@ final class ComputerUseDefaultBrowserSession {
             launchApplication: Self.launchVerifiedHandler,
             captureWindows: { application in
                 captureDiagnosticState.reset()
-                return try Self.captureWindowsForApplication(application, diagnostic: recordDiagnostic)
+                return try Self.captureWindowsForApplication(application,
+                    startupDocumentInventory: application.bundleIdentifier == "com.apple.Safari",
+                    diagnostic: recordDiagnostic)
             },
             captureRetainedWindow: { application, target in
                 captureDiagnosticState.reset()
@@ -364,6 +372,8 @@ final class ComputerUseDefaultBrowserSession {
 
     func navigateRetainedSafariTab(to url: URL, taskID: String, goal: String,
                                    tools: ComputerUseHostTools,
+                                   webUploadNavigation: (stage: ComputerUseWebUploadJob.NavigationStage,
+                                       provider: ComputerUseWebUploadJob.Provider, filename: String?)? = nil,
                                    diagnostic: @escaping @MainActor (String) -> Void = { _ in }) async throws {
         try Task.checkCancellation()
         try tools.requireActive()
@@ -375,10 +385,22 @@ final class ComputerUseDefaultBrowserSession {
         guard target.application.bundleIdentifier == "com.apple.Safari" else {
             diagnostic("phase=unsupported_browser bundle=safari_required"); throw Failure.targetLost
         }
-        guard Self.isSupportedGmailNavigationURL(url) else {
+        let uploadNavigationKey: String? = webUploadNavigation.map { "web-upload-\($0.stage.rawValue)" }
+        let supportedURL: Bool
+        if let webUploadNavigation {
+            supportedURL = Self.isSupportedWebUploadNavigationURL(url, stage: webUploadNavigation.stage,
+                provider: webUploadNavigation.provider, filename: webUploadNavigation.filename)
+        } else {
+            supportedURL = Self.isSupportedWebNavigationURL(url)
+        }
+        guard supportedURL else {
             diagnostic("phase=destination_rejected"); throw Failure.targetLost
         }
-        if state.navigationDispatches.contains(url.absoluteString) {
+        let dispatchKey = uploadNavigationKey ?? url.absoluteString
+        if state.navigationDispatches.contains(dispatchKey) {
+            guard uploadNavigationKey == nil else {
+                diagnostic("phase=already_latched"); throw Failure.targetLost
+            }
             guard state.stableNavigationRetryPermits.remove(url.absoluteString) != nil else {
                 diagnostic("phase=already_latched"); throw Failure.targetLost
             }
@@ -485,7 +507,7 @@ final class ComputerUseDefaultBrowserSession {
                         throw Failure.targetLost
                     }
                     // A partial or uncertain AX write must never be replayed.
-                    state.navigationDispatches.insert(url.absoluteString)
+                    state.navigationDispatches.insert(dispatchKey)
                     diagnostic("phase=ax_address_value_write_latched")
                 }, writeValue: {
                     try Task.checkCancellation()
@@ -542,7 +564,8 @@ final class ComputerUseDefaultBrowserSession {
                 switch phase {
                 case "return_field_process_changed", "return_field_role_changed", "return_field_identifier_changed",
                      "return_field_secure", "return_field_protected", "return_field_disabled",
-                     "return_field_not_writable", "return_field_window_unconfirmed", "return_window_changed":
+                     "return_field_not_writable", "return_field_window_unconfirmed",
+                     "return_field_ancestry_changed", "return_window_changed":
                     diagnostic("phase=ax_address_value_readback_field_unconfirmed_reason_\(phase)")
                 case "return_focus_changed", "return_focus_unavailable":
                     diagnostic("phase=ax_address_value_readback_focus_unconfirmed")
@@ -690,8 +713,20 @@ final class ComputerUseDefaultBrowserSession {
             diagnostic("phase=post_navigation_identity_mismatch")
             throw Failure.targetLost
         }
-        state.navigationReturnsCompleted.insert(url.absoluteString)
+        state.navigationReturnsCompleted.insert(dispatchKey)
         diagnostic("phase=ax_navigation_dispatched")
+    }
+
+    static func isSupportedWebUploadNavigationURL(_ url: URL,
+        stage: ComputerUseWebUploadJob.NavigationStage,
+        provider: ComputerUseWebUploadJob.Provider, filename: String?) -> Bool {
+        switch stage {
+        case .home, .returnToRoot:
+            return url == provider.homeURL
+        case .collisionSearch, .finalSearch:
+            guard provider == .googleDrive, let filename else { return false }
+            return ComputerUseWebUploadJob.isDriveTitleSearchURL(url, filename: filename)
+        }
     }
 
     private static func isCanonicalStableGmailNavigationURL(_ url: URL, accountIndex: Int) -> Bool {
@@ -821,21 +856,39 @@ final class ComputerUseDefaultBrowserSession {
 
     private func addressFieldBelongsToRetainedWindow(_ field: AXUIElement, target: Window,
                                                       deadline: ContinuousClock.Instant) -> Bool {
+        addressFieldRetainedWindowAncestry(field, target: target, deadline: deadline) == .confirmed
+    }
+
+    private enum AddressFieldAncestryReadiness: Equatable {
+        case confirmed
+        case temporarilyUnavailable
+        case changed
+    }
+
+    private func addressFieldRetainedWindowAncestry(_ field: AXUIElement, target: Window,
+                                                     deadline: ContinuousClock.Instant) -> AddressFieldAncestryReadiness {
         var cursor: AXUIElement? = field
         var seen: [AXUIElement] = []
         for _ in 0..<16 {
-            guard ContinuousClock.now < deadline, let current = cursor,
-                  !seen.contains(where: { CFEqual($0, current) }),
-                  safariAddressBarAX.processIdentifier(current) == target.application.processIdentifier else { return false }
-            if CFEqual(current, target.accessibilityElement) { return true }
+            guard ContinuousClock.now < deadline else { return .temporarilyUnavailable }
+            guard let current = cursor, !seen.contains(where: { CFEqual($0, current) }) else { return .changed }
+            guard let processIdentifier = safariAddressBarAX.processIdentifier(current) else {
+                return .temporarilyUnavailable
+            }
+            guard processIdentifier == target.application.processIdentifier else { return .changed }
+            if CFEqual(current, target.accessibilityElement) { return .confirmed }
             seen.append(current)
-            guard let role = safariAddressBarAX.read(kAXRoleAttribute as String, current) as? String,
-                  role != "AXWebArea",
-                  let parentValue = safariAddressBarAX.read(kAXParentAttribute as String, current),
-                  CFGetTypeID(parentValue) == AXUIElementGetTypeID() else { return false }
+            guard let roleValue = safariAddressBarAX.read(kAXRoleAttribute as String, current) else {
+                return .temporarilyUnavailable
+            }
+            guard let role = roleValue as? String, role != "AXWebArea" else { return .changed }
+            guard let parentValue = safariAddressBarAX.read(kAXParentAttribute as String, current) else {
+                return .temporarilyUnavailable
+            }
+            guard CFGetTypeID(parentValue) == AXUIElementGetTypeID() else { return .changed }
             cursor = unsafeBitCast(parentValue, to: AXUIElement.self)
         }
-        return false
+        return .changed
     }
 
     private func isCurrentSafariAddressField(_ field: AXUIElement, target: Window) -> Bool {
@@ -954,10 +1007,15 @@ final class ComputerUseDefaultBrowserSession {
         guard ContinuousClock.now < deadline else {
             return .temporarilyUnavailable("return_field_observation_deadline")
         }
-        guard addressFieldBelongsToRetainedWindow(field, target: target, deadline: deadline) else {
+        switch addressFieldRetainedWindowAncestry(field, target: target, deadline: deadline) {
+        case .confirmed:
+            break
+        case .temporarilyUnavailable:
             return ContinuousClock.now >= deadline
                 ? .temporarilyUnavailable("return_field_observation_deadline")
-                : .rejected("return_field_window_unconfirmed")
+                : .temporarilyUnavailable("return_field_ancestry_unavailable")
+        case .changed:
+            return .rejected("return_field_ancestry_changed")
         }
         return .ready
     }
@@ -1086,6 +1144,19 @@ final class ComputerUseDefaultBrowserSession {
 
     static func isSupportedGmailNavigationURL(_ url: URL) -> Bool {
         ComputerUseGmailAccountDirectory.accountIndex(from: url.absoluteString) != nil
+    }
+
+    static func isSupportedWebNavigationURL(_ url: URL) -> Bool {
+        if isSupportedGmailNavigationURL(url) { return true }
+        guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              components.scheme?.lowercased() == "https", components.user == nil, components.password == nil,
+              components.port == nil, components.query == nil, components.fragment == nil else { return false }
+        switch (components.host?.lowercased(), components.path) {
+        case ("drive.google.com", "/drive/my-drive"), ("www.dropbox.com", "/home"):
+            return true
+        default:
+            return false
+        }
     }
 
     static func matchingCGWindowNumber(target: Window, windowInfo: [[String: Any]]) -> CGWindowID? {
@@ -1395,6 +1466,26 @@ final class ComputerUseDefaultBrowserSession {
         return true
     }
 
+    static func startupWindowClassification(role: String?, subrole: String?) -> StartupWindowClassification {
+        guard let role else { return .unknown }
+        if role == "AXWindow" {
+            switch subrole {
+            case "AXStandardWindow": return .document
+            case "AXDialog", "AXSystemDialog", "AXFloatingWindow", "AXSystemFloatingWindow":
+                return .transientSurface
+            default: return .unknown
+            }
+        }
+        switch role {
+        case "AXDialog", "AXPopover", "AXPopoverWindow", "AXSheet", "AXMenu", "AXMenuBar",
+             "AXHelpTag", "AXSystemDialog", "AXScrollArea":
+            // Safari can expose a non-document AXScrollArea in its AXWindows list.
+            return .transientSurface
+        default:
+            return .unknown
+        }
+    }
+
     static func safariStableWindowID(processIdentifier: pid_t, accessibilityHash: CFHashCode,
                                      safariAXIdentifier: String?) -> String {
         if let uuid = parsedSafariWindowUUID(safariAXIdentifier) {
@@ -1613,18 +1704,63 @@ final class ComputerUseDefaultBrowserSession {
         // A capture can spend up to two seconds reading Safari's window list;
         // keep observing for a delayed Cmd+N result without ever replaying it.
         let deadline = ContinuousClock.now.advanced(by: .seconds(15))
+        let startedAt = ContinuousClock.now
+        let budgetMilliseconds = 15_000
         var transitionDiagnostics = 0
+        var successfulCaptureCount = 0
+        var transientCaptureFailureCount = 0
+        var lastCaptureMilliseconds = 0
+        var maximumCaptureMilliseconds = 0
+        var firstTransition: String?
+        var lastTransition: String?
+        func milliseconds(_ duration: Duration) -> Int {
+            let components = duration.components
+            let value = components.seconds * 1_000
+                + components.attoseconds / 1_000_000_000_000_000
+            return Int(min(60_000, max(0, value)))
+        }
+        func boundedCount(_ count: Int) -> Int { min(4_096, max(0, count)) }
+        func transitionSummary(_ after: WindowSnapshot) -> String {
+            let added = after.windows.filter { candidate in
+                !before.windows.contains(where: { sameWindowReference($0, candidate, in: before.application) })
+            }.count
+            let removed = before.windows.filter { prior in
+                !after.windows.contains(where: { sameWindowReference($0, prior, in: before.application) })
+            }.count
+            let focusedAdded = after.windows.first(where: { $0.id == after.focusedWindowID }).map { focused in
+                before.windows.contains(where: { sameWindowReference($0, focused, in: before.application) }) ? 0 : 1
+            } ?? 0
+            return "\(boundedCount(before.windows.count)):\(boundedCount(after.windows.count)):\(boundedCount(added)):\(boundedCount(removed)):\(focusedAdded)"
+        }
+        func recordSummary(_ outcome: String) {
+            let elapsed = milliseconds(startedAt.duration(to: ContinuousClock.now))
+            let first = firstTransition ?? "none"
+            let last = lastTransition ?? "none"
+            diagnostic("phase=new_window_wait_\(outcome) elapsed_ms=\(elapsed) budget_ms=\(budgetMilliseconds) successful_capture_count=\(successfulCaptureCount) transient_capture_failure_count=\(transientCaptureFailureCount) last_capture_ms=\(lastCaptureMilliseconds) max_capture_ms=\(maximumCaptureMilliseconds) first_transition=\(first) last_transition=\(last)")
+        }
         while ContinuousClock.now < deadline {
             try Task.checkCancellation()
             try tools.requireActive()
             let after: WindowSnapshot
-            do { after = try captureWindows(app) }
+            let captureStartedAt = ContinuousClock.now
+            do {
+                after = try captureWindows(app)
+                lastCaptureMilliseconds = milliseconds(captureStartedAt.duration(to: ContinuousClock.now))
+                maximumCaptureMilliseconds = max(maximumCaptureMilliseconds, lastCaptureMilliseconds)
+                successfulCaptureCount += 1
+            }
             catch Failure.targetLost, Failure.ambiguousWindows {
+                lastCaptureMilliseconds = milliseconds(captureStartedAt.duration(to: ContinuousClock.now))
+                maximumCaptureMilliseconds = max(maximumCaptureMilliseconds, lastCaptureMilliseconds)
+                transientCaptureFailureCount += 1
                 // AX can briefly omit or incompletely enumerate windows while the new window appears.
                 guard tools.frontmostApplicationSnapshot().identity == app else { throw Failure.targetLost }
                 try await Task.sleep(for: .milliseconds(50))
                 continue
             }
+            let currentTransition = transitionSummary(after)
+            if firstTransition == nil { firstTransition = currentTransition }
+            lastTransition = currentTransition
             if transitionDiagnostics < 8 {
                 let addedExactCFEqualCount = after.windows.filter { candidate in
                     !before.windows.contains(where: { CFEqual($0.accessibilityElement, candidate.accessibilityElement) })
@@ -1685,7 +1821,10 @@ final class ComputerUseDefaultBrowserSession {
             guard after.application == app else { throw Failure.targetLost }
             guard !after.hasSheets else { throw Failure.authenticationHandoff }
             guard Self.uniqueWindows(after.windows) else { throw Failure.ambiguousWindows }
-            if let target = Self.newFocusedWindow(before: before, after: after) { return target }
+            if let target = Self.newFocusedWindow(before: before, after: after) {
+                recordSummary("accepted")
+                return target
+            }
             // One newly created but not yet focused AX window is a normal
             // browser startup transition; wait without sending another key.
             if Self.singleNewWindow(before: before, after: after) != nil {
@@ -1704,12 +1843,14 @@ final class ComputerUseDefaultBrowserSession {
         }
         try Task.checkCancellation()
         try tools.requireActive()
+        recordSummary("timeout")
         throw Failure.noNewFocusedWindow
     }
 
     static func captureWindowsForApplication(
         _ application: ComputerUseApplicationIdentity,
         expectedWindow: Window? = nil,
+        startupDocumentInventory: Bool = false,
         diagnostic: @MainActor (String) -> Void = { _ in }
     ) throws -> WindowSnapshot {
         guard !Task.isCancelled else {
@@ -1806,8 +1947,9 @@ final class ComputerUseDefaultBrowserSession {
             }
             elements = [expectedWindow.accessibilityElement]
         }
-        func string(_ element: AXUIElement, _ attribute: CFString) -> String? {
-            read(element, attribute) as? String
+        func string(_ element: AXUIElement, _ attribute: CFString,
+                    messagingTimeout: Float? = nil) -> String? {
+            read(element, attribute, messagingTimeout: messagingTimeout) as? String
         }
         func safeRole(_ element: AXUIElement) -> String {
             let role = string(element, kAXRoleAttribute as CFString) ?? "unavailable"
@@ -1924,6 +2066,24 @@ final class ComputerUseDefaultBrowserSession {
             guard AXUIElementGetPid(element, &pid) == .success, pid == application.processIdentifier else {
                 windowFailure("pid", index: index, element: element)
                 throw Failure.ambiguousWindows
+            }
+            if startupDocumentInventory, expectedWindow == nil {
+                let role = string(element, kAXRoleAttribute as CFString, messagingTimeout: 0.05)
+                let subrole = role == "AXWindow"
+                    ? string(element, kAXSubroleAttribute as CFString, messagingTimeout: 0.05) : nil
+                switch Self.startupWindowClassification(role: role, subrole: subrole) {
+                case .document:
+                    break
+                case .transientSurface:
+                    if CFEqual(focusedElement, element) {
+                        diagnostic("phase=ax_window_validation reason=focused_transient_surface index=\(index) count=\(elements.count) deadline=\(ContinuousClock.now >= deadline ? 1 : 0) role=\(safeRole(element))")
+                        throw Failure.authenticationHandoff
+                    }
+                    continue
+                case .unknown:
+                    diagnostic("phase=ax_window_validation reason=startup_role_unclassified index=\(index) count=\(elements.count) deadline=\(ContinuousClock.now >= deadline ? 1 : 0) role=\(safeRole(element))")
+                    throw Failure.ambiguousWindows
+                }
             }
             let containsNativeFocus = focusedWithin(focusedElement, element)
             let isRetainedTarget = expectedWindow.map { CFEqual(element, $0.accessibilityElement) } ?? false

@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		B2A7D000A6F94D82A02D0001 /* ComputerUseWebUploadJob.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2A7D000A6F94D82A02D0002 /* ComputerUseWebUploadJob.swift */; };
 		C0FFEE060A00100000000007 /* ComputerUseGmailJobTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0FFEE060A00100000000008 /* ComputerUseGmailJobTests.swift */; };
 		C0FFEE060A00100000000005 /* ComputerUseWebJobRequestTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0FFEE060A00100000000006 /* ComputerUseWebJobRequestTests.swift */; };
 		C0FFEE060A00100000000003 /* ComputerUseGmailJob.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0FFEE060A00100000000004 /* ComputerUseGmailJob.swift */; };
@@ -330,6 +331,7 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		B2A7D000A6F94D82A02D0002 /* ComputerUseWebUploadJob.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseWebUploadJob.swift; sourceTree = "<group>"; };
 		C0FFEE060A00100000000008 /* ComputerUseGmailJobTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseGmailJobTests.swift; sourceTree = "<group>"; };
 		C0FFEE060A00100000000006 /* ComputerUseWebJobRequestTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseWebJobRequestTests.swift; sourceTree = "<group>"; };
 		C0FFEE060A00100000000004 /* ComputerUseGmailJob.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseGmailJob.swift; sourceTree = "<group>"; };
@@ -836,6 +838,7 @@
 		B29901137009531DE2AB2EA4 /* ComputerUse */ = {
 			isa = PBXGroup;
 			children = (
+				B2A7D000A6F94D82A02D0002 /* ComputerUseWebUploadJob.swift */,
 				36969F0DE1F6A96906659CB6 /* ComputerUseSkillCatalog.swift */,
 				01D4A4CBD5E28C53D7C11C24 /* AppleFoundationMCPPlanner.swift */,
 				CF84E4931D4FCF81B0D04411 /* ComputerUseAccessibilityTextTarget.swift */,
@@ -1328,6 +1331,7 @@
 				4C2907C9599BA45F37F3BFC3 /* ComputerUseBrowserNavigationTask.swift in Sources */,
 				FC552127F0C32B6F93C059BC /* ComputerUseBrowserGoalPlanner.swift in Sources */,
 				F9ACDE96EE9E22939D7836E9 /* ComputerUseFaraAction.swift in Sources */,
+				B2A7D000A6F94D82A02D0001 /* ComputerUseWebUploadJob.swift in Sources */,
 				9D2D77D48BD7D673605D92EE /* ComputerUseFaraModel.swift in Sources */,
 				090C570A456F35A34DC7A76B /* ComputerUseHoloModel.swift in Sources */,
 				50E760FE6946EEC28FF48631 /* ComputerUseGUIOwlModel.swift in Sources */,

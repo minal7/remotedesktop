@@ -1070,12 +1070,16 @@ enum ComputerUseNativeBrowserHostCommand {
     case newWindow
     case focusAddress
     case commitAddress
+    case driveOpenNewMenu
+    case driveChooseFileUpload
 
     var usage: Int {
         switch self {
         case .newWindow: return 0x11 // N
         case .focusAddress: return 0x0F // L
         case .commitAddress: return 0x28 // Return
+        case .driveOpenNewMenu: return 0x06 // C
+        case .driveChooseFileUpload: return 0x18 // U
         }
     }
 
@@ -1083,6 +1087,8 @@ enum ComputerUseNativeBrowserHostCommand {
         switch self {
         case .newWindow, .focusAddress: return 1 << 3 // Command
         case .commitAddress: return 0
+        case .driveOpenNewMenu: return 1 << 1 // Control
+        case .driveChooseFileUpload: return 0
         }
     }
 

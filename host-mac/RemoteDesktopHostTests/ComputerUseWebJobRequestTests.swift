@@ -49,6 +49,281 @@ final class ComputerUseWebJobRequestTests: XCTestCase {
             .ambiguousStorage([.googleDrive, .dropbox]))
         XCTAssertEqual(ComputerUseWebJobRequest.route("Upload \"Dropbox report.xlsx\" to Google Drive."),
             .googleDriveUpload(.init(originalRequest: "Upload \"Dropbox report.xlsx\" to Google Drive.", destination: .googleDrive)))
+
+        let driveWithAccount = "Upload the selected report to Google Drive using spiderali97@gmail.com."
+        XCTAssertEqual(ComputerUseWebJobRequest.route(driveWithAccount),
+            .googleDriveUpload(.init(originalRequest: driveWithAccount, destination: .googleDrive)))
+        let dropboxWithAccount = "Upload the selected report to Dropbox for spiderali97@gmail.com."
+        XCTAssertEqual(ComputerUseWebJobRequest.route(dropboxWithAccount),
+            .dropboxUpload(.init(originalRequest: dropboxWithAccount, destination: .dropbox)))
+        XCTAssertEqual(ComputerUseWebJobRequest.route("Use Gmail to draft an email to spiderali97@gmail.com."),
+            .gmail(.init(originalRequest: "Use Gmail to draft an email to spiderali97@gmail.com.", sendRequested: false)))
+    }
+
+    @MainActor
+    func testSupportedWebNavigationURLsAreClosedToProviderRoots() {
+        for raw in ["https://drive.google.com/drive/my-drive", "https://www.dropbox.com/home"] {
+            XCTAssertTrue(ComputerUseDefaultBrowserSession.isSupportedWebNavigationURL(URL(string: raw)!))
+        }
+        for raw in [
+            "https://example.com/drive/my-drive",
+            "http://drive.google.com/drive/my-drive",
+            "https://drive.google.com/drive/my-drive/other",
+            "https://drive.google.com:443/drive/my-drive",
+            "https://user@drive.google.com/drive/my-drive",
+            "https://www.dropbox.com/home?preview=1",
+        ] {
+            XCTAssertFalse(ComputerUseDefaultBrowserSession.isSupportedWebNavigationURL(URL(string: raw)!))
+        }
+    }
+
+    func testWebUploadRequestKeepsDestinationFolderSeparateFromSourceQuery() throws {
+        let query = ComputerUseLocalFileCatalog.Query(fileKind: .spreadsheet,
+            nameContains: "Board Review.xlsx", folderScope: .downloads)
+        let drive = try ComputerUseWebUploadJob.Request(provider: .googleDrive,
+            fileQuery: query, destinationFolder: "Quarterly Review")
+        XCTAssertEqual(drive.fileQuery, query)
+        XCTAssertEqual(drive.fileQuery.folderScope, .downloads)
+        XCTAssertEqual(drive.destinationFolder, "Quarterly Review")
+        XCTAssertEqual(drive.provider.homeURL.absoluteString, "https://drive.google.com/drive/my-drive")
+
+        let dropbox = try ComputerUseWebUploadJob.Request(provider: .dropbox,
+            fileQuery: query, destinationFolder: "Quarterly Review")
+        XCTAssertEqual(dropbox.provider.homeURL.absoluteString, "https://www.dropbox.com/home")
+        XCTAssertThrowsError(try ComputerUseWebUploadJob.Request(provider: .dropbox,
+            fileQuery: query, destinationFolder: "/Users/example/Quarterly Review"),
+            "A destination folder is a UI label, never a path")
+    }
+
+    func testDriveTitleSearchURLIsHostBuiltAndBoundToOneExactFilename() throws {
+        let filename = "Remote Desktop Acceptance [fixture-1].pptx"
+        let url = try XCTUnwrap(ComputerUseWebUploadJob.driveTitleSearchURL(filename: filename))
+        XCTAssertEqual(url.host, "drive.google.com")
+        XCTAssertEqual(url.path, "/drive/search")
+        XCTAssertEqual(URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems,
+            [URLQueryItem(name: "q", value: "title:\"\(filename)\"")])
+        XCTAssertTrue(ComputerUseWebUploadJob.isDriveTitleSearchURL(url, filename: filename))
+        XCTAssertFalse(ComputerUseWebUploadJob.isDriveTitleSearchURL(url, filename: "other.pptx"))
+        XCTAssertNil(ComputerUseWebUploadJob.driveTitleSearchURL(filename: "contains \"quotes\".pptx"))
+        XCTAssertFalse(ComputerUseWebUploadJob.isDriveTitleSearchURL(
+            URL(string: "https://drive.google.com/drive/search?q=title%3A%22fixture-1.pptx%22&extra=1")!,
+            filename: "fixture-1.pptx"))
+    }
+
+    @MainActor
+    func testWebUploadNavigationTargetsAreBoundToTypedStage() throws {
+        let home = URL(string: "https://drive.google.com/drive/my-drive")!
+        let search = try XCTUnwrap(ComputerUseWebUploadJob.driveTitleSearchURL(filename: "Board Review.xlsx"))
+        let provider = ComputerUseWebUploadJob.Provider.googleDrive
+
+        XCTAssertTrue(ComputerUseDefaultBrowserSession.isSupportedWebUploadNavigationURL(
+            home, stage: .home, provider: provider, filename: "Board Review.xlsx"))
+        XCTAssertTrue(ComputerUseDefaultBrowserSession.isSupportedWebUploadNavigationURL(
+            home, stage: .returnToRoot, provider: provider, filename: "Board Review.xlsx"))
+        XCTAssertFalse(ComputerUseDefaultBrowserSession.isSupportedWebUploadNavigationURL(
+            search, stage: .home, provider: provider, filename: "Board Review.xlsx"))
+        XCTAssertFalse(ComputerUseDefaultBrowserSession.isSupportedWebUploadNavigationURL(
+            home, stage: .collisionSearch, provider: provider, filename: "Board Review.xlsx"))
+        XCTAssertTrue(ComputerUseDefaultBrowserSession.isSupportedWebUploadNavigationURL(
+            search, stage: .collisionSearch, provider: provider, filename: "Board Review.xlsx"))
+        XCTAssertTrue(ComputerUseDefaultBrowserSession.isSupportedWebUploadNavigationURL(
+            search, stage: .finalSearch, provider: provider, filename: "Board Review.xlsx"))
+        XCTAssertFalse(ComputerUseDefaultBrowserSession.isSupportedWebUploadNavigationURL(
+            search, stage: .finalSearch, provider: .dropbox, filename: "Board Review.xlsx"))
+        XCTAssertFalse(ComputerUseDefaultBrowserSession.isSupportedWebUploadNavigationURL(
+            search, stage: .finalSearch, provider: provider, filename: "Other.xlsx"))
+    }
+
+    func testWebUploadFinalDetailsStagesStayOnExactSearchPage() {
+        XCTAssertEqual(ComputerUseDefaultBrowserExecutor.WebUploadStage.checkCollisionSearch.pageTarget, .exactSearch)
+        XCTAssertEqual(ComputerUseDefaultBrowserExecutor.WebUploadStage.checkFinalSearch.pageTarget, .exactSearch)
+        XCTAssertEqual(ComputerUseDefaultBrowserExecutor.WebUploadStage.selectFinalResult.pageTarget, .exactSearch)
+        XCTAssertEqual(ComputerUseDefaultBrowserExecutor.WebUploadStage.openFinalDetails.pageTarget, .exactSearch)
+        XCTAssertEqual(ComputerUseDefaultBrowserExecutor.WebUploadStage.verifyFinalDetails.pageTarget, .exactSearch)
+        XCTAssertEqual(ComputerUseDefaultBrowserExecutor.WebUploadStage.complete.pageTarget, .exactSearch)
+        XCTAssertEqual(ComputerUseDefaultBrowserExecutor.WebUploadStage.navigateReturnToRoot.pageTarget, .home)
+        XCTAssertEqual(ComputerUseDefaultBrowserExecutor.WebUploadStage.openUploaderMenu.pageTarget, .home)
+    }
+
+    func testDriveDetailsRequireExactSelectedFilenameSizeAndRootLocation() {
+        let candidate = ComputerUseLocalFileCatalog.Candidate(id: "candidate-details",
+            displayName: "Board Review.xlsx", contentTypeIdentifier: nil, fileExtension: "xlsx",
+            byteCount: 8_192, modifiedAt: nil, createdAt: nil, addedToDirectoryAt: nil)
+        let size = ByteCountFormatter.string(fromByteCount: candidate.byteCount, countStyle: .file)
+        XCTAssertTrue(ComputerUseWebUploadJob.driveDetailsMatch(textValues: [
+            candidate.displayName, "Size\u{00A0} \(size)", "Storage used\u{00A0} \(size)", "Location",
+            "My Drive, show location in the list of files.",
+        ], candidate: candidate))
+        XCTAssertFalse(ComputerUseWebUploadJob.driveDetailsMatch(textValues: [
+            candidate.displayName, "Size\u{00A0} 7 KB", "My Drive, show location in the list of files.",
+        ], candidate: candidate))
+        XCTAssertFalse(ComputerUseWebUploadJob.driveDetailsMatch(textValues: [
+            candidate.displayName, "Size\u{00A0} \(size)", "Shared drive, show location in the list of files.",
+        ], candidate: candidate))
+        XCTAssertFalse(ComputerUseWebUploadJob.driveDetailsMatch(textValues: [
+            candidate.displayName, candidate.displayName, "Size\u{00A0} \(size)",
+            "My Drive, show location in the list of files.",
+        ], candidate: candidate))
+    }
+
+    func testDriveDisplayedSizesMatchCalibratedBinaryKilobyteLabels() {
+        XCTAssertEqual(ComputerUseWebUploadJob.displayedSize(byteCount: 100_000, provider: .googleDrive), "98 KB")
+        XCTAssertEqual(ComputerUseWebUploadJob.displayedSize(byteCount: 8_406, provider: .googleDrive), "8 KB")
+        XCTAssertEqual(ComputerUseWebUploadJob.displayedSize(byteCount: 100_000, provider: .dropbox),
+                       Optional(ByteCountFormatter.string(fromByteCount: 100_000, countStyle: .file)),
+                       "Dropbox formatting remains unchanged until calibrated")
+
+        let candidate = ComputerUseLocalFileCatalog.Candidate(id: "candidate-100kb",
+            displayName: "Calibration.pptx", contentTypeIdentifier: nil, fileExtension: "pptx",
+            byteCount: 100_000, modifiedAt: nil, createdAt: nil, addedToDirectoryAt: nil)
+        let row = ComputerUseWebUploadJob.ListingRow(rowID: "drive-row-calibration", cellLabels: [
+            candidate.displayName, "me", "Today", "My Drive", "Size: 98 KB Storage used: 98 KB",
+        ])
+        XCTAssertEqual(ComputerUseWebUploadJob.listingEvidence(rows: [row], candidate: candidate,
+            progress: .complete, pageIsComplete: true,
+            expectedLocationLabel: ComputerUseWebUploadJob.driveRootLocationLabel), .complete)
+
+        let decimalRow = ComputerUseWebUploadJob.ListingRow(rowID: "drive-row-decimal", cellLabels: [
+            candidate.displayName, "me", "Today", "My Drive", "Size: 100 KB Storage used: 100 KB",
+        ])
+        XCTAssertEqual(ComputerUseWebUploadJob.listingEvidence(rows: [decimalRow], candidate: candidate,
+            progress: .complete, pageIsComplete: true,
+            expectedLocationLabel: ComputerUseWebUploadJob.driveRootLocationLabel), .mismatch)
+
+        XCTAssertNil(ComputerUseWebUploadJob.displayedSize(byteCount: 1_048_577, provider: .googleDrive),
+                     "Drive MB labels remain unsupported until calibrated")
+        let megabyteCandidate = ComputerUseLocalFileCatalog.Candidate(id: "candidate-large",
+            displayName: "Large.pptx", contentTypeIdentifier: nil, fileExtension: "pptx",
+            byteCount: 1_048_577, modifiedAt: nil, createdAt: nil, addedToDirectoryAt: nil)
+        let megabyteRow = ComputerUseWebUploadJob.ListingRow(rowID: "drive-row-large", cellLabels: [
+            megabyteCandidate.displayName, "me", "Today", "My Drive", "Size: 1 MB Storage used: 1 MB",
+        ])
+        XCTAssertEqual(ComputerUseWebUploadJob.listingEvidence(rows: [megabyteRow], candidate: megabyteCandidate,
+            progress: .complete, pageIsComplete: true,
+            expectedLocationLabel: ComputerUseWebUploadJob.driveRootLocationLabel), .mismatch)
+    }
+
+    func testWebUploadEffectLatchesPreventReplayingAnUncertainDispatch() {
+        var latch = ComputerUseWebUploadJob.DispatchLatch()
+        XCTAssertTrue(latch.beginSiteUpload())
+        XCTAssertFalse(latch.beginSiteUpload(), "An uncertain website upload must be verified, never redispatched")
+        XCTAssertTrue(latch.siteUploadAttempted)
+        XCTAssertFalse(latch.nativeOpenAttempted)
+
+        XCTAssertTrue(latch.beginNativeOpen())
+        XCTAssertFalse(latch.beginNativeOpen(), "An uncertain native Open must not be replayed")
+        XCTAssertTrue(latch.siteUploadAttempted)
+        XCTAssertTrue(latch.nativeOpenAttempted)
+    }
+
+    func testWebUploadUsesBoundUserFileChoiceBeforeAmbiguousAutomaticSelection() {
+        let automatic = ComputerUseLocalFileCatalog.Candidate(id: "automatic-choice",
+            displayName: "Quarterly Metrics.xlsx", contentTypeIdentifier: nil, fileExtension: "xlsx",
+            byteCount: 8_192, modifiedAt: nil, createdAt: nil, addedToDirectoryAt: nil)
+        let selected = ComputerUseLocalFileCatalog.Candidate(id: "user-choice",
+            displayName: "Quarterly Metrics final.xlsx", contentTypeIdentifier: nil, fileExtension: "xlsx",
+            byteCount: 9_216, modifiedAt: nil, createdAt: nil, addedToDirectoryAt: nil)
+
+        XCTAssertEqual(ComputerUseWebUploadJob.selectedUploadCandidate(
+            visibleCandidates: [automatic, selected], automaticCandidateID: nil,
+            userSelectedCandidateID: selected.id)?.id, selected.id,
+            "A prior user choice remains authoritative when the original query is still ambiguous")
+        XCTAssertNil(ComputerUseWebUploadJob.selectedUploadCandidate(
+            visibleCandidates: [automatic, selected], automaticCandidateID: automatic.id,
+            userSelectedCandidateID: "stale-choice"),
+            "A user choice missing from the current verified page must stop instead of falling back")
+        XCTAssertEqual(ComputerUseWebUploadJob.selectedUploadCandidate(
+            visibleCandidates: [automatic, selected], automaticCandidateID: automatic.id,
+            userSelectedCandidateID: nil)?.id, automatic.id,
+            "Automatic selection remains unchanged when no explicit user choice exists")
+    }
+
+    func testWebUploadExtractionResolvesQuotedSourceAndDestinationLiterals() throws {
+        let original = "Upload the \"Quarterly Metrics.xlsx\" file to Google Drive in the \"Archive 2026\" folder."
+        let extractor = try makeExtractor(transport: WebJobTransport(reply: try envelope("{}")))
+        let request = try extractor.makeUploadRequest(originalRequest: original)
+        let body = try XCTUnwrap(request.httpBody)
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])
+        let messages = try XCTUnwrap(json["messages"] as? [[String: Any]])
+        let schema = try XCTUnwrap(json["response_format"] as? [String: Any])
+        let schemaBody = try XCTUnwrap(schema["json_schema"] as? [String: Any])
+        let root = try XCTUnwrap(schemaBody["schema"] as? [String: Any])
+        let properties = try XCTUnwrap(root["properties"] as? [String: Any])
+        let folderSchema = try XCTUnwrap(properties["destination_folder"] as? [String: Any])
+        XCTAssertTrue((folderSchema["anyOf"] as? [[String: Any]])?.contains(where: {
+            ($0["enum"] as? [String])?.contains("q1") == true
+        }) == true)
+        XCTAssertFalse((messages.first?["content"] as? String ?? "").contains("full local path"))
+
+        let content = #"{"file_description":{"description":"quarterly metrics workbook","file_kind":"spreadsheet","name_contains":"q0","folder_scope":"downloads","date_field":"none","direction":"none"},"destination_folder":"q1"}"#
+        let extraction = try ComputerUseWebJobContentExtractor.decodeUpload(content, originalRequest: original)
+        XCTAssertEqual(extraction.fileQuery.nameContains, "Quarterly Metrics.xlsx")
+        XCTAssertEqual(extraction.fileQuery.fileKind, .spreadsheet)
+        XCTAssertEqual(extraction.destinationFolder, "Archive 2026")
+    }
+
+    func testWebUploadCompletionRequiresOneSameRowNameSizeAndFinishedStatus() {
+        let candidate = ComputerUseLocalFileCatalog.Candidate(id: "candidate-1",
+            displayName: "Board Review.xlsx", contentTypeIdentifier: nil, fileExtension: "xlsx",
+            byteCount: 8_192, modifiedAt: nil, createdAt: nil, addedToDirectoryAt: nil)
+        let displayedSize = ByteCountFormatter.string(fromByteCount: candidate.byteCount, countStyle: .file)
+        let observedSizeCell = "Size: \(displayedSize) Storage used: \(displayedSize)"
+        func row(_ id: String, _ cells: [String]) -> ComputerUseWebUploadJob.ListingRow {
+            .init(rowID: id, cellLabels: cells)
+        }
+        func evidence(_ rows: [ComputerUseWebUploadJob.ListingRow],
+                      progress: ComputerUseWebUploadJob.UploadProgress = .complete,
+                      pageIsComplete: Bool = true,
+                      expectedLocation: String? = nil) -> ComputerUseWebUploadJob.ListingEvidence {
+            ComputerUseWebUploadJob.listingEvidence(rows: rows, candidate: candidate,
+                progress: progress, pageIsComplete: pageIsComplete,
+                expectedLocationLabel: expectedLocation)
+        }
+
+        XCTAssertEqual(evidence([row("drive-row-1", [
+            "Board Review.xlsx", "me", "Today", observedSizeCell,
+        ])]), .complete)
+        XCTAssertEqual(evidence([row("drive-row-root", [
+            "Board Review.xlsx", "me", "Today", "My Drive", observedSizeCell,
+        ])], expectedLocation: "My Drive"), .complete)
+        XCTAssertNotEqual(evidence([row("drive-row-other-location", [
+            "Board Review.xlsx", "me", "Today", "Shared drive", observedSizeCell,
+        ])], expectedLocation: "My Drive"), .complete)
+        XCTAssertNotEqual(evidence([row("drive-row-wrong-size", [
+            "Board Review.xlsx", "me", "Today", "Size: 7 KB Storage used: 7 KB",
+        ])]), .complete)
+        XCTAssertNotEqual(evidence([
+            row("drive-row-name", ["Board Review.xlsx", "me", "Today"]),
+            row("drive-row-size", [observedSizeCell]),
+        ]), .complete, "Name and size from separate rows must not combine")
+        XCTAssertNotEqual(evidence([row("drive-row-pending", [
+            "Board Review.xlsx", "me", "Today", displayedSize,
+        ])], progress: .inProgress), .complete)
+        XCTAssertNotEqual(evidence([
+            row("drive-row-1", ["Board Review.xlsx", "me", "Today", observedSizeCell]),
+            row("drive-row-2", ["Board Review.xlsx", "me", "Yesterday", observedSizeCell]),
+        ]), .complete, "Duplicate exact-name rows are ambiguous")
+        XCTAssertNotEqual(evidence([row("drive-row-incomplete-page", [
+            "Board Review.xlsx", "me", "Today", observedSizeCell,
+        ])], pageIsComplete: false), .complete, "A truncated listing cannot establish uniqueness")
+
+        let rootRowWithoutSize = row("drive-row-details", ["Board Review.xlsx", "me", "Today", "My Drive"])
+        let details = ["Board Review.xlsx", "Size\u{00A0} \(displayedSize)",
+            "Storage used\u{00A0} \(displayedSize)", "Location",
+            "My Drive, show location in the list of files."]
+        XCTAssertTrue(ComputerUseWebUploadJob.verifiesDriveCompletion(rows: [row("drive-row-sized", [
+            "Board Review.xlsx", "me", "Today", "My Drive", observedSizeCell,
+        ])], candidate: candidate, progress: .complete, pageIsComplete: true, detailsTextValues: []),
+            "A unique same-row size is sufficient when the result table exposes it")
+        XCTAssertTrue(ComputerUseWebUploadJob.verifiesDriveCompletion(rows: [rootRowWithoutSize],
+            candidate: candidate, progress: .complete, pageIsComplete: true, detailsTextValues: details),
+            "A unique bound row can use its selected Details size when the listing omits size")
+        XCTAssertFalse(ComputerUseWebUploadJob.verifiesDriveCompletion(rows: [rootRowWithoutSize,
+            row("drive-row-duplicate-other-location", ["Board Review.xlsx", "Shared drive"])],
+            candidate: candidate, progress: .complete, pageIsComplete: true, detailsTextValues: details),
+            "A second exact-name row is ambiguous even when it is outside My Drive")
+        XCTAssertFalse(ComputerUseWebUploadJob.verifiesDriveCompletion(rows: [rootRowWithoutSize],
+            candidate: candidate, progress: .inProgress, pageIsComplete: true, detailsTextValues: details))
     }
 
     func testNonwebJobsAndPausedLocalSyncRemainUnrouted() {

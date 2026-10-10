@@ -10,6 +10,7 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
+from urllib.parse import quote
 from unittest.mock import patch
 
 
@@ -297,6 +298,7 @@ class GmailHarnessTests(unittest.TestCase):
                     self.assertEqual(saved["attempts"], 3)
                     self.assertEqual(len(before_files), 1)
                     self.assertEqual(before_files[0][0], first[2].name)
+
 
     def test_verified_saved_draft_url_is_persisted_for_later_gate_runs(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -701,6 +703,333 @@ class GmailHarnessTests(unittest.TestCase):
                 "approval_events": [], "approval_events_omitted": 0,
             }}}
 
+
+class WebUploadAcceptanceTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.token = "a1" * 16
+        self.expected = {
+            "job": "drive",
+            "provider": "drive",
+            "run_id": self.token,
+            "expected_account": "user@example.test",
+            "folder_url": "https://drive.google.com/drive/my-drive",
+            "attachment_name": f"Remote Desktop Acceptance [{self.token}].pptx",
+            "source_bytes": 28273,
+        }
+        self.row = {
+            "row_identity": "row-1",
+            # Drive's visible result row supplies name/location; the synthetic
+            # exact-byte size lives in the separately observed Details pane.
+            "cells": [self.expected["attachment_name"], "My Drive"],
+            "errors": [],
+        }
+        search_query = f'title:"{self.expected["attachment_name"]}"'
+        search_url = "https://drive.google.com/drive/search?q=" + quote(search_query, safe="")
+        self.outcome = {
+            "job": "drive", "run_id": self.token, "raw_outcome": "taskCompleted",
+            "evidence": {"web_upload": {
+                "provider": "drive",
+                "origin_url": search_url,
+                "folder_url": "https://drive.google.com/drive/my-drive",
+                "search_field_values": [search_query],
+                "account_label": "Test User (user@example.test)",
+                "account_verified_before_approval": True,
+                "upload_control_approval_count": 0,
+                "upload_control_approval_responses_granted": 0,
+                "open_approval_count": 1,
+                "open_approval_responses_granted": 1,
+                "upload_control_dispatch_count": 1,
+                "selected_source_verified": True,
+                "page_truncated": False,
+                "upload_progress_observations": ["Upload complete"],
+                "listing_rows": [self.row],
+                "collision_search_checkpoint": {
+                    "captured": True, "url": search_url, "search_field_values": [search_query],
+                    "account_label": "Test User (user@example.test)", "page_truncated": False,
+                    "empty_state_values": ["None of your files or folders matched this search"],
+                    "listing_rows": [],
+                },
+                "upload_progress_checkpoint": {
+                    "captured": True, "url": "https://drive.google.com/drive/my-drive",
+                    "account_label": "Test User (user@example.test)", "controls_complete": True,
+                    "progress_values": ["Upload complete"],
+                },
+                "details_text_values": [self.expected["attachment_name"], "Size 28,273 bytes",
+                    "My Drive, show location in the list of files."],
+            }},
+        }
+
+    def test_web_upload_requires_one_exact_completed_same_row_with_size_and_account(self) -> None:
+        check = runner.check_web_upload(self.expected, self.outcome)
+        self.assertTrue(check["passed"])
+        self.assertEqual(check["matching_row_count"], 1)
+        self.assertTrue(check["file_name_and_size_verified"])
+        self.assertTrue(check["upload_completed"])
+
+    def test_web_upload_rejects_missing_duplicate_wrong_size_or_incomplete_rows(self) -> None:
+        cases = (
+            ([], "missing row"),
+            ([self.row, dict(self.row)], "duplicate exact rows"),
+            ([dict(self.row, cells=[self.expected["attachment_name"] + " copy", "28,273 bytes"])], "filename suffix"),
+        )
+        for rows, label in cases:
+            with self.subTest(label=label):
+                outcome = json.loads(json.dumps(self.outcome))
+                outcome["evidence"]["web_upload"]["listing_rows"] = rows
+                with self.assertRaises(runner.AcceptanceError):
+                    runner.check_web_upload(self.expected, outcome)
+
+    def test_web_upload_does_not_accept_product_completion_without_independent_listing(self) -> None:
+        outcome = json.loads(json.dumps(self.outcome))
+        outcome["evidence"]["web_upload"].update({
+            "listing_rows": [],
+            "completion_toast": "1 upload complete",
+        })
+        with self.assertRaises(runner.AcceptanceError):
+            runner.check_web_upload(self.expected, outcome)
+
+    def test_drive_requires_independent_collision_progress_and_details_checkpoints(self) -> None:
+        for field, value in (
+            ("origin_url", "https://drive.google.com/drive/my-drive"),
+            ("search_field_values", ["title:\"other\""]),
+        ):
+            with self.subTest(final_field=field):
+                outcome = json.loads(json.dumps(self.outcome))
+                outcome["evidence"]["web_upload"][field] = value
+                with self.assertRaises(runner.AcceptanceError):
+                    runner.check_web_upload(self.expected, outcome)
+
+        for field, value in (
+            ("collision_search_checkpoint", None),
+            ("upload_progress_checkpoint", None),
+        ):
+            with self.subTest(field=field):
+                outcome = json.loads(json.dumps(self.outcome))
+                outcome["evidence"]["web_upload"][field] = value
+                with self.assertRaises(runner.AcceptanceError):
+                    runner.check_web_upload(self.expected, outcome)
+
+        for field, value in (
+            ("url", "https://drive.google.com/drive/search?q=title%3A%22other%22"),
+            ("search_field_values", ["title:\"other\""]),
+            ("page_truncated", True),
+            ("empty_state_values", []),
+            ("listing_rows", [self.row]),
+            ("account_label", "Other (other@example.test)"),
+        ):
+            with self.subTest(preflight_field=field):
+                outcome = json.loads(json.dumps(self.outcome))
+                outcome["evidence"]["web_upload"]["collision_search_checkpoint"][field] = value
+                with self.assertRaises(runner.AcceptanceError):
+                    runner.check_web_upload(self.expected, outcome)
+
+        for field, value in (
+            ("url", "https://drive.google.com/drive/search?q=title%3A%22x%22"),
+            ("controls_complete", False),
+            ("progress_values", ["Uploading 90%"]),
+        ):
+            with self.subTest(progress_field=field):
+                outcome = json.loads(json.dumps(self.outcome))
+                outcome["evidence"]["web_upload"]["upload_progress_checkpoint"][field] = value
+                with self.assertRaises(runner.AcceptanceError):
+                    runner.check_web_upload(self.expected, outcome)
+
+        for details in (
+            [self.expected["attachment_name"], "Size 27 KB", "My Drive, show location in the list of files."],
+            [self.expected["attachment_name"], "Size 28,272 bytes", "My Drive, show location in the list of files."],
+            [self.expected["attachment_name"], "Size 28,273 bytes", "Other location"],
+        ):
+            with self.subTest(details=details):
+                outcome = json.loads(json.dumps(self.outcome))
+                outcome["evidence"]["web_upload"]["details_text_values"] = details
+                with self.assertRaises(runner.AcceptanceError):
+                    runner.check_web_upload(self.expected, outcome)
+
+        outcome = json.loads(json.dumps(self.outcome))
+        outcome["evidence"]["web_upload"]["listing_rows"][0]["cells"].remove("My Drive")
+        with self.assertRaises(runner.AcceptanceError):
+            runner.check_web_upload(self.expected, outcome)
+
+    def test_drive_same_exact_row_byte_size_can_replace_details_size(self) -> None:
+        outcome = json.loads(json.dumps(self.outcome))
+        outcome["evidence"]["web_upload"]["listing_rows"][0]["cells"] = [
+            self.expected["attachment_name"], "28,273 bytes", "My Drive"]
+        outcome["evidence"]["web_upload"]["details_text_values"] = []
+        self.assertTrue(runner.check_web_upload(self.expected, outcome)["passed"])
+
+    def test_web_upload_requires_fresh_completed_progress_even_with_exact_row(self) -> None:
+        for observations in ([], ["Uploading 72%"], ["Upload complete", "Upload failed"]):
+            with self.subTest(observations=observations):
+                outcome = json.loads(json.dumps(self.outcome))
+                outcome["evidence"]["web_upload"]["upload_progress_checkpoint"]["progress_values"] = observations
+                with self.assertRaises(runner.AcceptanceError):
+                    runner.check_web_upload(self.expected, outcome)
+
+    def test_drive_size_accepts_only_calibrated_binary_kilobyte_rounding(self) -> None:
+        self.assertTrue(runner._displayed_size_matches("drive", ["Size 98 KB"], 100_000))
+        self.assertTrue(runner._displayed_size_matches("drive", ["Size 8 KB"], 8_406))
+        self.assertFalse(runner._displayed_size_matches("drive", ["Size 100 KB"], 100_000))
+        self.assertFalse(runner._displayed_size_matches("drive", ["Size 8.4 KB"], 8_406))
+        self.assertFalse(runner._displayed_size_matches("drive", ["Size 1 MB"], 1_048_577))
+        self.assertFalse(runner._displayed_size_matches("dropbox", ["Size 98 KB"], 100_000))
+
+    def test_web_upload_requires_account_proof_and_exactly_one_native_open_approval(self) -> None:
+        for field, value in (
+            ("account_verified_before_approval", False),
+            ("open_approval_count", 0),
+            ("open_approval_count", 2),
+            ("open_approval_responses_granted", 0),
+            ("upload_control_approval_count", 3),
+        ):
+            with self.subTest(field=field, value=value):
+                outcome = json.loads(json.dumps(self.outcome))
+                outcome["evidence"]["web_upload"][field] = value
+                with self.assertRaises(runner.AcceptanceError):
+                    runner.check_web_upload(self.expected, outcome)
+
+    def test_web_upload_rejects_wrong_provider_account_or_multiple_dispatches(self) -> None:
+        for field, value in (
+            ("provider", "dropbox"),
+            ("origin_url", "https://example.com/drive/my-drive"),
+            ("folder_url", "https://drive.google.com/drive/shared-with-me"),
+            ("account_label", "Another User (other@example.com)"),
+            ("upload_control_dispatch_count", 2),
+            ("page_truncated", True),
+        ):
+            with self.subTest(field=field):
+                outcome = json.loads(json.dumps(self.outcome))
+                outcome["evidence"]["web_upload"][field] = value
+                with self.assertRaises(runner.AcceptanceError):
+                    runner.check_web_upload(self.expected, outcome)
+
+    def test_web_upload_rejects_account_prefix_and_nonstandard_provider_port(self) -> None:
+        for field, value in (
+            ("account_label", "Test User (user@example.test.evil)"),
+            ("origin_url", "https://drive.google.com:444/drive/my-drive"),
+        ):
+            with self.subTest(field=field):
+                outcome = json.loads(json.dumps(self.outcome))
+                outcome["evidence"]["web_upload"][field] = value
+                with self.assertRaises(runner.AcceptanceError):
+                    runner.check_web_upload(self.expected, outcome)
+
+    def test_web_upload_batch_identity_rejects_reused_tokens_and_names(self) -> None:
+        seen_tokens: set[tuple[str, str]] = set()
+        seen_items: set[tuple[str, str, str]] = set()
+        runner.record_web_upload_batch_identity(
+            "drive", self.token, self.expected["folder_url"], self.expected["attachment_name"],
+            seen_tokens, seen_items)
+        second_token = "b2" * 16
+        second_name = f"Remote Desktop Acceptance [{second_token}].pptx"
+        runner.record_web_upload_batch_identity(
+            "drive", second_token, self.expected["folder_url"], second_name,
+            seen_tokens, seen_items)
+        with self.assertRaises(runner.AcceptanceError):
+            runner.record_web_upload_batch_identity(
+                "drive", self.token, self.expected["folder_url"], second_name,
+                seen_tokens, seen_items)
+        with self.assertRaises(runner.AcceptanceError):
+            runner.record_web_upload_batch_identity(
+                "drive", "c3" * 16, self.expected["folder_url"], self.expected["attachment_name"],
+                seen_tokens, seen_items)
+
+    def test_dropbox_checker_requires_its_origin_and_same_row_evidence(self) -> None:
+        token = "d4" * 16
+        expected = dict(self.expected, job="dropbox", provider="dropbox", run_id=token,
+            folder_url="https://www.dropbox.com/home/RemoteDesktopAcceptance",
+            attachment_name=f"Remote Desktop Acceptance [{token}].pptx")
+        outcome = json.loads(json.dumps(self.outcome))
+        outcome.update({"job": "dropbox", "run_id": token})
+        evidence = outcome["evidence"]["web_upload"]
+        evidence.update({"provider": "dropbox",
+            "origin_url": "https://www.dropbox.com/home/RemoteDesktopAcceptance",
+            "folder_url": expected["folder_url"]})
+        evidence["listing_rows"] = [dict(self.row,
+            cells=[expected["attachment_name"], "28,273 bytes"])]
+        check = runner.check_web_upload(expected, outcome)
+        self.assertTrue(check["passed"])
+
+    def test_web_upload_session_preserves_uncertain_identity_and_blocks_restart(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with patch.multiple(runner, TRACE_ROOT=root / "traces",
+                                FIXTURE_ROOT=root / "fixtures", DOWNLOADS=root / "downloads"):
+                fixture = runner.prepare_fixtures()
+                session = runner.web_upload_session("drive", "user@example.test", fixture)
+                provider, account, token, file_name, staged, attempt = session
+                self.assertEqual(provider, "drive")
+                self.assertEqual(account, "user@example.test")
+                self.assertRegex(token, r"^[a-f0-9]{32}$")
+                self.assertIn(token, file_name)
+                self.assertEqual(staged.name, file_name)
+                self.assertEqual(runner.sha256(staged.read_bytes()), fixture["Board Review.pptx"]["sha256"])
+                self.assertEqual(attempt, 1)
+
+                state_path = runner.web_upload_session_path("drive")
+                initial_state = json.loads(state_path.read_text(encoding="utf-8"))
+                self.assertEqual(initial_state["token"], token)
+                self.assertIs(initial_state["attempted"], False)
+
+                runner.mark_web_upload_attempted(session)
+                before_state = state_path.read_bytes()
+                saved_state = json.loads(before_state)
+                self.assertEqual(saved_state["provider"], provider)
+                self.assertEqual(saved_state["account"], account)
+                self.assertEqual(saved_state["token"], token)
+                self.assertEqual(saved_state["file_name"], file_name)
+                self.assertIs(saved_state["attempted"], True)
+                before_files = sorted((path.name, path.read_bytes()) for path in (root / "downloads").iterdir())
+                with self.assertRaises(runner.AcceptanceError):
+                    runner.web_upload_session("drive", "user@example.test", fixture)
+                self.assertEqual(state_path.read_bytes(), before_state)
+                self.assertEqual(sorted((path.name, path.read_bytes()) for path in (root / "downloads").iterdir()),
+                                 before_files)
+                self.assertEqual(json.loads(before_state)["token"], token)
+                self.assertTrue(json.loads(before_state)["attempted"])
+
+    def test_web_upload_rotates_only_after_passed_independent_checker_result(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with patch.multiple(runner, TRACE_ROOT=root / "traces",
+                                FIXTURE_ROOT=root / "fixtures", DOWNLOADS=root / "downloads"):
+                fixture = runner.prepare_fixtures()
+                session = runner.web_upload_session("dropbox", "owner@example.test", fixture)
+                runner.mark_web_upload_attempted(session)
+                state_path = runner.web_upload_session_path("dropbox")
+                before = state_path.read_bytes()
+                unchanged = runner.rotate_web_upload_session_after_success(
+                    session, passed=False, more_runs=True)
+                self.assertEqual(unchanged, session)
+                self.assertEqual(state_path.read_bytes(), before)
+
+                fresh = runner.rotate_web_upload_session_after_success(
+                    session, passed=True, more_runs=True)
+                self.assertNotEqual(fresh[2], session[2])
+                self.assertNotEqual(fresh[3], session[3])
+                self.assertIn(fresh[2], fresh[3])
+                self.assertEqual(fresh[4].name, fresh[3])
+                self.assertEqual(runner.sha256(fresh[4].read_bytes()), fixture["Board Review.pptx"]["sha256"])
+                self.assertFalse(json.loads(state_path.read_text(encoding="utf-8"))["attempted"])
+
+    def test_web_upload_final_success_is_persisted_before_later_fresh_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with patch.multiple(runner, TRACE_ROOT=root / "traces",
+                                FIXTURE_ROOT=root / "fixtures", DOWNLOADS=root / "downloads"):
+                fixture = runner.prepare_fixtures()
+                session = runner.web_upload_session("drive", "user@example.test", fixture)
+                runner.mark_web_upload_attempted(session)
+                state_path = runner.web_upload_session_path("drive")
+                finished = runner.rotate_web_upload_session_after_success(
+                    session, passed=True, more_runs=False)
+                self.assertEqual(finished, session)
+                saved = json.loads(state_path.read_text(encoding="utf-8"))
+                self.assertIs(saved["attempted"], True)
+                self.assertIs(saved["independent_checker_passed"], True)
+                fresh = runner.web_upload_session("drive", "user@example.test", fixture)
+                self.assertNotEqual(fresh[2], session[2])
+                self.assertNotEqual(fresh[3], session[3])
+                self.assertFalse(json.loads(state_path.read_text(encoding="utf-8"))["attempted"])
 
 class MailBodyTests(unittest.TestCase):
     def test_prefers_rendered_html_and_ignores_attachment_object(self) -> None:

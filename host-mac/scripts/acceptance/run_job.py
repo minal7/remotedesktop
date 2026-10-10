@@ -32,6 +32,10 @@ TRACE_ROOT = Path.home() / "Library/Application Support/RemoteDesktopHost/Traces
 FIXTURE_ROOT = Path.home() / "RemoteDesktopAcceptance"
 DOWNLOADS = Path.home() / "Downloads"
 GMAIL_SESSION_PATH = TRACE_ROOT / "gmail-acceptance-session.json"
+WEB_UPLOAD_SESSION_NAMES = {
+    "drive": "drive-web-upload-acceptance-session.json",
+    "dropbox": "dropbox-web-upload-acceptance-session.json",
+}
 TEST_ID = "RemoteDesktopHostTests/CoreJobAcceptanceTests/testRunJob"
 MAX_RUNS = 10
 MAX_TRACE_FOLDERS = 20
@@ -208,6 +212,183 @@ def record_gmail_batch_draft_identity(token: Any, saved_url: Any,
         raise AcceptanceError("Gmail batch reused a saved draft identity")
     seen_tokens.add(token)
     seen_identities.add(identity)
+
+
+def web_upload_session_path(provider: str) -> Path:
+    try:
+        return TRACE_ROOT / WEB_UPLOAD_SESSION_NAMES[provider]
+    except KeyError as error:
+        raise AcceptanceError("Unsupported website upload provider") from error
+
+
+def _write_private_json(path: Path, value: dict[str, Any]) -> None:
+    if path.is_symlink():
+        raise AcceptanceError("Website upload session must not be a symlink")
+    temp = path.with_name(path.name + ".tmp")
+    if temp.exists() or temp.is_symlink():
+        raise AcceptanceError("Website upload session update is already in progress")
+    payload = json.dumps(value, sort_keys=True) + "\n"
+    descriptor = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            stream.write(payload)
+        os.replace(temp, path)
+    except BaseException:
+        try:
+            temp.unlink()
+        except OSError:
+            pass
+        raise
+
+
+def _web_upload_origin(provider: str) -> tuple[str, str]:
+    if provider == "drive":
+        return "https", "drive.google.com"
+    if provider == "dropbox":
+        return "https", "www.dropbox.com"
+    raise AcceptanceError("Unsupported website upload provider")
+
+
+def web_upload_session(provider: str, account: str,
+                       fixture: dict[str, dict[str, Any]]) -> tuple[str, str, str, str, Path, int]:
+    """Load one pending identity, or create a fresh one before any browser effect."""
+    if (provider not in WEB_UPLOAD_SESSION_NAMES or not isinstance(account, str)
+            or not re.fullmatch(r"[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", account)):
+        raise AcceptanceError("A supported provider and explicit test account are required")
+    TRACE_ROOT.mkdir(mode=0o700, parents=True, exist_ok=True)
+    path = web_upload_session_path(provider)
+    if path.is_symlink():
+        raise AcceptanceError("Website upload session must not be a symlink")
+    saved: dict[str, Any] | None = None
+    if path.exists():
+        try:
+            saved = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            raise AcceptanceError("Website upload session is invalid") from error
+        if (not isinstance(saved, dict) or saved.get("provider") != provider
+                or saved.get("account") != account):
+            raise AcceptanceError("Pending website upload belongs to another provider or account")
+        token = saved.get("token")
+        file_name = saved.get("file_name")
+        attempted = saved.get("attempted")
+        passed = saved.get("independent_checker_passed")
+        if (not isinstance(token, str) or not re.fullmatch(r"[a-f0-9]{32}", token)
+                or not isinstance(file_name, str)
+                or file_name != f"Remote Desktop Acceptance [{token}].pptx"
+                or type(attempted) is not bool or type(passed) is not bool):
+            raise AcceptanceError("Website upload session identity is invalid")
+        if attempted and not passed:
+            raise AcceptanceError("An attempted website upload is unresolved; inspect the existing item before retrying")
+        if passed:
+            # Only an independently verified prior success permits a new
+            # identity. Preserve the old remote item; never overwrite it.
+            token = uuid.uuid4().hex
+            file_name = f"Remote Desktop Acceptance [{token}].pptx"
+            attempted = False
+            passed = False
+            saved = None
+    else:
+        token = uuid.uuid4().hex
+        file_name = f"Remote Desktop Acceptance [{token}].pptx"
+        attempted = False
+        passed = False
+
+    source = fixture["Board Review.pptx"]
+    payload = Path(source["path"]).read_bytes()
+    if len(payload) != source["bytes"] or sha256(payload) != source["sha256"]:
+        raise AcceptanceError("Canonical website upload fixture changed before staging")
+    DOWNLOADS.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if DOWNLOADS.is_symlink() or not DOWNLOADS.is_dir():
+        raise AcceptanceError("Downloads must be a real directory")
+    staged = DOWNLOADS / file_name
+    if staged.exists() or staged.is_symlink():
+        if staged.is_symlink() or not staged.is_file() or sha256(staged.read_bytes()) != source["sha256"]:
+            raise AcceptanceError("Existing website upload fixture differs from canonical bytes")
+    else:
+        descriptor = os.open(staged, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(payload)
+    if saved is None:
+        _write_private_json(path, {"schema_version": 1, "provider": provider, "account": account,
+                                   "token": token, "file_name": file_name,
+                                   "attempted": False, "independent_checker_passed": False})
+    return provider, account, token, file_name, staged, 1
+
+
+def mark_web_upload_attempted(session: tuple[str, str, str, str, Path, int]) -> None:
+    provider, account, token, file_name, staged, _ = session
+    path = web_upload_session_path(provider)
+    if path.is_symlink():
+        raise AcceptanceError("Website upload session must not be a symlink")
+    try:
+        saved = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise AcceptanceError("Website upload session is invalid") from error
+    if (not isinstance(saved, dict) or saved.get("provider") != provider or saved.get("account") != account
+            or saved.get("token") != token or saved.get("file_name") != file_name
+            or saved.get("attempted") is not False or saved.get("independent_checker_passed") is not False
+            or staged.parent != DOWNLOADS or staged.name != file_name or staged.is_symlink()
+            or not staged.is_file() or sha256(staged.read_bytes()) != sha256(fixture_bytes("Board Review.pptx"))):
+        raise AcceptanceError("Website upload identity changed before dispatch")
+    saved["attempted"] = True
+    _write_private_json(path, saved)
+
+
+def record_web_upload_batch_identity(provider: str, token: Any, folder_url: Any, file_name: Any,
+                                     seen_tokens: set[tuple[str, str]],
+                                     seen_items: set[tuple[str, str, str]]) -> None:
+    if not isinstance(token, str) or not re.fullmatch(r"[a-f0-9]{32}", token):
+        raise AcceptanceError("Website upload batch token is invalid")
+    if not isinstance(folder_url, str) or not isinstance(file_name, str):
+        raise AcceptanceError("Website upload identity is incomplete")
+    origin = _web_upload_origin(provider)
+    parsed = urlparse(folder_url)
+    if parsed.scheme != origin[0] or parsed.hostname != origin[1] or parsed.username or parsed.password:
+        raise AcceptanceError("Website upload folder is not on the expected provider")
+    token_key = (provider, token)
+    item_key = (provider, folder_url, file_name)
+    if token_key in seen_tokens or item_key in seen_items:
+        raise AcceptanceError("Website upload batch reused a token or remote item name")
+    seen_tokens.add(token_key)
+    seen_items.add(item_key)
+
+
+def rotate_web_upload_session_after_success(
+    session: tuple[str, str, str, str, Path, int], *, passed: bool, more_runs: bool,
+) -> tuple[str, str, str, str, Path, int]:
+    if not passed:
+        return session
+    provider, account, token, file_name, staged, _ = session
+    path = web_upload_session_path(provider)
+    if path.is_symlink() or staged.is_symlink() or staged.parent != DOWNLOADS or not staged.is_file():
+        raise AcceptanceError("Website upload success cannot rotate an unowned source or session")
+    source = fixture_bytes("Board Review.pptx")
+    if sha256(staged.read_bytes()) != sha256(source):
+        raise AcceptanceError("Website upload source changed before rotation")
+    try:
+        saved = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise AcceptanceError("Website upload session is invalid") from error
+    if (not isinstance(saved, dict) or saved.get("provider") != provider or saved.get("account") != account
+            or saved.get("token") != token or saved.get("file_name") != file_name
+            or saved.get("attempted") is not True):
+        raise AcceptanceError("Website upload session changed during the run")
+    saved["independent_checker_passed"] = True
+    if not more_runs:
+        _write_private_json(path, saved)
+        return session
+    fresh_token = uuid.uuid4().hex
+    fresh_name = f"Remote Desktop Acceptance [{fresh_token}].pptx"
+    fresh_stage = DOWNLOADS / fresh_name
+    if fresh_stage.exists() or fresh_stage.is_symlink():
+        raise AcceptanceError("Fresh website upload filename already exists")
+    descriptor = os.open(fresh_stage, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(descriptor, "wb") as stream:
+        stream.write(source)
+    _write_private_json(path, {"schema_version": 1, "provider": provider, "account": account,
+                               "token": fresh_token, "file_name": fresh_name,
+                               "attempted": False, "independent_checker_passed": False})
+    return provider, account, fresh_token, fresh_name, fresh_stage, 1
 
 
 def gmail_session(fixture: dict[str, dict[str, Any]]) -> tuple[str, str, Path, int, str | None]:
@@ -475,7 +656,7 @@ def remove_owned_stage(path: Path | None, expected_hash: str | None) -> None:
 def prune_traces() -> None:
     if not TRACE_ROOT.is_dir():
         return
-    milestone_prefixes = tuple(f"m{index}-" for index in range(5)) + ("w1-", "mail-body-diagnostic-",)
+    milestone_prefixes = tuple(f"m{index}-" for index in range(5)) + ("w1-", "w2-", "mail-body-diagnostic-",)
     owned = [path for path in TRACE_ROOT.iterdir()
              if path.is_dir() and not path.is_symlink() and path.name.startswith(milestone_prefixes)]
     owned.sort(key=lambda path: path.stat().st_mtime_ns, reverse=True)
@@ -487,12 +668,13 @@ def make_expected(job: str, run_id: str, run_index: int,
                   fixture: dict[str, dict[str, Any]], cloud_root: Path | None,
                   send_approval_check: bool = False,
                   staged_source: Path | None = None,
-                  gmail: tuple[str, str, Path, str, int, str | None] | None = None) -> tuple[dict[str, Any], Path | None, str | None]:
+                  gmail: tuple[str, str, Path, str, int, str | None] | None = None,
+                  web_upload: tuple[str, str, str, str, Path, int] | None = None) -> tuple[dict[str, Any], Path | None, str | None]:
     expected: dict[str, Any] = {"job": job, "run_id": run_id, "run_index": run_index}
     stage: Path | None = None
     stage_hash: str | None = None
     pptx = fixture["Board Review.pptx"]
-    if job in {"email", "cloud", "gmail"}:
+    if job in {"email", "cloud", "gmail", "drive", "dropbox"}:
         source_info = fixture["Quarterly Metrics.xlsx"] if job == "gmail" else pptx
         stage = staged_source or stage_source(Path(source_info["path"]), run_id, source_info["sha256"])
         stage_hash = source_info["sha256"]
@@ -564,6 +746,21 @@ def make_expected(job: str, run_id: str, run_index: int,
         expected["prompt"] = "Find me a cheap flight from SFO to Lisbon on November 10, 2026. Return 3–5 options with prices copied from the page."
     elif job == "gmail":
         pass
+    elif job in {"drive", "dropbox"}:
+        if web_upload is None or staged_source is None:
+            raise AcceptanceError("Website upload session is missing")
+        provider, account, token, file_name, staged, attempt = web_upload
+        if staged != staged_source or token != run_id or file_name != staged.name:
+            raise AcceptanceError("Website upload session does not match its staged fixture")
+        folder_url = ("https://drive.google.com/drive/my-drive" if job == "drive"
+                      else "https://www.dropbox.com/home")
+        expected.update({"provider": provider, "expected_account": account,
+            "folder_url": folder_url, "attachment_name": file_name,
+            "source_path": str(staged), "source_sha256": pptx["sha256"],
+            "source_bytes": pptx["bytes"], "attempt": attempt,
+            "prompt": (f"Upload the exact file named \"{file_name}\" from Downloads to "
+                f"{('Google Drive My Drive' if job == 'drive' else 'Dropbox')} using the signed-in "
+                f"default browser account {account}. Do not send, share, overwrite, or delete anything.")})
     else:
         expected["prompt"] = (
             "Report whether this task reached the Mac. If it is locked, ask me to unlock it in the "
@@ -964,6 +1161,213 @@ def check_gmail(expected: dict[str, Any], outcome: dict[str, Any]) -> dict[str, 
             "attachment_approval_responses_granted": attachment_grants}
 
 
+def _displayed_size_matches(provider: str, raw_cells: list[Any], expected_bytes: Any) -> bool:
+    if type(expected_bytes) is not int or expected_bytes <= 0:
+        return False
+    normalized_cells = [cell.replace("\u00a0", " ") for cell in raw_cells if isinstance(cell, str)]
+    pattern = re.compile(
+        r"^\s*(?:Size(?::|\s)\s*)?([0-9]{1,3}(?:,[0-9]{3})*|[0-9]+)\s*(bytes?|B)\b",
+        re.IGNORECASE)
+    for cell in normalized_cells:
+        match = pattern.match(cell)
+        if not match:
+            continue
+        whole = int(match.group(1).replace(",", ""))
+        unit = match.group(2).lower()
+        if unit in {"byte", "bytes", "b"} and whole == expected_bytes:
+            return True
+    if provider == "drive" and expected_bytes <= 1_048_576:
+        # Drive's observed Details label rounds binary KiB to the nearest whole KB.
+        # Keep this limited to the calibrated unit/range; larger units need evidence.
+        kib_pattern = re.compile(r"^\s*(?:Size(?::|\s)\s*)?([0-9]+)\s*KB\b", re.IGNORECASE)
+        expected_kib = (expected_bytes + 512) // 1_024
+        if any((match := kib_pattern.match(cell)) and int(match.group(1)) == expected_kib
+               for cell in normalized_cells):
+            return True
+    return False
+
+
+def _drive_title_search_matches(raw_url: Any, filename: str) -> bool:
+    if not isinstance(raw_url, str):
+        return False
+    parsed = urlparse(raw_url)
+    try:
+        port = parsed.port
+    except ValueError:
+        return False
+    query = parse_qs(parsed.query, keep_blank_values=True)
+    expected = f'title:"{filename}"'
+    return (parsed.scheme == "https" and parsed.hostname == "drive.google.com"
+            and port in {None, 443} and parsed.username is None and parsed.password is None
+            and parsed.path == "/drive/search" and not parsed.fragment
+            and set(query) == {"q"} and query.get("q") == [expected])
+
+
+def _upload_progress_is_complete(values: Any) -> bool:
+    if not isinstance(values, list) or any(not isinstance(item, str) for item in values):
+        return False
+    normalized = [item.strip().lower() for item in values]
+    if (any("upload failed" in item or "couldn't upload" in item or "could not upload" in item
+            or "upload error" in item for item in normalized)
+            or any("uploading" in item or "remaining" in item for item in normalized)):
+        return False
+    return any("upload complete" in item or item == "uploaded"
+               or item in {"100% complete", "100% uploaded"} for item in normalized)
+
+
+def _valid_web_provider_url(provider: str, raw_url: Any, expected_url: Any) -> bool:
+    origin = _web_upload_origin(provider)
+    if not isinstance(raw_url, str) or not isinstance(expected_url, str):
+        return False
+    actual = urlparse(raw_url)
+    expected = urlparse(expected_url)
+    try:
+        ports = (actual.port, expected.port)
+    except ValueError:
+        return False
+    if any(parsed.scheme != origin[0] or parsed.hostname != origin[1]
+           or port not in {None, 443}
+           or parsed.username or parsed.password or parsed.fragment
+           for parsed, port in zip((actual, expected), ports)):
+        return False
+    if actual.query or expected.query:
+        return False
+    return actual.path.rstrip("/") == expected.path.rstrip("/")
+
+
+def check_web_upload(expected: dict[str, Any], outcome: dict[str, Any]) -> dict[str, Any]:
+    provider = expected.get("provider")
+    if provider not in WEB_UPLOAD_SESSION_NAMES or expected.get("job") != provider:
+        raise AcceptanceError("Website upload expected provider is invalid")
+    evidence = outcome.get("evidence", {}).get("web_upload") if isinstance(outcome.get("evidence"), dict) else None
+    if not isinstance(evidence, dict):
+        raise AcceptanceError("Website upload outcome is missing independent browser evidence")
+    token = expected.get("run_id")
+    file_name = expected.get("attachment_name")
+    if (not isinstance(token, str) or not re.fullmatch(r"[a-f0-9]{32}", token)
+            or outcome.get("run_id") != token or not isinstance(file_name, str)
+            or file_name != f"Remote Desktop Acceptance [{token}].pptx"):
+        raise AcceptanceError("Website upload run identity is invalid")
+    if outcome.get("raw_outcome") != "taskCompleted":
+        raise AcceptanceError("Website upload task did not complete")
+    account = expected.get("expected_account")
+    account_label = evidence.get("account_label")
+    account_pattern = (re.compile(r"(?<![A-Za-z0-9.!#$%&'*+/=?^_`{|}~-])" + re.escape(account)
+                                  + r"(?![A-Za-z0-9.!#$%&'*+/=?^_`{|}~-])", re.IGNORECASE)
+                       if isinstance(account, str) else None)
+    if (account_pattern is None or not isinstance(account_label, str)
+            or len(account_pattern.findall(account_label)) != 1):
+        raise AcceptanceError("Fresh provider account evidence does not match the requested test account")
+    origin_matches = (_drive_title_search_matches(evidence.get("origin_url"), file_name)
+                      if provider == "drive"
+                      else _valid_web_provider_url(provider, evidence.get("origin_url"), expected.get("folder_url")))
+    if (evidence.get("provider") != provider or not origin_matches
+            or not _valid_web_provider_url(provider, evidence.get("folder_url"), expected.get("folder_url"))):
+        raise AcceptanceError("Fresh browser evidence is not from the selected provider folder")
+
+    if provider == "drive":
+        search_query = f'title:"{file_name}"'
+        if evidence.get("search_field_values") != [search_query]:
+            raise AcceptanceError("Drive final search field does not exactly match the host-owned title query")
+        collision = evidence.get("collision_search_checkpoint")
+        if not isinstance(collision, dict):
+            raise AcceptanceError("Drive exact-name collision search was not independently observed")
+        collision_rows = collision.get("listing_rows")
+        collision_account = collision.get("account_label")
+        if (collision.get("captured") is not True
+                or not _drive_title_search_matches(collision.get("url"), file_name)
+                or collision.get("search_field_values") != [search_query]
+                or not isinstance(collision_account, str)
+                or len(account_pattern.findall(collision_account)) != 1
+                or collision.get("page_truncated") is not False
+                or collision.get("empty_state_values") != ["None of your files or folders matched this search"]
+                or not isinstance(collision_rows, list)):
+            raise AcceptanceError("Drive collision search did not independently prove an exact empty result")
+        collision_ids: set[str] = set()
+        for row in collision_rows:
+            if (not isinstance(row, dict) or not isinstance(row.get("row_identity"), str)
+                    or not row["row_identity"] or row["row_identity"] in collision_ids
+                    or not isinstance(row.get("cells"), list)
+                    or any(not isinstance(cell, str) for cell in row["cells"])):
+                raise AcceptanceError("Drive collision search listing is incomplete or ambiguous")
+            collision_ids.add(row["row_identity"])
+            if file_name in row["cells"]:
+                raise AcceptanceError("An exact-name Drive item already exists before upload")
+
+        progress_checkpoint = evidence.get("upload_progress_checkpoint")
+        if (not isinstance(progress_checkpoint, dict) or progress_checkpoint.get("captured") is not True
+                or not _valid_web_provider_url(provider, progress_checkpoint.get("url"), expected.get("folder_url"))
+                or not isinstance(progress_checkpoint.get("account_label"), str)
+                or len(account_pattern.findall(progress_checkpoint["account_label"])) != 1
+                or progress_checkpoint.get("controls_complete") is not True
+                or not _upload_progress_is_complete(progress_checkpoint.get("progress_values"))):
+            raise AcceptanceError("Drive root page did not independently show completed upload progress")
+
+    if evidence.get("page_truncated") is not False:
+        raise AcceptanceError("Provider listing observation is incomplete")
+    if (type(evidence.get("upload_control_dispatch_count")) is not int
+            or evidence.get("upload_control_dispatch_count") != 1
+            or evidence.get("selected_source_verified") is not True):
+        raise AcceptanceError("Website upload did not prove one selected fixture and one site dispatch")
+    upload_approval_count = evidence.get("upload_control_approval_count")
+    upload_approval_grants = evidence.get("upload_control_approval_responses_granted")
+    open_approval_count = evidence.get("open_approval_count")
+    open_approval_grants = evidence.get("open_approval_responses_granted")
+    if (evidence.get("account_verified_before_approval") is not True
+            or type(upload_approval_count) is not int or not 0 <= upload_approval_count <= 2
+            or type(upload_approval_grants) is not int
+            or upload_approval_grants != upload_approval_count
+            or type(open_approval_count) is not int or open_approval_count != 1
+            or type(open_approval_grants) is not int or open_approval_grants != 1):
+        raise AcceptanceError("Website upload approvals were not bounded and preceded by independent account proof")
+    rows = evidence.get("listing_rows")
+    if not isinstance(rows, list):
+        raise AcceptanceError("Provider listing rows are missing")
+    identities: set[str] = set()
+    exact_rows: list[dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, dict) or not isinstance(row.get("row_identity"), str) or not row["row_identity"]:
+            raise AcceptanceError("Provider listing has a row without a stable identity")
+        if row["row_identity"] in identities:
+            raise AcceptanceError("Provider listing repeated a row identity")
+        identities.add(row["row_identity"])
+        cells = row.get("cells")
+        if not isinstance(cells, list) or any(not isinstance(cell, str) for cell in cells):
+            raise AcceptanceError("Provider row cells are incomplete")
+        if file_name in cells:
+            exact_rows.append(row)
+    if len(exact_rows) != 1:
+        raise AcceptanceError("Provider listing must contain exactly one row with the exact fixture name")
+    row = exact_rows[0]
+    row_size_matches = _displayed_size_matches(provider, row["cells"], expected.get("source_bytes"))
+    errors = row.get("errors")
+    if not isinstance(errors, list) or errors:
+        raise AcceptanceError("Provider row reports an upload error or has no error-state proof")
+    if provider == "drive":
+        if "My Drive" not in row["cells"]:
+            raise AcceptanceError("The exact Drive row is not independently located in My Drive")
+        detail_values = evidence.get("details_text_values")
+        if (not isinstance(detail_values, list)
+                or any(not isinstance(value, str) for value in detail_values)):
+            raise AcceptanceError("Drive Details evidence is malformed")
+        if not row_size_matches:
+            if (detail_values.count(file_name) != 1
+                    or detail_values.count("My Drive, show location in the list of files.") != 1):
+                raise AcceptanceError("Drive Details did not independently identify the exact file and root location")
+            sizes = [value.replace("\u00a0", " ") for value in detail_values
+                     if re.match(r"^\s*Size\s", value.replace("\u00a0", " "), re.IGNORECASE)]
+            if len(sizes) != 1 or not _displayed_size_matches(provider, sizes, expected.get("source_bytes")):
+                raise AcceptanceError("Drive Details do not show the exact source byte count")
+    else:
+        if not row_size_matches:
+            raise AcceptanceError("The exact provider row does not show a matching displayed file size")
+        if not _upload_progress_is_complete(evidence.get("upload_progress_observations")):
+            raise AcceptanceError("Provider upload is not visibly complete")
+    return {"passed": True, "provider": provider, "matching_row_count": 1,
+            "file_name_and_size_verified": True, "upload_completed": True,
+            "upload_control_dispatch_count": 1, "account_verified": True}
+
+
 def check_cloud(expected: dict[str, Any], outcome: dict[str, Any]) -> dict[str, Any]:
     evidence = outcome["evidence"].get("cloud")
     if not isinstance(evidence, dict):
@@ -1113,6 +1517,8 @@ def verify_run(trace: Path, expected: dict[str, Any], test_code: int) -> tuple[b
         check = check_gmail(expected, outcome)
     elif expected["job"] == "cloud":
         check = check_cloud(expected, outcome)
+    elif expected["job"] in {"drive", "dropbox"}:
+        check = check_web_upload(expected, outcome)
     elif expected["job"] == "flights":
         check = check_flights(expected, outcome, trace)
     else:
@@ -1156,16 +1562,19 @@ def validate_cloud_root(root: Path) -> Path:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("job", choices=("email", "gmail", "cloud", "flights", "away"))
+    parser.add_argument("job", choices=("email", "gmail", "cloud", "drive", "dropbox", "flights", "away"))
     parser.add_argument("--runs", type=int, required=True)
     parser.add_argument("--cloud-root", help="Installed provider sync folder for the cloud job")
     parser.add_argument("--gmail-recipient", help="Expected signed-in Gmail address for read-only validation")
+    parser.add_argument("--web-account", help="Expected signed-in provider test account for Drive or Dropbox")
     parser.add_argument("--build-command-json", type=Path, help="Local xcodebuild argv override file; never shell-evaluated")
     parser.add_argument("--send-approval-check", action="store_true",
                         help="For email or Gmail, verify the exact Send approval without granting it")
     args = parser.parse_args()
     if not 1 <= args.runs <= MAX_RUNS:
         parser.error(f"--runs must be between 1 and {MAX_RUNS}")
+    if args.job in {"drive", "dropbox"} and args.runs not in {1, 10}:
+        parser.error("Drive and Dropbox accept either --runs 1 for diagnostics or --runs 10 for the acceptance gate")
     if args.job == "cloud":
         parser.error("cloud acceptance is paused by A6; this runner will not execute OS-level cloud copies")
     if args.job == "gmail" and args.send_approval_check and args.runs != 3:
@@ -1174,8 +1583,12 @@ def main() -> int:
         parser.error("Gmail draft acceptance requires exactly 10 runs")
     if args.job == "gmail" and (not args.gmail_recipient or "@" not in args.gmail_recipient):
         parser.error("gmail requires --gmail-recipient for checker-only validation")
+    if args.job in {"drive", "dropbox"} and (not args.web_account or "@" not in args.web_account):
+        parser.error(f"{args.job} requires --web-account for independent account validation")
     if args.job != "gmail" and args.gmail_recipient:
         parser.error("--gmail-recipient is only valid for gmail")
+    if args.job not in {"drive", "dropbox"} and args.web_account:
+        parser.error("--web-account is only valid for drive or dropbox")
     if args.job != "cloud" and args.cloud_root:
         parser.error("--cloud-root is only valid for cloud")
     if args.send_approval_check and args.job not in {"email", "gmail"}:
@@ -1189,8 +1602,11 @@ def main() -> int:
     batch_staged: Path | None = None
     batch_staged_hash: str | None = None
     gmail: tuple[str, str, Path, str, int, str | None] | None = None
+    web_upload: tuple[str, str, str, str, Path, int] | None = None
     gmail_batch_tokens: set[str] = set()
     gmail_batch_draft_identities: set[tuple[str, str]] = set()
+    web_upload_batch_tokens: set[tuple[str, str]] = set()
+    web_upload_batch_items: set[tuple[str, str, str]] = set()
     try:
         cloud_root = check_cloud_root(args.cloud_root) if args.job == "cloud" else None
         fixture = prepare_fixtures()
@@ -1203,9 +1619,13 @@ def main() -> int:
             gmail = (token, subject, staged, args.gmail_recipient, attempt, existing_draft_url)
             batch_staged = staged
             batch_staged_hash = fixture["Quarterly Metrics.xlsx"]["sha256"]
+        elif args.job in {"drive", "dropbox"}:
+            web_upload = web_upload_session(args.job, args.web_account, fixture)
+            batch_staged = web_upload[4]
+            batch_staged_hash = fixture["Board Review.pptx"]["sha256"]
         base_command = load_build_command(args.build_command_json, env)
     except (AcceptanceError, OSError) as error:
-        if args.job != "gmail":
+        if args.job not in {"gmail", "drive", "dropbox"}:
             remove_owned_stage(batch_staged, batch_staged_hash)
         print(f"Preflight failed: {error}", file=sys.stderr)
         report = {"status": "failed", "job": args.job, "runs_requested": args.runs,
@@ -1253,12 +1673,15 @@ def main() -> int:
 
         results: list[dict[str, Any]] = []
         run_ids = [first_run_id] + [uuid.uuid4().hex for _ in range(args.runs - 1)]
-        for index, run_id in enumerate(run_ids, 1):
+        for index, generated_run_id in enumerate(run_ids, 1):
+            run_id = web_upload[2] if web_upload is not None else generated_run_id
             trace = first_trace if index == 1 else trace_path(args.job, run_id)
             try:
+                if index > 1 and web_upload is not None:
+                    wait_for_spotlight_visibility(web_upload[4], timeout=180)
                 expected, _, _ = make_expected(args.job, run_id, index, fixture, cloud_root,
                                                args.send_approval_check, staged_source=batch_staged,
-                                               gmail=gmail)
+                                               gmail=gmail, web_upload=web_upload)
                 (trace / "expected.json").write_text(json.dumps(expected, indent=2, sort_keys=True) + "\n", encoding="utf-8")
                 test_env = env.copy()
                 test_env.update({
@@ -1271,6 +1694,8 @@ def main() -> int:
                 command = command_for(base_command, "test-without-building", trace,
                                       test_allowance=test_allowance)
                 print(f"Run {index}/{args.runs}: {args.job} [{run_id[:8]}]", flush=True)
+                if web_upload is not None:
+                    mark_web_upload_attempted(web_upload)
                 code, elapsed = run_logged(command, test_env, trace / "test.log", test_allowance)
                 try:
                     passed, check = verify_run(trace, expected, code)
@@ -1293,6 +1718,17 @@ def main() -> int:
                         check["gmail_batch_identity_unique"] = True
                     except (AcceptanceError, OSError, KeyError, TypeError, json.JSONDecodeError) as error:
                         passed, check = False, {"passed": False, "reason": str(error)}
+                if passed and web_upload is not None:
+                    try:
+                        record_web_upload_batch_identity(args.job, expected.get("run_id"),
+                            expected.get("folder_url"), expected.get("attachment_name"),
+                            web_upload_batch_tokens, web_upload_batch_items)
+                    except AcceptanceError as error:
+                        passed, check = False, {"passed": False, "reason": str(error)}
+                    if passed:
+                        web_upload = rotate_web_upload_session_after_success(
+                            web_upload, passed=True, more_runs=index < args.runs)
+                        batch_staged = web_upload[4]
                 if passed and args.job == "gmail" and not args.send_approval_check and gmail is not None:
                     verified_gmail = persist_verified_gmail_draft_url(gmail, outcome_path)
                     if verified_gmail[5] is None:
@@ -1337,6 +1773,10 @@ def main() -> int:
         if args.job == "gmail" and not args.send_approval_check:
             summary["distinct_gmail_subject_tokens"] = len(gmail_batch_tokens)
             summary["distinct_gmail_saved_drafts"] = len(gmail_batch_draft_identities)
+        if args.job in {"drive", "dropbox"}:
+            summary["distinct_web_upload_tokens"] = len(web_upload_batch_tokens)
+            summary["distinct_web_upload_items"] = len(web_upload_batch_items)
+            summary["acceptance_gate"] = "10-distinct-provider-items" if args.runs == 10 else "diagnostic-only"
         summary_path = Path(results[-1]["trace"]) / "summary.json"
         summary_path.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         prune_traces()
@@ -1344,7 +1784,7 @@ def main() -> int:
         print(f"Summary trace: {summary_path.parent}", flush=True)
         return 0 if passed_count == args.runs else 1
     finally:
-        if args.job != "gmail":
+        if args.job not in {"gmail", "drive", "dropbox"}:
             remove_owned_stage(batch_staged, batch_staged_hash)
 
 
