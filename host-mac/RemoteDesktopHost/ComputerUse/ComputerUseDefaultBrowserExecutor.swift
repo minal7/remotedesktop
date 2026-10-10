@@ -1162,9 +1162,9 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
                       let center = try scope.pageReader.validatedControlCenter(observation: page,
                         controlID: control.id, window: window.accessibilityElement,
                         windowBounds: bounds, mayAct: { (try? tools.requireActive()) != nil }) else { return nil }
-                let action = try Self.normalizedPointerAction(center: center, display: display)
-                let predicted = ComputerUsePredictedAction.click(x: Int(center.x.rounded()), y: Int(center.y.rounded()),
-                    button: 1, count: 1)
+                let binding = try Self.observedControlActionPair(center: center, display: display)
+                let action = binding.proposalAction
+                let predicted = binding.predictedAction
                 if isSend {
                     guard let tools = scope.tools, tools.approvalReason(for: predicted) != nil else { return nil }
                 }
@@ -2094,6 +2094,22 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
             .replacingOccurrences(of: "<", with: "\\u003c")
             .replacingOccurrences(of: ">", with: "\\u003e")
         return .init(response: "<tool_call>\n\(json)\n</tool_call>", action: action)
+    }
+
+    struct ObservedControlActionPair {
+        let proposalAction: ComputerUseFaraAction
+        let predictedAction: ComputerUsePredictedAction
+    }
+
+    static func observedControlActionPair(center: CGPoint, display: CGRect) throws -> ObservedControlActionPair {
+        let proposal = try normalizedPointerAction(center: center, display: display)
+        guard case .pointer(.leftClick, let point) = proposal else {
+            throw ComputerUseDesktopExecutor.Failure.unsupportedAction
+        }
+        let nativePoint = try ComputerUseDesktopImage.displayPoint(normalizedX: point.x, normalizedY: point.y,
+            displayBounds: display)
+        let predicted = ComputerUsePredictedAction.click(x: nativePoint.x, y: nativePoint.y, button: 1, count: 1)
+        return .init(proposalAction: proposal, predictedAction: predicted)
     }
 
     private static func normalizedPointerAction(center: CGPoint, display: CGRect) throws -> ComputerUseFaraAction {

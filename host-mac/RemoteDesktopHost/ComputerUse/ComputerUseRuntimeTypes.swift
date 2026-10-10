@@ -243,11 +243,7 @@ struct ComputerUseDesktopImage: Sendable {
 
     init(observation: ComputerUseScreenObservation) throws {
         let bounds = observation.displayBounds, extent = observation.image.extent
-        guard bounds.origin.x.isFinite, bounds.origin.y.isFinite,
-              bounds.width.isFinite, bounds.height.isFinite,
-              abs(bounds.origin.x) <= 1_000_000, abs(bounds.origin.y) <= 1_000_000,
-              (1...1_000_000).contains(bounds.width), (1...1_000_000).contains(bounds.height),
-              bounds == bounds.integral,
+        guard Self.hasValidDisplayBounds(bounds),
               extent.origin.x.isFinite, extent.origin.y.isFinite,
               (1...65_536).contains(extent.width), (1...65_536).contains(extent.height),
               extent == extent.integral,
@@ -290,11 +286,27 @@ struct ComputerUseDesktopImage: Sendable {
     /// Map through the original display, not its AX window or downscaled pixels.
     /// The inclusive 1000 edge selects the final in-display input cell.
     func displayPoint(normalizedX x: Double, normalizedY y: Double) throws -> (x: Int, y: Int) {
-        guard x.isFinite, y.isFinite, (0...1000).contains(x), (0...1000).contains(y) else {
+        try Self.displayPoint(normalizedX: x, normalizedY: y, displayBounds: displayBounds)
+    }
+
+    /// Shared conversion for host-created controls that must predict the same
+    /// native point as a normalized visual proposal.
+    static func displayPoint(normalizedX x: Double, normalizedY y: Double,
+                             displayBounds: CGRect) throws -> (x: Int, y: Int) {
+        guard Self.hasValidDisplayBounds(displayBounds),
+              x.isFinite, y.isFinite, (0...1000).contains(x), (0...1000).contains(y) else {
             throw OSAtlasLlamaRuntimeError.invalidVisionInput
         }
         return (Int(displayBounds.minX) + min(Int(displayBounds.width) - 1, Int(floor(x / 1000 * displayBounds.width))),
                 Int(displayBounds.minY) + min(Int(displayBounds.height) - 1, Int(floor(y / 1000 * displayBounds.height))))
+    }
+
+    private static func hasValidDisplayBounds(_ bounds: CGRect) -> Bool {
+        bounds.origin.x.isFinite && bounds.origin.y.isFinite &&
+        bounds.width.isFinite && bounds.height.isFinite &&
+        abs(bounds.origin.x) <= 1_000_000 && abs(bounds.origin.y) <= 1_000_000 &&
+        (1...1_000_000).contains(bounds.width) && (1...1_000_000).contains(bounds.height) &&
+        bounds == bounds.integral
     }
 
     /// Compare the complete visible target plus surrounding label context.
