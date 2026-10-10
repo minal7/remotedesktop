@@ -228,6 +228,77 @@ final class ComputerUseWebJobRequestTests: XCTestCase {
         XCTAssertEqual(request.url?.host, "127.0.0.1")
     }
 
+    func testExtractorResolvesModelSelectedQuotedLiteralReferencesExactly() async throws {
+        let subject = "Rëveiw [typo-λ]"
+        let body = "Line one  with exact spacing; café."
+        let filename = "Δonnées Qtr typo.xlsx"
+        let prompt = "Draft an email to Jordan with subject \"\(subject)\" and body “\(body)”. Attach the file named \"\(filename)\" from Downloads."
+        let response: [String: Any] = [
+            "subject": ["literal_id": "q0"],
+            "body": ["literal_id": "q1"],
+            "file_description": [
+                "description": "the file named", "file_kind": "spreadsheet",
+                "name_contains": ["literal_id": "q2"], "folder_scope": "downloads",
+                "date_field": "none", "direction": "none",
+            ],
+        ]
+        let responseData = try JSONSerialization.data(withJSONObject: response, options: [.sortedKeys])
+        let transport = WebJobTransport(reply: try envelope(String(decoding: responseData, as: UTF8.self)))
+        let extractor = try makeExtractor(transport: transport)
+
+        let result = try await extractor.propose(originalRequest: prompt)
+        XCTAssertEqual(result.subject, subject)
+        XCTAssertEqual(result.body, body)
+        XCTAssertEqual(result.fileQuery?.nameContains, filename)
+        XCTAssertEqual(result.fileQuery?.fileKind, .spreadsheet)
+
+        let recordedRequest = await transport.lastRequest()
+        let request = try XCTUnwrap(recordedRequest)
+        let bodyObject = try XCTUnwrap(try JSONSerialization.jsonObject(with: XCTUnwrap(request.httpBody)) as? [String: Any])
+        let messages = try XCTUnwrap(bodyObject["messages"] as? [[String: Any]])
+        let contextString = try XCTUnwrap(messages.last?["content"] as? String)
+        let context = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(contextString.utf8)) as? [String: Any])
+        XCTAssertEqual(context["literal_payloads"] as? [String: String],
+            ["q0": subject, "q1": body, "q2": filename])
+    }
+
+    func testExtractorRejectsMutatedQuotedTextAndUnknownLiteralReference() async throws {
+        let exactSubject = "Quarterly Review [147b3ba460c143a6aedde7ba27f52f57]"
+        let prompt = "Draft an email with the exact subject \"\(exactSubject)\" and body “Review the figures.”"
+        for proposal in [
+            #"{"subject":"Quarterly Review [147b3ba460c143a6aedde7ba27f52f]","body":{"literal_id":"q1"},"file_description":null}"#,
+            #"{"subject":{"literal_id":"q9"},"body":{"literal_id":"q1"},"file_description":null}"#,
+        ] {
+            let extractor = try makeExtractor(transport: WebJobTransport(reply: try envelope(proposal)))
+            do {
+                _ = try await extractor.propose(originalRequest: prompt)
+                XCTFail("Only an exact source-backed literal reference may supply quoted field text")
+            } catch let error as ComputerUseWebJobContentExtractor.Error {
+                XCTAssertEqual(error, .invalidResponse)
+            }
+        }
+    }
+
+    func testExtractorLiteralInventoryIncludesAcceptedClarificationsAndRejectsAmbiguousQuotes() async throws {
+        let extractor = try makeExtractor(transport: WebJobTransport(reply: try envelope(
+            #"{"subject":{"literal_id":"q1"},"body":{"literal_id":"q0"},"file_description":null}"#)))
+        let result = try await extractor.propose(originalRequest: "Draft about \"Quarterly\".",
+            clarifications: [["question": "What subject?", "answer": "Use “Rëview” exactly."]])
+        XCTAssertEqual(result.subject, "Rëview")
+        XCTAssertEqual(result.body, "Quarterly")
+
+        XCTAssertThrowsError(try extractor.makeRequest(originalRequest: "Draft with an unmatched \"literal.")) { error in
+            XCTAssertEqual(error as? ComputerUseWebJobContentExtractor.Error, .invalidInput)
+        }
+        let tooManyQuotedSpans = String(repeating: "\"x\" ", count: 33)
+        XCTAssertThrowsError(try extractor.makeRequest(originalRequest: tooManyQuotedSpans)) { error in
+            XCTAssertEqual(error as? ComputerUseWebJobContentExtractor.Error, .invalidInput)
+        }
+        XCTAssertThrowsError(try extractor.makeRequest(originalRequest: #"Draft with an ambiguous escaped quote \" inside."#)) { error in
+            XCTAssertEqual(error as? ComputerUseWebJobContentExtractor.Error, .invalidInput)
+        }
+    }
+
     private func makeExtractor(transport: any ComputerUseTextModelTransport) throws -> ComputerUseWebJobContentExtractor {
         .init(connection: try ComputerUseTextModelConnection(
             baseURL: URL(string: "http://127.0.0.1:49123")!,

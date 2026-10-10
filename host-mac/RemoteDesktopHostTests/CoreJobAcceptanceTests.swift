@@ -146,6 +146,17 @@ final class CoreJobAcceptanceTests: XCTestCase {
             subject: subject, composeRegions: [facts]))
     }
 
+    func testGmailDraftRowPointerFallbackRequiresReadableMissingAXPress() {
+        XCTAssertTrue(Self.gmailDraftRowShouldUsePointerFallback(actionNamesRead: true,
+            actionNames: ["AXShowMenu", "AXCancel"]))
+        XCTAssertFalse(Self.gmailDraftRowShouldUsePointerFallback(actionNamesRead: false,
+            actionNames: nil))
+        XCTAssertFalse(Self.gmailDraftRowShouldUsePointerFallback(actionNamesRead: true,
+            actionNames: nil))
+        XCTAssertFalse(Self.gmailDraftRowShouldUsePointerFallback(actionNamesRead: true,
+            actionNames: ["AXPress", "AXShowMenu"]))
+    }
+
     func testGmailFileApprovalDetailsRequireExactSingleFileRequest() {
         let expected = Expected(job: "gmail", run_id: "run", prompt: "",
             source_path: "/fixture/Board Review.pptx", source_sha256: String(repeating: "a", count: 64),
@@ -314,6 +325,9 @@ final class CoreJobAcceptanceTests: XCTestCase {
             "completionVerificationPhase": "final-surface", "completionOutcomeAccepted": "true",
             "gmailFlowStage": "normalizeDrafts", "gmailNavigationStage": "waitForTarget",
             "gmailPendingFlowStage": "waitingForAttachment",
+            "addressFocusWait_reason": "focus_deadline",
+            "addressFocusWait_validation_count": "21", "addressFocusWait_elapsed_ms": "1503",
+            "addressFocusWait_saw_focused_ui_element": "true",
         ])
         XCTAssertEqual(diagnostic["blockedAt"] as? String, "screen-consent-recognition")
         XCTAssertEqual(diagnostic["recognitionWorkerFailure"] as? String, "timedOut")
@@ -334,13 +348,29 @@ final class CoreJobAcceptanceTests: XCTestCase {
         XCTAssertEqual(diagnostic["gmailFlowStage"] as? String, "normalizeDrafts")
         XCTAssertEqual(diagnostic["gmailNavigationStage"] as? String, "waitForTarget")
         XCTAssertEqual(diagnostic["gmailPendingFlowStage"] as? String, "waitingForAttachment")
+        XCTAssertEqual(diagnostic["addressFocusWait_reason"] as? String, "focus_deadline")
+        XCTAssertEqual(diagnostic["addressFocusWait_validation_count"] as? Int, 21)
+        XCTAssertEqual(diagnostic["addressFocusWait_elapsed_ms"] as? Int, 1_503)
+        XCTAssertEqual(diagnostic["addressFocusWait_saw_focused_ui_element"] as? Bool, true)
+        for stage in ["initial-editor-sample-scope-recovery-deadline",
+            "settle-editor-sample-scope-recovery-deadline",
+            "settle-final-editor-sample-scope-recovery-deadline",
+            "initial-editor-sample-active-app-before-editor-sample",
+            "settle-editor-sample-active-app-before-editor-sample-check",
+            "settle-final-editor-sample-active-app-after-post-sample-check",
+            "initial-editor-sample-scope-recovery-deadline-active-app-before-check",
+            "settle-final-editor-sample-scope-recovery-deadline-active-app-after-check"] {
+            XCTAssertEqual(Self.sanitizedDesktopRevalidationDiagnostic(["blockedAt": stage])["blockedAt"] as? String, stage)
+        }
         XCTAssertTrue(Self.sanitizedDesktopRevalidationDiagnostic([
-            "blockedAt": "recipient@example.com", "sampleCount": "999999",
+            "blockedAt": "initial-editor-sample-scope-recovery-deadline recipient@example.com", "sampleCount": "999999",
             "recognitionWorkerFailure": "private text",
             "rejectedFailure": "private text", "rejectedCount": "4", "decisionKind": "https://private.invalid/",
             "completionVerificationPhase": "private text", "completionOutcomeAccepted": "yes",
             "gmailFlowStage": "recipient@example.com", "gmailNavigationStage": "private text",
             "gmailPendingFlowStage": "private text",
+            "addressFocusWait_reason": "recipient@example.com", "addressFocusWait_validation_count": "999999",
+            "addressFocusWait_elapsed_ms": "private text", "addressFocusWait_saw_focused_ui_element": "maybe",
         ]).isEmpty)
         let rejected = Self.sanitizedDesktopRevalidationDiagnostic([
             "approvedVisualContinuationFailure": "recipient@example.com",
@@ -489,6 +519,14 @@ final class CoreJobAcceptanceTests: XCTestCase {
             "product_draft_row_probe_diagnostic": evidence["product_draft_row_probe_diagnostic"] ?? NSNull(),
             "product_draft_row_probe_cell_found": evidence["product_draft_row_probe_cell_found"] ?? false,
             "product_draft_row_probe_ambiguous": evidence["product_draft_row_probe_ambiguous"] ?? false,
+            "saved_draft_row_diagnostic": evidence["saved_draft_row_diagnostic"] ?? NSNull(),
+            "saved_draft_row_axpress_attempted": evidence["saved_draft_row_axpress_attempted"] ?? false,
+            "saved_draft_row_axpress_status": evidence["saved_draft_row_axpress_status"] ?? NSNull(),
+            "saved_draft_row_action_names_readable": evidence["saved_draft_row_action_names_readable"] ?? false,
+            "saved_draft_row_axpress_advertised": evidence["saved_draft_row_axpress_advertised"] ?? false,
+            "saved_draft_row_pointer_attempted": evidence["saved_draft_row_pointer_attempted"] ?? false,
+            "saved_draft_row_pointer_down_sent": evidence["saved_draft_row_pointer_down_sent"] ?? false,
+            "saved_draft_row_pointer_release_sent": evidence["saved_draft_row_pointer_release_sent"] ?? false,
         ]
         try Self.write(output, to: URL(fileURLWithPath: resultPath))
         XCTAssertEqual(evidence["saved_oracle_status"] as? String, "probe-unique-exact-subject-row-found",
@@ -697,6 +735,62 @@ final class CoreJobAcceptanceTests: XCTestCase {
         return true
     }
 
+    private static func gmailDraftRowShouldUsePointerFallback(actionNamesRead: Bool,
+                                                                actionNames: [String]?) -> Bool {
+        actionNamesRead && actionNames != nil && actionNames?.contains(kAXPressAction as String) == false
+    }
+
+    private static func gmailDraftRowBoundsAreUsable(_ row: CGRect, cellBounds: CGRect,
+                                                       windowBounds: CGRect) -> Bool {
+        func valid(_ rect: CGRect) -> Bool {
+            rect.origin.x.isFinite && rect.origin.y.isFinite
+                && rect.width.isFinite && rect.height.isFinite && rect.width > 0 && rect.height > 0
+        }
+        return valid(row) && valid(cellBounds) && valid(windowBounds)
+            && windowBounds.contains(row) && row.contains(cellBounds)
+    }
+
+    private static func gmailDraftRowHitTestResolvesToCell(
+        _ point: CGPoint, row: AXUIElement, cell: AXUIElement, window: AXUIElement,
+        read: (String, AXUIElement, Float) -> CFTypeRef?, prune: (AXUIElement, String) -> Bool
+    ) -> Bool {
+        let systemWide = AXUIElementCreateSystemWide()
+        AXUIElementSetMessagingTimeout(systemWide, 0.2)
+        var hit: AXUIElement?
+        guard AXUIElementCopyElementAtPosition(systemWide, Float(point.x), Float(point.y), &hit) == .success,
+              var current = hit else { return false }
+        let actionableRoles: Set<String> = ["AXButton", "AXLink", "AXCheckBox", "AXRadioButton",
+            "AXPopUpButton", "AXMenuButton", "AXTextField", "AXTextArea", "AXTextEntryArea",
+            "AXDisclosureTriangle", "AXIncrementor", "AXComboBox"]
+        var seen: [AXUIElement] = []
+        var sawCell = false
+        var sawRow = false
+        for _ in 0..<16 {
+            guard !seen.contains(where: { CFEqual($0, current) }) else { return false }
+            seen.append(current)
+            guard let role = read(kAXRoleAttribute as String, current, 0.2) as? String,
+                  role.hasPrefix("AX"), role != "AXUnknown",
+                  !prune(current, role) else { return false }
+            if actionableRoles.contains(role) { return false }
+            if role == "AXCell" {
+                guard CFEqual(current, cell), !sawCell, !sawRow else { return false }
+                sawCell = true
+            }
+            if role == "AXRow" {
+                guard CFEqual(current, row), sawCell, !sawRow else { return false }
+                sawRow = true
+            }
+            if role == "AXWindow" {
+                return CFEqual(current, window) && sawCell && sawRow
+            }
+            var parent: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(current, kAXParentAttribute as CFString, &parent) == .success,
+                  let parent, CFGetTypeID(parent) == AXUIElementGetTypeID() else { return false }
+            current = unsafeBitCast(parent, to: AXUIElement.self)
+        }
+        return false
+    }
+
     private static func gmailIsOwnedOpaqueDraftComposeURL(_ rawURL: String, expectedAccountIndex: Int) -> Bool {
         guard rawURL.range(of: #"%(?![0-9A-Fa-f]{2})"#, options: .regularExpression) == nil,
               let components = URLComponents(string: rawURL), components.scheme?.lowercased() == "https",
@@ -716,8 +810,11 @@ final class CoreJobAcceptanceTests: XCTestCase {
 
     // A product-observed bookmark can recover navigation after a native panel
     // interrupts the independent reader. It must never supply acceptance proof.
-    private static func gmailRecoveryMetadata(verifiedURL: URL?) -> [String: Any] {
+    private static func gmailRecoveryMetadata(verifiedURL: URL?, verifiedSubject: String?,
+                                               expectedSubject: String?) -> [String: Any] {
         guard let url = verifiedURL,
+              let verifiedSubject, let expectedSubject,
+              verifiedSubject.utf8.elementsEqual(expectedSubject.utf8),
               let accountIndex = ComputerUseGmailAccountDirectory.accountIndex(from: url.absoluteString),
               gmailIsOwnedOpaqueDraftComposeURL(url.absoluteString, expectedAccountIndex: accountIndex) else {
             return [:]
@@ -728,7 +825,9 @@ final class CoreJobAcceptanceTests: XCTestCase {
 
     func testGmailRecoveryBookmarkDoesNotSupplyIndependentDraftProof() {
         let url = URL(string: "https://mail.google.com/mail/u/0/#drafts?compose=FMfcgzQX_ownedDraft1234567890")!
-        let evidence = Self.gmailRecoveryMetadata(verifiedURL: url)
+        let subject = "Remote Desktop acceptance [token]"
+        let evidence = Self.gmailRecoveryMetadata(verifiedURL: url, verifiedSubject: subject,
+            expectedSubject: subject)
         XCTAssertEqual(evidence["recovery_compose_url"] as? String, url.absoluteString)
         XCTAssertEqual(evidence["gmail_account_index"] as? Int, 0)
         XCTAssertEqual(evidence["recovery_subject_verified"] as? Bool, true)
@@ -739,8 +838,15 @@ final class CoreJobAcceptanceTests: XCTestCase {
         for invalid in [nil, URL(string: "https://mail.google.com/mail/u/0/#drafts"),
                         URL(string: "https://mail.google.com.evil.invalid/mail/u/0/#drafts?compose=FMfcgzQX_ownedDraft1234567890"),
                         URL(string: "https://mail.google.com/mail/u/0/#drafts?compose=FMfcgzQX_ownedDraft1234567890&compose=otherDraft1234567890")] {
-            XCTAssertTrue(Self.gmailRecoveryMetadata(verifiedURL: invalid).isEmpty)
+            XCTAssertTrue(Self.gmailRecoveryMetadata(verifiedURL: invalid, verifiedSubject: subject,
+                expectedSubject: subject).isEmpty)
         }
+        XCTAssertTrue(Self.gmailRecoveryMetadata(verifiedURL: url, verifiedSubject: "wrong extracted subject",
+            expectedSubject: subject).isEmpty)
+        XCTAssertTrue(Self.gmailRecoveryMetadata(verifiedURL: url, verifiedSubject: nil,
+            expectedSubject: subject).isEmpty)
+        XCTAssertTrue(Self.gmailRecoveryMetadata(verifiedURL: url, verifiedSubject: subject,
+            expectedSubject: nil).isEmpty)
     }
 
     private enum GmailPreferencePreflight: Equatable {
@@ -1031,8 +1137,9 @@ final class CoreJobAcceptanceTests: XCTestCase {
                 if expected.send_approval_check != true {
                     await Self.captureGmailDraft(expected: expected, evidence: &gmail, verifySavedDraft: true)
                 }
-                gmail.merge(Self.gmailRecoveryMetadata(
-                    verifiedURL: gmailVisualLoader?.defaultBrowserExecutor?.gmailVerifiedComposeURLForRecovery),
+                let recovery = gmailVisualLoader?.defaultBrowserExecutor?.gmailVerifiedComposeBookmarkForRecovery
+                gmail.merge(Self.gmailRecoveryMetadata(verifiedURL: recovery?.url,
+                    verifiedSubject: recovery?.subject, expectedSubject: expected.subject),
                     uniquingKeysWith: { independent, _ in independent })
                 let productFieldDiagnostic = Self.sanitizedGmailFieldDiagnostic(from: gmailVisualLoader)
                 if !productFieldDiagnostic.isEmpty {
@@ -1057,8 +1164,9 @@ final class CoreJobAcceptanceTests: XCTestCase {
                 if expected.send_approval_check != true {
                     await Self.captureGmailDraft(expected: expected, evidence: &gmail)
                 }
-                gmail.merge(Self.gmailRecoveryMetadata(
-                    verifiedURL: gmailVisualLoader?.defaultBrowserExecutor?.gmailVerifiedComposeURLForRecovery),
+                let recovery = gmailVisualLoader?.defaultBrowserExecutor?.gmailVerifiedComposeBookmarkForRecovery
+                gmail.merge(Self.gmailRecoveryMetadata(verifiedURL: recovery?.url,
+                    verifiedSubject: recovery?.subject, expectedSubject: expected.subject),
                     uniquingKeysWith: { independent, _ in independent })
                 let productFieldDiagnostic = Self.sanitizedGmailFieldDiagnostic(from: gmailVisualLoader)
                 if !productFieldDiagnostic.isEmpty {
@@ -1223,15 +1331,23 @@ final class CoreJobAcceptanceTests: XCTestCase {
     }
 
     private static func sanitizedDesktopRevalidationDiagnostic(_ raw: [String: String]) -> [String: Any] {
-        let blockedStages: Set<String> = [
+        let editorSampleStages = ["initial-editor-sample", "settle-editor-sample", "settle-final-editor-sample"]
+        let editorSampleSuffixes = [
+            "active-app-before-editor-sample", "active-app-before-editor-sample-check",
+            "active-app-before-post-sample-check", "active-app-after-post-sample-check",
+            "scope-recovery-deadline", "scope-recovery-deadline-active-app-before-check",
+            "scope-recovery-deadline-active-app-after-check",
+        ]
+        let blockedStages = Set([
             "scope-wait-active-app-before-check", "scope-wait-deadline", "scope-wait-active-app-after-check",
             "initial-editor-sample-active-app-before-check", "initial-editor-sample-active-app-after-check",
             "initial-editor-sample-scope-invalid", "settle-active-app-before-editor-sample",
             "settle-active-app-after-pre-sample-scope", "settle-scope-invalid-before-editor-sample",
             "settle-active-app-before-post-sample-check", "settle-active-app-after-post-sample-scope",
-            "settle-scope-invalid-after-editor-sample", "editor-settle-timeout", "editor-settle-deadline-reobserve", "screen-consent-recognition",
-            "typing-target-unavailable", "approval-fingerprint-preparation", "approval-fingerprint-dispatch",
-        ]
+            "settle-scope-invalid-after-editor-sample", "editor-settle-timeout", "editor-settle-deadline-reobserve",
+            "screen-consent-recognition", "typing-target-unavailable", "approval-fingerprint-preparation",
+            "approval-fingerprint-dispatch",
+        ] + editorSampleStages.flatMap { stage in editorSampleSuffixes.map { "\(stage)-\($0)" } })
         var result: [String: Any] = [:]
         if let stage = raw["blockedAt"], blockedStages.contains(stage) {
             result["blockedAt"] = stage
@@ -1258,6 +1374,24 @@ final class CoreJobAcceptanceTests: XCTestCase {
             "completionUnverified", "unsupportedAction", "invalidApproval", "stepLimit", "authentication"]
         if let failure = raw["approvedVisualContinuationDesktopFailure"], desktopFailures.contains(failure) {
             result["approvedVisualContinuationDesktopFailure"] = failure
+        }
+        if let reason = raw["addressFocusWait_reason"], ["validation_failed", "focus_deadline"].contains(reason) {
+            result["addressFocusWait_reason"] = reason
+        }
+        for key in ["validation_count", "focus_check_count", "reacquisition_count"] {
+            if let value = raw["addressFocusWait_\(key)"], let count = Int(value), (0...256).contains(count) {
+                result["addressFocusWait_\(key)"] = count
+            }
+        }
+        for key in ["validation_elapsed_ms", "focus_check_elapsed_ms", "reacquisition_elapsed_ms", "elapsed_ms"] {
+            if let value = raw["addressFocusWait_\(key)"], let milliseconds = Int(value), (0...10_000).contains(milliseconds) {
+                result["addressFocusWait_\(key)"] = milliseconds
+            }
+        }
+        for key in ["saw_focused_ui_element", "saw_initial_field", "saw_reacquired_current_field"] {
+            if let value = raw["addressFocusWait_\(key)"], ["true", "false"].contains(value) {
+                result["addressFocusWait_\(key)"] = value == "true"
+            }
         }
         let finiteLabels: [String: Set<String>] = [
             "rejectedFailure": ["changedScreen", "completionUnverified", "unsupportedAction"],
@@ -1876,6 +2010,7 @@ final class CoreJobAcceptanceTests: XCTestCase {
         struct Node {
             let element: AXUIElement
             let role, title, description, text: String
+            var subjectCell: AXUIElement? = nil
         }
         func readTree(_ root: AXUIElement, limit: Int) -> [Node]? {
             var queue = [root]
@@ -2712,7 +2847,7 @@ final class CoreJobAcceptanceTests: XCTestCase {
                 let description = value(kAXDescriptionAttribute as String, actionable) as? String ?? match.description
                 let text = value(kAXValueAttribute as String, actionable) as? String ?? match.text
                 rows.append(Node(element: actionable, role: role, title: title,
-                    description: description, text: text))
+                    description: description, text: text, subjectCell: match.element))
             }
             return rows
         }
@@ -2884,6 +3019,45 @@ final class CoreJobAcceptanceTests: XCTestCase {
             evidence["draft_saved_verified"] = false
             evidence["saved_oracle_status"] = subjectNodes.count == 1
                 ? "probe-unique-exact-subject-row-found" : "probe-exact-subject-row-not-unique"
+            var rowDiagnostic: [String: Any] = [
+                "exact_subject_row_count": subjectNodes.count,
+                "same_page_url": verifiedCurrentGmailURL() == retainedPageURL && alreadyOnDrafts,
+                "axpress_attempted": false,
+            ]
+            if subjectNodes.count == 1, let subjectNode = subjectNodes.first {
+                var actionableRow: AXUIElement?
+                var ancestor: AXUIElement? = subjectNode.element
+                for _ in 0..<8 {
+                    guard let current = ancestor else { break }
+                    let role = value(kAXRoleAttribute as String, current) as? String ?? ""
+                    if role == "AXRow" || role == "AXLink" || role == "AXButton" {
+                        actionableRow = current
+                        break
+                    }
+                    var parent: CFTypeRef?
+                    guard AXUIElementCopyAttributeValue(current, kAXParentAttribute as CFString, &parent) == .success,
+                          let parent, CFGetTypeID(parent) == AXUIElementGetTypeID() else { break }
+                    ancestor = (parent as! AXUIElement)
+                }
+                rowDiagnostic["row_found"] = actionableRow != nil
+                if let actionableRow {
+                    let role = value(kAXRoleAttribute as String, actionableRow) as? String
+                    let roles: Set<String> = ["AXRow", "AXLink", "AXButton", "AXCell", "AXGroup"]
+                    rowDiagnostic["role"] = role.map { roles.contains($0) ? $0 : "other" } ?? "unavailable"
+                    let enabled = value(kAXEnabledAttribute as String, actionableRow) as? NSNumber
+                    rowDiagnostic["enabled_readable"] = enabled != nil
+                    rowDiagnostic["enabled"] = enabled.map { $0.boolValue } ?? false
+                    var actions: CFArray?
+                    let actionsStatus = AXUIElementCopyActionNames(actionableRow, &actions)
+                    let actionNames = actionsStatus == .success ? actions as? [String] : nil
+                    rowDiagnostic["action_names_readable"] = actionNames != nil
+                    rowDiagnostic["action_count"] = min(actionNames?.count ?? 0, 128)
+                    rowDiagnostic["axpress_advertised"] = actionNames?.contains(kAXPressAction as String) ?? false
+                }
+            } else {
+                rowDiagnostic["row_found"] = false
+            }
+            evidence["saved_draft_row_diagnostic"] = rowDiagnostic
             return
         }
         guard subjectNodes.count == 1, let subjectNode = subjectNodes.first else {
@@ -2905,13 +3079,100 @@ final class CoreJobAcceptanceTests: XCTestCase {
             guard let parent, CFGetTypeID(parent) == AXUIElementGetTypeID() else { break }
             ancestor = (parent as! AXUIElement)
         }
-        guard let draftRow,
-              verifiedCurrentGmailURL() == retainedPageURL,
-              value(kAXEnabledAttribute as String, draftRow) as? Bool == true,
-              press(draftRow) else {
+        guard let draftRow else {
             evidence["draft_saved_verified"] = false
             evidence["saved_oracle_status"] = "owned-draft-row-not-actionable"
             return
+        }
+        var draftRowActions: CFArray?
+        let draftRowActionsStatus = AXUIElementCopyActionNames(draftRow, &draftRowActions)
+        let draftRowActionNames = draftRowActionsStatus == .success ? draftRowActions as? [String] : nil
+        evidence["saved_draft_row_action_names_readable"] = draftRowActionNames != nil
+        evidence["saved_draft_row_axpress_advertised"] = draftRowActionNames?.contains(kAXPressAction as String) ?? false
+        if draftRowActionNames?.contains(kAXPressAction as String) == true {
+            guard verifiedCurrentGmailURL() == retainedPageURL,
+                  value(kAXEnabledAttribute as String, draftRow) as? Bool == true else {
+                evidence["draft_saved_verified"] = false
+                evidence["saved_oracle_status"] = "drafts-page-changed-before-row-press"
+                return
+            }
+            evidence["saved_draft_row_axpress_attempted"] = true
+            let rowPressStatus = AXUIElementPerformAction(draftRow, kAXPressAction as CFString)
+            evidence["saved_draft_row_axpress_status"] = Int(rowPressStatus.rawValue)
+            guard rowPressStatus == .success else {
+                evidence["draft_saved_verified"] = false
+                evidence["saved_oracle_status"] = "owned-draft-row-not-actionable"
+                return
+            }
+        } else {
+            guard Self.gmailDraftRowShouldUsePointerFallback(actionNamesRead: draftRowActionsStatus == .success,
+                    actionNames: draftRowActionNames),
+                  let subjectCell = subjectNode.subjectCell,
+                  let rowBounds = axBounds(draftRow), let cellBounds = axBounds(subjectCell),
+                  Self.gmailDraftRowBoundsAreUsable(rowBounds, cellBounds: cellBounds,
+                    windowBounds: revalidatedWindowBounds) else {
+                evidence["draft_saved_verified"] = false
+                evidence["saved_oracle_status"] = "owned-draft-row-not-actionable"
+                evidence["saved_draft_row_pointer_attempted"] = false
+                return
+            }
+            let clickPoint = CGPoint(x: cellBounds.midX, y: cellBounds.midY)
+            func pointerClickStillVerified() -> Bool {
+                guard !Task.isCancelled,
+                      let (_, frontmostApplication, frontmostWindow) =
+                        ComputerUseDefaultBrowserTarget.currentDefaultHandlerForegroundWindow(),
+                      frontmostApplication == application,
+                      frontmostWindow.applicationProcessIdentifier == window.identity.applicationProcessIdentifier,
+                      frontmostWindow.accessibilityWindowHash == window.identity.accessibilityWindowHash,
+                      verifiedCurrentGmailURL() == retainedPageURL,
+                      Self.gmailIsOwnedDraftsListingURL(retainedPageURL, expectedAccountIndex: accountIndex) else {
+                    return false
+                }
+                do { try revalidateAccountPage() } catch { return false }
+                guard let outer = selectedOuterWebArea(), verifiedCurrentGmailURL() == retainedPageURL,
+                      let rows = findOwnedDraftSubject(outer, subject: subject), rows.count == 1,
+                      CFEqual(rows[0].element, draftRow), let currentCell = rows[0].subjectCell,
+                      CFEqual(currentCell, subjectCell),
+                      value(kAXRoleAttribute as String, draftRow) as? String == "AXRow",
+                      value(kAXRoleAttribute as String, subjectCell) as? String == "AXCell",
+                      value(kAXEnabledAttribute as String, draftRow) as? Bool == true,
+                      !pruneDiscoverySubtree(draftRow, role: "AXRow"),
+                      !pruneDiscoverySubtree(subjectCell, role: "AXCell"),
+                      let currentActions = ({ () -> [String]? in
+                          var names: CFArray?
+                          guard AXUIElementCopyActionNames(draftRow, &names) == .success else { return nil }
+                          return names as? [String]
+                      })(),
+                      Self.gmailDraftRowShouldUsePointerFallback(actionNamesRead: true,
+                        actionNames: currentActions),
+                      let freshRowBounds = axBounds(draftRow), let freshCellBounds = axBounds(subjectCell),
+                      Self.gmailDraftRowBoundsAreUsable(freshRowBounds, cellBounds: freshCellBounds,
+                        windowBounds: revalidatedWindowBounds),
+                      CGPoint(x: freshCellBounds.midX, y: freshCellBounds.midY) == clickPoint,
+                      Self.gmailDraftRowHitTestResolvesToCell(clickPoint, row: draftRow, cell: subjectCell,
+                        window: window.accessibilityElement, read: value, prune: pruneDiscoverySubtree) else {
+                    return false
+                }
+                return true
+            }
+            let injector = InputInjector()
+            let x = Int(clickPoint.x.rounded()), y = Int(clickPoint.y.rounded())
+            evidence["saved_draft_row_pointer_attempted"] = true
+            let downSent = injector.apply(.pointer(x: x, y: y, buttons: 0b001), ifAllowed: pointerClickStillVerified)
+            evidence["saved_draft_row_pointer_down_sent"] = downSent
+            guard downSent else {
+                evidence["draft_saved_verified"] = false
+                evidence["saved_oracle_status"] = "owned-draft-row-pointer-denied"
+                return
+            }
+            // Always release the automation-owned button after a dispatched down.
+            let upSent = injector.apply(.pointer(x: x, y: y, buttons: 0), ifAllowed: { true })
+            evidence["saved_draft_row_pointer_release_sent"] = upSent
+            guard upSent else {
+                evidence["draft_saved_verified"] = false
+                evidence["saved_oracle_status"] = "owned-draft-row-pointer-release-failed"
+                return
+            }
         }
         var reopened = false
         let reopenDeadline = ContinuousClock.now.advanced(by: .seconds(3))

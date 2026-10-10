@@ -937,6 +937,8 @@ def check_gmail(expected: dict[str, Any], outcome: dict[str, Any]) -> dict[str, 
             or len(events) != attachment_count):
         raise AcceptanceError("Gmail draft run unexpectedly reached a Send approval prompt")
     saved_url = validate_gmail_compose_url(evidence.get("saved_draft_url"))
+    if saved_url is None:
+        raise AcceptanceError("Gmail Drafts page did not return the validated test-owned draft URL")
     expected_draft_url = expected.get("gmail_existing_draft_url")
     if expected_draft_url and gmail_draft_identity(saved_url) != gmail_draft_identity(expected_draft_url):
         raise AcceptanceError("Gmail draft oracle returned a different owned compose URL")
@@ -948,8 +950,6 @@ def check_gmail(expected: dict[str, Any], outcome: dict[str, Any]) -> dict[str, 
             "saved_attachment_name_visible", "saved_attachment_size_visible")))
     if not fields_exact:
         raise AcceptanceError("Saved Gmail Drafts page did not verify exactly one matching draft and attachment name/size")
-    if saved_url is None:
-        raise AcceptanceError("Gmail Drafts page did not return the validated test-owned draft URL")
     return {"passed": True, "draft_saved_verified": True, "saved_draft_count": 1,
             "saved_attachment_count": 1,
             "fields_exact": True, "attachment_name_and_size_verified": True,

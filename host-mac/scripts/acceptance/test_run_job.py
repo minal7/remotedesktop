@@ -354,6 +354,8 @@ class GmailHarnessTests(unittest.TestCase):
              "recovery_subject_verified": True, "gmail_account_index": 0},
             {"recovery_compose_url": "https://mail.google.com/mail/u/0/#drafts?compose=FMfcgzQX_unverified123",
              "recovery_subject_verified": False, "gmail_account_index": 0},
+            {"recovery_compose_url": "https://mail.google.com/mail/u/0/#drafts?compose=FMfcgzQX_missingProof123",
+             "gmail_account_index": 0},
         )
         for evidence in invalid_evidence:
             with self.subTest(evidence=evidence), tempfile.TemporaryDirectory() as temporary:
@@ -530,6 +532,11 @@ class GmailHarnessTests(unittest.TestCase):
                 with self.assertRaises(runner.AcceptanceError):
                     runner.check_gmail(
                         {"send_approval_check": False, "gmail_existing_draft_url": expected_url}, changed)
+        missing_url = self.exact_metadata()
+        missing_url["evidence"]["gmail"]["saved_draft_url"] = None
+        with self.assertRaisesRegex(runner.AcceptanceError, "did not return the validated test-owned draft URL"):
+            runner.check_gmail(
+                {"send_approval_check": False, "gmail_existing_draft_url": expected_url}, missing_url)
 
     def test_baseline_rejects_granted_approval_and_records_incorrect_compose(self) -> None:
         outcome = self.exact_metadata()

@@ -303,12 +303,14 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
         private let writableValues: [Bool]
         private let defaultWritable: Bool
         private let focusDelayAfterCommandL: Int?
+        private let focusDelayAfterCommandLSeconds: TimeInterval?
         private let deactivateOnWritableRead: Int?
         private var writableReadCount = 0
         private var delayedWritableReadCount = 0
         private var delayedWritableReadSeconds = 0.0
         private var focusedReadCountAfterCommandL = 0
         private var commandLDispatched = false
+        private var commandLDispatchUptime: TimeInterval?
         private var addressValue = "https://mail.google.com/mail/u/0/#drafts?compose=fixture"
         private var delayedAddressValue: String?
         private var delayedAddressValueReadsRemaining = 0
@@ -320,10 +322,12 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
         private(set) var isActive = true
 
         init(processIdentifier: pid_t, writableValues: [Bool], defaultWritable: Bool = true,
-             focusDelayAfterCommandL: Int? = nil, deactivateOnWritableRead: Int? = nil) {
+             focusDelayAfterCommandL: Int? = nil, focusDelayAfterCommandLSeconds: TimeInterval? = nil,
+             deactivateOnWritableRead: Int? = nil) {
             self.writableValues = writableValues
             self.defaultWritable = defaultWritable
             self.focusDelayAfterCommandL = focusDelayAfterCommandL
+            self.focusDelayAfterCommandLSeconds = focusDelayAfterCommandLSeconds
             self.deactivateOnWritableRead = deactivateOnWritableRead
             applicationElement = AXUIElementCreateApplication(processIdentifier)
             window = AXUIElementCreateApplication(processIdentifier + 100)
@@ -345,6 +349,7 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
         }
 
         func reactivate() { isActive = true }
+        func deactivate() { isActive = false }
 
         var hasDispatchedCommandL: Bool { commandLDispatched }
 
@@ -387,6 +392,7 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
         func markCommandLDispatched() {
             commandLDispatched = true
             focusedReadCountAfterCommandL = 0
+            commandLDispatchUptime = ProcessInfo.processInfo.systemUptime
         }
 
         func read(_ attribute: String, _ element: AXUIElement) -> CFTypeRef? {
@@ -394,6 +400,11 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                 if attribute == (kAXFocusedWindowAttribute as String) { return window as CFTypeRef }
                 if attribute == (kAXFocusedUIElementAttribute as String) {
                     if forceAddressFocusLoss { return toolbar as CFTypeRef }
+                    if let focusDelayAfterCommandLSeconds {
+                        guard commandLDispatched, let commandLDispatchUptime else { return toolbar as CFTypeRef }
+                        let elapsed = ProcessInfo.processInfo.systemUptime - commandLDispatchUptime
+                        return (elapsed >= focusDelayAfterCommandLSeconds ? field : toolbar) as CFTypeRef
+                    }
                     guard let focusDelayAfterCommandL else { return field as CFTypeRef }
                     guard commandLDispatched else { return toolbar as CFTypeRef }
                     focusedReadCountAfterCommandL += 1
@@ -3419,9 +3430,12 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
     func testSafariNavigationLatchRetriesOnlyBeforeAXValueWriteBegins() async throws {
         let destination = try XCTUnwrap(URL(string: "https://mail.google.com/mail/u/0/#inbox"))
 
-        for scenario in ["pre-write-authority", "uncertain-write", "delayed-focus", "never-focused",
+        for scenario in ["pre-write-authority", "uncertain-write", "delayed-focus", "late-focus", "never-focused",
+                         "transient-type-fingerprint", "persistent-type-fingerprint",
+                         "changed-value-after-type-fingerprint", "revoked-gate-after-type-fingerprint",
                          "inactive-after-focus", "transient-capture-read", "persistent-capture-read",
-                         "transient-bounds-read", "persistent-bounds-read"] {
+                         "transient-bounds-read", "persistent-bounds-read", "transient-bounds-after-return",
+                         "persistent-bounds-after-return", "nonqualifying-bounds-after-return"] {
             let root = FileManager.default.temporaryDirectory
                 .appendingPathComponent("SafariNavigationLatch-\(UUID().uuidString)", isDirectory: true)
             defer { try? FileManager.default.removeItem(at: root) }
@@ -3439,8 +3453,12 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                 writableValues: scenario == "pre-write-authority" ? [true, false, false, false] : [],
                 defaultWritable: scenario != "pre-write-authority",
                 focusDelayAfterCommandL: scenario == "delayed-focus" ? 2
+                    : scenario == "late-focus" ? nil
                     : scenario == "never-focused" ? Int.max
-                    : ["transient-capture-read", "persistent-capture-read", "transient-bounds-read", "persistent-bounds-read"].contains(scenario) ? 0 : nil,
+                    : ["transient-capture-read", "persistent-capture-read", "transient-bounds-read", "persistent-bounds-read",
+                       "transient-bounds-after-return", "persistent-bounds-after-return",
+                       "nonqualifying-bounds-after-return"].contains(scenario) ? 0 : nil,
+                focusDelayAfterCommandLSeconds: scenario == "late-focus" ? 1.5 : nil,
                 deactivateOnWritableRead: scenario == "inactive-after-focus" ? 2 : nil)
             let existing = ComputerUseDefaultBrowserSession.Window(id: "existing", application: app,
                 accessibilityElement: AXUIElementCreateApplication(pid + 199),
@@ -3452,12 +3470,35 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
             var selectionDispatches = 0
             var returnDispatches = 0
             var addressValueWriteCount = 0
+            var typeFingerprintAttempts = 0
+            var typeFingerprintUnavailableCount = 0
             var transientCaptureFailures = 0
             var captureReason: String?
             var captureAXErrorCode: Int?
             let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { graph.isActive },
-                approvalTargetProvider: { _ in
-                    .init(context: "Safari focused window", applicationID: app.bundleIdentifier,
+                approvalTargetProvider: { action in
+                    if case .typeText = action {
+                        typeFingerprintAttempts += 1
+                        if scenario == "transient-type-fingerprint" && typeFingerprintAttempts == 1 {
+                            typeFingerprintUnavailableCount += 1
+                            throw ComputerUseHostTools.ToolError.approvalTargetUnavailable
+                        }
+                        if scenario == "persistent-type-fingerprint" {
+                            typeFingerprintUnavailableCount += 1
+                            throw ComputerUseHostTools.ToolError.approvalTargetUnavailable
+                        }
+                        if scenario == "changed-value-after-type-fingerprint" && typeFingerprintAttempts == 1 {
+                            typeFingerprintUnavailableCount += 1
+                            graph.setAddressValue("https://mail.google.com/mail/u/0/#changed")
+                            throw ComputerUseHostTools.ToolError.approvalTargetUnavailable
+                        }
+                        if scenario == "revoked-gate-after-type-fingerprint" && typeFingerprintAttempts == 1 {
+                            typeFingerprintUnavailableCount += 1
+                            graph.deactivate()
+                            throw ComputerUseHostTools.ToolError.approvalTargetUnavailable
+                        }
+                    }
+                    return .init(context: "Safari focused window", applicationID: app.bundleIdentifier,
                         accessibilityIdentity: "retained-safari-window")
                 },
                 actionPerformer: { action in
@@ -3501,6 +3542,18 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                 },
                 captureWindows: { identity in
                     guard identity == app else { throw ComputerUseDefaultBrowserSession.Failure.targetLost }
+                    if scenario == "transient-bounds-after-return"
+                        || scenario == "persistent-bounds-after-return"
+                        || scenario == "nonqualifying-bounds-after-return" {
+                        if returnDispatches > 0
+                            && (scenario != "transient-bounds-after-return" || transientCaptureFailures == 0) {
+                            transientCaptureFailures += 1
+                            captureReason = "bounds_read"
+                            captureAXErrorCode = scenario == "nonqualifying-bounds-after-return"
+                                ? Int(AXError.noValue.rawValue) : Int(AXError.cannotComplete.rawValue)
+                            throw ComputerUseDefaultBrowserSession.Failure.ambiguousWindows
+                        }
+                    }
                     if graph.hasDispatchedCommandL
                         && (scenario == "persistent-capture-read" || scenario == "persistent-bounds-read"
                             || (scenario == "transient-capture-read" && transientCaptureFailures == 0)
@@ -3538,9 +3591,54 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
             XCTAssertEqual(launches, 1)
 
             var firstDiagnostics: [String] = []
-            if scenario == "delayed-focus" || scenario == "transient-capture-read" || scenario == "transient-bounds-read" {
+            if scenario == "transient-type-fingerprint" {
                 try await session.navigateRetainedSafariTab(to: destination, taskID: taskID, goal: goal,
                     tools: tools, diagnostic: { firstDiagnostics.append($0) })
+                XCTAssertEqual(typeFingerprintUnavailableCount, 1,
+                    "The URL-write fingerprint preparation should have exactly one transient unavailable result")
+                XCTAssertEqual(typeFingerprintAttempts, 3,
+                    "One retry succeeds, then the existing approved-dispatch boundary performs its own final revalidation")
+                XCTAssertEqual(focusDispatches, 1)
+                XCTAssertEqual(addressValueWriteCount, 1)
+                XCTAssertEqual(returnDispatches, 1)
+                XCTAssertEqual(graph.currentAddressValue, destination.absoluteString)
+                XCTAssertEqual(graph.nativeTypeCount, 0)
+                continue
+            }
+            if ["persistent-type-fingerprint", "changed-value-after-type-fingerprint",
+                "revoked-gate-after-type-fingerprint"].contains(scenario) {
+                do {
+                    try await session.navigateRetainedSafariTab(to: destination, taskID: taskID, goal: goal,
+                        tools: tools, diagnostic: { firstDiagnostics.append($0) })
+                    XCTFail("Unavailable or changed URL-write authority must not dispatch the AX write")
+                } catch let error as ComputerUseHostTools.ToolError where scenario == "revoked-gate-after-type-fingerprint" {
+                    XCTAssertEqual(error.localizedDescription, ComputerUseHostTools.ToolError.paused.localizedDescription)
+                } catch let error as ComputerUseHostTools.ToolError where scenario == "persistent-type-fingerprint" {
+                    XCTAssertEqual(error.localizedDescription,
+                        ComputerUseHostTools.ToolError.approvalTargetUnavailable.localizedDescription)
+                } catch let failure as ComputerUseDefaultBrowserSession.Failure where scenario == "changed-value-after-type-fingerprint" {
+                    XCTAssertEqual(failure, .targetLost)
+                }
+                XCTAssertEqual(focusDispatches, 1)
+                XCTAssertEqual(addressValueWriteCount, 0)
+                XCTAssertEqual(returnDispatches, 0)
+                XCTAssertEqual(graph.nativeTypeCount, 0)
+                XCTAssertEqual(typeFingerprintAttempts,
+                    scenario == "persistent-type-fingerprint" ? 3 : 1,
+                    "Persistent unavailability is bounded; changed value or revoked gate stops immediately")
+                XCTAssertEqual(typeFingerprintUnavailableCount,
+                    scenario == "persistent-type-fingerprint" ? 3 : 1)
+                continue
+            }
+            if scenario == "delayed-focus" || scenario == "late-focus"
+                || scenario == "transient-capture-read" || scenario == "transient-bounds-read" {
+                let navigationStarted = ProcessInfo.processInfo.systemUptime
+                try await session.navigateRetainedSafariTab(to: destination, taskID: taskID, goal: goal,
+                    tools: tools, diagnostic: { firstDiagnostics.append($0) })
+                if scenario == "late-focus" {
+                    XCTAssertGreaterThanOrEqual(ProcessInfo.processInfo.systemUptime - navigationStarted, 1.4,
+                        "Late focus must be delayed by elapsed time after Cmd-L, not consumed by extra AX reads")
+                }
                 XCTAssertEqual(firstDiagnostics.last, "phase=ax_navigation_dispatched")
                 XCTAssertEqual(focusDispatches, 1, "A delayed focus must follow exactly one Cmd-L dispatch")
                 XCTAssertEqual(returnDispatches, 1)
@@ -3552,6 +3650,18 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                     XCTAssertEqual(transientCaptureFailures, 1, "Only one exact transient bounds failure is recovered")
                 }
                 continue
+            } else if scenario == "transient-bounds-after-return" {
+                try await session.navigateRetainedSafariTab(to: destination, taskID: taskID, goal: goal,
+                    tools: tools, diagnostic: { firstDiagnostics.append($0) })
+                XCTAssertEqual(focusDispatches, 1)
+                XCTAssertEqual(addressValueWriteCount, 1)
+                XCTAssertEqual(returnDispatches, 1)
+                XCTAssertEqual(transientCaptureFailures, 1,
+                    "A transient post-Return bounds read may be freshly recaptured once without replaying input")
+                XCTAssertEqual(graph.nativeTypeCount, 0)
+                XCTAssertEqual(graph.currentAddressValue, destination.absoluteString)
+                XCTAssertEqual(firstDiagnostics.last, "phase=ax_navigation_dispatched")
+                continue
             } else {
                 do {
                     try await session.navigateRetainedSafariTab(to: destination, taskID: taskID, goal: goal,
@@ -3560,7 +3670,9 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                 } catch let error as ComputerUseHostTools.ToolError where scenario == "inactive-after-focus" {
                     XCTAssertEqual(error.localizedDescription, ComputerUseHostTools.ToolError.paused.localizedDescription)
                 } catch let failure as ComputerUseDefaultBrowserSession.Failure {
-                    XCTAssertEqual(failure, scenario == "persistent-bounds-read" ? .ambiguousWindows : .targetLost)
+                    XCTAssertEqual(failure,
+                        (scenario == "persistent-bounds-read" || scenario.contains("bounds-after-return"))
+                            ? .ambiguousWindows : .targetLost)
                 }
             }
             if scenario == "never-focused" {
@@ -3580,6 +3692,16 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                 XCTAssertEqual(returnDispatches, 0)
                 XCTAssertGreaterThan(transientCaptureFailures, 1)
                 XCTAssertTrue(firstDiagnostics.contains("phase=address_field_not_focused_before_navigation"))
+                continue
+            }
+            if scenario == "persistent-bounds-after-return" || scenario == "nonqualifying-bounds-after-return" {
+                XCTAssertEqual(focusDispatches, 1, "A post-Return capture failure must not replay Cmd-L")
+                XCTAssertEqual(addressValueWriteCount, 1, "A post-Return capture failure must not replay the URL write")
+                XCTAssertEqual(returnDispatches, 1, "A post-Return capture failure must not replay Return")
+                XCTAssertEqual(graph.nativeTypeCount, 0)
+                XCTAssertEqual(transientCaptureFailures,
+                    scenario == "persistent-bounds-after-return" ? 3 : 1,
+                    "Persistent or nonqualifying bounds failures remain bounded and fail closed")
                 continue
             }
             if scenario == "inactive-after-focus" {

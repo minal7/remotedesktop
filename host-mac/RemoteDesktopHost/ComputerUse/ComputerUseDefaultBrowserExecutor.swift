@@ -817,7 +817,11 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
     /// from the fresh screenshot. Real-site acceptance checks outcomes separately.
     var retainedWindowForDiagnostics: ComputerUseDefaultBrowserSession.Window? { scope.window }
     /// Recovery navigation hint only; it is not completion or approval evidence.
-    var gmailVerifiedComposeURLForRecovery: URL? { scope.lastVerifiedGmailComposeURL }
+    var gmailVerifiedComposeBookmarkForRecovery: (url: URL, subject: String)? {
+        guard let url = scope.lastVerifiedGmailComposeURL,
+              let subject = scope.gmailJob?.request.subject else { return nil }
+        return (url, subject)
+    }
     private(set) var lastSessionFailureForDiagnostics: ComputerUseDefaultBrowserSession.Failure?
     private(set) var lastApprovedVisualContinuationFailureForDiagnostics: String?
     private(set) var lastApprovedVisualContinuationDesktopFailureForDiagnostics: String?
@@ -859,6 +863,9 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
         }
         if let transition = scope.session.lastWindowTransitionDiagnostic {
             diagnostic["sessionWindowTransitionDiagnostic"] = transition
+        }
+        for (key, value) in scope.session.lastAddressFocusWaitDiagnostic {
+            diagnostic["addressFocusWait_\(key)"] = value
         }
         diagnostic["lastSessionFailureForDiagnostics"] = String(describing: lastSessionFailureForDiagnostics)
         return diagnostic

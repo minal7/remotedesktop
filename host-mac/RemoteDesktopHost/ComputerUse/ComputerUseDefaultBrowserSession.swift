@@ -429,7 +429,45 @@ final class ComputerUseDefaultBrowserSession {
             throw Failure.targetLost
         }
         let typeAction = ComputerUsePredictedAction.typeText(url.absoluteString)
-        let typeFingerprint = try tools.prepareNativeActionFingerprint(for: typeAction)
+        var typeFingerprint: ComputerUseApprovalFingerprint?
+        var typeFingerprintAttempts = 0
+        var typeFingerprintRetryDeadline: ContinuousClock.Instant?
+        while typeFingerprint == nil {
+            if typeFingerprintAttempts > 0 {
+                guard let deadline = typeFingerprintRetryDeadline, ContinuousClock.now < deadline else {
+                    throw ComputerUseHostTools.ToolError.approvalTargetUnavailable
+                }
+                try Task.checkCancellation()
+                try tools.requireActive()
+                try await Task.sleep(for: .milliseconds(50))
+                try Task.checkCancellation()
+                try tools.requireActive()
+                try validate(taskID: taskID, goal: goal, tools: tools)
+                guard isCurrentSafariAddressField(addressField, target: target),
+                      focusedSafariAddressField(in: target).map({ CFEqual($0, addressField) }) == true,
+                      safariAddressBarAX.read(kAXValueAttribute as String, addressField) as? String == addressValue else {
+                    throw Failure.targetLost
+                }
+                guard ContinuousClock.now < deadline else {
+                    throw ComputerUseHostTools.ToolError.approvalTargetUnavailable
+                }
+            }
+            try Task.checkCancellation()
+            try tools.requireActive()
+            typeFingerprintAttempts += 1
+            do {
+                typeFingerprint = try tools.prepareNativeActionFingerprint(for: typeAction)
+            } catch ComputerUseHostTools.ToolError.approvalTargetUnavailable {
+                typeFingerprintRetryDeadline = typeFingerprintRetryDeadline
+                    ?? ContinuousClock.now.advanced(by: .seconds(2))
+                guard typeFingerprintAttempts < 3 else {
+                    throw ComputerUseHostTools.ToolError.approvalTargetUnavailable
+                }
+            } catch {
+                throw error
+            }
+        }
+        guard let typeFingerprint else { throw Failure.targetLost }
         let addressEntryScope = ComputerUseNativeBrowserAddressEntryScope(
             application: target.application,
             window: target.identity,
@@ -800,10 +838,17 @@ final class ComputerUseDefaultBrowserSession {
     }
 
     private func isTransientValidationCaptureFailure(_ error: Error) -> Bool {
-        (error as? Failure) == .targetLost
-            && lastValidationPhaseForDiagnostics == .capture
-            && ["windows_read", "focused_window_read"].contains(lastCaptureReasonForDiagnostics ?? "")
-            && lastCaptureAXErrorCodeForDiagnostics == Int(AXError.cannotComplete.rawValue)
+        guard lastValidationPhaseForDiagnostics == .capture,
+              lastCaptureAXErrorCodeForDiagnostics == Int(AXError.cannotComplete.rawValue),
+              let failure = error as? Failure,
+              let reason = lastCaptureReasonForDiagnostics else { return false }
+        switch (failure, reason) {
+        case (.targetLost, "windows_read"), (.targetLost, "focused_window_read"),
+             (.ambiguousWindows, "bounds_read"):
+            return true
+        default:
+            return false
+        }
     }
 
     private func safariAddressFieldReadiness(_ field: AXUIElement, target: Window) -> ReturnPreparationReadiness {
@@ -890,7 +935,7 @@ final class ComputerUseDefaultBrowserSession {
                                                   taskID: String, goal: String,
                                                   tools: ComputerUseHostTools,
                                                   diagnostic: (String) -> Void) async throws -> AXUIElement {
-        let deadline = ContinuousClock.now.advanced(by: .seconds(1))
+        let deadline = ContinuousClock.now.advanced(by: .seconds(5))
         let started = ContinuousClock.now
         var validationCount = 0
         var focusCheckCount = 0
@@ -931,14 +976,7 @@ final class ComputerUseDefaultBrowserSession {
             } catch let failure as Failure {
                 validationCount += 1
                 validationElapsed += validationStarted.duration(to: ContinuousClock.now)
-                let transientAXRead = failure == .targetLost
-                    && (lastCaptureReasonForDiagnostics == "windows_read"
-                        || lastCaptureReasonForDiagnostics == "focused_window_read")
-                    && lastCaptureAXErrorCodeForDiagnostics == Int(AXError.cannotComplete.rawValue)
-                let transientBoundsRead = failure == .ambiguousWindows
-                    && lastCaptureReasonForDiagnostics == "bounds_read"
-                    && lastCaptureAXErrorCodeForDiagnostics == Int(AXError.cannotComplete.rawValue)
-                guard transientAXRead || transientBoundsRead, ContinuousClock.now < deadline else {
+                guard isTransientValidationCaptureFailure(failure), ContinuousClock.now < deadline else {
                     recordFailure("validation_failed")
                     throw failure
                 }
@@ -1075,11 +1113,7 @@ final class ComputerUseDefaultBrowserSession {
             do {
                 snapshot = try capture()
             } catch {
-                guard attempt < 2,
-                      (error as? Failure) == .targetLost,
-                      let captureReason = lastCaptureReasonForDiagnostics,
-                      ["windows_read", "focused_window_read"].contains(captureReason),
-                      lastCaptureAXErrorCodeForDiagnostics == Int(AXError.cannotComplete.rawValue) else {
+                guard attempt < 2, isTransientValidationCaptureFailure(error) else {
                     throw error
                 }
                 try authorizeValidationRecapture(application: application, tools: tools,
