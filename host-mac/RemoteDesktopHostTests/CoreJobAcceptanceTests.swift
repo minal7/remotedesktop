@@ -285,7 +285,8 @@ final class CoreJobAcceptanceTests: XCTestCase {
             "focused_window_malformed", "focused_window_unconvertible", "capture_deadline",
             "capture_cancelled", "final_frontmost_unavailable", "final_frontmost_changed",
             "bounds_read", "bounds_deadline", "bounds_type", "bounds_malformed",
-            "startup_role_unclassified", "focused_transient_surface"] {
+            "startup_role_unclassified", "focused_transient_surface",
+            "focused_retained_fallback_unverified", "focused_retained_fallback_structure_unreadable"] {
             XCTAssertEqual(Self.sanitizedSessionCaptureReason(reason), reason)
         }
         for rejected in ["https://mail.google.com/", "recipient@example.com", "phase=capture_failure", "unknown"] {
@@ -1179,7 +1180,9 @@ final class CoreJobAcceptanceTests: XCTestCase {
         let finished = XCTestExpectation(description: "Run the opt-in acceptance body")
         let quiesced = XCTestExpectation(description: "Join the cancelled acceptance body")
         var bodyResult: Result<Void, Error>?
-        let bodyTask = Task { @MainActor in
+        // Keep XCTest task-local error observation out of this long actor-isolated body;
+        // relay its terminal result explicitly to the synchronous test entry.
+        let bodyTask = Task.detached { @MainActor in
             do {
                 try await self.runJobAcceptanceBody()
                 bodyResult = .success(())
@@ -1989,7 +1992,8 @@ final class CoreJobAcceptanceTests: XCTestCase {
             "retained_target_missing_or_ambiguous", "retained_target_pid", "pid", "bounds_read",
             "bounds_deadline", "bounds_type", "bounds_malformed", "focused_duplicate", "duplicate_id",
             "duplicate_element", "bounds_ax_read_failure", "startup_role_unclassified",
-            "focused_transient_surface"]
+            "focused_transient_surface", "focused_retained_fallback_unverified",
+            "focused_retained_fallback_structure_unreadable"]
         guard let raw, allowed.contains(raw) else { return nil }
         return raw
     }

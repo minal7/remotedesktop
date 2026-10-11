@@ -1619,6 +1619,85 @@ final class ComputerUseDefaultBrowserPageReaderTests: XCTestCase {
         }
     }
 
+    func testRetainedPageURLRetriesOnlyOneTransientNilWindowInventory() throws {
+        for nilRead in [1, 2] {
+            let graph = PageAXGraph(); graph.makePage()
+            graph.windowInventoryNilReads = [nilRead]
+            let url = try ComputerUseDefaultBrowserPageReader(access: graph.access)
+                .readRetainedPageURL(window: graph.window, application: graph.identity, mayAct: { true })
+            XCTAssertEqual(url, "https://drive.google.com/drive/my-drive",
+                "A single unavailable root-window list may recover at either proof boundary")
+            XCTAssertGreaterThan(graph.windowInventoryReadCount, nilRead)
+        }
+
+        let persistent = PageAXGraph(); persistent.makePage()
+        persistent.windowInventoryNilReads = Set(1...10)
+        XCTAssertNil(try ComputerUseDefaultBrowserPageReader(access: persistent.access)
+            .readRetainedPageURL(window: persistent.window, application: persistent.identity, mayAct: { true }))
+        XCTAssertEqual(persistent.windowInventoryReadCount, 2,
+            "A persistent unavailable window list gets at most one fresh read")
+
+        let sharedBudget = PageAXGraph(); sharedBudget.makePage()
+        sharedBudget.windowInventoryNilReads = [1, 3]
+        XCTAssertNil(try ComputerUseDefaultBrowserPageReader(access: sharedBudget.access)
+            .readRetainedPageURL(window: sharedBudget.window, application: sharedBudget.identity, mayAct: { true }),
+            "Recovery at the initial proof boundary consumes the single retry")
+        XCTAssertEqual(sharedBudget.windowInventoryReadCount, 3,
+            "A later fresh-proof nil cannot trigger a second recovery")
+
+        for change in ["application", "root"] {
+            let graph = PageAXGraph(); graph.makePage()
+            graph.windowInventoryNilReads = [1]
+            graph.afterRead = { node, attribute in
+                guard node == "root", attribute == (kAXWindowsAttribute as String),
+                      graph.windowInventoryReadCount == 1 else { return }
+                if change == "application" { graph.frontmostIdentity = graph.otherIdentity }
+                else { graph.frontmostRootElement = graph.element("replacement-root") }
+            }
+            XCTAssertNil(try ComputerUseDefaultBrowserPageReader(access: graph.access)
+                .readRetainedPageURL(window: graph.window, application: graph.identity, mayAct: { true }), change)
+            XCTAssertEqual(graph.windowInventoryReadCount, 1,
+                "A changed authoritative app/root must stop before retrying the inventory")
+        }
+
+        let paused = PageAXGraph(); paused.makePage()
+        paused.windowInventoryNilReads = [1]
+        var active = true
+        paused.afterRead = { node, attribute in
+            if node == "root", attribute == (kAXWindowsAttribute as String) { active = false }
+        }
+        do {
+            _ = try ComputerUseDefaultBrowserPageReader(access: paused.access)
+                .readRetainedPageURL(window: paused.window, application: paused.identity, mayAct: { active })
+            XCTFail("A revoked task gate must stop before the fresh window read")
+        } catch ComputerUseHostTools.ToolError.paused { }
+        XCTAssertEqual(paused.windowInventoryReadCount, 1)
+
+        let missing = PageAXGraph(); missing.makePage()
+        missing.set("root", kAXWindowsAttribute, [] as CFArray)
+        XCTAssertNil(try ComputerUseDefaultBrowserPageReader(access: missing.access)
+            .readRetainedPageURL(window: missing.window, application: missing.identity, mayAct: { true }))
+        XCTAssertEqual(missing.windowInventoryReadCount, 1, "A readable missing window is not transient")
+
+        let duplicate = PageAXGraph(); duplicate.makePage()
+        duplicate.set("root", kAXWindowsAttribute, [duplicate.window, duplicate.window] as CFArray)
+        XCTAssertNil(try ComputerUseDefaultBrowserPageReader(access: duplicate.access)
+            .readRetainedPageURL(window: duplicate.window, application: duplicate.identity, mayAct: { true }))
+        XCTAssertEqual(duplicate.windowInventoryReadCount, 1, "Duplicate membership is not retried")
+
+        let malformed = PageAXGraph(); malformed.makePage()
+        malformed.set("root", kAXWindowsAttribute, "not an AXWindows list" as NSString)
+        XCTAssertNil(try ComputerUseDefaultBrowserPageReader(access: malformed.access)
+            .readRetainedPageURL(window: malformed.window, application: malformed.identity, mayAct: { true }))
+        XCTAssertEqual(malformed.windowInventoryReadCount, 1, "A malformed readable list is not retried")
+
+        let wrongRole = PageAXGraph(); wrongRole.makePage()
+        wrongRole.set("window", kAXRoleAttribute, "AXDialog" as NSString)
+        XCTAssertNil(try ComputerUseDefaultBrowserPageReader(access: wrongRole.access)
+            .readRetainedPageURL(window: wrongRole.window, application: wrongRole.identity, mayAct: { true }))
+        XCTAssertEqual(wrongRole.windowInventoryReadCount, 1, "A readable role mismatch is not retried")
+    }
+
     func testRetainedPageURLStopsWhenPausedOrCancelled() async throws {
         let graph = PageAXGraph(); graph.makePage()
         let reader = ComputerUseDefaultBrowserPageReader(access: graph.access)
@@ -1647,6 +1726,8 @@ private final class PageAXGraph {
     var writes: [String] = []
     var reads: [(String, String)] = []
     var afterRead: ((String, String) -> Void)?
+    var windowInventoryNilReads: Set<Int> = []
+    var windowInventoryReadCount = 0
     var onHitTest: (() -> Void)?
     var didReplace = false
     var hitTestElement: AXUIElement?
@@ -1659,6 +1740,7 @@ private final class PageAXGraph {
     lazy var window = element("window")
     lazy var otherWindow = element("other-window")
     var frontmostIdentity: ComputerUseApplicationIdentity
+    var frontmostRootElement: AXUIElement?
     lazy var focusedWindow = element("window")
 
     init() {
@@ -1710,11 +1792,16 @@ private final class PageAXGraph {
     }
 
     var access: ComputerUseDefaultBrowserPageReader.Access {
-        .init(frontmost: { [self] in (frontmostIdentity, element("root")) }, read: { [self] attr, ref in
+        .init(frontmost: { [self] in (frontmostIdentity, frontmostRootElement ?? element("root")) }, read: { [self] attr, ref in
             guard let node = refs.first(where: { CFEqual($0.value, ref) })?.key else { return nil }
             reads.append((node, attr))
             let result: CFTypeRef?
             if node == "root", attr == (kAXFocusedWindowAttribute as String) { result = focusedWindow }
+            else if node == "root", attr == (kAXWindowsAttribute as String) {
+                windowInventoryReadCount += 1
+                result = windowInventoryNilReads.contains(windowInventoryReadCount)
+                    ? nil : attrs[node]?[attr]
+            }
             else { result = attrs[node]?[attr] }
             afterRead?(node, attr)
             return result

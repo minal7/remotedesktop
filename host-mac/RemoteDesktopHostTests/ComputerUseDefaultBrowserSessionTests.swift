@@ -307,8 +307,9 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
         private let focusDelayAfterCommandLSeconds: TimeInterval?
         private let deactivateOnWritableRead: Int?
         private var writableReadCount = 0
-        private var delayedWritableReadCount = 0
-        private var delayedWritableReadSeconds = 0.0
+        private var writableOverride: Bool?
+        private var delayedEnabledReadCount = 0
+        private var delayedEnabledReadSeconds = 0.0
         private var focusedReadCountAfterCommandL = 0
         private var commandLDispatched = false
         private var commandLDispatchUptime: TimeInterval?
@@ -342,15 +343,16 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
 
         func isSettable(_ element: AXUIElement) -> Bool {
             guard CFEqual(element, field) else { return false }
-            if delayedWritableReadCount > 0 {
-                delayedWritableReadCount -= 1
-                Thread.sleep(forTimeInterval: delayedWritableReadSeconds)
-            }
+            if let writableOverride { return writableOverride }
             let readIndex = writableReadCount
             writableReadCount += 1
             let result = readIndex < writableValues.count ? writableValues[readIndex] : defaultWritable
             if readIndex == deactivateOnWritableRead { isActive = false }
             return result
+        }
+
+        func setWritableOverride(_ value: Bool?) {
+            writableOverride = value
         }
 
         func reactivate() { isActive = true }
@@ -390,9 +392,9 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
             unavailableAddressParentReadsRemaining = count
         }
 
-        func delayNextWritableReads(_ count: Int, seconds: TimeInterval) {
-            delayedWritableReadCount = count
-            delayedWritableReadSeconds = seconds
+        func delayNextEnabledReads(_ count: Int, seconds: TimeInterval) {
+            delayedEnabledReadCount = count
+            delayedEnabledReadSeconds = seconds
         }
 
         var currentAddressValue: String { addressValue }
@@ -447,7 +449,13 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                     return (forceAddressParentChange ? webArea : toolbar) as CFTypeRef
                 }
                 if attribute == "AXIdentifier" { return "WEB_BROWSER_ADDRESS_AND_SEARCH_FIELD" as CFTypeRef }
-                if attribute == (kAXEnabledAttribute as String) { return NSNumber(value: true) }
+                if attribute == (kAXEnabledAttribute as String) {
+                    if delayedEnabledReadCount > 0 {
+                        delayedEnabledReadCount -= 1
+                        Thread.sleep(forTimeInterval: delayedEnabledReadSeconds)
+                    }
+                    return NSNumber(value: true)
+                }
                 if attribute == (kAXSubroleAttribute as String) { return "" as CFTypeRef }
                 if attribute == "AXHidden" || attribute == "AXProtectedContent" { return NSNumber(value: false) }
                 if attribute == (kAXChildrenAttribute as String) { return [] as CFArray }
@@ -487,6 +495,107 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
         XCTAssertEqual(fixture.desktop.keyCount, 1)
         XCTAssertEqual(fixture.desktop.windows.map(\.id), ["existing", "new"])
         XCTAssertEqual(fixture.desktop.windows.first?.identity, fixture.original.identity)
+    }
+
+    func testW2FocusedRetainedCaptureFallbackIsTaskBoundAndUsesExistingValidation() async throws {
+        let fixture = try Fixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let taskID = "w2-focused-retained-fallback"
+        let goal = "Upload the selected file to Google Drive."
+        var injectInventoryFailure = false
+        var fallbackReturnsUnknownSheet = false
+        var fallbackCaptures = 0
+        let session = try fixture.session(
+            retainedWindowCapture: { identity, _ in
+                if injectInventoryFailure {
+                    throw ComputerUseDefaultBrowserSession.Failure.targetLost
+                }
+                return fixture.desktop.snapshot(application: identity)
+            },
+            focusedRetainedWindowCapture: { identity, _, authorizeFallback in
+                fallbackCaptures += 1
+                try authorizeFallback()
+                let snapshot = fixture.desktop.snapshot(application: identity)
+                guard fallbackReturnsUnknownSheet else { return snapshot }
+                return .init(application: snapshot.application, windows: snapshot.windows,
+                    focusedWindowID: snapshot.focusedWindowID, hasSheets: true,
+                    hasUnrecognizedSheets: true)
+            })
+
+        let target = try await session.ensure(taskID: taskID, goal: goal, tools: fixture.tools)
+        injectInventoryFailure = true
+        XCTAssertThrowsError(try session.validate(taskID: taskID, goal: goal, tools: fixture.tools),
+            "The default capture policy must remain strict before a validated W2 request opts in")
+        XCTAssertEqual(fallbackCaptures, 0)
+        XCTAssertThrowsError(try session.enableW2FocusedRetainedCaptureFallback(
+            taskID: "different-task", goal: goal, tools: fixture.tools))
+        XCTAssertThrowsError(try session.enableW2FocusedRetainedCaptureFallback(
+            taskID: taskID, goal: "different goal", tools: fixture.tools))
+
+        fixture.desktop.isActive = false
+        XCTAssertThrowsError(try session.enableW2FocusedRetainedCaptureFallback(
+            taskID: taskID, goal: goal, tools: fixture.tools))
+        fixture.desktop.isActive = true
+        try session.enableW2FocusedRetainedCaptureFallback(taskID: taskID, goal: goal, tools: fixture.tools)
+
+        do {
+            let resumed = try await session.ensure(taskID: taskID, goal: goal, tools: fixture.tools)
+            XCTAssertEqual(resumed.id, target.id)
+            XCTAssertTrue(CFEqual(resumed.accessibilityElement, target.accessibilityElement))
+        } catch {
+            XCTFail("Same-task Resume should use the enabled fresh focused-retained capture: \(error)")
+        }
+        XCTAssertEqual(fallbackCaptures, 1,
+            "Same-task Resume may use one fresh focused-retained capture and still passes the normal validator")
+        XCTAssertEqual(fixture.desktop.keyCount, 1, "Window recovery must never repeat Cmd-N")
+
+        fallbackReturnsUnknownSheet = true
+        XCTAssertThrowsError(try session.validate(taskID: taskID, goal: goal, tools: fixture.tools),
+            "Focused fallback must still pass through the normal unknown-modal rejection")
+        XCTAssertEqual(fallbackCaptures, 2)
+    }
+
+    func testW2FocusedRetainedInventoryFallbackRequiresExactTransientInventoryFailureAndSafariTarget() throws {
+        let pid = pid_t(47_001)
+        let path = "/Applications/Safari.app"
+        let code = ComputerUseApplicationCodeIdentity(authority: .runningCode,
+            bundleIdentifier: "com.apple.Safari", canonicalBundlePath: path,
+            canonicalExecutablePath: "\(path)/Contents/MacOS/Safari",
+            designatedRequirement: "fixture", teamIdentifier: "APPLE", platformIdentifier: nil)
+        let app = try XCTUnwrap(ComputerUseApplicationIdentity(bundleIdentifier: "com.apple.Safari",
+            processIdentifier: pid, launchGeneration: 1, codeIdentity: code))
+        let target = ComputerUseDefaultBrowserSession.Window(id: "retained",
+            application: app, accessibilityElement: AXUIElementCreateApplication(pid + 1),
+            identity: .init(applicationProcessIdentifier: pid, accessibilityWindowHash: 9,
+                bounds: CGRect(x: 1, y: 2, width: 800, height: 600)))
+        func eligible(rootReadable: Bool = false, rootError: AXError? = .cannotComplete,
+                      frontmost: ComputerUseApplicationIdentity? = app, targetPID: pid_t? = pid,
+                      role: String? = "AXWindow", subrole: String? = "AXStandardWindow",
+                      beforeDeadline: Bool = true, enabled: Bool = true) -> Bool {
+            ComputerUseDefaultBrowserSession.isW2FocusedRetainedInventoryFallbackEligible(
+                enabledForTask: enabled, application: app, expectedWindow: target,
+                rootInventoryReadable: rootReadable, rootWindowsError: rootError,
+                frontmostIdentity: frontmost, targetProcessIdentifier: targetPID,
+                targetRole: role, targetSubrole: subrole, withinCaptureDeadline: beforeDeadline)
+        }
+
+        XCTAssertTrue(eligible())
+        XCTAssertFalse(eligible(rootReadable: true), "Readable inventories, including malformed or ambiguous ones, never use the fallback")
+        XCTAssertFalse(eligible(rootError: .invalidUIElement))
+        XCTAssertFalse(eligible(rootError: .noValue))
+        XCTAssertFalse(eligible(frontmost: nil))
+        let otherApp = try XCTUnwrap(ComputerUseApplicationIdentity(
+            bundleIdentifier: "org.example.Other", processIdentifier: pid + 1, launchGeneration: 1,
+            codeIdentity: .init(authority: .runningCode, bundleIdentifier: "org.example.Other",
+                canonicalBundlePath: "/Applications/Other.app",
+                canonicalExecutablePath: "/Applications/Other.app/Contents/MacOS/Other",
+                designatedRequirement: "fixture", teamIdentifier: "TEST", platformIdentifier: nil)))
+        XCTAssertFalse(eligible(frontmost: otherApp))
+        XCTAssertFalse(eligible(targetPID: pid + 1))
+        XCTAssertFalse(eligible(role: "AXDialog", subrole: "AXDialog"))
+        XCTAssertFalse(eligible(role: nil, subrole: nil))
+        XCTAssertFalse(eligible(beforeDeadline: false))
+        XCTAssertFalse(eligible(enabled: false))
     }
 
     func testInitialWindowCreationToleratesStartupMetadataIDChurnForSameAXReferences() async throws {
@@ -3965,6 +4074,7 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                          "drafts-success",
                          "ax-setter-gate-revoked", "ax-setter-postwrite-transient-scope",
                          "ax-setter-delayed-readback", "ax-setter-gate-revoked-after-write",
+                         "return-not-writable-after-write",
                          "ax-setter-cancelled-after-write", "ax-setter-readback-timeout",
                          "ax-setter-unsupported", "ax-setter-changed-authority", "ax-setter-changed-value",
                          "ax-setter-changed-role",
@@ -4116,6 +4226,7 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                                 delayedReads: scenario == "ax-setter-delayed-readback" ? 2
                                     : scenario == "ax-setter-readback-timeout" ? Int.max : 0)
                             if scenario == "ax-setter-changed-role" { graph.forceAddressRoleChange = true }
+                            if scenario == "return-not-writable-after-write" { graph.setWritableOverride(false) }
                         }
                         if scenario == "ax-setter-postwrite-transient-scope" {
                             // Exhaust the existing three-capture validation batch to
@@ -4367,6 +4478,7 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                 XCTAssertEqual(graph.nativeTypeCount, 0)
                 continue
             } else if scenario == "success" || scenario == "animated-chrome" || scenario == "drafts-success"
+                || scenario == "return-not-writable-after-write"
                 || scenario == "return-transient-windows-read" || scenario == "return-transient-value-read"
                 || scenario == "return-field-observation-deadline" {
                 var navigationDiagnostics: [String] = []
@@ -4380,7 +4492,7 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                         if value == "phase=ax_address_value_readback_verified" {
                             switch scenario {
                             case "return-transient-value-read": graph.makeAddressValueUnavailableForReads(1)
-                            case "return-field-observation-deadline": graph.delayNextWritableReads(1, seconds: 0.8)
+                            case "return-field-observation-deadline": graph.delayNextEnabledReads(1, seconds: 0.8)
                             default: break
                             }
                         }
@@ -4391,6 +4503,19 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                 XCTAssertEqual(selectionDispatches, 0, "Whole-value AX replacement does not need keyboard selection")
                 XCTAssertEqual(focusDispatches, 1, "Cmd-L must activate Safari's location editor even when AX focus already names the address field")
                 XCTAssertEqual(nativeNavigationEffects, ["CmdL", "AXSetValue", "Return"])
+                if scenario == "return-not-writable-after-write" {
+                    do {
+                        try await session.navigateRetainedSafariTab(to: destination, taskID: "task-\(scenario)",
+                            goal: "Open the signed-in Gmail inbox.", tools: tools)
+                        XCTFail("A completed address write must not be replayed")
+                    } catch let failure as ComputerUseDefaultBrowserSession.Failure {
+                        XCTAssertEqual(failure, .targetLost)
+                    }
+                    XCTAssertEqual(axValueWrites, 1, "Duplicate invocation must not repeat the AX write")
+                    XCTAssertEqual(focusDispatches, 1, "Duplicate invocation must not repeat Cmd-L")
+                    XCTAssertEqual(returnDispatches, 1, "The original navigation sends one Return")
+                    continue
+                }
                 if scenario == "return-transient-windows-read" || scenario == "return-transient-value-read" {
                     XCTAssertEqual(axValueWrites, 1, "Return preparation must never repeat the URL setter")
                     XCTAssertEqual(focusDispatches, 1, "Return preparation must not repeat Cmd-L")
@@ -7971,6 +8096,7 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
         func session(hasSheets override: Bool? = nil,
                      captureWindowsOverride: ComputerUseDefaultBrowserSession.CaptureWindows? = nil,
                      retainedWindowCapture: ComputerUseDefaultBrowserSession.CaptureRetainedWindow? = nil,
+                     focusedRetainedWindowCapture: ComputerUseDefaultBrowserSession.CaptureFocusedRetainedWindow? = nil,
                      captureDiagnosticProvider: @escaping @MainActor () -> String? = { nil },
                      captureDiagnosticAXErrorProvider: @escaping @MainActor () -> Int? = { nil}) throws -> ComputerUseDefaultBrowserSession {
             let defaultCaptureWindows: ComputerUseDefaultBrowserSession.CaptureWindows = { identity in
@@ -8006,6 +8132,7 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                 launchApplication: { _, beforeOpen in try beforeOpen(); desktop.launchCount += 1; return app },
                 captureWindows: captureWindowsOverride ?? defaultCaptureWindows,
                 captureRetainedWindow: retainedWindowCapture,
+                captureFocusedRetainedWindow: focusedRetainedWindowCapture,
                 captureDiagnosticProvider: captureDiagnosticProvider,
                 captureDiagnosticAXErrorProvider: captureDiagnosticAXErrorProvider)
         }

@@ -301,11 +301,29 @@ final class ComputerUseDefaultBrowserPageReader {
             guard let (identity, root) = access.frontmost(), identity == expectedApplication else { return nil }
             return root
         }
+        var windowInventoryRetryUsed = false
         func listedWindow(_ root: AXUIElement) throws -> Bool {
-            guard let windows = try value(kAXWindowsAttribute as String, root) as? [AXUIElement],
-                  windows.filter({ CFEqual($0, expectedWindow) }).count == 1,
-                  (try string(kAXRoleAttribute as String, expectedWindow)) == "AXWindow" else { return false }
-            return true
+            func confirmsMembership(_ windows: [AXUIElement]) throws -> Bool {
+                guard windows.filter({ CFEqual($0, expectedWindow) }).count == 1,
+                      (try string(kAXRoleAttribute as String, expectedWindow)) == "AXWindow" else { return false }
+                return true
+            }
+            guard let rawWindows = try value(kAXWindowsAttribute as String, root) else {
+                guard !expired, !windowInventoryRetryUsed else { return false }
+                windowInventoryRetryUsed = true
+                try check()
+                guard !expired,
+                      let (identity, freshRoot) = access.frontmost(),
+                      identity == expectedApplication, CFEqual(freshRoot, root) else { return false }
+                try check()
+                guard !expired,
+                      let freshWindows = try value(kAXWindowsAttribute as String, freshRoot) as? [AXUIElement] else {
+                    return false
+                }
+                return try confirmsMembership(freshWindows)
+            }
+            guard let windows = rawWindows as? [AXUIElement] else { return false }
+            return try confirmsMembership(windows)
         }
         func uniqueOuterWebArea(in window: AXUIElement, phase: String) throws -> (AXUIElement?, String?) {
             let inventory = try discoverOuterPages(in: window, value: value, check: check)

@@ -1186,6 +1186,13 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
         let request = try ComputerUseWebUploadJob.Request(provider: provider,
             fileQuery: extraction.fileQuery, destinationFolder: extraction.destinationFolder)
         scope.webUpload = .init(intent: intent, request: request, fileDescription: extraction.fileDescription)
+        do {
+            guard let taskID = scope.taskID, let goal = scope.goal else { throw Failure.taskAlreadyBound }
+            try scope.session.enableW2FocusedRetainedCaptureFallback(taskID: taskID, goal: goal, tools: tools)
+        } catch {
+            scope.webUpload = nil
+            throw error
+        }
         return nil
     }
     private func surfacePendingGmailClarification(_ result: ComputerUseExecutionResult,

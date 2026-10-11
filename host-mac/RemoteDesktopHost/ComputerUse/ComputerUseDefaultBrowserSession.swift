@@ -113,6 +113,8 @@ final class ComputerUseDefaultBrowserSession {
     typealias LaunchApplication = @MainActor (ComputerUseDefaultBrowserTarget.Handler, @escaping @MainActor () throws -> Void) async throws -> ComputerUseApplicationIdentity
     typealias CaptureWindows = @MainActor (ComputerUseApplicationIdentity) throws -> WindowSnapshot
     typealias CaptureRetainedWindow = @MainActor (ComputerUseApplicationIdentity, Window) throws -> WindowSnapshot
+    typealias CaptureFocusedRetainedWindow = @MainActor (ComputerUseApplicationIdentity, Window,
+        @MainActor () throws -> Void) throws -> WindowSnapshot
 
     private final class RunState {
         let taskID: String
@@ -132,6 +134,7 @@ final class ComputerUseDefaultBrowserSession {
         var navigationReturnsCompleted: Set<String> = []
         var stableNavigationRetryConsumed: Set<String> = []
         var stableNavigationRetryPermits: Set<String> = []
+        var allowsW2FocusedRetainedCapture = false
 
         init(taskID: String, goalDigest: String, sessionTaskID: String,
              handler: ComputerUseDefaultBrowserTarget.Handler) {
@@ -160,7 +163,8 @@ final class ComputerUseDefaultBrowserSession {
                 "retained_target_missing_or_ambiguous", "retained_target_pid", "pid", "bounds_read",
                 "bounds_deadline", "bounds_type", "bounds_malformed", "focused_duplicate",
                 "duplicate_id", "duplicate_element", "bounds_ax_read_failure",
-                "startup_role_unclassified", "focused_transient_surface"]
+                "startup_role_unclassified", "focused_transient_surface",
+                "focused_retained_fallback_unverified", "focused_retained_fallback_structure_unreadable"]
             if let token, allowed.contains(token) { reason = token }
             if let field = message.split(separator: " ").first(where: { $0.hasPrefix("ax_error=") }),
                let code = Int(field.dropFirst("ax_error=".count)), (-65_535...65_535).contains(code) {
@@ -178,6 +182,7 @@ final class ComputerUseDefaultBrowserSession {
     private let launchApplication: LaunchApplication
     private let captureWindows: CaptureWindows
     private let captureRetainedWindow: CaptureRetainedWindow?
+    private let captureFocusedRetainedWindow: CaptureFocusedRetainedWindow?
     private let makeStore: (URL) throws -> ComputerUseTaskJournalStore
     private let safariAddressBarAX: SafariAddressBarAXAccess
     private let captureDiagnosticProvider: @MainActor () -> String?
@@ -222,6 +227,11 @@ final class ComputerUseDefaultBrowserSession {
                 captureDiagnosticState.reset()
                 return try Self.captureWindowsForApplication(application, expectedWindow: target,
                     diagnostic: recordDiagnostic)
+            }, captureFocusedRetainedWindow: { application, target, authorizeFallback in
+                captureDiagnosticState.reset()
+                return try Self.captureWindowsForApplication(application, expectedWindow: target,
+                    allowFocusedRetainedInventoryFallback: true,
+                    authorizeFocusedFallback: authorizeFallback, diagnostic: recordDiagnostic)
             }, captureDiagnosticProvider: { captureDiagnosticState.reason },
             captureDiagnosticAXErrorProvider: { captureDiagnosticState.axErrorCode },
             captureDiagnosticElapsedMsProvider: { captureDiagnosticState.elapsedMs },
@@ -235,6 +245,7 @@ final class ComputerUseDefaultBrowserSession {
          safariAddressBarAX: SafariAddressBarAXAccess = .live,
          makeStore: @escaping (URL) throws -> ComputerUseTaskJournalStore = { try .init(directory: $0) },
          captureRetainedWindow: CaptureRetainedWindow? = nil,
+         captureFocusedRetainedWindow: CaptureFocusedRetainedWindow? = nil,
          captureDiagnosticProvider: @escaping @MainActor () -> String? = { nil },
          captureDiagnosticAXErrorProvider: @escaping @MainActor () -> Int? = { nil },
          captureDiagnosticElapsedMsProvider: @escaping @MainActor () -> Int? = { nil },
@@ -244,6 +255,7 @@ final class ComputerUseDefaultBrowserSession {
         self.launchApplication = launchApplication
         self.captureWindows = captureWindows
         self.captureRetainedWindow = captureRetainedWindow
+        self.captureFocusedRetainedWindow = captureFocusedRetainedWindow
         self.safariAddressBarAX = safariAddressBarAX
         self.makeStore = makeStore
         self.captureDiagnosticProvider = captureDiagnosticProvider
@@ -324,7 +336,8 @@ final class ComputerUseDefaultBrowserSession {
         }
         let current: WindowSnapshot
         lastValidationPhaseForDiagnostics = .capture
-        current = try captureForValidation(application: app, target: expected, tools: tools)
+        current = try captureForValidation(application: app, target: expected,
+            taskID: taskID, goalDigest: ComputerUseTextTaskContract.digest(goal), tools: tools)
         lastValidationPhaseForDiagnostics = .target
         guard current.application == app,
               let focused = current.windows.first(where: { $0.id == expected.id }),
@@ -352,6 +365,26 @@ final class ComputerUseDefaultBrowserSession {
         state.currentFileOpenPanel = panel
         state.currentActionBounds = panel?.actionBounds ?? focused.identity.bounds
         lastValidationPhaseForDiagnostics = .complete
+    }
+
+    /// Called only after a typed W2 upload request is validated and assigned to
+    /// its executor scope. The setting belongs to this exact task run and is
+    /// intentionally absent from startup, generic browser, and Gmail sessions.
+    func enableW2FocusedRetainedCaptureFallback(taskID: String, goal: String,
+                                                tools: ComputerUseHostTools) throws {
+        try Task.checkCancellation()
+        try tools.requireActive()
+        let goalDigest = ComputerUseTextTaskContract.digest(goal)
+        guard let state = runState, state.taskID == taskID, state.goalDigest == goalDigest,
+              let app = state.app, let target = state.target,
+              target.application == app,
+              target.identity.applicationProcessIdentifier == app.processIdentifier else {
+            throw Failure.changedTaskOrGoal
+        }
+        try Self.validate(application: app, matches: state.handler)
+        try Task.checkCancellation()
+        try tools.requireActive()
+        state.allowsW2FocusedRetainedCapture = true
     }
 
     /// Navigates through Safari's observed address field using only the
@@ -1012,12 +1045,6 @@ final class ComputerUseDefaultBrowserSession {
         guard ContinuousClock.now < deadline else {
             return .temporarilyUnavailable("return_field_observation_deadline")
         }
-        guard safariAddressBarAX.valueIsSettable(field) else {
-            return .rejected("return_field_not_writable")
-        }
-        guard ContinuousClock.now < deadline else {
-            return .temporarilyUnavailable("return_field_observation_deadline")
-        }
         switch addressFieldRetainedWindowAncestry(field, target: target, deadline: deadline) {
         case .confirmed:
             break
@@ -1205,7 +1232,8 @@ final class ComputerUseDefaultBrowserSession {
         try tools.requireActive()
         let current: WindowSnapshot
         lastValidationPhaseForDiagnostics = .capture
-        current = try captureForValidation(application: app, target: target, tools: tools)
+        current = try captureForValidation(application: app, target: target,
+            taskID: taskID, goalDigest: goalDigest, tools: tools)
         lastValidationPhaseForDiagnostics = .target
         guard current.application == app,
               let focused = current.windows.first(where: { $0.id == target.id }),
@@ -1236,9 +1264,30 @@ final class ComputerUseDefaultBrowserSession {
     }
 
     private func captureForValidation(application: ComputerUseApplicationIdentity,
-                                      target: Window,
+                                      target: Window, taskID: String, goalDigest: String,
                                       tools: ComputerUseHostTools) throws -> WindowSnapshot {
         func capture() throws -> WindowSnapshot {
+            if let state = runState, state.allowsW2FocusedRetainedCapture,
+               state.target.map({ Self.sameWindow($0, target) }) == true,
+               let captureFocusedRetainedWindow {
+                // The W2 capture performs its narrow fallback inside this same
+                // native capture and retains its original four-second deadline.
+                return try captureFocusedRetainedWindow(application, target) {
+                    try Task.checkCancellation()
+                    try tools.requireActive()
+                    guard let state = runState, state.taskID == taskID,
+                          state.goalDigest == goalDigest,
+                          state.allowsW2FocusedRetainedCapture,
+                          state.app == application,
+                          state.target.map({ Self.sameWindow($0, target) }) == true,
+                          try resolveHandler() == state.handler else { throw Failure.targetLost }
+                    try Self.validate(application: application, matches: state.handler)
+                    let frontmost = tools.frontmostApplicationSnapshot()
+                    guard frontmost.identityIsAuthoritative,
+                          let current = frontmost.identity, current == application,
+                          current.codeIdentity == application.codeIdentity else { throw Failure.targetLost }
+                }
+            }
             if let captureRetainedWindow {
                 return try captureRetainedWindow(application, target)
             }
@@ -1520,6 +1569,30 @@ final class ComputerUseDefaultBrowserSession {
         }
         return safariStableWindowID(processIdentifier: application.processIdentifier,
             accessibilityHash: accessibilityHash, safariAXIdentifier: safariAXIdentifier)
+    }
+
+    static func isW2FocusedRetainedInventoryFallbackEligible(
+        enabledForTask: Bool,
+        application: ComputerUseApplicationIdentity,
+        expectedWindow: Window?,
+        rootInventoryReadable: Bool,
+        rootWindowsError: AXError?,
+        frontmostIdentity: ComputerUseApplicationIdentity?,
+        targetProcessIdentifier: pid_t?,
+        targetRole: String?,
+        targetSubrole: String?,
+        withinCaptureDeadline: Bool
+    ) -> Bool {
+        guard enabledForTask, !rootInventoryReadable, rootWindowsError == .cannotComplete,
+              withinCaptureDeadline, application.bundleIdentifier == "com.apple.Safari",
+              let codeIdentity = application.codeIdentity,
+              let frontmostIdentity, frontmostIdentity == application,
+              frontmostIdentity.codeIdentity == codeIdentity,
+              let expectedWindow, expectedWindow.application == application,
+              expectedWindow.identity.applicationProcessIdentifier == application.processIdentifier,
+              targetProcessIdentifier == application.processIdentifier,
+              targetRole == "AXWindow", targetSubrole == "AXStandardWindow" else { return false }
+        return true
     }
 
     private static func parsedSafariWindowUUID(_ identifier: String?) -> UUID? {
@@ -1892,6 +1965,8 @@ final class ComputerUseDefaultBrowserSession {
         _ application: ComputerUseApplicationIdentity,
         expectedWindow: Window? = nil,
         startupDocumentInventory: Bool = false,
+        allowFocusedRetainedInventoryFallback: Bool = false,
+        authorizeFocusedFallback: @MainActor () throws -> Void = {},
         diagnostic: @MainActor (String) -> Void = { _ in }
     ) throws -> WindowSnapshot {
         guard !Task.isCancelled else {
@@ -1917,6 +1992,10 @@ final class ComputerUseDefaultBrowserSession {
         let deadline = ContinuousClock.now.advanced(by: .seconds(4))
         let root = AXUIElementCreateApplication(application.processIdentifier)
         var rootReadAXError: Int?
+        var rootWindowsAXError: AXError?
+        var lastReadAXError: AXError?
+        var focusedRetainedFallbackUsed = false
+        var focusedRetainedFallbackStructureFailed = false
         func read(_ element: AXUIElement, _ attribute: CFString,
                   messagingTimeout: Float? = nil) -> CFTypeRef? {
             guard !Task.isCancelled, ContinuousClock.now < deadline else { return nil }
@@ -1932,11 +2011,17 @@ final class ComputerUseDefaultBrowserSession {
             let readStarted = ContinuousClock.now
             let result = AXUIElementCopyAttributeValue(element, attribute, &value)
             guard result == .success else {
+                lastReadAXError = result
+                if focusedRetainedFallbackUsed,
+                   result != .noValue, result != .attributeUnsupported {
+                    focusedRetainedFallbackStructureFailed = true
+                }
                 let readDuration = readStarted.duration(to: .now).components
                 let elapsedMs = max(0, min(2_000, Int(Double(readDuration.seconds) * 1_000
                     + Double(readDuration.attoseconds) / 1_000_000_000_000_000)))
                 if CFEqual(element, root), attribute == (kAXWindowsAttribute as CFString) {
                     rootReadAXError = Int(result.rawValue)
+                    rootWindowsAXError = result
                     diagnostic("phase=capture_failure reason=windows_read ax_error=\(result.rawValue) elapsed_ms=\(elapsedMs)")
                 } else if CFEqual(element, root), attribute == (kAXFocusedWindowAttribute as CFString) {
                     rootReadAXError = Int(result.rawValue)
@@ -1950,6 +2035,7 @@ final class ComputerUseDefaultBrowserSession {
                 }
                 return nil
             }
+            lastReadAXError = nil
             guard !Task.isCancelled, ContinuousClock.now < deadline else { return nil }
             return value
         }
@@ -1957,19 +2043,56 @@ final class ComputerUseDefaultBrowserSession {
             guard let raw = read(element, attribute), CFGetTypeID(raw) == AXValueGetTypeID() else { return false }
             return AXValueGetValue(raw as! AXValue, type, &result)
         }
-        guard let windowsValue = read(root, kAXWindowsAttribute as CFString) else {
-            if Task.isCancelled { diagnostic("phase=capture_failure reason=capture_cancelled") }
-            else if ContinuousClock.now >= deadline { diagnostic("phase=capture_failure reason=capture_deadline") }
-            else if rootReadAXError == nil { diagnostic("phase=capture_failure reason=windows_read") }
-            throw Failure.targetLost
-        }
-        guard CFGetTypeID(windowsValue) == CFArrayGetTypeID() else {
-            diagnostic("phase=capture_failure reason=windows_malformed")
-            throw Failure.targetLost
-        }
-        guard var elements = windowsValue as? [AXUIElement] else {
-            diagnostic("phase=capture_failure reason=windows_unconvertible")
-            throw Failure.targetLost
+        let windowsValue = read(root, kAXWindowsAttribute as CFString)
+        var elements: [AXUIElement]
+        if let windowsValue {
+            guard CFGetTypeID(windowsValue) == CFArrayGetTypeID() else {
+                diagnostic("phase=capture_failure reason=windows_malformed")
+                throw Failure.targetLost
+            }
+            guard let listed = windowsValue as? [AXUIElement] else {
+                diagnostic("phase=capture_failure reason=windows_unconvertible")
+                throw Failure.targetLost
+            }
+            elements = listed
+        } else {
+            guard allowFocusedRetainedInventoryFallback,
+                  rootWindowsAXError == .cannotComplete,
+                  let expectedWindow,
+                  ContinuousClock.now < deadline else {
+                if Task.isCancelled { diagnostic("phase=capture_failure reason=capture_cancelled") }
+                else if ContinuousClock.now >= deadline { diagnostic("phase=capture_failure reason=capture_deadline") }
+                else if rootReadAXError == nil { diagnostic("phase=capture_failure reason=windows_read") }
+                throw Failure.targetLost
+            }
+            try authorizeFocusedFallback()
+            guard !Task.isCancelled, ContinuousClock.now < deadline,
+                  let currentApp = NSWorkspace.shared.frontmostApplication, !currentApp.isTerminated,
+                  let currentIdentity = ComputerUseApplicationIdentity(runningApplication: currentApp),
+                  currentIdentity == application,
+                  let targetRole = read(expectedWindow.accessibilityElement, kAXRoleAttribute as CFString) as? String,
+                  let targetSubrole = read(expectedWindow.accessibilityElement, kAXSubroleAttribute as CFString) as? String else {
+                diagnostic("phase=capture_failure reason=focused_retained_fallback_unverified")
+                throw Failure.targetLost
+            }
+            var targetPID: pid_t = 0
+            guard AXUIElementGetPid(expectedWindow.accessibilityElement, &targetPID) == .success,
+                  Self.isW2FocusedRetainedInventoryFallbackEligible(
+                    enabledForTask: true, application: application, expectedWindow: expectedWindow,
+                    rootInventoryReadable: false, rootWindowsError: rootWindowsAXError,
+                    frontmostIdentity: currentIdentity, targetProcessIdentifier: targetPID,
+                    targetRole: targetRole, targetSubrole: targetSubrole,
+                    withinCaptureDeadline: ContinuousClock.now < deadline) else {
+                diagnostic("phase=capture_failure reason=focused_retained_fallback_unverified")
+                throw Failure.targetLost
+            }
+            try authorizeFocusedFallback()
+            guard !Task.isCancelled, ContinuousClock.now < deadline else {
+                diagnostic("phase=capture_failure reason=capture_deadline")
+                throw Failure.targetLost
+            }
+            focusedRetainedFallbackUsed = true
+            elements = [expectedWindow.accessibilityElement]
         }
         rootReadAXError = nil
         guard let focusedValue = read(root, kAXFocusedWindowAttribute as CFString) else {
@@ -2000,7 +2123,12 @@ final class ComputerUseDefaultBrowserSession {
         }
         func string(_ element: AXUIElement, _ attribute: CFString,
                     messagingTimeout: Float? = nil) -> String? {
-            read(element, attribute, messagingTimeout: messagingTimeout) as? String
+            guard let raw = read(element, attribute, messagingTimeout: messagingTimeout) else { return nil }
+            guard let value = raw as? String else {
+                if focusedRetainedFallbackUsed { focusedRetainedFallbackStructureFailed = true }
+                return nil
+            }
+            return value
         }
         func safeRole(_ element: AXUIElement) -> String {
             let role = string(element, kAXRoleAttribute as CFString) ?? "unavailable"
@@ -2027,9 +2155,20 @@ final class ComputerUseDefaultBrowserSession {
                   size.width > 0, size.height > 0 else { return (nil, "malformed") }
             return (CGRect(origin: origin, size: size), "ok")
         }
-        func array(_ element: AXUIElement, _ attribute: CFString) -> [AXUIElement] {
-            guard let raw = read(element, attribute), CFGetTypeID(raw) == CFArrayGetTypeID() else { return [] }
-            return raw as? [AXUIElement] ?? []
+        func array(_ element: AXUIElement, _ attribute: CFString,
+                   requiredForFallback: Bool = false) -> [AXUIElement] {
+            guard let raw = read(element, attribute) else {
+                if focusedRetainedFallbackUsed,
+                   (requiredForFallback || (lastReadAXError != .noValue && lastReadAXError != .attributeUnsupported)) {
+                    focusedRetainedFallbackStructureFailed = true
+                }
+                return []
+            }
+            guard CFGetTypeID(raw) == CFArrayGetTypeID(), let values = raw as? [AXUIElement] else {
+                if focusedRetainedFallbackUsed { focusedRetainedFallbackStructureFailed = true }
+                return []
+            }
+            return values
         }
         func bounds(_ element: AXUIElement) -> CGRect? {
             var origin = CGPoint.zero
@@ -2041,8 +2180,11 @@ final class ComputerUseDefaultBrowserSession {
             return CGRect(origin: origin, size: size)
         }
         func parent(_ element: AXUIElement) -> AXUIElement? {
-            guard let raw = read(element, kAXParentAttribute as CFString),
-                  CFGetTypeID(raw) == AXUIElementGetTypeID() else { return nil }
+            guard let raw = read(element, kAXParentAttribute as CFString) else { return nil }
+            guard CFGetTypeID(raw) == AXUIElementGetTypeID() else {
+                if focusedRetainedFallbackUsed { focusedRetainedFallbackStructureFailed = true }
+                return nil
+            }
             return (raw as! AXUIElement)
         }
         func descendants(_ start: AXUIElement, limit: Int = 256) -> [AXUIElement]? {
@@ -2200,7 +2342,8 @@ final class ComputerUseDefaultBrowserSession {
                 hasUnrecognizedSheets = true
             }
             var sheets: [AXUIElement] = []
-            for sheet in axSheets + array(element, kAXChildrenAttribute as CFString)
+            for sheet in axSheets + array(element, kAXChildrenAttribute as CFString,
+                requiredForFallback: focusedRetainedFallbackUsed && isRetainedTarget)
                 where string(sheet, kAXRoleAttribute as CFString) == "AXSheet"
                     && !sheets.contains(where: { CFEqual($0, sheet) }) {
                 sheets.append(sheet)
@@ -2313,6 +2456,10 @@ final class ComputerUseDefaultBrowserSession {
         guard ContinuousClock.now < deadline else {
             diagnostic("phase=capture_failure reason=capture_deadline")
             throw Failure.targetLost
+        }
+        guard !focusedRetainedFallbackStructureFailed else {
+            diagnostic("phase=capture_failure reason=focused_retained_fallback_structure_unreadable")
+            throw Failure.authenticationHandoff
         }
         return WindowSnapshot(application: application, windows: windows,
             focusedWindowID: focusedID, hasSheets: hasSheets, fileOpenPanel: fileOpenPanel,
