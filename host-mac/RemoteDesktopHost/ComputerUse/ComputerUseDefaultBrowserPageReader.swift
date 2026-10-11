@@ -85,15 +85,24 @@ final class ComputerUseDefaultBrowserPageReader {
     }
 
     struct Access {
+        enum MetadataAttributeResult {
+            case value(CFTypeRef)
+            case unavailable
+            case error(AXError)
+        }
+
         let frontmost: () -> (ComputerUseApplicationIdentity, AXUIElement)?
         let read: (String, AXUIElement) -> CFTypeRef?
         let timeout: (AXUIElement, Float) -> Void
+        /// Optional positional results for the four attributes used before
+        /// pruning an outer-page node: role, subrole, hidden, protected.
+        var readOuterMetadata: ((AXUIElement) -> [MetadataAttributeResult]?)? = nil
         /// Optional read-only point hit test. A missing element is unknown;
         /// callers resolve its bounded AX parent chain before using it.
         var hitTestElementAtPoint: (CGPoint) -> AXUIElement? = { _ in nil }
 
         @MainActor static var live: Access {
-            Access(frontmost: {
+            var access = Access(frontmost: {
                 guard let app = NSWorkspace.shared.frontmostApplication,
                       let identity = ComputerUseApplicationIdentity(runningApplication: app),
                       identity.codeIdentity != nil else { return nil }
@@ -113,6 +122,25 @@ final class ComputerUseDefaultBrowserPageReader {
                 }
                 return element
             })
+            access.readOuterMetadata = { element in
+                let names = [kAXRoleAttribute as String, kAXSubroleAttribute as String,
+                    "AXHidden", "AXProtectedContent"]
+                var rawValues: CFArray?
+                guard AXUIElementCopyMultipleAttributeValues(element, names as CFArray, [], &rawValues) == .success,
+                      let rawValues, CFArrayGetCount(rawValues) == names.count else { return nil }
+                return names.indices.map { index in
+                    let raw = unsafeBitCast(CFArrayGetValueAtIndex(rawValues, index), to: CFTypeRef.self)
+                    if CFGetTypeID(raw) == CFNullGetTypeID() { return .unavailable }
+                    if CFGetTypeID(raw) == AXValueGetTypeID(), AXValueGetType(raw as! AXValue) == .axError {
+                        var error: AXError = .success
+                        guard AXValueGetValue(raw as! AXValue, .axError, &error) else { return .error(.failure) }
+                        return error == .noValue || error == .attributeUnsupported
+                            ? .unavailable : .error(error)
+                    }
+                    return .value(raw)
+                }
+            }
+            return access
         }
     }
 
@@ -160,7 +188,9 @@ final class ComputerUseDefaultBrowserPageReader {
 
     private func discoverOuterPages(in root: AXUIElement,
                                     value: (String, AXUIElement) throws -> CFTypeRef?,
-                                    check: () throws -> Void) throws -> OuterPageInventory {
+                                    check: () throws -> Void,
+                                    readOuterMetadata: (AXUIElement) throws -> [Access.MetadataAttributeResult]? = { _ in nil },
+                                    useBatchedMetadata: Bool = false) throws -> OuterPageInventory {
         var pending: [(AXUIElement, Int)] = [(root, 0)]
         var visited: [AXUIElement] = [], pages: [AXUIElement] = [], sheetFrames: [CGRect] = []
         var complete = true
@@ -172,10 +202,49 @@ final class ComputerUseDefaultBrowserPageReader {
             if visited.contains(where: { CFEqual($0, node) }) { continue }
             visited.append(node)
             guard depth <= 16 else { complete = false; otherIncompleteReason = true; continue }
-            let role = try value(kAXRoleAttribute as String, node) as? String ?? ""
-            let subrole = try value(kAXSubroleAttribute as String, node) as? String ?? ""
-            let hidden = (try value("AXHidden", node) as? NSNumber)?.boolValue == true
-            let protected = (try value("AXProtectedContent", node) as? NSNumber)?.boolValue == true
+            let role: String
+            let subrole: String
+            let hidden: Bool
+            let protected: Bool
+            if useBatchedMetadata {
+                guard let values = try readOuterMetadata(node), values.count == 4,
+                      case .value(let rawRole) = values[0], let decodedRole = rawRole as? String,
+                      !decodedRole.isEmpty else {
+                    complete = false
+                    otherIncompleteReason = true
+                    break
+                }
+                func optionalString(_ result: Access.MetadataAttributeResult) -> String? {
+                    switch result {
+                    case .value(let raw): return raw as? String
+                    case .unavailable: return ""
+                    case .error: return nil
+                    }
+                }
+                func optionalBoolean(_ result: Access.MetadataAttributeResult) -> Bool? {
+                    switch result {
+                    case .value(let raw): return (raw as? NSNumber)?.boolValue
+                    case .unavailable: return false
+                    case .error: return nil
+                    }
+                }
+                guard let decodedSubrole = optionalString(values[1]),
+                      let decodedHidden = optionalBoolean(values[2]),
+                      let decodedProtected = optionalBoolean(values[3]) else {
+                    complete = false
+                    otherIncompleteReason = true
+                    break
+                }
+                role = decodedRole
+                subrole = decodedSubrole
+                hidden = decodedHidden
+                protected = decodedProtected
+            } else {
+                role = try value(kAXRoleAttribute as String, node) as? String ?? ""
+                subrole = try value(kAXSubroleAttribute as String, node) as? String ?? ""
+                hidden = (try value("AXHidden", node) as? NSNumber)?.boolValue == true
+                protected = (try value("AXProtectedContent", node) as? NSNumber)?.boolValue == true
+            }
             if role == "AXSecureTextField" || subrole == (kAXSecureTextFieldSubrole as String) || hidden || protected {
                 continue
             }
@@ -710,6 +779,14 @@ final class ComputerUseDefaultBrowserPageReader {
             try check()
             return expired ? nil : result
         }
+        func readOuterMetadataForDiscovery(_ element: AXUIElement) throws -> [Access.MetadataAttributeResult]? {
+            try check()
+            guard !expired, let readOuterMetadata = access.readOuterMetadata else { return nil }
+            access.timeout(element, 0.1)
+            let result = readOuterMetadata(element)
+            try check()
+            return expired ? nil : result
+        }
         func element(_ name: String, _ source: AXUIElement) throws -> AXUIElement? {
             guard let raw = try value(name, source), CFGetTypeID(raw) == AXUIElementGetTypeID() else { return nil }
             return unsafeBitCast(raw, to: AXUIElement.self)
@@ -758,7 +835,10 @@ final class ComputerUseDefaultBrowserPageReader {
         }
         var selectedInventory: OuterPageInventory?
         func discoverOuterWebArea() throws -> AXUIElement? {
-            let inventory = try discoverOuterPages(in: focused, value: value, check: check)
+            let inventory = try discoverOuterPages(in: focused, value: value, check: check,
+                readOuterMetadata: readOuterMetadataForDiscovery,
+                useBatchedMetadata: (mode == .webUploadControls || mode == .webUploadListing)
+                    && access.readOuterMetadata != nil)
             guard inventory.complete else { markIncomplete("outer_page_incomplete"); return nil }
             selectedInventory = inventory
             return try selectOuterPage(from: inventory, window: focused, value: value, check: check)

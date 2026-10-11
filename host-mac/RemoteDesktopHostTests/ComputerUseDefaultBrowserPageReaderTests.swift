@@ -925,6 +925,89 @@ final class ComputerUseDefaultBrowserPageReaderTests: XCTestCase {
         XCTAssertLessThan(ProcessInfo.processInfo.systemUptime - standardStarted, 1.0)
     }
 
+    func testWebUploadOuterMetadataBatchToleratesColdInventoryAndKeepsPruning() throws {
+        let graph = PageAXGraph()
+        graph.makePage()
+        let containers = (0..<28).map { index -> AXUIElement in
+            let key = "metadata-container-\(index)"
+            let node = graph.element(key)
+            graph.set(key, kAXRoleAttribute, "AXGroup" as NSString)
+            graph.set(key, kAXChildrenAttribute, [] as CFArray)
+            return node
+        }
+        let hidden = graph.element("batch-hidden")
+        graph.set("batch-hidden", kAXRoleAttribute, "AXGroup" as NSString)
+        graph.set("batch-hidden", "AXHidden", kCFBooleanTrue)
+        graph.set("batch-hidden", kAXChildrenAttribute, [graph.element("batch-hidden-secret")] as CFArray)
+        graph.set("batch-hidden-secret", kAXRoleAttribute, "AXStaticText" as NSString)
+        graph.set("batch-hidden-secret", kAXValueAttribute, "hidden batch secret" as NSString)
+        let protected = graph.element("batch-protected")
+        graph.set("batch-protected", kAXRoleAttribute, "AXGroup" as NSString)
+        graph.set("batch-protected", "AXProtectedContent", kCFBooleanTrue)
+        graph.set("batch-protected", kAXChildrenAttribute, [graph.element("batch-protected-secret")] as CFArray)
+        graph.set("batch-protected-secret", kAXRoleAttribute, "AXStaticText" as NSString)
+        graph.set("batch-protected-secret", kAXValueAttribute, "protected batch secret" as NSString)
+        graph.set("window", kAXChildrenAttribute,
+            ([graph.element("web")] + containers + [hidden, protected]) as CFArray)
+
+        let metadataNames = [kAXRoleAttribute as String, kAXSubroleAttribute as String,
+            "AXHidden", "AXProtectedContent"]
+        graph.afterRead = { node, attribute in
+            guard node.hasPrefix("metadata-container-"), metadataNames.contains(attribute) else { return }
+            Thread.sleep(forTimeInterval: 0.010)
+        }
+        var access = graph.access
+        enum BatchFailure { case none, malformed, axError }
+        var batchFailure = BatchFailure.none
+        access.readOuterMetadata = { node in
+            let nodeName = graph.nodeName(for: node)
+            if nodeName?.hasPrefix("metadata-container-") == true {
+                Thread.sleep(forTimeInterval: 0.010)
+            }
+            if nodeName == "metadata-container-0" {
+                switch batchFailure {
+                case .malformed: return []
+                case .axError:
+                    return [.error(.cannotComplete), .unavailable, .unavailable, .unavailable]
+                case .none: break
+                }
+            }
+            return metadataNames.map { attribute in
+                if let value = graph.metadataValue(node, attribute: attribute) {
+                    return .value(value)
+                }
+                return .unavailable
+            }
+        }
+
+        let reader = ComputerUseDefaultBrowserPageReader(access: access)
+        let started = ProcessInfo.processInfo.systemUptime
+        let observation = try XCTUnwrap(reader.read(window: graph.window, application: graph.identity,
+            mayAct: { true }, mode: .webUploadControls),
+            "Batched outer metadata should fit the existing W2 deadline under accumulated short IPC latency")
+        let elapsed = ProcessInfo.processInfo.systemUptime - started
+        XCTAssertEqual(observation.url, "https://drive.google.com/drive/my-drive")
+        XCTAssertTrue(observation.webUploadControlsComplete)
+        XCTAssertLessThan(elapsed, 2.0)
+        XCTAssertFalse(graph.reads.contains { $0 == ("batch-hidden", kAXChildrenAttribute as String) })
+        XCTAssertFalse(graph.reads.contains { $0 == ("batch-protected", kAXChildrenAttribute as String) })
+        XCTAssertFalse(graph.reads.contains { $0 == ("batch-hidden-secret", kAXValueAttribute as String) })
+        XCTAssertFalse(graph.reads.contains { $0 == ("batch-protected-secret", kAXValueAttribute as String) })
+
+        for failure in [BatchFailure.malformed, .axError] {
+            batchFailure = failure
+            let readStart = graph.reads.count
+            let failedReader = ComputerUseDefaultBrowserPageReader(access: access)
+            XCTAssertNil(try failedReader.read(window: graph.window, application: graph.identity,
+                mayAct: { true }, mode: .webUploadControls),
+                "Malformed or transient-error metadata must fail closed without serial fallback")
+            let failedReads = graph.reads.dropFirst(readStart)
+            XCTAssertFalse(failedReads.contains { $0.0 == "metadata-container-0" })
+            XCTAssertFalse(failedReads.contains { $0.0 == "batch-hidden" || $0.0 == "batch-protected"
+                || $0.0 == "batch-hidden-secret" || $0.0 == "batch-protected-secret" })
+        }
+    }
+
     func testObservationCarriesExactStaticTextAndControlLabelsFromOuterPage() throws {
         let graph = PageAXGraph()
         graph.makePage(text: "Current destination entry")
@@ -2167,6 +2250,15 @@ private final class PageAXGraph {
         let value = AXUIElementCreateApplication(pid_t(93_100 + (refs.count * 2)))
         refs[key] = value
         return value
+    }
+
+    func nodeName(for element: AXUIElement) -> String? {
+        refs.first(where: { CFEqual($0.value, element) })?.key
+    }
+
+    func metadataValue(_ element: AXUIElement, attribute: String) -> CFTypeRef? {
+        guard let node = nodeName(for: element) else { return nil }
+        return attrs[node]?[attribute]
     }
 
     func set(_ node: String, _ attribute: String, _ value: CFTypeRef) { attrs[node, default: [:]][attribute] = value }
