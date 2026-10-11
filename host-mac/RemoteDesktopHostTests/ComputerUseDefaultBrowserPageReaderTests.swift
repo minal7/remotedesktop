@@ -1698,6 +1698,44 @@ final class ComputerUseDefaultBrowserPageReaderTests: XCTestCase {
         XCTAssertEqual(wrongRole.windowInventoryReadCount, 1, "A readable role mismatch is not retried")
     }
 
+    func testRetainedPageURLAllowsSlowInventoryWithinSharedDeadline() throws {
+        let graph = PageAXGraph()
+        graph.makePage()
+        graph.windowInventoryLatency = 0.15
+
+        let url = try ComputerUseDefaultBrowserPageReader(access: graph.access)
+            .readRetainedPageURL(window: graph.window, application: graph.identity, mayAct: { true })
+
+        XCTAssertEqual(url, "https://drive.google.com/drive/my-drive",
+            "A 150ms AXWindows IPC should succeed with the targeted inventory timeout")
+        XCTAssertEqual(graph.windowInventoryReadCount, 2,
+            "The exact retained window must still be confirmed at both proof boundaries")
+        XCTAssertTrue(graph.windowInventoryTimeouts.allSatisfy { $0 <= 0.5 },
+            "The inventory read remains within the measured per-call cap")
+
+        let tooSlow = PageAXGraph()
+        tooSlow.makePage()
+        tooSlow.windowInventoryLatency = 0.4
+        XCTAssertNil(try ComputerUseDefaultBrowserPageReader(access: tooSlow.access)
+            .readRetainedPageURL(window: tooSlow.window, application: tooSlow.identity, mayAct: { true }),
+            "Two slow inventory reads must still fail under the shared 750ms proof deadline")
+        XCTAssertLessThanOrEqual(tooSlow.windowInventoryReadCount, 3)
+
+        let paused = PageAXGraph()
+        paused.makePage()
+        var mayAct = true
+        paused.afterRead = { node, attribute in
+            if node == "root", attribute == (kAXWindowsAttribute as String) { mayAct = false }
+        }
+        do {
+            _ = try ComputerUseDefaultBrowserPageReader(access: paused.access)
+                .readRetainedPageURL(window: paused.window, application: paused.identity, mayAct: { mayAct })
+            XCTFail("A revoked task gate must stop the read")
+        } catch ComputerUseHostTools.ToolError.paused { }
+        XCTAssertEqual(paused.windowInventoryReadCount, 1,
+            "A revoked gate after the first inventory must prevent the second proof read")
+    }
+
     func testRetainedPageURLStopsWhenPausedOrCancelled() async throws {
         let graph = PageAXGraph(); graph.makePage()
         let reader = ComputerUseDefaultBrowserPageReader(access: graph.access)
@@ -1717,6 +1755,242 @@ final class ComputerUseDefaultBrowserPageReaderTests: XCTestCase {
             XCTFail("A cancelled task must not read retained page metadata")
         } catch is CancellationError { }
     }
+
+    func testDriveDetailsObservationReadsOnlyTheUniqueSelectedDetailsFrame() throws {
+        let filename = "Acceptance Detail.pptx"
+        let graph = makeDriveDetailsGraph(filename: filename)
+        let reader = ComputerUseDefaultBrowserPageReader(access: graph.access)
+
+        let ordinary = try XCTUnwrap(reader.read(window: graph.window, application: graph.identity,
+            mayAct: { true }))
+        XCTAssertFalse(ordinary.exactTextValues.contains("Size\u{00A0} 8 KB"),
+            "Ordinary page reads continue to omit nested iframe content")
+
+        let details = try XCTUnwrap(reader.readDriveDetails(window: graph.window, application: graph.identity,
+            expectedFileName: filename, mayAct: { true }),
+            "The dedicated bounded read must expose the selected Drive Details iframe")
+        XCTAssertTrue(details.complete)
+        XCTAssertEqual(details.documentRoute, "https://drive.google.com/odp/embed",
+            "The opaque embedded-document query must not escape the reader")
+        XCTAssertTrue(details.exactTextValues.contains(filename))
+        XCTAssertEqual(details.exactTextValues.filter { $0 == filename }.count, 1,
+            "The selected filename must not be duplicated by outer and embedded values")
+        XCTAssertTrue(details.exactTextValues.contains("Size\u{00A0} 8 KB"))
+        XCTAssertTrue(details.exactTextValues.contains("My Drive, show location in the list of files."))
+        XCTAssertFalse(details.documentRoute.contains("?"))
+        XCTAssertTrue(graph.writes.isEmpty)
+
+        for (otherName, typeLabel) in [("Acceptance Sheet.xlsx", "Microsoft Excel"),
+                                       ("Acceptance Document.pdf", "PDF document")] {
+            let otherGraph = makeDriveDetailsGraph(filename: otherName, fileTypeLabel: typeLabel)
+            let otherReader = ComputerUseDefaultBrowserPageReader(access: otherGraph.access)
+            let otherDetails = try XCTUnwrap(otherReader.readDriveDetails(window: otherGraph.window,
+                application: otherGraph.identity, expectedFileName: otherName, mayAct: { true }))
+            XCTAssertTrue(otherDetails.complete, otherName)
+            XCTAssertEqual(otherDetails.exactTextValues.filter { $0 == otherName }.count, 1, otherName)
+        }
+    }
+
+    func testDriveDetailsObservationStopsOnAuthorityLossAndIncompleteReads() throws {
+        let filename = "Acceptance Detail.pptx"
+
+        let missingURL = makeDriveDetailsGraph(filename: filename)
+        missingURL.remove("details-webarea", "AXURL" as CFString)
+        XCTAssertNil(try ComputerUseDefaultBrowserPageReader(access: missingURL.access)
+            .readDriveDetails(window: missingURL.window, application: missingURL.identity,
+                expectedFileName: filename, mayAct: { true }), "missing embedded URL")
+
+        let oversized = makeDriveDetailsGraph(filename: filename)
+        let extraDetails = (0..<70).map { index -> AXUIElement in
+            let key = "details-extra-\(index)"
+            let node = oversized.element(key)
+            oversized.set(key, kAXRoleAttribute, "AXStaticText" as NSString)
+            oversized.set(key, kAXValueAttribute, "Extra detail \(index)" as NSString)
+            return node
+        }
+        let listed = [oversized.element("details-size"), oversized.element("details-storage-used"),
+                      oversized.element("details-location")] + extraDetails
+        oversized.set("file-details-list", kAXChildrenAttribute, listed as CFArray)
+        XCTAssertNil(try ComputerUseDefaultBrowserPageReader(access: oversized.access)
+            .readDriveDetails(window: oversized.window, application: oversized.identity,
+                expectedFileName: filename, mayAct: { true }), "oversized required details list")
+
+        for changedAuthority in ["application", "focused-window"] {
+            let graph = makeDriveDetailsGraph(filename: filename)
+            graph.afterRead = { node, attribute in
+                guard node == "details-size", attribute == (kAXValueAttribute as String) else { return }
+                if changedAuthority == "application" { graph.frontmostIdentity = graph.otherIdentity }
+                else { graph.focusedWindow = graph.otherWindow }
+            }
+            XCTAssertNil(try ComputerUseDefaultBrowserPageReader(access: graph.access)
+                .readDriveDetails(window: graph.window, application: graph.identity,
+                    expectedFileName: filename, mayAct: { true }), changedAuthority)
+        }
+
+        let paused = makeDriveDetailsGraph(filename: filename)
+        var mayAct = true
+        paused.afterRead = { node, attribute in
+            if node == "details-size", attribute == (kAXValueAttribute as String) { mayAct = false }
+        }
+        do {
+            _ = try ComputerUseDefaultBrowserPageReader(access: paused.access)
+                .readDriveDetails(window: paused.window, application: paused.identity,
+                    expectedFileName: filename, mayAct: { mayAct })
+            XCTFail("A pause during the embedded read must stop it")
+        } catch ComputerUseHostTools.ToolError.paused { }
+        XCTAssertEqual(paused.reads.last?.0, "details-size")
+        XCTAssertEqual(paused.reads.last?.1, kAXValueAttribute as String,
+            "No further AX reads may occur after the pause is observed")
+    }
+
+    func testDriveDetailsObservationRejectsUnboundOrAmbiguousFrames() throws {
+        let filename = "Acceptance Detail.pptx"
+        for scenario in ["wrong-origin", "wrong-path", "duplicate-pane", "duplicate-frame",
+                         "unbound-frame", "duplicate-row", "unselected-row", "missing-row",
+                         "missing-file-details", "changed-page"] {
+            let graph = makeDriveDetailsGraph(filename: filename, scenario: scenario)
+            let reader = ComputerUseDefaultBrowserPageReader(access: graph.access)
+            XCTAssertNil(try reader.readDriveDetails(window: graph.window, application: graph.identity,
+                expectedFileName: filename, mayAct: { true }), scenario)
+            XCTAssertTrue(graph.writes.isEmpty, scenario)
+        }
+    }
+
+    private func makeDriveDetailsGraph(filename: String, fileTypeLabel: String? = nil,
+                                       scenario: String = "valid") -> PageAXGraph {
+        let graph = PageAXGraph()
+        graph.makePage()
+        let searchURL = try! XCTUnwrap(ComputerUseWebUploadJob.driveTitleSearchURL(filename: filename))
+        graph.set("web", "AXURL", searchURL.absoluteString as NSString)
+
+        let table = graph.element("drive-table")
+        let row = graph.element("drive-row")
+        let nameCell = graph.element("drive-name-cell")
+        let name = graph.element("drive-name")
+        let locationCell = graph.element("drive-location-cell")
+        let location = graph.element("drive-location")
+        for (key, role) in [("drive-table", "AXTable"), ("drive-row", "AXRow"),
+                            ("drive-name-cell", "AXCell"), ("drive-location-cell", "AXCell"),
+                            ("drive-name", "AXStaticText"), ("drive-location", "AXStaticText")] {
+            graph.set(key, kAXRoleAttribute, role as NSString)
+        }
+        graph.set("drive-name", kAXValueAttribute, filename as NSString)
+        graph.set("drive-location", kAXValueAttribute, "My Drive" as NSString)
+        graph.set("drive-row", "AXSelected", NSNumber(value: scenario != "unselected-row"))
+        graph.set("drive-table", kAXChildrenAttribute, [row] as CFArray)
+        graph.set("drive-row", kAXChildrenAttribute, [nameCell, locationCell] as CFArray)
+        graph.set("drive-name-cell", kAXChildrenAttribute, [name] as CFArray)
+        graph.set("drive-location-cell", kAXChildrenAttribute, [location] as CFArray)
+
+        let pane = graph.element("details-pane")
+        let heading = graph.element("details-heading")
+        let scroll = graph.element("details-scroll")
+        let embedded = graph.element("details-webarea")
+        let detailsGroup = graph.element("details-group")
+        let fileDetails = graph.element("file-details-group")
+        let fileDetailsList = graph.element("file-details-list")
+        graph.set("details-pane", kAXRoleAttribute, "AXGroup" as NSString)
+        graph.set("details-pane", kAXTitleAttribute, "Details Pane" as NSString)
+        graph.set("details-pane", kAXDescriptionAttribute, "Details Pane" as NSString)
+        graph.set("details-heading", kAXRoleAttribute, "AXHeading" as NSString)
+        let inferredType = fileTypeLabel ?? (filename.hasSuffix(".xlsx") ? "Microsoft Excel"
+            : filename.hasSuffix(".pdf") ? "PDF document" : "Microsoft PowerPoint")
+        graph.set("details-heading", kAXTitleAttribute, "\(inferredType) \(filename)" as NSString)
+        graph.set("details-heading", kAXValueAttribute, NSNumber(value: 2))
+        let hideDetails = graph.element("hide-details")
+        graph.set("hide-details", kAXRoleAttribute, "AXButton" as NSString)
+        graph.set("hide-details", kAXTitleAttribute, "Hide Details" as NSString)
+        graph.set("details-scroll", kAXRoleAttribute, "AXScrollArea" as NSString)
+        graph.set("details-webarea", kAXRoleAttribute, "AXWebArea" as NSString)
+        let detailsRoute: String
+        switch scenario {
+        case "wrong-origin": detailsRoute = "https://example.com/odp/embed"
+        case "wrong-path": detailsRoute = "https://drive.google.com/drive/file"
+        default: detailsRoute = "https://drive.google.com/odp/embed"
+        }
+        graph.set("details-webarea", "AXURL", "\(detailsRoute)?private-query-must-not-escape" as NSString)
+        graph.set("details-group", kAXRoleAttribute, "AXGroup" as NSString)
+        graph.set("details-group", kAXTitleAttribute, "Details" as NSString)
+        graph.set("file-details-group", kAXRoleAttribute, "AXGroup" as NSString)
+        graph.set("file-details-group", kAXTitleAttribute, "File details" as NSString)
+        graph.set("file-details-list", kAXRoleAttribute, "AXList" as NSString)
+        graph.set("file-details-list", kAXTitleAttribute, "File details" as NSString)
+
+        let openFile = graph.element("details-open-file")
+        let fileImage = graph.element("details-file-image")
+        graph.set("details-open-file", kAXRoleAttribute, "AXLink" as NSString)
+        graph.set("details-open-file", kAXTitleAttribute, "Open \(filename)" as NSString)
+        graph.set("details-open-file", kAXChildrenAttribute, [fileImage] as CFArray)
+        graph.set("details-file-image", kAXRoleAttribute, "AXImage" as NSString)
+        graph.set("details-file-image", kAXDescriptionAttribute, filename as NSString)
+
+        let size = graph.element("details-size")
+        let used = graph.element("details-storage-used")
+        let detailsLocation = graph.element("details-location")
+        for (key, value) in [("details-size", "Size\u{00A0} 8 KB"),
+                             ("details-storage-used", "Storage used\u{00A0} 8 KB"),
+                             ("details-location", "My Drive, show location in the list of files.")] {
+            graph.set(key, kAXRoleAttribute, "AXStaticText" as NSString)
+            graph.set(key, kAXValueAttribute, value as NSString)
+        }
+        graph.set("file-details-list", kAXChildrenAttribute, [size, used, detailsLocation] as CFArray)
+        graph.set("file-details-group", kAXChildrenAttribute,
+            scenario == "missing-file-details" ? [] as CFArray : [fileDetailsList] as CFArray)
+        graph.set("details-group", kAXChildrenAttribute, [openFile, fileDetails] as CFArray)
+        graph.set("details-webarea", kAXChildrenAttribute, [detailsGroup] as CFArray)
+        var embeddedFrames: [AXUIElement] = scenario == "unbound-frame" ? [] : [embedded]
+        if scenario == "duplicate-frame" {
+            let duplicateFrame = graph.element("duplicate-details-webarea")
+            graph.set("duplicate-details-webarea", kAXRoleAttribute, "AXWebArea" as NSString)
+            graph.set("duplicate-details-webarea", "AXURL",
+                "https://drive.google.com/odp/embed?another-private-query" as NSString)
+            graph.set("duplicate-details-webarea", kAXChildrenAttribute, [detailsGroup] as CFArray)
+            embeddedFrames.append(duplicateFrame)
+        }
+        graph.set("details-scroll", kAXChildrenAttribute, embeddedFrames as CFArray)
+        graph.set("details-pane", kAXChildrenAttribute, [heading, hideDetails, scroll] as CFArray)
+
+        let toolbarHide = graph.element("toolbar-hide-details")
+        graph.set("toolbar-hide-details", kAXRoleAttribute, "AXButton" as NSString)
+        graph.set("toolbar-hide-details", kAXTitleAttribute, "Hide details (⌥V then D)" as NSString)
+        var pageChildren: [AXUIElement] = [table, toolbarHide, pane]
+        if scenario == "duplicate-row" {
+            let duplicate = graph.element("duplicate-drive-row")
+            let duplicateCell = graph.element("duplicate-name-cell")
+            let duplicateName = graph.element("duplicate-drive-name")
+            graph.set("duplicate-drive-row", kAXRoleAttribute, "AXRow" as NSString)
+            graph.set("duplicate-name-cell", kAXRoleAttribute, "AXCell" as NSString)
+            graph.set("duplicate-drive-name", kAXRoleAttribute, "AXStaticText" as NSString)
+            graph.set("duplicate-drive-name", kAXValueAttribute, filename as NSString)
+            graph.set("duplicate-name-cell", kAXChildrenAttribute, [duplicateName] as CFArray)
+            graph.set("duplicate-drive-row", kAXChildrenAttribute, [duplicateCell] as CFArray)
+            graph.set("drive-table", kAXChildrenAttribute, [row, duplicate] as CFArray)
+        } else if scenario == "missing-row" {
+            graph.set("drive-name", kAXValueAttribute, "Other.pptx" as NSString)
+        } else if scenario == "duplicate-pane" {
+            let duplicatePane = graph.element("duplicate-details-pane")
+            graph.set("duplicate-details-pane", kAXRoleAttribute, "AXGroup" as NSString)
+            graph.set("duplicate-details-pane", kAXTitleAttribute, "Details Pane" as NSString)
+            pageChildren.append(duplicatePane)
+        } else if scenario == "unbound-frame" {
+            let unboundFrame = graph.element("unbound-details-webarea")
+            graph.set("unbound-details-webarea", kAXRoleAttribute, "AXWebArea" as NSString)
+            graph.set("unbound-details-webarea", "AXURL",
+                "https://drive.google.com/odp/embed?unbound-private-query" as NSString)
+            graph.set("unbound-details-webarea", kAXChildrenAttribute, [detailsGroup] as CFArray)
+            pageChildren.append(unboundFrame)
+        }
+        graph.set("web", kAXChildrenAttribute, pageChildren as CFArray)
+        if scenario == "changed-page" {
+            var changed = false
+            graph.afterRead = { node, attribute in
+                guard !changed, node == "web", attribute == "AXURL" else { return }
+                changed = true
+                graph.set("web", "AXURL", "https://drive.google.com/drive/my-drive" as NSString)
+            }
+        }
+        return graph
+    }
 }
 
 @MainActor
@@ -1728,6 +2002,9 @@ private final class PageAXGraph {
     var afterRead: ((String, String) -> Void)?
     var windowInventoryNilReads: Set<Int> = []
     var windowInventoryReadCount = 0
+    var windowInventoryLatency: TimeInterval = 0
+    var windowInventoryTimeout: Float = 0.1
+    var windowInventoryTimeouts: [Float] = []
     var onHitTest: (() -> Void)?
     var didReplace = false
     var hitTestElement: AXUIElement?
@@ -1799,13 +2076,21 @@ private final class PageAXGraph {
             if node == "root", attr == (kAXFocusedWindowAttribute as String) { result = focusedWindow }
             else if node == "root", attr == (kAXWindowsAttribute as String) {
                 windowInventoryReadCount += 1
-                result = windowInventoryNilReads.contains(windowInventoryReadCount)
-                    ? nil : attrs[node]?[attr]
+                windowInventoryTimeouts.append(windowInventoryTimeout)
+                if windowInventoryNilReads.contains(windowInventoryReadCount)
+                    || TimeInterval(windowInventoryTimeout) < windowInventoryLatency {
+                    result = nil
+                } else {
+                    if windowInventoryLatency > 0 { Thread.sleep(forTimeInterval: windowInventoryLatency) }
+                    result = attrs[node]?[attr]
+                }
             }
             else { result = attrs[node]?[attr] }
             afterRead?(node, attr)
             return result
-        }, timeout: { _, _ in }, hitTestElementAtPoint: { [self] _ in
+        }, timeout: { [self] element, duration in
+            if CFEqual(element, self.element("root")) { windowInventoryTimeout = duration }
+        }, hitTestElementAtPoint: { [self] _ in
             let result = hitTestElements.isEmpty ? hitTestElement
                 : hitTestElements[min(hitTestCount, hitTestElements.count - 1)]
             hitTestCount += 1

@@ -286,7 +286,8 @@ final class CoreJobAcceptanceTests: XCTestCase {
             "capture_cancelled", "final_frontmost_unavailable", "final_frontmost_changed",
             "bounds_read", "bounds_deadline", "bounds_type", "bounds_malformed",
             "startup_role_unclassified", "focused_transient_surface",
-            "focused_retained_fallback_unverified", "focused_retained_fallback_structure_unreadable"] {
+            "focused_retained_fallback_unverified", "focused_retained_metadata_read",
+            "focused_retained_fallback_structure_unreadable"] {
             XCTAssertEqual(Self.sanitizedSessionCaptureReason(reason), reason)
         }
         for rejected in ["https://mail.google.com/", "recipient@example.com", "phase=capture_failure", "unknown"] {
@@ -1993,7 +1994,7 @@ final class CoreJobAcceptanceTests: XCTestCase {
             "bounds_deadline", "bounds_type", "bounds_malformed", "focused_duplicate", "duplicate_id",
             "duplicate_element", "bounds_ax_read_failure", "startup_role_unclassified",
             "focused_transient_surface", "focused_retained_fallback_unverified",
-            "focused_retained_fallback_structure_unreadable"]
+            "focused_retained_metadata_read", "focused_retained_fallback_structure_unreadable"]
         guard let raw, allowed.contains(raw) else { return nil }
         return raw
     }
@@ -2583,6 +2584,14 @@ final class CoreJobAcceptanceTests: XCTestCase {
             return
         }
         upload["executor_captured"] = true
+        // Retain the host-established window identity even on a failed run so
+        // acceptance cleanup can close only its own window after testing stops.
+        if let owned = executor.retainedWindowForDiagnostics,
+           owned.application.bundleIdentifier == "com.apple.Safari",
+           owned.id.range(of: #"^[0-9]{1,10}:safari-uuid:[0-9a-f-]{36}$"#,
+               options: .regularExpression) != nil {
+            upload["task_owned_window_id"] = owned.id
+        }
         upload["site_dispatch_count"] = executor.webUploadDispatchCountForDiagnostics
         upload["open_dispatch_count"] = executor.webUploadOpenDispatchCountForDiagnostics
         upload["upload_control_dispatch_count"] = executor.webUploadDispatchCountForDiagnostics
@@ -2645,7 +2654,15 @@ final class CoreJobAcceptanceTests: XCTestCase {
         upload["page_truncated"] = page.truncated
         if provider == "drive", let query = ComputerUseWebUploadJob.driveTitleSearchQuery(filename: name) {
             upload["search_field_values"] = page.formFieldValues.map(\.value).filter { $0 == query }
-            upload["details_text_values"] = page.exactTextValues.filter { value in
+            // Independently reread provider-owned Details content; do not use
+            // the executor's cached verification or completion claim.
+            let details = try? reader.readDriveDetails(window: retained.accessibilityElement,
+                application: retained.application, expectedFileName: name,
+                mayAct: { !Task.isCancelled })
+            let detailValues: [String]
+            if let details, details.complete { detailValues = details.exactTextValues }
+            else { detailValues = page.exactTextValues }
+            upload["details_text_values"] = detailValues.filter { value in
                 let normalized = value.replacingOccurrences(of: "\u{00A0}", with: " ")
                     .trimmingCharacters(in: .whitespacesAndNewlines)
                 return value == name || normalized == "Location"

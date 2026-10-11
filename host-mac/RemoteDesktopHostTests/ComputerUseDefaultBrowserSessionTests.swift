@@ -555,7 +555,7 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
         XCTAssertEqual(fallbackCaptures, 2)
     }
 
-    func testW2FocusedRetainedInventoryFallbackRequiresExactTransientInventoryFailureAndSafariTarget() throws {
+    func testW2FocusedRetainedCaptureRequiresExactSafariTargetAndTaskGate() throws {
         let pid = pid_t(47_001)
         let path = "/Applications/Safari.app"
         let code = ComputerUseApplicationCodeIdentity(authority: .runningCode,
@@ -568,21 +568,16 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
             application: app, accessibilityElement: AXUIElementCreateApplication(pid + 1),
             identity: .init(applicationProcessIdentifier: pid, accessibilityWindowHash: 9,
                 bounds: CGRect(x: 1, y: 2, width: 800, height: 600)))
-        func eligible(rootReadable: Bool = false, rootError: AXError? = .cannotComplete,
-                      frontmost: ComputerUseApplicationIdentity? = app, targetPID: pid_t? = pid,
+        func eligible(frontmost: ComputerUseApplicationIdentity? = app, targetPID: pid_t? = pid,
                       role: String? = "AXWindow", subrole: String? = "AXStandardWindow",
                       beforeDeadline: Bool = true, enabled: Bool = true) -> Bool {
-            ComputerUseDefaultBrowserSession.isW2FocusedRetainedInventoryFallbackEligible(
+            ComputerUseDefaultBrowserSession.isW2FocusedRetainedCaptureEligible(
                 enabledForTask: enabled, application: app, expectedWindow: target,
-                rootInventoryReadable: rootReadable, rootWindowsError: rootError,
                 frontmostIdentity: frontmost, targetProcessIdentifier: targetPID,
                 targetRole: role, targetSubrole: subrole, withinCaptureDeadline: beforeDeadline)
         }
 
         XCTAssertTrue(eligible())
-        XCTAssertFalse(eligible(rootReadable: true), "Readable inventories, including malformed or ambiguous ones, never use the fallback")
-        XCTAssertFalse(eligible(rootError: .invalidUIElement))
-        XCTAssertFalse(eligible(rootError: .noValue))
         XCTAssertFalse(eligible(frontmost: nil))
         let otherApp = try XCTUnwrap(ComputerUseApplicationIdentity(
             bundleIdentifier: "org.example.Other", processIdentifier: pid + 1, launchGeneration: 1,
@@ -4065,6 +4060,7 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
         let inboxDestination = try XCTUnwrap(URL(string: "https://mail.google.com/mail/u/0/#inbox"))
 
         for scenario in ["success", "animated-chrome", "uncertain-ax-write", "uncertain-native-return",
+                         "w2-postwrite-capture-overrun", "w2-postwrite-transient-metadata",
                          "return-transient-value-read", "return-transient-windows-read",
                          "return-transient-parent-read", "return-readable-parent-changed",
                          "return-field-observation-deadline",
@@ -4082,7 +4078,9 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                          "ax-setter-error-applied-gate-revoked-after-write",
                          "ax-setter-error-applied-cancelled-after-write", "ax-setter-partial"] {
             let destination = scenario == "drafts-success"
-                ? try XCTUnwrap(URL(string: "https://mail.google.com/mail/u/0/#drafts")) : inboxDestination
+                ? try XCTUnwrap(URL(string: "https://mail.google.com/mail/u/0/#drafts"))
+                : (scenario == "w2-postwrite-capture-overrun" || scenario == "w2-postwrite-transient-metadata")
+                    ? ComputerUseWebUploadJob.Provider.googleDrive.homeURL : inboxDestination
             let root = FileManager.default.temporaryDirectory
                 .appendingPathComponent("SafariNativeURLTyping-\(UUID().uuidString)", isDirectory: true)
             defer { try? FileManager.default.removeItem(at: root) }
@@ -4114,8 +4112,11 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
             var nativeNavigationEffects: [String] = []
             var returnCaptureFailuresRemaining = 0
             var postWriteCaptureFailuresRemaining = 0
+            var postWriteMetadataFailuresRemaining = 0
             var captureDiagnosticReason: String?
             var captureDiagnosticAXError: Int?
+            var didDelayW2PostWriteCapture = false
+            var didInjectW2MetadataFailure = false
             let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { active && graph.isActive },
                 approvalTargetProvider: { action in
                     if case .typeText(_) = action {
@@ -4233,6 +4234,9 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                             // prove the post-write path has its own bounded read-only recovery.
                             postWriteCaptureFailuresRemaining = 3
                         }
+                        if scenario == "w2-postwrite-transient-metadata" {
+                            postWriteMetadataFailuresRemaining = 1
+                        }
                         if scenario == "return-transient-parent-read" {
                             graph.makeAddressParentUnavailableForReads(1)
                         }
@@ -4245,10 +4249,38 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                             || scenario == "uncertain-ax-write")
                             ? .cannotComplete : .success
                     }),
+                captureFocusedRetainedWindow: { identity, target, authorizeFallback in
+                    guard identity == app, target.id == "retained",
+                          CFEqual(target.accessibilityElement, graph.window) else {
+                        throw ComputerUseDefaultBrowserSession.Failure.targetLost
+                    }
+                    try authorizeFallback()
+                    if scenario == "w2-postwrite-transient-metadata", axValueWrites == 1,
+                       postWriteMetadataFailuresRemaining > 0 {
+                        postWriteMetadataFailuresRemaining -= 1
+                        didInjectW2MetadataFailure = true
+                        captureDiagnosticReason = "focused_retained_metadata_read"
+                        captureDiagnosticAXError = Int(AXError.cannotComplete.rawValue)
+                        throw ComputerUseDefaultBrowserSession.Failure.targetLost
+                    }
+                    captureDiagnosticReason = nil
+                    captureDiagnosticAXError = nil
+                    if scenario == "w2-postwrite-capture-overrun", axValueWrites == 1,
+                       !didDelayW2PostWriteCapture {
+                        didDelayW2PostWriteCapture = true
+                        Thread.sleep(forTimeInterval: 2.1)
+                    }
+                    return .init(application: app, windows: [existing] + (retained.map { [$0] } ?? []),
+                        focusedWindowID: retained?.id ?? existing.id, hasSheets: panel != nil, fileOpenPanel: panel)
+                },
                 captureDiagnosticProvider: { captureDiagnosticReason },
                 captureDiagnosticAXErrorProvider: { captureDiagnosticAXError })
 
             _ = try await session.ensure(taskID: "task-\(scenario)", goal: "Open the signed-in Gmail inbox.", tools: tools)
+            if scenario == "w2-postwrite-capture-overrun" || scenario == "w2-postwrite-transient-metadata" {
+                try session.enableW2FocusedRetainedCaptureFallback(taskID: "task-\(scenario)",
+                    goal: "Open the signed-in Gmail inbox.", tools: tools)
+            }
 
             if scenario.hasPrefix("ax-setter-") && scenario != "ax-setter-gate-revoked" {
                 var navigationError: Error?
@@ -4478,12 +4510,17 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                 XCTAssertEqual(graph.nativeTypeCount, 0)
                 continue
             } else if scenario == "success" || scenario == "animated-chrome" || scenario == "drafts-success"
+                || scenario == "w2-postwrite-capture-overrun" || scenario == "w2-postwrite-transient-metadata"
                 || scenario == "return-not-writable-after-write"
                 || scenario == "return-transient-windows-read" || scenario == "return-transient-value-read"
                 || scenario == "return-field-observation-deadline" {
                 var navigationDiagnostics: [String] = []
                 try await session.navigateRetainedSafariTab(to: destination, taskID: "task-\(scenario)",
-                    goal: "Open the signed-in Gmail inbox.", tools: tools, diagnostic: { value in
+                    goal: "Open the signed-in Gmail inbox.", tools: tools,
+                    webUploadNavigation: scenario == "w2-postwrite-capture-overrun"
+                        || scenario == "w2-postwrite-transient-metadata"
+                        ? (stage: .home, provider: .googleDrive, filename: nil) : nil,
+                    diagnostic: { value in
                         navigationDiagnostics.append(value)
                         if scenario == "return-transient-windows-read",
                            value == "phase=ax_address_value_readback_verified" {
@@ -4503,6 +4540,21 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                 XCTAssertEqual(selectionDispatches, 0, "Whole-value AX replacement does not need keyboard selection")
                 XCTAssertEqual(focusDispatches, 1, "Cmd-L must activate Safari's location editor even when AX focus already names the address field")
                 XCTAssertEqual(nativeNavigationEffects, ["CmdL", "AXSetValue", "Return"])
+                if scenario == "w2-postwrite-capture-overrun" {
+                    XCTAssertTrue(didDelayW2PostWriteCapture,
+                        "The W2-only capture delay must occur after the single address write")
+                    XCTAssertEqual(axValueWrites, 1, "A slow validation capture must never replay the address setter")
+                    XCTAssertEqual(returnDispatches, 1, "Return requires the exact readback after slow validation")
+                    continue
+                }
+                if scenario == "w2-postwrite-transient-metadata" {
+                    XCTAssertTrue(didInjectW2MetadataFailure,
+                        "The injected AX cannot-complete metadata failure must follow the one address write")
+                    XCTAssertEqual(axValueWrites, 1, "Metadata recovery must never replay the address setter")
+                    XCTAssertEqual(returnDispatches, 1, "Return requires fresh scope and exact value readback")
+                    XCTAssertEqual(graph.currentAddressValue, destination.absoluteString)
+                    continue
+                }
                 if scenario == "return-not-writable-after-write" {
                     do {
                         try await session.navigateRetainedSafariTab(to: destination, taskID: "task-\(scenario)",

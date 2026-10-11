@@ -1052,7 +1052,11 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
                 let observedURL: String?
                 do {
                     observedURL = try pageReader.readRetainedPageURL(window: current.accessibilityElement,
-                        application: current.application, mayAct: { (try? tools.requireActive()) != nil })
+                        application: current.application, mayAct: { (try? tools.requireActive()) != nil },
+                        diagnostic: { failure, elapsed in
+                            self.gmailFieldDiagnostics["webUploadParentInitialReadFailure"] = failure
+                            self.gmailFieldDiagnostics["webUploadParentInitialReadElapsedMs"] = String(elapsed)
+                        })
                 } catch {
                     recordShortcutRecheck("url_read")
                     throw error
@@ -1802,6 +1806,17 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
                 }
                 if upload.stage == .openUploaderMenu {
                     let label = upload.request.provider == .googleDrive ? "New" : "Upload"
+                    if upload.request.provider == .googleDrive {
+                        guard Self.driveUploaderMenuShortcutEligible(controls: page.controls) else {
+                            return .init(response: "", decision: .handoff(
+                                "Drive’s New control is not uniquely available and enabled."),
+                                includeInModelHistory: false)
+                        }
+                        upload.menuFallbackAttempts = 1
+                        upload.stage = .driveKeyboardChooseFileUpload
+                        scope.webUpload = upload
+                        return .init(response: "", decision: .refreshObservation, includeInModelHistory: false)
+                    }
                     guard let control = page.controls.first(where: {
                         ($0.role == "AXButton" || $0.role == "AXMenuItem")
                             && $0.label.localizedCaseInsensitiveCompare(label) == .orderedSame
@@ -2008,6 +2023,20 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
                         observedControl: .init(id: row.rowID, label: candidate.displayName, role: "AXRow"))
                 }
                 if upload.stage == .openFinalDetails {
+                    if let candidate = scope.selectedCandidate,
+                       let details = try scope.pageReader.readDriveDetails(window: window.accessibilityElement,
+                            application: window.application, expectedFileName: candidate.displayName,
+                            mayAct: { (try? tools.requireActive()) != nil }),
+                       details.complete,
+                       ComputerUseWebUploadJob.driveDetailsMatch(textValues: details.exactTextValues,
+                            candidate: candidate) {
+                        // Selecting the unique result may open the Details pane
+                        // automatically. Verify that fresh pane instead of
+                        // clicking either of the page's two Hide controls.
+                        upload.stage = .verifyFinalDetails
+                        scope.webUpload = upload
+                        return .init(response: "", decision: .refreshObservation, includeInModelHistory: false)
+                    }
                     let matches = page.controls.filter { control in
                         control.role == "AXButton"
                             && control.label.lowercased().hasPrefix("view details")
@@ -2023,6 +2052,10 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
                 if upload.stage == .verifyFinalDetails {
                     guard upload.observedCompletionProgress,
                           let candidate = scope.selectedCandidate,
+                          let details = try scope.pageReader.readDriveDetails(window: window.accessibilityElement,
+                            application: window.application, expectedFileName: candidate.displayName,
+                            mayAct: { (try? tools.requireActive()) != nil }),
+                          details.complete,
                           let rowsPage = try scope.pageReader.read(window: window.accessibilityElement,
                             application: window.application, mayAct: { (try? tools.requireActive()) != nil },
                             mode: .webUploadListing),
@@ -2033,7 +2066,7 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
                     }
                     guard ComputerUseWebUploadJob.verifiesDriveCompletion(rows: rowsPage.webUploadListingRows,
                         candidate: candidate, progress: .complete, pageIsComplete: true,
-                        detailsTextValues: page.exactTextValues) else {
+                        detailsTextValues: details.exactTextValues) else {
                         return .init(response: "", decision: .handoff(
                             "The selected file’s Details do not verify its displayed size and My Drive location."),
                             includeInModelHistory: false)
@@ -3026,6 +3059,58 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
                             }
                         })
                     if let uploadNavigation, var upload = scope.webUpload {
+                        guard let retained = scope.session.currentWindow,
+                              retained.application.bundleIdentifier == "com.apple.Safari",
+                              retained.application.codeIdentity != nil else {
+                            throw ComputerUseDesktopExecutor.Failure.scopedSurfaceChanged
+                        }
+                        let expectedStage: WebUploadStage
+                        switch uploadNavigation.stage {
+                        case .home: expectedStage = .navigateHome
+                        case .collisionSearch: expectedStage = .navigateCollisionSearch
+                        case .returnToRoot: expectedStage = .navigateReturnToRoot
+                        case .finalSearch: expectedStage = .navigateFinalSearch
+                        }
+                        let originalStage = upload.stage
+                        guard originalStage == expectedStage else {
+                            throw ComputerUseDesktopExecutor.Failure.scopedSurfaceChanged
+                        }
+                        try await Self.waitForW2DestinationReady(expectedURL: target.absoluteString,
+                            application: retained.application, expectedAccountLabel: upload.expectedAccountLabel,
+                            provider: upload.request.provider, tools: tools,
+                            checkScope: {
+                                guard let currentUpload = scope.webUpload,
+                                      currentUpload.stage == originalStage,
+                                      currentUpload.request.provider == upload.request.provider,
+                                      currentUpload.expectedAccountLabel == upload.expectedAccountLabel else {
+                                    throw ComputerUseDesktopExecutor.Failure.scopedSurfaceChanged
+                                }
+                                do {
+                                    try scope.check(nil, tools)
+                                } catch let failure as ComputerUseDefaultBrowserSession.Failure {
+                                    guard failure == .targetLost,
+                                          scope.session.lastValidationPhaseForDiagnostics == .capture,
+                                          scope.session.lastCaptureReasonForDiagnostics == "focused_retained_metadata_read",
+                                          scope.session.lastCaptureAXErrorCodeForDiagnostics
+                                            == Int(AXError.cannotComplete.rawValue) else { throw failure }
+                                    return false
+                                }
+                                guard scope.session.currentFileOpenPanel == nil else {
+                                    throw ComputerUseDefaultBrowserSession.Failure.authenticationHandoff
+                                }
+                                guard let current = scope.session.currentWindow,
+                                      current.id == retained.id,
+                                      current.application == retained.application,
+                                      CFEqual(current.accessibilityElement, retained.accessibilityElement) else {
+                                    throw ComputerUseDefaultBrowserSession.Failure.targetLost
+                                }
+                                return true
+                            },
+                            readPage: {
+                                try scope.pageReader.read(window: retained.accessibilityElement,
+                                    application: retained.application,
+                                    mayAct: { (try? tools.requireActive()) != nil }, mode: .webUploadControls)
+                            })
                         switch uploadNavigation.stage {
                         case .home: upload.stage = .resolveFile
                         case .collisionSearch: upload.stage = .checkCollisionSearch
@@ -3050,6 +3135,65 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
                 if scope.pendingVisualDirective == nil { scope.visualFallbackPending = false }
                 await finishRun()
             })
+    }
+
+    static func waitForW2DestinationReady(
+        expectedURL: String,
+        application: ComputerUseApplicationIdentity,
+        expectedAccountLabel: String?,
+        provider: ComputerUseWebUploadJob.Provider,
+        tools: ComputerUseHostTools,
+        checkScope: @MainActor () throws -> Bool,
+        readPage: @MainActor () throws -> ComputerUseDefaultBrowserPageReader.Observation?
+    ) async throws {
+        let deadline = ContinuousClock.now.advanced(by: .seconds(15))
+        while ContinuousClock.now < deadline {
+            try Task.checkCancellation()
+            try tools.requireActive()
+            guard try checkScope() else {
+                try await Task.sleep(for: .milliseconds(50))
+                continue
+            }
+            guard ContinuousClock.now < deadline else {
+                throw ComputerUseDefaultBrowserSession.Failure.targetLost
+            }
+            if let page = try readPage() {
+                guard ContinuousClock.now < deadline else {
+                    throw ComputerUseDefaultBrowserSession.Failure.targetLost
+                }
+                guard page.application == application else {
+                    throw ComputerUseDefaultBrowserSession.Failure.targetLost
+                }
+                if page.webUploadControlsComplete {
+                    guard page.url == expectedURL else {
+                        throw ComputerUseDefaultBrowserSession.Failure.authenticationHandoff
+                    }
+                    if let expectedAccountLabel {
+                        guard webUploadAccountLabel(page, provider: provider) == expectedAccountLabel else {
+                            throw ComputerUseDefaultBrowserSession.Failure.authenticationHandoff
+                        }
+                    }
+                    guard !page.controls.isEmpty else {
+                        try await Task.sleep(for: .milliseconds(50))
+                        continue
+                    }
+                    try Task.checkCancellation()
+                    try tools.requireActive()
+                    guard try checkScope() else {
+                        try await Task.sleep(for: .milliseconds(50))
+                        continue
+                    }
+                    guard ContinuousClock.now < deadline else {
+                        throw ComputerUseDefaultBrowserSession.Failure.targetLost
+                    }
+                    return
+                }
+            }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        try Task.checkCancellation()
+        try tools.requireActive()
+        throw ComputerUseDefaultBrowserSession.Failure.targetLost
     }
 
     private static func webUploadAccountLabel(_ page: ComputerUseDefaultBrowserPageReader.Observation,
@@ -3098,6 +3242,15 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
 
     static func webUploadProgressBaselineIsClean(controlsComplete: Bool, progressValues: [String]) -> Bool {
         controlsComplete && webUploadProgress(progressValues) == .unknown
+    }
+
+    static func driveUploaderMenuShortcutEligible(
+        controls: [ComputerUseDefaultBrowserPageReader.Control]) -> Bool {
+        let matches = controls.filter {
+            ($0.role == "AXButton" || $0.role == "AXMenuItem")
+                && $0.label.localizedCaseInsensitiveCompare("New") == .orderedSame
+        }
+        return matches.count == 1 && matches[0].enabled == true
     }
 
     private static func focusedEditorProposal(_ plan: ComputerUseDefaultBrowserControlPlan,

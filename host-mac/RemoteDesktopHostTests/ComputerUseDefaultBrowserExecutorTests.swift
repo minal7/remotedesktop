@@ -116,6 +116,25 @@ final class ComputerUseDefaultBrowserExecutorTests: XCTestCase {
         }
     }
 
+    func testDriveUploaderMenuShortcutRequiresUniqueEnabledObservedNewControl() {
+        func control(_ label: String, role: String = "AXButton", enabled: Bool? = true) -> ComputerUseDefaultBrowserPageReader.Control {
+            .init(id: "control-\(label)-\(role)", role: role, label: label, frame: nil, enabled: enabled)
+        }
+
+        XCTAssertTrue(ComputerUseDefaultBrowserExecutor.driveUploaderMenuShortcutEligible(
+            controls: [control("New")]))
+        XCTAssertFalse(ComputerUseDefaultBrowserExecutor.driveUploaderMenuShortcutEligible(
+            controls: [control("New"), control("New", role: "AXMenuItem")]),
+            "Ambiguous New controls must not start the keyboard fallback")
+        XCTAssertFalse(ComputerUseDefaultBrowserExecutor.driveUploaderMenuShortcutEligible(
+            controls: [control("New", enabled: false)]))
+        XCTAssertFalse(ComputerUseDefaultBrowserExecutor.driveUploaderMenuShortcutEligible(
+            controls: [control("New", role: "AXStaticText")]))
+        XCTAssertFalse(ComputerUseDefaultBrowserExecutor.driveUploaderMenuShortcutEligible(
+            controls: [control("Upload")]),
+            "Dropbox's Upload control does not route through Drive's fixed shortcut")
+    }
+
     func testWebUploadRequiresCleanCompleteBaselineBeforeFreshCompletion() {
         XCTAssertTrue(ComputerUseDefaultBrowserExecutor.webUploadProgressBaselineIsClean(
             controlsComplete: true, progressValues: []))
@@ -148,6 +167,96 @@ final class ComputerUseDefaultBrowserExecutorTests: XCTestCase {
         XCTAssertEqual(ComputerUseDefaultBrowserExecutor.webUploadProgress(
             ["2 uploads complete", "Upload failed"]), .failed,
             "Failure evidence takes precedence over a completion counter")
+    }
+
+    func testW2DestinationReadinessWaitsForFreshCompletePageAndStopsOnScopeLoss() async throws {
+        let code = ComputerUseApplicationCodeIdentity(authority: .runningCode,
+            bundleIdentifier: "com.apple.Safari", canonicalBundlePath: "/Applications/Safari.app",
+            canonicalExecutablePath: "/Applications/Safari.app/Contents/MacOS/Safari",
+            designatedRequirement: "test requirement", teamIdentifier: nil, platformIdentifier: nil)
+        let application = try XCTUnwrap(ComputerUseApplicationIdentity(bundleIdentifier: "com.apple.Safari",
+            processIdentifier: 42, launchGeneration: 1, codeIdentity: code))
+        let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { true })
+        let expectedURL = ComputerUseWebUploadJob.Provider.googleDrive.homeURL.absoluteString
+        let accountControl = ComputerUseDefaultBrowserPageReader.Control(id: "account", role: "AXButton",
+            label: "Google Account: Test (test@example.com)", frame: nil, enabled: true)
+        func page(url: String, controlsComplete: Bool, truncated: Bool) -> ComputerUseDefaultBrowserPageReader.Observation {
+            .init(id: "page", application: application, url: url, renderedAXText: "",
+                controls: [accountControl], iframeContentMayBeOmitted: false, truncated: truncated,
+                webUploadControlsComplete: controlsComplete)
+        }
+
+        var scopeChecks = 0
+        var pageReads = 0
+        try await ComputerUseDefaultBrowserExecutor.waitForW2DestinationReady(
+            expectedURL: expectedURL, application: application,
+            expectedAccountLabel: "Google Account: Test (test@example.com)", provider: .googleDrive,
+            tools: tools,
+            checkScope: {
+                scopeChecks += 1
+                return scopeChecks != 2 // one exact transient metadata/capture miss
+            },
+            readPage: {
+                pageReads += 1
+                return pageReads == 1 ? page(url: expectedURL, controlsComplete: false, truncated: true)
+                    : page(url: expectedURL, controlsComplete: true, truncated: true)
+            })
+        XCTAssertEqual(scopeChecks, 4, "Scope is rechecked before reading and before accepting readiness")
+        XCTAssertEqual(pageReads, 2, "Incomplete page evidence is reread before the destination is accepted")
+
+        var readsAfterFocusLoss = 0
+        do {
+            try await ComputerUseDefaultBrowserExecutor.waitForW2DestinationReady(
+                expectedURL: expectedURL, application: application, expectedAccountLabel: nil,
+                provider: .googleDrive, tools: tools,
+                checkScope: { throw ComputerUseDefaultBrowserSession.Failure.targetLost },
+                readPage: { readsAfterFocusLoss += 1; return page(url: expectedURL, controlsComplete: true, truncated: false) })
+            XCTFail("A changed or unverified focus must stop readiness immediately")
+        } catch is ComputerUseDefaultBrowserSession.Failure {
+            XCTAssertEqual(readsAfterFocusLoss, 0)
+        }
+
+        do {
+            try await ComputerUseDefaultBrowserExecutor.waitForW2DestinationReady(
+                expectedURL: expectedURL, application: application, expectedAccountLabel: nil,
+                provider: .googleDrive, tools: tools,
+                checkScope: { true },
+                readPage: { page(url: "https://accounts.google.com/", controlsComplete: true, truncated: false) })
+            XCTFail("A complete sign-in or unexpected page must hand off instead of settling")
+        } catch let failure as ComputerUseDefaultBrowserSession.Failure {
+            guard case .authenticationHandoff = failure else { return XCTFail("Unexpected failure: \(failure)") }
+        }
+
+        let deniedTools = ComputerUseHostTools(injector: InputInjector(), mayAct: { false })
+        var deniedReads = 0
+        do {
+            try await ComputerUseDefaultBrowserExecutor.waitForW2DestinationReady(
+                expectedURL: expectedURL, application: application, expectedAccountLabel: nil,
+                provider: .googleDrive, tools: deniedTools,
+                checkScope: { true },
+                readPage: { deniedReads += 1; return page(url: expectedURL, controlsComplete: true, truncated: false) })
+            XCTFail("A revoked task gate must stop readiness")
+        } catch {
+            XCTAssertEqual(deniedReads, 0)
+        }
+
+        var gateActive = true
+        let revokedTools = ComputerUseHostTools(injector: InputInjector(), mayAct: { gateActive })
+        var readsBeforeGateStop = 0
+        do {
+            try await ComputerUseDefaultBrowserExecutor.waitForW2DestinationReady(
+                expectedURL: expectedURL, application: application, expectedAccountLabel: nil,
+                provider: .googleDrive, tools: revokedTools,
+                checkScope: { true },
+                readPage: {
+                    readsBeforeGateStop += 1
+                    gateActive = false
+                    return page(url: expectedURL, controlsComplete: false, truncated: true)
+                })
+            XCTFail("A revoked task gate must stop before another page read")
+        } catch {
+            XCTAssertEqual(readsBeforeGateStop, 1)
+        }
     }
 
     private enum ShortcutFailure: Error { case injected }
