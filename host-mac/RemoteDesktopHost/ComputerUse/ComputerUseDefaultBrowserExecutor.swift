@@ -1279,6 +1279,16 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
         if let elapsedMs = scope.session.lastCaptureElapsedMsForDiagnostics {
             diagnostic["sessionCaptureElapsedMs"] = String(elapsedMs)
         }
+        let structureFailure = scope.session.lastCaptureStructureFailureForDiagnostics
+        if let attribute = structureFailure.attribute {
+            diagnostic["sessionCaptureStructureFailureAttribute"] = attribute
+        }
+        if let kind = structureFailure.kind {
+            diagnostic["sessionCaptureStructureFailureKind"] = kind
+        }
+        if let code = structureFailure.axErrorCode {
+            diagnostic["sessionCaptureStructureFailureAXErrorCode"] = String(code)
+        }
         if let transition = scope.session.lastWindowTransitionDiagnostic {
             diagnostic["sessionWindowTransitionDiagnostic"] = transition
         }
@@ -3075,7 +3085,23 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
                         guard originalStage == expectedStage else {
                             throw ComputerUseDesktopExecutor.Failure.scopedSurfaceChanged
                         }
+                        let previousURL: String?
+                        switch uploadNavigation.stage {
+                        case .home:
+                            previousURL = nil
+                        case .collisionSearch:
+                            previousURL = upload.request.provider.homeURL.absoluteString
+                        case .finalSearch:
+                            previousURL = upload.request.provider.homeURL.absoluteString
+                        case .returnToRoot:
+                            guard let filename = scope.selectedCandidate?.displayName,
+                                  let url = ComputerUseWebUploadJob.driveTitleSearchURL(filename: filename) else {
+                                throw ComputerUseDesktopExecutor.Failure.scopedSurfaceChanged
+                            }
+                            previousURL = url.absoluteString
+                        }
                         try await Self.waitForW2DestinationReady(expectedURL: target.absoluteString,
+                            previousURL: previousURL,
                             application: retained.application, expectedAccountLabel: upload.expectedAccountLabel,
                             provider: upload.request.provider, tools: tools,
                             checkScope: {
@@ -3090,7 +3116,8 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
                                 } catch let failure as ComputerUseDefaultBrowserSession.Failure {
                                     guard failure == .targetLost,
                                           scope.session.lastValidationPhaseForDiagnostics == .capture,
-                                          scope.session.lastCaptureReasonForDiagnostics == "focused_retained_metadata_read",
+                                          ["focused_retained_metadata_read", "focused_retained_structure_read"]
+                                            .contains(scope.session.lastCaptureReasonForDiagnostics ?? ""),
                                           scope.session.lastCaptureAXErrorCodeForDiagnostics
                                             == Int(AXError.cannotComplete.rawValue) else { throw failure }
                                     return false
@@ -3107,9 +3134,20 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
                                 return true
                             },
                             readPage: {
-                                try scope.pageReader.read(window: retained.accessibilityElement,
+                                scope.gmailFieldDiagnostics.removeValue(forKey: "webUploadReadFailure")
+                                scope.gmailFieldDiagnostics.removeValue(forKey: "webUploadReadFailureAncestorRoles")
+                                return try scope.pageReader.read(window: retained.accessibilityElement,
                                     application: retained.application,
-                                    mayAct: { (try? tools.requireActive()) != nil }, mode: .webUploadControls)
+                                    mayAct: { (try? tools.requireActive()) != nil }, mode: .webUploadControls,
+                                    diagnostic: { reason, roles in
+                                        scope.gmailFieldDiagnostics["webUploadReadFailure"] = reason
+                                        scope.gmailFieldDiagnostics["webUploadReadFailureAncestorRoles"] = roles.joined(separator: ",")
+                                    })
+                            }, diagnostic: { reads, scopeRetries, reason, elapsedMs in
+                                scope.gmailFieldDiagnostics["webUploadReadinessReads"] = String(reads)
+                                scope.gmailFieldDiagnostics["webUploadReadinessScopeRetries"] = String(scopeRetries)
+                                scope.gmailFieldDiagnostics["webUploadReadinessLastReason"] = reason
+                                scope.gmailFieldDiagnostics["webUploadReadinessElapsedMs"] = String(elapsedMs)
                             })
                         switch uploadNavigation.stage {
                         case .home: upload.stage = .resolveFile
@@ -3139,24 +3177,38 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
 
     static func waitForW2DestinationReady(
         expectedURL: String,
+        previousURL: String? = nil,
         application: ComputerUseApplicationIdentity,
         expectedAccountLabel: String?,
         provider: ComputerUseWebUploadJob.Provider,
         tools: ComputerUseHostTools,
         checkScope: @MainActor () throws -> Bool,
-        readPage: @MainActor () throws -> ComputerUseDefaultBrowserPageReader.Observation?
+        readPage: @MainActor () throws -> ComputerUseDefaultBrowserPageReader.Observation?,
+        diagnostic: (@MainActor (_ reads: Int, _ scopeRetries: Int, _ lastReason: String, _ elapsedMs: Int) -> Void)? = nil
     ) async throws {
+        let started = ContinuousClock.now
+        var reads = 0
+        var scopeRetries = 0
+        var lastReason = "nil"
+        defer {
+            let elapsed = (ContinuousClock.now - started).components
+            let elapsedMs = Int(max(0, elapsed.seconds * 1_000
+                + elapsed.attoseconds / 1_000_000_000_000_000))
+            diagnostic?(reads, scopeRetries, lastReason, elapsedMs)
+        }
         let deadline = ContinuousClock.now.advanced(by: .seconds(15))
         while ContinuousClock.now < deadline {
             try Task.checkCancellation()
             try tools.requireActive()
             guard try checkScope() else {
+                scopeRetries += 1
                 try await Task.sleep(for: .milliseconds(50))
                 continue
             }
             guard ContinuousClock.now < deadline else {
                 throw ComputerUseDefaultBrowserSession.Failure.targetLost
             }
+            reads += 1
             if let page = try readPage() {
                 guard ContinuousClock.now < deadline else {
                     throw ComputerUseDefaultBrowserSession.Failure.targetLost
@@ -3165,15 +3217,28 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
                     throw ComputerUseDefaultBrowserSession.Failure.targetLost
                 }
                 if page.webUploadControlsComplete {
+                    if page.url == previousURL, previousURL != expectedURL {
+                        guard let expectedAccountLabel,
+                              webUploadAccountLabel(page, provider: provider) == expectedAccountLabel else {
+                            lastReason = "account_mismatch"
+                            throw ComputerUseDefaultBrowserSession.Failure.authenticationHandoff
+                        }
+                        lastReason = "waiting_previous_page"
+                        try await Task.sleep(for: .milliseconds(50))
+                        continue
+                    }
                     guard page.url == expectedURL else {
+                        lastReason = "url_unexpected"
                         throw ComputerUseDefaultBrowserSession.Failure.authenticationHandoff
                     }
                     if let expectedAccountLabel {
                         guard webUploadAccountLabel(page, provider: provider) == expectedAccountLabel else {
+                            lastReason = "account_mismatch"
                             throw ComputerUseDefaultBrowserSession.Failure.authenticationHandoff
                         }
                     }
                     guard !page.controls.isEmpty else {
+                        lastReason = "controls_empty"
                         try await Task.sleep(for: .milliseconds(50))
                         continue
                     }
@@ -3186,8 +3251,12 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
                     guard ContinuousClock.now < deadline else {
                         throw ComputerUseDefaultBrowserSession.Failure.targetLost
                     }
+                    lastReason = "success"
                     return
                 }
+                lastReason = "controls_incomplete"
+            } else {
+                lastReason = "nil"
             }
             try await Task.sleep(for: .milliseconds(50))
         }

@@ -874,6 +874,57 @@ final class ComputerUseDefaultBrowserPageReaderTests: XCTestCase {
         XCTAssertEqual(cappedReader.lastWebUploadControlsDiagnosticForDiagnostics["exact_text"], "128")
     }
 
+    func testWebUploadPageModesAllowAccumulatedColdPageAXLatencyWithinBoundedBudget() throws {
+        func delayedGraph() -> (PageAXGraph, () -> Int) {
+            let graph = PageAXGraph()
+            graph.makePage()
+            let controls = (0..<20).map { index -> AXUIElement in
+                let key = "latency-control-\(index)"
+                let control = graph.element(key)
+                graph.set(key, kAXParentAttribute, graph.element("web"))
+                graph.set(key, kAXRoleAttribute, "AXButton" as NSString)
+                graph.set(key, kAXTitleAttribute, "Drive control \(index)" as NSString)
+                graph.set(key, kAXEnabledAttribute, NSNumber(value: true))
+                return control
+            }
+            graph.set("web", kAXChildrenAttribute,
+                [graph.element("text"), graph.element("button"), graph.element("secure"), graph.element("iframe")] + controls as CFArray)
+            var delayedReadCount = 0
+            graph.afterRead = { _, _ in
+                delayedReadCount += 1
+                Thread.sleep(forTimeInterval: 0.004)
+            }
+            return (graph, { delayedReadCount })
+        }
+
+        for mode in [ComputerUseDefaultBrowserPageReader.ReadMode.webUploadControls, .webUploadListing] {
+            let (graph, delayedReadCount) = delayedGraph()
+            let reader = ComputerUseDefaultBrowserPageReader(access: graph.access)
+            let started = ProcessInfo.processInfo.systemUptime
+            let observation = try XCTUnwrap(reader.read(window: graph.window, application: graph.identity,
+                mayAct: { true }, mode: mode), "W2 page reads should tolerate accumulated AX latency within their bounded budget")
+            let elapsed = ProcessInfo.processInfo.systemUptime - started
+            XCTAssertEqual(observation.url, "https://drive.google.com/drive/my-drive")
+            XCTAssertGreaterThan(elapsed, 0.75, "Latency is accumulated across short AX reads")
+            XCTAssertLessThan(elapsed, 2.0, "The W2 read remains within its bounded page-read budget")
+            XCTAssertGreaterThan(delayedReadCount(), 100)
+            if mode == .webUploadControls {
+                XCTAssertTrue(observation.webUploadControlsComplete)
+            } else {
+                XCTAssertFalse(observation.webUploadControlsComplete,
+                    "Listing observations do not claim control-pass completeness")
+                XCTAssertEqual(observation.controls.count, 21)
+            }
+        }
+
+        let (standardGraph, _) = delayedGraph()
+        let standardReader = ComputerUseDefaultBrowserPageReader(access: standardGraph.access)
+        let standardStarted = ProcessInfo.processInfo.systemUptime
+        XCTAssertNil(try standardReader.read(window: standardGraph.window, application: standardGraph.identity,
+            mayAct: { true }, mode: .standard), "Standard page reads retain the existing 750ms budget")
+        XCTAssertLessThan(ProcessInfo.processInfo.systemUptime - standardStarted, 1.0)
+    }
+
     func testObservationCarriesExactStaticTextAndControlLabelsFromOuterPage() throws {
         let graph = PageAXGraph()
         graph.makePage(text: "Current destination entry")
@@ -1696,6 +1747,90 @@ final class ComputerUseDefaultBrowserPageReaderTests: XCTestCase {
         XCTAssertNil(try ComputerUseDefaultBrowserPageReader(access: wrongRole.access)
             .readRetainedPageURL(window: wrongRole.window, application: wrongRole.identity, mayAct: { true }))
         XCTAssertEqual(wrongRole.windowInventoryReadCount, 1, "A readable role mismatch is not retried")
+    }
+
+    func testRetainedPageURLRecoversFromOneTransientNilContainerInFreshOuterInventory() throws {
+        let graph = PageAXGraph()
+        graph.makePage()
+        let container = graph.element("transient-container")
+        graph.set("window", kAXChildrenAttribute, [container] as CFArray)
+        graph.set("transient-container", kAXRoleAttribute, "AXGroup" as NSString)
+        let containerChildren: CFArray = [graph.element("web")] as CFArray
+        graph.set("transient-container", kAXChildrenAttribute, containerChildren)
+        var containerChildrenReads = 0
+        graph.afterRead = { node, attribute in
+            guard node == "transient-container", attribute == (kAXChildrenAttribute as String) else { return }
+            containerChildrenReads += 1
+            if containerChildrenReads == 1 {
+                // Initial outer inventory is complete; make only the next
+                // (fresh proof) container read transiently unavailable.
+                graph.remove("transient-container", kAXChildrenAttribute as CFString)
+            } else if containerChildrenReads == 2 {
+                graph.set("transient-container", kAXChildrenAttribute, containerChildren)
+            }
+        }
+
+        let url = try ComputerUseDefaultBrowserPageReader(access: graph.access)
+            .readRetainedPageURL(window: graph.window, application: graph.identity, mayAct: { true })
+
+        XCTAssertEqual(url, "https://drive.google.com/drive/my-drive",
+            "The retained URL may be returned only after a complete fresh inventory recovers")
+        XCTAssertGreaterThanOrEqual(containerChildrenReads, 3,
+            "Recovery must re-read the full outer inventory after the single transient nil")
+        XCTAssertEqual(graph.windowInventoryReadCount, 3,
+            "Recovery must re-prove exact-window membership before the complete inventory retry")
+
+        let persistent = PageAXGraph()
+        persistent.makePage()
+        let persistentContainer = persistent.element("transient-container")
+        persistent.set("window", kAXChildrenAttribute, [persistentContainer] as CFArray)
+        persistent.set("transient-container", kAXRoleAttribute, "AXGroup" as NSString)
+        persistent.set("transient-container", kAXChildrenAttribute, [persistent.element("web")] as CFArray)
+        var persistentReads = 0
+        persistent.afterRead = { node, attribute in
+            guard node == "transient-container", attribute == (kAXChildrenAttribute as String) else { return }
+            persistentReads += 1
+            if persistentReads == 1 {
+                persistent.remove("transient-container", kAXChildrenAttribute as CFString)
+            }
+        }
+        XCTAssertNil(try ComputerUseDefaultBrowserPageReader(access: persistent.access)
+            .readRetainedPageURL(window: persistent.window, application: persistent.identity, mayAct: { true }),
+            "A persistent incomplete outer inventory must never return a retained URL")
+        XCTAssertEqual(persistent.windowInventoryReadCount, 3)
+        XCTAssertEqual(persistentReads, 3)
+
+        for changedAuthority in ["application", "root", "window"] {
+            let changed = PageAXGraph()
+            changed.makePage()
+            let changedContainer = changed.element("transient-container")
+            changed.set("window", kAXChildrenAttribute, [changedContainer] as CFArray)
+            changed.set("transient-container", kAXRoleAttribute, "AXGroup" as NSString)
+            changed.set("transient-container", kAXChildrenAttribute, [changed.element("web")] as CFArray)
+            var changedReads = 0
+            changed.afterRead = { node, attribute in
+                guard node == "transient-container", attribute == (kAXChildrenAttribute as String) else { return }
+                changedReads += 1
+                if changedReads == 1 {
+                    changed.remove("transient-container", kAXChildrenAttribute as CFString)
+                } else if changedReads == 2 {
+                    changed.set("transient-container", kAXChildrenAttribute,
+                        [changed.element("web")] as CFArray)
+                    switch changedAuthority {
+                    case "application": changed.frontmostIdentity = changed.otherIdentity
+                    case "root": changed.frontmostRootElement = changed.element("replacement-root")
+                    default: changed.set("root", kAXWindowsAttribute,
+                        [changed.otherWindow] as CFArray)
+                    }
+                }
+            }
+            XCTAssertNil(try ComputerUseDefaultBrowserPageReader(access: changed.access)
+                .readRetainedPageURL(window: changed.window, application: changed.identity, mayAct: { true }),
+                changedAuthority)
+            XCTAssertEqual(changedReads, 2, "Changed authority must stop before retrying the outer inventory")
+            XCTAssertEqual(changed.windowInventoryReadCount, changedAuthority == "window" ? 3 : 2,
+                "The recovery boundary must re-prove current authority before traversal")
+        }
     }
 
     func testRetainedPageURLAllowsSlowInventoryWithinSharedDeadline() throws {

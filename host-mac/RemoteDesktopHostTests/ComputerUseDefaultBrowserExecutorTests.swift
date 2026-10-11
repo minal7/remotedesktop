@@ -188,6 +188,7 @@ final class ComputerUseDefaultBrowserExecutorTests: XCTestCase {
 
         var scopeChecks = 0
         var pageReads = 0
+        var readinessDiagnostic: (reads: Int, scopeRetries: Int, reason: String, elapsedMs: Int)?
         try await ComputerUseDefaultBrowserExecutor.waitForW2DestinationReady(
             expectedURL: expectedURL, application: application,
             expectedAccountLabel: "Google Account: Test (test@example.com)", provider: .googleDrive,
@@ -198,11 +199,60 @@ final class ComputerUseDefaultBrowserExecutorTests: XCTestCase {
             },
             readPage: {
                 pageReads += 1
-                return pageReads == 1 ? page(url: expectedURL, controlsComplete: false, truncated: true)
+                if pageReads == 1 { return nil }
+                return pageReads == 2 ? page(url: expectedURL, controlsComplete: false, truncated: true)
                     : page(url: expectedURL, controlsComplete: true, truncated: true)
+            }, diagnostic: { reads, retries, reason, elapsedMs in
+                readinessDiagnostic = (reads, retries, reason, elapsedMs)
             })
-        XCTAssertEqual(scopeChecks, 4, "Scope is rechecked before reading and before accepting readiness")
-        XCTAssertEqual(pageReads, 2, "Incomplete page evidence is reread before the destination is accepted")
+        XCTAssertEqual(scopeChecks, 5, "Scope is rechecked before reading and before accepting readiness")
+        XCTAssertEqual(pageReads, 3, "Nil and incomplete page evidence are reread before accepting readiness")
+        XCTAssertEqual(readinessDiagnostic?.reads, 3)
+        XCTAssertEqual(readinessDiagnostic?.scopeRetries, 1)
+        XCTAssertEqual(readinessDiagnostic?.reason, "success")
+        XCTAssertGreaterThanOrEqual(readinessDiagnostic?.elapsedMs ?? -1, 0)
+        XCTAssertLessThan(readinessDiagnostic?.elapsedMs ?? Int.max, 15_000)
+
+        let previousSearchURL = "https://drive.google.com/drive/search?q=collision"
+        var settlingReads = 0
+        try await ComputerUseDefaultBrowserExecutor.waitForW2DestinationReady(
+            expectedURL: expectedURL, previousURL: previousSearchURL, application: application,
+            expectedAccountLabel: "Google Account: Test (test@example.com)", provider: .googleDrive,
+            tools: tools, checkScope: { true },
+            readPage: {
+                settlingReads += 1
+                return settlingReads == 1
+                    ? page(url: previousSearchURL, controlsComplete: true, truncated: false)
+                    : page(url: expectedURL, controlsComplete: true, truncated: false)
+            })
+        XCTAssertEqual(settlingReads, 2,
+            "An exact previous Drive page with the expected account should settle before accepting the destination")
+
+        do {
+            try await ComputerUseDefaultBrowserExecutor.waitForW2DestinationReady(
+                expectedURL: expectedURL, previousURL: previousSearchURL, application: application,
+                expectedAccountLabel: "Google Account: Test (test@example.com)", provider: .googleDrive,
+                tools: tools, checkScope: { true },
+                readPage: { page(url: "https://accounts.google.com/", controlsComplete: true, truncated: false) })
+            XCTFail("An unrelated authentication page must hand off immediately")
+        } catch let failure as ComputerUseDefaultBrowserSession.Failure {
+            guard case .authenticationHandoff = failure else { return XCTFail("Unexpected failure: \(failure)") }
+        }
+
+        let wrongAccountControl = ComputerUseDefaultBrowserPageReader.Control(id: "other-account", role: "AXButton",
+            label: "Google Account: Other (other@example.com)", frame: nil, enabled: true)
+        let wrongAccountPage = ComputerUseDefaultBrowserPageReader.Observation(id: "page", application: application,
+            url: previousSearchURL, renderedAXText: "", controls: [wrongAccountControl],
+            iframeContentMayBeOmitted: false, truncated: false, webUploadControlsComplete: true)
+        do {
+            try await ComputerUseDefaultBrowserExecutor.waitForW2DestinationReady(
+                expectedURL: expectedURL, previousURL: previousSearchURL, application: application,
+                expectedAccountLabel: "Google Account: Test (test@example.com)", provider: .googleDrive,
+                tools: tools, checkScope: { true }, readPage: { wrongAccountPage })
+            XCTFail("A previous page with the wrong account must hand off immediately")
+        } catch let failure as ComputerUseDefaultBrowserSession.Failure {
+            guard case .authenticationHandoff = failure else { return XCTFail("Unexpected failure: \(failure)") }
+        }
 
         var readsAfterFocusLoss = 0
         do {

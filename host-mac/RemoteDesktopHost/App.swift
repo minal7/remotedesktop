@@ -68,6 +68,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private(set) var didInstallStatusItem = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        #if DEBUG
+        if let standaloneOptIn = ProcessInfo.processInfo.environment["CORE_JOB_ACCEPTANCE_STANDALONE"] {
+            guard standaloneOptIn == "1" else {
+                FileHandle.standardError.write(Data("standalone acceptance opt-in invalid\n".utf8))
+                Darwin.exit(EXIT_FAILURE)
+            }
+            NSApp.setActivationPolicy(.prohibited)
+            let testBundleURL = Bundle.main.bundleURL
+                .appendingPathComponent("Contents/PlugIns/RemoteDesktopHostTests.xctest", isDirectory: true)
+            guard let testBundle = Bundle(url: testBundleURL) else {
+                FileHandle.standardError.write(Data("standalone acceptance bundle unavailable\n".utf8))
+                Darwin.exit(EXIT_FAILURE)
+            }
+            do {
+                try testBundle.loadAndReturnError()
+            } catch {
+                FileHandle.standardError.write(Data("standalone acceptance bundle load failed\n".utf8))
+                Darwin.exit(EXIT_FAILURE)
+            }
+            guard let runnerType = NSClassFromString("CoreJobAcceptanceStandaloneRunner") as? NSObject.Type else {
+                FileHandle.standardError.write(Data("standalone acceptance runner unavailable\n".utf8))
+                Darwin.exit(EXIT_FAILURE)
+            }
+            let runner = runnerType.init()
+            let start = Selector(("start"))
+            guard runner.responds(to: start) else {
+                FileHandle.standardError.write(Data("standalone acceptance entry unavailable\n".utf8))
+                Darwin.exit(EXIT_FAILURE)
+            }
+            runner.perform(start)
+            return
+        }
+        #endif
         guard HostRuntimeContext.shouldInstallVisibleChrome else {
             // XCTest still needs the application process as its bundle host,
             // but it must not create a status item, popover, setup window, or

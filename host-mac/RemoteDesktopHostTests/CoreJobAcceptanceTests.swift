@@ -287,7 +287,7 @@ final class CoreJobAcceptanceTests: XCTestCase {
             "bounds_read", "bounds_deadline", "bounds_type", "bounds_malformed",
             "startup_role_unclassified", "focused_transient_surface",
             "focused_retained_fallback_unverified", "focused_retained_metadata_read",
-            "focused_retained_fallback_structure_unreadable"] {
+            "focused_retained_fallback_structure_unreadable", "focused_retained_structure_read"] {
             XCTAssertEqual(Self.sanitizedSessionCaptureReason(reason), reason)
         }
         for rejected in ["https://mail.google.com/", "recipient@example.com", "phase=capture_failure", "unknown"] {
@@ -420,6 +420,33 @@ final class CoreJobAcceptanceTests: XCTestCase {
             "webUploadParentInitialReadElapsedMs": "2001",
             "webUploadParentRecheckFailure": "account@example.com",
             "webUploadParentRecheckElapsedMs": "-1",
+        ]).isEmpty)
+
+        let w2Readiness = Self.sanitizedW2ReadinessDiagnostic([
+            "webUploadReadinessReads": "12", "webUploadReadinessScopeRetries": "3",
+            "webUploadReadinessLastReason": "controls_incomplete", "webUploadReadinessElapsedMs": "1475",
+            "webUploadReadFailure": "focused_ancestry_parent_missing",
+            "webUploadReadFailureAncestorRoles": "AXTextField,AXGroup,AXWebArea",
+            "sessionCaptureStructureFailureAttribute": "AXChildren",
+            "sessionCaptureStructureFailureKind": "read_error",
+            "sessionCaptureStructureFailureAXErrorCode": "-25202",
+        ])
+        XCTAssertEqual(w2Readiness["webUploadReadinessReads"] as? Int, 12)
+        XCTAssertEqual(w2Readiness["webUploadReadinessScopeRetries"] as? Int, 3)
+        XCTAssertEqual(w2Readiness["webUploadReadinessLastReason"] as? String, "controls_incomplete")
+        XCTAssertEqual(w2Readiness["webUploadReadinessElapsedMs"] as? Int, 1_475)
+        XCTAssertEqual(w2Readiness["webUploadReadFailure"] as? String, "focused_ancestry_parent_missing")
+        XCTAssertEqual(w2Readiness["webUploadReadFailureAncestorRoles"] as? String,
+            "AXTextField,AXGroup,AXWebArea")
+        XCTAssertEqual(w2Readiness["sessionCaptureStructureFailureAttribute"] as? String, "AXChildren")
+        XCTAssertEqual(w2Readiness["sessionCaptureStructureFailureKind"] as? String, "read_error")
+        XCTAssertEqual(w2Readiness["sessionCaptureStructureFailureAXErrorCode"] as? Int, -25_202)
+        XCTAssertTrue(Self.sanitizedW2ReadinessDiagnostic([
+            "webUploadReadinessReads": "1025", "webUploadReadinessScopeRetries": "-1",
+            "webUploadReadinessLastReason": "private text", "webUploadReadinessElapsedMs": "60001",
+            "webUploadReadFailure": "private@example.com", "webUploadReadFailureAncestorRoles": "AXSecretRole",
+            "sessionCaptureStructureFailureAttribute": "/private/file", "sessionCaptureStructureFailureKind": "raw error",
+            "sessionCaptureStructureFailureAXErrorCode": "999999",
         ]).isEmpty)
 
         let uploadControls = Self.sanitizedWebUploadControlsDiagnostic([
@@ -1211,7 +1238,7 @@ final class CoreJobAcceptanceTests: XCTestCase {
         try bodyResult.get()
     }
 
-    nonisolated private static func acceptanceBodyBudget(job: String, deadlineEpoch: String?, nowEpoch: TimeInterval)
+    nonisolated fileprivate static func acceptanceBodyBudget(job: String, deadlineEpoch: String?, nowEpoch: TimeInterval)
         -> TimeInterval? {
         guard let deadlineEpoch, let deadline = Double(deadlineEpoch), deadline.isFinite,
               nowEpoch.isFinite else { return nil }
@@ -1221,7 +1248,7 @@ final class CoreJobAcceptanceTests: XCTestCase {
         return min(cap, remaining)
     }
 
-    private func runJobAcceptanceBody() async throws {
+    fileprivate func runJobAcceptanceBody() async throws {
         let env = ProcessInfo.processInfo.environment
         guard let job = env["CORE_JOB_ACCEPTANCE_JOB"],
               let tracePath = env["CORE_JOB_ACCEPTANCE_TRACE"],
@@ -1597,6 +1624,7 @@ final class CoreJobAcceptanceTests: XCTestCase {
         for (key, value) in Self.sanitizedWebUploadScopeDiagnostic(raw) { result[key] = value }
         for (key, value) in Self.sanitizedWebUploadDriveShortcutDiagnostic(raw) { result[key] = value }
         for (key, value) in Self.sanitizedWebUploadParentReadDiagnostic(raw) { result[key] = value }
+        for (key, value) in Self.sanitizedW2ReadinessDiagnostic(raw) { result[key] = value }
         for (key, value) in Self.sanitizedGmailCompletionProofDiagnostic(raw) {
             result[key] = value
         }
@@ -1649,6 +1677,55 @@ final class CoreJobAcceptanceTests: XCTestCase {
             }
         } else if let failure = raw["lastSessionFailureForDiagnostics"], sessionFailures.contains(failure) {
             result["lastSessionFailureForDiagnostics"] = failure
+        }
+        return result
+    }
+
+    private static func sanitizedW2ReadinessDiagnostic(_ raw: [String: String]) -> [String: Any] {
+        var result: [String: Any] = [:]
+        for (key, range) in ["webUploadReadinessReads": 0...1_024,
+                             "webUploadReadinessScopeRetries": 0...1_024,
+                             "webUploadReadinessElapsedMs": 0...60_000] {
+            if let value = raw[key], let number = Int(value), range.contains(number) { result[key] = number }
+        }
+        let readinessReasons: Set<String> = ["nil", "controls_incomplete", "controls_empty", "success",
+            "url_unexpected", "account_mismatch", "waiting_previous_page"]
+        if let reason = raw["webUploadReadinessLastReason"], readinessReasons.contains(reason) {
+            result["webUploadReadinessLastReason"] = reason
+        }
+        let readerFailures: Set<String> = ["scope_unavailable", "outer_page_discovery_deadline",
+            "outer_page_discovery_incomplete_or_ambiguous", "deadline_during_focus_ancestry",
+            "focused_ancestry_cycle", "focused_ancestry_pruned", "focused_nested_webarea_boundary",
+            "focused_ancestry_parent_missing", "focused_ancestry_limit_or_window_mismatch",
+            "outer_page_url_unavailable_or_unsupported", "page_scope_or_outer_area_changed",
+            "focused_element_changed_during_read", "focused_path_changed_or_became_pruned",
+            "focused_path_no_longer_reaches_outer_page", "focused_path_changed_during_read",
+            "focused_node_not_visited_by_content_walk", "focused_ancestor_control_not_in_catalogue",
+            "focused_control_not_in_catalogue", "focused_element_appeared_during_read",
+            "outer_page_url_changed", "deadline_during_final_validation"]
+        if let reason = raw["webUploadReadFailure"], readerFailures.contains(reason) {
+            result["webUploadReadFailure"] = reason
+        }
+        let safeRoles: Set<String> = ["AXWindow", "AXWebArea", "AXGroup", "AXTextArea", "AXTextField",
+            "AXSecureTextField", "AXButton", "AXComboBox", "AXStaticText", "AXLink", "AXMenuItem", "AXOther"]
+        if let roles = raw["webUploadReadFailureAncestorRoles"], roles.utf8.count <= 512 {
+            let values = roles.isEmpty ? [] : roles.split(separator: ",", omittingEmptySubsequences: false).map(String.init)
+            if values.count <= 16, values.allSatisfy(safeRoles.contains) {
+                result["webUploadReadFailureAncestorRoles"] = roles
+            }
+        }
+        let structureAttributes: Set<String> = ["AXRole", "AXSubrole", "AXPosition", "AXSize", "AXChildren",
+            "AXSheets", "AXParent", "AXIdentifier", "AXURL", "AXFocusedUIElement", "AXValue",
+            "AXSelectedTextRange", "AXEnabled", "AXSelectedRows", "AXSelectedChildren", "other"]
+        if let attribute = raw["sessionCaptureStructureFailureAttribute"], structureAttributes.contains(attribute) {
+            result["sessionCaptureStructureFailureAttribute"] = attribute
+        }
+        if let kind = raw["sessionCaptureStructureFailureKind"], ["read_error", "type_mismatch"].contains(kind) {
+            result["sessionCaptureStructureFailureKind"] = kind
+        }
+        if let code = raw["sessionCaptureStructureFailureAXErrorCode"],
+           let value = Int(code), (-65_535...65_535).contains(value) {
+            result["sessionCaptureStructureFailureAXErrorCode"] = value
         }
         return result
     }
@@ -1994,7 +2071,8 @@ final class CoreJobAcceptanceTests: XCTestCase {
             "bounds_deadline", "bounds_type", "bounds_malformed", "focused_duplicate", "duplicate_id",
             "duplicate_element", "bounds_ax_read_failure", "startup_role_unclassified",
             "focused_transient_surface", "focused_retained_fallback_unverified",
-            "focused_retained_metadata_read", "focused_retained_fallback_structure_unreadable"]
+            "focused_retained_metadata_read", "focused_retained_fallback_structure_unreadable",
+            "focused_retained_structure_read"]
         guard let raw, allowed.contains(raw) else { return nil }
         return raw
     }
@@ -4728,6 +4806,100 @@ final class CoreJobAcceptanceTests: XCTestCase {
 
     private static func write(_ value: [String: Any], to url: URL) throws {
         let data = try JSONSerialization.data(withJSONObject: value, options: [.sortedKeys])
+        try data.write(to: url, options: .atomic)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+    }
+}
+
+@MainActor
+@objc(CoreJobAcceptanceStandaloneRunner)
+final class CoreJobAcceptanceStandaloneRunner: NSObject {
+    private var bodyTask: Task<Void, Never>?
+    private var deadlineTask: Task<Void, Never>?
+    private var quiescenceTask: Task<Void, Never>?
+    private var traceURL: URL?
+    private var job: String?
+    private var runID: String?
+    private var didFinish = false
+    private var timedOut = false
+
+    @objc func start() {
+        let environment = ProcessInfo.processInfo.environment
+        let allowedJobs: Set<String> = ["drive", "dropbox", "gmail", "flights", "away"]
+        guard environment["CORE_JOB_ACCEPTANCE_STANDALONE"] == "1",
+              let job = environment["CORE_JOB_ACCEPTANCE_JOB"], allowedJobs.contains(job),
+              let tracePath = environment["CORE_JOB_ACCEPTANCE_TRACE"], tracePath.hasPrefix("/"),
+              let fixtureRoot = environment["CORE_JOB_ACCEPTANCE_FIXTURE_ROOT"], fixtureRoot.hasPrefix("/"),
+              let runID = environment["CORE_JOB_ACCEPTANCE_RUN_ID"],
+              runID.range(of: #"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"#, options: .regularExpression) != nil,
+              FileManager.default.fileExists(atPath: fixtureRoot),
+              let budget = CoreJobAcceptanceTests.acceptanceBodyBudget(
+                job: job, deadlineEpoch: environment["CORE_JOB_ACCEPTANCE_DEADLINE_EPOCH"],
+                nowEpoch: Date().timeIntervalSince1970) else {
+            failBeforeBody("standalone acceptance environment invalid")
+        }
+
+        let trace = URL(fileURLWithPath: tracePath, isDirectory: true)
+        do {
+            try FileManager.default.createDirectory(at: trace, withIntermediateDirectories: true,
+                attributes: [.posixPermissions: 0o700])
+            try Self.writeMarker(["schema_version": 1, "job": job, "run_id": runID,
+                "pid": ProcessInfo.processInfo.processIdentifier], to: trace.appendingPathComponent("standalone-started.json"))
+        } catch {
+            failBeforeBody("standalone acceptance trace unavailable")
+        }
+        self.traceURL = trace
+        self.job = job
+        self.runID = runID
+
+        let acceptance = CoreJobAcceptanceTests(invocation: nil)
+        bodyTask = Task { @MainActor in
+            let exitCode: Int
+            do {
+                try await acceptance.runJobAcceptanceBody()
+                exitCode = 0
+            } catch {
+                exitCode = 1
+            }
+            self.finish(bodyExitCode: exitCode)
+        }
+        deadlineTask = Task { @MainActor in
+            do { try await Task.sleep(for: .seconds(budget)) } catch { return }
+            self.expireBody()
+        }
+    }
+
+    private func expireBody() {
+        guard !didFinish else { return }
+        timedOut = true
+        bodyTask?.cancel()
+        quiescenceTask = Task { @MainActor in
+            do { try await Task.sleep(for: .seconds(10)) } catch { return }
+            guard !self.didFinish else { return }
+            self.finish(bodyExitCode: 124)
+        }
+    }
+
+    private func finish(bodyExitCode: Int) {
+        guard !didFinish else { return }
+        didFinish = true
+        deadlineTask?.cancel()
+        quiescenceTask?.cancel()
+        let exitCode = timedOut ? 124 : bodyExitCode
+        if let traceURL, let job, let runID {
+            try? Self.writeMarker(["schema_version": 1, "job": job, "run_id": runID,
+                "exit_code": exitCode], to: traceURL.appendingPathComponent("standalone-result.json"))
+        }
+        Darwin.exit(Int32(exitCode))
+    }
+
+    private func failBeforeBody(_ message: String) -> Never {
+        FileHandle.standardError.write(Data((message + "\n").utf8))
+        Darwin.exit(EXIT_FAILURE)
+    }
+
+    private static func writeMarker(_ marker: [String: Any], to url: URL) throws {
+        let data = try JSONSerialization.data(withJSONObject: marker, options: [.sortedKeys])
         try data.write(to: url, options: .atomic)
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
     }

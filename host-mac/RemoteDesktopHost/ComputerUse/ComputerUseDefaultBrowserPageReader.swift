@@ -131,14 +131,16 @@ final class ComputerUseDefaultBrowserPageReader {
         let pages: [AXUIElement]
         let sheetFrames: [CGRect]
         let complete: Bool
+        let recoverableMissingRequiredChildren: Bool
     }
 
     private let access: Access
     private var retained: [String: Retained] = [:]
     private(set) var lastWebUploadControlsDiagnosticForDiagnostics: [String: String] = [:]
     private let contextByteLimit = 8_192
-    /// Each bounded pass visits at most this many nodes; all passes share a
-    /// 750ms deadline and each AX IPC is configured for at most 0.1s.
+    /// Each bounded pass visits at most this many nodes. Standard page reads
+    /// share a 750ms deadline; W2 control/listing reads share a 2s deadline.
+    /// Each AX IPC remains configured for at most 0.1s.
     private let nodeLimitPerPass = 256
 
     init(access: Access? = nil) { self.access = access ?? .live }
@@ -162,12 +164,14 @@ final class ComputerUseDefaultBrowserPageReader {
         var pending: [(AXUIElement, Int)] = [(root, 0)]
         var visited: [AXUIElement] = [], pages: [AXUIElement] = [], sheetFrames: [CGRect] = []
         var complete = true
+        var missingRequiredChildren = false
+        var otherIncompleteReason = false
         while !pending.isEmpty, visited.count < nodeLimitPerPass {
             try check()
             let (node, depth) = pending.removeFirst()
             if visited.contains(where: { CFEqual($0, node) }) { continue }
             visited.append(node)
-            guard depth <= 16 else { complete = false; continue }
+            guard depth <= 16 else { complete = false; otherIncompleteReason = true; continue }
             let role = try value(kAXRoleAttribute as String, node) as? String ?? ""
             let subrole = try value(kAXSubroleAttribute as String, node) as? String ?? ""
             let hidden = (try value("AXHidden", node) as? NSNumber)?.boolValue == true
@@ -180,18 +184,22 @@ final class ComputerUseDefaultBrowserPageReader {
                 continue
             }
             if role == "AXWebArea" { pages.append(node); continue }
-            if let children = try value(kAXChildrenAttribute as String, node) as? [AXUIElement] {
+            let rawChildren = try value(kAXChildrenAttribute as String, node)
+            if let children = rawChildren as? [AXUIElement] {
                 let room = max(0, nodeLimitPerPass - visited.count - pending.count)
-                if children.count > room { complete = false }
+                if children.count > room { complete = false; otherIncompleteReason = true }
                 pending.append(contentsOf: children.prefix(room).map { ($0, depth + 1) })
             } else if ["AXWindow", "AXGroup", "AXSplitGroup", "AXUnknown", "AXScrollArea", "AXTabGroup", "AXToolbar"].contains(role) {
                 // A container whose children could not be read can conceal a
                 // second outer page. An explicitly empty children list is safe.
                 complete = false
+                if rawChildren == nil { missingRequiredChildren = true }
+                else { otherIncompleteReason = true }
             }
         }
-        if !pending.isEmpty { complete = false }
-        return OuterPageInventory(pages: pages, sheetFrames: sheetFrames, complete: complete)
+        if !pending.isEmpty { complete = false; otherIncompleteReason = true }
+        return OuterPageInventory(pages: pages, sheetFrames: sheetFrames, complete: complete,
+            recoverableMissingRequiredChildren: missingRequiredChildren && !otherIncompleteReason)
     }
 
     private func selectOuterPage(from inventory: OuterPageInventory, window: AXUIElement,
@@ -316,6 +324,8 @@ final class ComputerUseDefaultBrowserPageReader {
             return root
         }
         var windowInventoryRetryUsed = false
+        var outerInventoryRecoveryUsed = false
+        var expectedProofRoot: AXUIElement?
         func listedWindow(_ root: AXUIElement) throws -> Bool {
             func confirmsMembership(_ windows: [AXUIElement]) throws -> Bool {
                 guard windows.filter({ CFEqual($0, expectedWindow) }).count == 1,
@@ -340,7 +350,19 @@ final class ComputerUseDefaultBrowserPageReader {
             return try confirmsMembership(windows)
         }
         func uniqueOuterWebArea(in window: AXUIElement, phase: String) throws -> (AXUIElement?, String?) {
-            let inventory = try discoverOuterPages(in: window, value: value, check: check)
+            var inventory = try discoverOuterPages(in: window, value: value, check: check)
+            if !inventory.complete, inventory.recoverableMissingRequiredChildren,
+               !outerInventoryRecoveryUsed {
+                outerInventoryRecoveryUsed = true
+                try check()
+                guard let expectedProofRoot,
+                      let retryRoot = try currentRoot(), CFEqual(retryRoot, expectedProofRoot),
+                      try listedWindow(retryRoot) else {
+                    return (nil, "\(phase)_outer_inventory_incomplete")
+                }
+                try check()
+                inventory = try discoverOuterPages(in: window, value: value, check: check)
+            }
             guard inventory.complete else { return (nil, "\(phase)_outer_inventory_incomplete") }
             guard !inventory.pages.isEmpty else { return (nil, "\(phase)_outer_inventory_empty") }
             guard let selected = try selectOuterPage(from: inventory, window: window, value: value, check: check) else {
@@ -357,6 +379,7 @@ final class ComputerUseDefaultBrowserPageReader {
 
         try check()
         guard let root = try currentRoot() else { return failed("initial_app_unavailable") }
+        expectedProofRoot = root
         guard try listedWindow(root) else { return failed("initial_window_unavailable") }
         let (webArea, initialPageFailure) = try uniqueOuterWebArea(in: expectedWindow, phase: "initial")
         guard let webArea else { return failed(initialPageFailure ?? "initial_outer_selection_ambiguous") }
@@ -671,7 +694,8 @@ final class ComputerUseDefaultBrowserPageReader {
             diagnostic?(reason, focusedAncestorRoles)
             return nil
         }
-        let deadline = ContinuousClock.now.advanced(by: .milliseconds(750))
+        let pageReadBudget: Duration = mode == .standard ? .milliseconds(750) : .seconds(2)
+        let deadline = ContinuousClock.now.advanced(by: pageReadBudget)
         var expired = false
         func check() throws {
             try Task.checkCancellation()
@@ -817,6 +841,25 @@ final class ComputerUseDefaultBrowserPageReader {
         // inherited-disabled checks while visiting the verified focus branch first.
         var contentQueue: [(AXUIElement, Bool, Int?)] = [(webArea, false, nil)]
         var contentVisited: [AXUIElement] = []
+        var finalValidationSucceeded = false
+        func recordControlsDiagnostic(complete: Bool) {
+            guard mode == .webUploadControls else { return }
+            let controlsComplete = complete && !expired && contentQueue.isEmpty
+                && contentVisited.count < nodeLimitPerPass && !controlPassIncomplete
+            lastWebUploadControlsDiagnosticForDiagnostics = [
+                "complete": String(controlsComplete),
+                "truncated": String(truncated),
+                "reasons": webUploadIncompleteReasons.sorted().joined(separator: ","),
+                "visited": String(contentVisited.count),
+                "pending": String(contentQueue.count),
+                "controls": String(controls.count),
+                "exact_text": String(exactTextValues.count),
+                "form_fields": String(formFieldValues.count),
+                "context_bytes": String(contextBytes),
+                "pruned_listing_nodes": String(prunedListingNodeCount),
+            ]
+        }
+        defer { recordControlsDiagnostic(complete: finalValidationSucceeded) }
         func bounded(_ chunk: String, to bytes: Int) -> String {
             var result = "", used = 0
             for scalar in chunk.unicodeScalars {
@@ -1019,11 +1062,19 @@ final class ComputerUseDefaultBrowserPageReader {
                 cellLabels: listingRowLabels[index], frame: webUploadListingRows[index].frame)
         }
         try check()
-        guard !expired, let (afterRoot, afterWindow) = try currentScope(),
-              CFEqual(afterRoot, root), CFEqual(afterWindow, expectedWindow),
-              let finalArea = try discoverOuterWebArea(), CFEqual(finalArea, webArea) else {
+        guard !expired else { return fail("deadline_during_final_validation") }
+        guard let (afterRoot, afterWindow) = try currentScope() else {
+            return fail(expired ? "deadline_during_final_validation" : "page_scope_or_outer_area_changed")
+        }
+        guard !expired else { return fail("deadline_during_final_validation") }
+        guard CFEqual(afterRoot, root), CFEqual(afterWindow, expectedWindow) else {
             return fail("page_scope_or_outer_area_changed")
         }
+        guard let finalArea = try discoverOuterWebArea() else {
+            return fail(expired ? "deadline_during_final_validation" : "page_scope_or_outer_area_changed")
+        }
+        guard !expired else { return fail("deadline_during_final_validation") }
+        guard CFEqual(finalArea, webArea) else { return fail("page_scope_or_outer_area_changed") }
         if let focusedUIElement {
             guard let finalFocus = try element(kAXFocusedUIElementAttribute as String, afterRoot),
                   CFEqual(finalFocus, focusedUIElement) else { return fail("focused_element_changed_during_read") }
@@ -1079,20 +1130,6 @@ final class ComputerUseDefaultBrowserPageReader {
         guard finalURL == url, !expired else { return fail(expired ? "deadline_during_final_validation" : "outer_page_url_changed") }
         let controlsComplete = mode == .webUploadControls && !expired && contentQueue.isEmpty
             && contentVisited.count < nodeLimitPerPass && !controlPassIncomplete
-        if mode == .webUploadControls {
-            lastWebUploadControlsDiagnosticForDiagnostics = [
-                "complete": String(controlsComplete),
-                "truncated": String(truncated),
-                "reasons": webUploadIncompleteReasons.sorted().joined(separator: ","),
-                "visited": String(contentVisited.count),
-                "pending": String(contentQueue.count),
-                "controls": String(controls.count),
-                "exact_text": String(exactTextValues.count),
-                "form_fields": String(formFieldValues.count),
-                "context_bytes": String(contextBytes),
-                "pruned_listing_nodes": String(prunedListingNodeCount),
-            ]
-        }
         let observationID = UUID().uuidString
         let observation = Observation(id: observationID, application: expectedApplication, url: url,
             renderedAXText: text, controls: controls, iframeContentMayBeOmitted: true, truncated: truncated,
@@ -1109,6 +1146,7 @@ final class ComputerUseDefaultBrowserPageReader {
             retained.removeValue(forKey: evictedID)
         }
         try check()
+        finalValidationSucceeded = true
         return observation
     }
 

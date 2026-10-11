@@ -151,8 +151,14 @@ final class ComputerUseDefaultBrowserSession {
         var reason: String?
         var axErrorCode: Int?
         var elapsedMs: Int?
+        var structureFailureAttribute: String?
+        var structureFailureKind: String?
+        var structureFailureAXErrorCode: Int?
 
-        func reset() { reason = nil; axErrorCode = nil; elapsedMs = nil }
+        func reset() {
+            reason = nil; axErrorCode = nil; elapsedMs = nil
+            structureFailureAttribute = nil; structureFailureKind = nil; structureFailureAXErrorCode = nil
+        }
 
         func record(_ message: String) {
             let token = message.split(separator: " ").first(where: { $0.hasPrefix("reason=") })
@@ -167,7 +173,7 @@ final class ComputerUseDefaultBrowserSession {
                 "duplicate_id", "duplicate_element", "bounds_ax_read_failure",
                 "startup_role_unclassified", "focused_transient_surface",
                 "focused_retained_fallback_unverified", "focused_retained_metadata_read",
-                "focused_retained_fallback_structure_unreadable"]
+                "focused_retained_fallback_structure_unreadable", "focused_retained_structure_read"]
             if let token, allowed.contains(token) { reason = token }
             if let field = message.split(separator: " ").first(where: { $0.hasPrefix("ax_error=") }),
                let code = Int(field.dropFirst("ax_error=".count)), (-65_535...65_535).contains(code) {
@@ -176,6 +182,22 @@ final class ComputerUseDefaultBrowserSession {
             if let field = message.split(separator: " ").first(where: { $0.hasPrefix("elapsed_ms=") }),
                let duration = Int(field.dropFirst("elapsed_ms=".count)), (0...2_000).contains(duration) {
                 elapsedMs = duration
+            }
+            if structureFailureAttribute == nil,
+               let field = message.split(separator: " ").first(where: { $0.hasPrefix("structure_attribute=") }) {
+                let value = String(field.dropFirst("structure_attribute=".count))
+                let allowed = ["AXRole", "AXSubrole", "AXPosition", "AXSize", "AXChildren", "AXSheets",
+                    "AXParent", "AXIdentifier", "AXURL", "AXFocusedUIElement", "AXValue",
+                    "AXSelectedTextRange", "AXEnabled", "AXSelectedRows", "AXSelectedChildren", "other"]
+                if allowed.contains(value) { structureFailureAttribute = value }
+                if let kind = message.split(separator: " ").first(where: { $0.hasPrefix("structure_kind=") }) {
+                    let value = String(kind.dropFirst("structure_kind=".count))
+                    if ["read_error", "type_mismatch"].contains(value) { structureFailureKind = value }
+                }
+                if let code = message.split(separator: " ").first(where: { $0.hasPrefix("structure_ax_error=") }),
+                   let value = Int(code.dropFirst("structure_ax_error=".count)), (-65_535...65_535).contains(value) {
+                    structureFailureAXErrorCode = value
+                }
             }
         }
     }
@@ -191,6 +213,7 @@ final class ComputerUseDefaultBrowserSession {
     private let captureDiagnosticProvider: @MainActor () -> String?
     private let captureDiagnosticAXErrorProvider: @MainActor () -> Int?
     private let captureDiagnosticElapsedMsProvider: @MainActor () -> Int?
+    private let captureDiagnosticStructureFailureProvider: @MainActor () -> (String?, String?, Int?)
     private let captureWindowsDiagnostic: @MainActor (String) -> Void
     private var runState: RunState?
     private(set) var lastValidationPhaseForDiagnostics: ValidationPhase?
@@ -204,6 +227,10 @@ final class ComputerUseDefaultBrowserSession {
     var lastCaptureReasonForDiagnostics: String? { captureDiagnosticProvider() }
     var lastCaptureAXErrorCodeForDiagnostics: Int? { captureDiagnosticAXErrorProvider() }
     var lastCaptureElapsedMsForDiagnostics: Int? { captureDiagnosticElapsedMsProvider() }
+    var lastCaptureStructureFailureForDiagnostics: (attribute: String?, kind: String?, axErrorCode: Int?) {
+        let value = captureDiagnosticStructureFailureProvider()
+        return (value.0, value.1, value.2)
+    }
 
     convenience init(journalDirectory: URL,
                       captureWindowsDiagnostic: @escaping @MainActor (String) -> Void = { _ in }) throws {
@@ -238,6 +265,10 @@ final class ComputerUseDefaultBrowserSession {
             }, captureDiagnosticProvider: { captureDiagnosticState.reason },
             captureDiagnosticAXErrorProvider: { captureDiagnosticState.axErrorCode },
             captureDiagnosticElapsedMsProvider: { captureDiagnosticState.elapsedMs },
+            captureDiagnosticStructureFailureProvider: {
+                (captureDiagnosticState.structureFailureAttribute, captureDiagnosticState.structureFailureKind,
+                 captureDiagnosticState.structureFailureAXErrorCode)
+            },
             captureWindowsDiagnostic: captureWindowsDiagnostic)
     }
 
@@ -252,6 +283,7 @@ final class ComputerUseDefaultBrowserSession {
          captureDiagnosticProvider: @escaping @MainActor () -> String? = { nil },
          captureDiagnosticAXErrorProvider: @escaping @MainActor () -> Int? = { nil },
          captureDiagnosticElapsedMsProvider: @escaping @MainActor () -> Int? = { nil },
+         captureDiagnosticStructureFailureProvider: @escaping @MainActor () -> (String?, String?, Int?) = { (nil, nil, nil) },
          captureWindowsDiagnostic: @escaping @MainActor (String) -> Void = { _ in }) throws {
         self.journalDirectory = journalDirectory
         self.resolveHandler = resolveHandler
@@ -264,6 +296,7 @@ final class ComputerUseDefaultBrowserSession {
         self.captureDiagnosticProvider = captureDiagnosticProvider
         self.captureDiagnosticAXErrorProvider = captureDiagnosticAXErrorProvider
         self.captureDiagnosticElapsedMsProvider = captureDiagnosticElapsedMsProvider
+        self.captureDiagnosticStructureFailureProvider = captureDiagnosticStructureFailureProvider
         self.captureWindowsDiagnostic = captureWindowsDiagnostic
     }
 
@@ -1005,6 +1038,7 @@ final class ComputerUseDefaultBrowserSession {
         switch (failure, reason) {
         case (.targetLost, "windows_read"), (.targetLost, "focused_window_read"),
              (.targetLost, "focused_retained_metadata_read"),
+             (.targetLost, "focused_retained_structure_read"),
              (.ambiguousWindows, "bounds_read"):
             return true
         default:
@@ -2002,6 +2036,27 @@ final class ComputerUseDefaultBrowserSession {
         var lastReadAXError: AXError?
         var focusedRetainedFallbackUsed = false
         var focusedRetainedFallbackStructureFailed = false
+        var firstStructureFailureRecorded = false
+        var structureFailureCount = 0
+        var structureFailuresAreCannotComplete = true
+        func attributeToken(_ attribute: CFString) -> String {
+            let name = attribute as String
+            let allowed = ["AXRole", "AXSubrole", "AXPosition", "AXSize", "AXChildren", "AXSheets",
+                "AXParent", "AXIdentifier", "AXURL", "AXFocusedUIElement", "AXValue",
+                "AXSelectedTextRange", "AXEnabled", "AXSelectedRows", "AXSelectedChildren"]
+            return allowed.contains(name) ? name : "other"
+        }
+        func recordStructureFailure(_ attribute: CFString, kind: String, error: AXError? = nil) {
+            focusedRetainedFallbackStructureFailed = true
+            structureFailureCount += 1
+            if kind != "read_error" || error != .cannotComplete {
+                structureFailuresAreCannotComplete = false
+            }
+            guard !firstStructureFailureRecorded else { return }
+            firstStructureFailureRecorded = true
+            let errorField = error.map { " structure_ax_error=\($0.rawValue)" } ?? ""
+            diagnostic("phase=capture_structure_failure structure_attribute=\(attributeToken(attribute)) structure_kind=\(kind)\(errorField)")
+        }
         func read(_ element: AXUIElement, _ attribute: CFString,
                   messagingTimeout: Float? = nil) -> CFTypeRef? {
             guard !Task.isCancelled, ContinuousClock.now < deadline else { return nil }
@@ -2020,7 +2075,7 @@ final class ComputerUseDefaultBrowserSession {
                 lastReadAXError = result
                 if focusedRetainedFallbackUsed,
                    result != .noValue, result != .attributeUnsupported {
-                    focusedRetainedFallbackStructureFailed = true
+                    recordStructureFailure(attribute, kind: "read_error", error: result)
                 }
                 let readDuration = readStarted.duration(to: .now).components
                 let elapsedMs = max(0, min(2_000, Int(Double(readDuration.seconds) * 1_000
@@ -2162,7 +2217,7 @@ final class ComputerUseDefaultBrowserSession {
                     messagingTimeout: Float? = nil) -> String? {
             guard let raw = read(element, attribute, messagingTimeout: messagingTimeout) else { return nil }
             guard let value = raw as? String else {
-                if focusedRetainedFallbackUsed { focusedRetainedFallbackStructureFailed = true }
+                if focusedRetainedFallbackUsed { recordStructureFailure(attribute, kind: "type_mismatch") }
                 return nil
             }
             return value
@@ -2197,12 +2252,12 @@ final class ComputerUseDefaultBrowserSession {
             guard let raw = read(element, attribute) else {
                 if focusedRetainedFallbackUsed,
                    (requiredForFallback || (lastReadAXError != .noValue && lastReadAXError != .attributeUnsupported)) {
-                    focusedRetainedFallbackStructureFailed = true
+                    recordStructureFailure(attribute, kind: "read_error", error: lastReadAXError)
                 }
                 return []
             }
             guard CFGetTypeID(raw) == CFArrayGetTypeID(), let values = raw as? [AXUIElement] else {
-                if focusedRetainedFallbackUsed { focusedRetainedFallbackStructureFailed = true }
+                if focusedRetainedFallbackUsed { recordStructureFailure(attribute, kind: "type_mismatch") }
                 return []
             }
             return values
@@ -2219,7 +2274,7 @@ final class ComputerUseDefaultBrowserSession {
         func parent(_ element: AXUIElement) -> AXUIElement? {
             guard let raw = read(element, kAXParentAttribute as CFString) else { return nil }
             guard CFGetTypeID(raw) == AXUIElementGetTypeID() else {
-                if focusedRetainedFallbackUsed { focusedRetainedFallbackStructureFailed = true }
+                if focusedRetainedFallbackUsed { recordStructureFailure(kAXParentAttribute as CFString, kind: "type_mismatch") }
                 return nil
             }
             return (raw as! AXUIElement)
@@ -2507,6 +2562,10 @@ final class ComputerUseDefaultBrowserSession {
             throw Failure.targetLost
         }
         guard !focusedRetainedFallbackStructureFailed else {
+            if structureFailureCount > 0, structureFailuresAreCannotComplete {
+                diagnostic("phase=capture_failure reason=focused_retained_structure_read ax_error=\(AXError.cannotComplete.rawValue)")
+                throw Failure.targetLost
+            }
             diagnostic("phase=capture_failure reason=focused_retained_fallback_structure_unreadable")
             throw Failure.authenticationHandoff
         }

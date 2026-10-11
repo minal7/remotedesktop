@@ -40,6 +40,7 @@ TEST_ID = "RemoteDesktopHostTests/CoreJobAcceptanceTests/testRunJob"
 MAX_RUNS = 10
 MAX_TRACE_FOLDERS = 20
 TIMEOUT_SECONDS = 420
+STANDALONE_JOBS = {"drive", "dropbox"}
 
 # Archive members are sorted, uncompressed, and have fixed ZIP metadata so
 # these fixture hashes are stable across Python and zlib versions.
@@ -890,12 +891,249 @@ def run_logged(command: list[str], env: dict[str, str], log_path: Path, timeout:
     return code, time.monotonic() - started
 
 
+def standalone_app_path(build_command: list[str]) -> Path:
+    """Resolve the fixed DEBUG app from literal xcodebuild output settings."""
+    configuration = None
+    for index, item in enumerate(build_command[:-1]):
+        if item == "-configuration":
+            configuration = build_command[index + 1]
+            break
+    if configuration is None:
+        configuration = next((item.split("=", 1)[1] for item in build_command
+                              if item.startswith("CONFIGURATION=")), "Debug")
+    if configuration != "Debug":
+        raise AcceptanceError("Standalone acceptance requires a Debug app product")
+    build_dirs = [item.split("=", 1)[1] for item in build_command
+                  if item.startswith("CONFIGURATION_BUILD_DIR=")]
+    if len(build_dirs) > 1:
+        raise AcceptanceError("Build command has multiple CONFIGURATION_BUILD_DIR values")
+    if build_dirs:
+        raw_directory = build_dirs[0]
+        if not raw_directory or "$" in raw_directory:
+            raise AcceptanceError("CONFIGURATION_BUILD_DIR must be a literal path")
+        product_directory = Path(raw_directory).expanduser()
+        if not product_directory.is_absolute():
+            product_directory = (ROOT / product_directory).resolve()
+    else:
+        def option_value(option: str) -> str | None:
+            for index, item in enumerate(build_command[:-1]):
+                if item == option:
+                    return build_command[index + 1]
+            return None
+
+        derived_raw = option_value("-derivedDataPath")
+        configuration = option_value("-configuration") or "Debug"
+        if derived_raw is None or "$" in derived_raw or "$" in configuration:
+            raise AcceptanceError("Build command does not identify a literal derived-data product path")
+        if configuration != "Debug":
+            raise AcceptanceError("Standalone acceptance requires a Debug app product")
+        derived_data = Path(derived_raw).expanduser()
+        if not derived_data.is_absolute():
+            derived_data = (ROOT / derived_data).resolve()
+        product_directory = derived_data / "Build" / "Products" / configuration
+
+    if not product_directory.is_absolute():
+        raise AcceptanceError("Standalone app product directory must be absolute")
+    return product_directory / "RemoteDesktopHost.app"
+
+
+def validate_standalone_app(app: Path) -> tuple[Path, Path]:
+    executable = app / "Contents" / "MacOS" / "RemoteDesktopHost"
+    test_bundle = app / "Contents" / "PlugIns" / "RemoteDesktopHostTests.xctest"
+    if not app.is_dir() or not executable.is_file() or not test_bundle.is_dir():
+        raise AcceptanceError("Built Debug app or embedded acceptance test bundle is missing")
+    return executable, test_bundle
+
+
+def read_standalone_started(trace: Path, job: str, run_id: str) -> dict[str, Any]:
+    try:
+        marker = json.loads((trace / "standalone-started.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise AcceptanceError("Standalone started marker is missing or invalid") from error
+    pid = marker.get("pid") if isinstance(marker, dict) else None
+    if (not isinstance(marker, dict) or marker.get("schema_version") != 1
+            or marker.get("job") != job or marker.get("run_id") != run_id
+            or type(pid) is not int or pid <= 1):
+        raise AcceptanceError("Standalone started marker identity does not match this run")
+    return marker
+
+
+def read_standalone_result(trace: Path, job: str, run_id: str) -> dict[str, Any]:
+    try:
+        marker = json.loads((trace / "standalone-result.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise AcceptanceError("Standalone result marker is missing or invalid") from error
+    exit_code = marker.get("exit_code") if isinstance(marker, dict) else None
+    if (not isinstance(marker, dict) or marker.get("schema_version") != 1
+            or marker.get("job") != job or marker.get("run_id") != run_id
+            or type(exit_code) is not int or exit_code not in {0, 1, 124}):
+        raise AcceptanceError("Standalone result marker identity or exit code is invalid")
+    return marker
+
+
+def owned_standalone_command(pid: int, executable: Path, run_id: str) -> bool:
+    command = standalone_process_command(pid)
+    if not command:
+        return False
+    run_flag = re.search(r"(?:^|\s)--core-job-acceptance-run-id\s+" + re.escape(run_id) + r"(?:\s|$)", command)
+    return command.startswith(str(executable) + " ") and run_flag is not None
+
+
+def standalone_process_command(pid: int) -> str | None:
+    try:
+        result = subprocess.run(["/bin/ps", "-p", str(pid), "-o", "command="],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, check=False, timeout=3)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return ""
+    return result.stdout.strip()
+
+
+def wait_for_standalone_exit(pid: int, executable: Path, run_id: str,
+                             timeout: float) -> bool:
+    deadline = time.monotonic() + max(0.0, timeout)
+    while True:
+        command = standalone_process_command(pid)
+        if command is None:
+            return False
+        if not command or not (command.startswith(str(executable) + " ")
+                and re.search(r"(?:^|\s)--core-job-acceptance-run-id\s+"
+                              + re.escape(run_id) + r"(?:\s|$)", command)):
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.1)
+
+
+def stop_owned_standalone_app(trace: Path, job: str, run_id: str,
+                              executable: Path) -> None:
+    try:
+        marker = read_standalone_started(trace, job, run_id)
+    except AcceptanceError:
+        return
+    pid = marker["pid"]
+    if not owned_standalone_command(pid, executable, run_id):
+        return
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        if not owned_standalone_command(pid, executable, run_id):
+            return
+        time.sleep(0.2)
+    if owned_standalone_command(pid, executable, run_id):
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+
+
+def reap_open_process(process: subprocess.Popen[Any]) -> None:
+    if process.poll() is not None:
+        return
+    process.terminate()
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait()
+
+
+def run_standalone(job: str, run_id: str, trace: Path, fixture_root: Path,
+                   app: Path, env: dict[str, str], deadline_epoch: float,
+                   deadline_monotonic: float) -> tuple[int, float]:
+    executable, _ = validate_standalone_app(app)
+    if job not in STANDALONE_JOBS:
+        raise AcceptanceError("Standalone launcher is limited to Drive and Dropbox")
+    if not fixture_root.is_dir():
+        raise AcceptanceError("Standalone fixture root is missing")
+    expected_path = trace / "expected.json"
+    try:
+        expected = json.loads(expected_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise AcceptanceError("Standalone expected.json is missing or invalid") from error
+    if not isinstance(expected, dict) or expected.get("job") != job or expected.get("run_id") != run_id:
+        raise AcceptanceError("Standalone expected.json identity does not match this run")
+
+    developer = env.get("DEVELOPER_DIR")
+    if not developer:
+        raise AcceptanceError("Selected Xcode developer directory is unavailable")
+    developer_root = Path(developer)
+    frameworks = developer_root / "Platforms/MacOSX.platform/Developer/Library/Frameworks"
+    libraries = developer_root / "Platforms/MacOSX.platform/Developer/usr/lib"
+    if not frameworks.is_dir() or not libraries.is_dir():
+        raise AcceptanceError("Selected Xcode XCTest runtime paths are unavailable")
+
+    launch_env = clear_live_optins()
+    launch_env.update({
+        "DEVELOPER_DIR": developer,
+        "CORE_JOB_ACCEPTANCE_STANDALONE": "1",
+        "CORE_JOB_ACCEPTANCE_JOB": job,
+        "CORE_JOB_ACCEPTANCE_TRACE": str(trace),
+        "CORE_JOB_ACCEPTANCE_FIXTURE_ROOT": str(fixture_root),
+        "CORE_JOB_ACCEPTANCE_RUN_ID": run_id,
+        "CORE_JOB_ACCEPTANCE_DEADLINE_EPOCH": str(deadline_epoch),
+        "DYLD_FRAMEWORK_PATH": str(frameworks),
+        "DYLD_LIBRARY_PATH": str(libraries),
+    })
+    command = ["/usr/bin/open", "-n", "-g", "-W"]
+    for key in ("DEVELOPER_DIR", "CORE_JOB_ACCEPTANCE_STANDALONE", "CORE_JOB_ACCEPTANCE_JOB",
+                "CORE_JOB_ACCEPTANCE_TRACE", "CORE_JOB_ACCEPTANCE_FIXTURE_ROOT",
+                "CORE_JOB_ACCEPTANCE_RUN_ID", "CORE_JOB_ACCEPTANCE_DEADLINE_EPOCH",
+                "DYLD_FRAMEWORK_PATH", "DYLD_LIBRARY_PATH"):
+        command.extend(["--env", f"{key}={launch_env[key]}"])
+    log_path = trace / "app.log"
+    command.extend(["--stdout", str(log_path), "--stderr", str(log_path), str(app), "--args",
+                    "--core-job-acceptance-run-id", run_id])
+
+    started_at = time.monotonic()
+    open_process = subprocess.Popen(command, env=launch_env, stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+    completed = False
+    try:
+        while time.monotonic() < deadline_monotonic:
+            result_path = trace / "standalone-result.json"
+            if result_path.is_file():
+                # The result can win the first poll; still require its exact started identity.
+                started = read_standalone_started(trace, job, run_id)
+                marker = read_standalone_result(trace, job, run_id)
+                try:
+                    open_process.wait(timeout=min(5, max(0.1, deadline_monotonic - time.monotonic())))
+                except subprocess.TimeoutExpired:
+                    pass
+                pid = started["pid"]
+                if not wait_for_standalone_exit(pid, executable, run_id, 1):
+                    stop_owned_standalone_app(trace, job, run_id, executable)
+                    if not wait_for_standalone_exit(pid, executable, run_id, 6):
+                        raise AcceptanceError("Standalone result was written but its owned app did not exit")
+                completed = True
+                return marker["exit_code"], time.monotonic() - started_at
+            if (trace / "standalone-started.json").is_file():
+                read_standalone_started(trace, job, run_id)
+            if open_process.poll() is not None:
+                raise AcceptanceError("Standalone app exited before writing its result marker")
+            time.sleep(min(0.25, max(0.0, deadline_monotonic - time.monotonic())))
+        raise AcceptanceError("Standalone app exceeded its absolute run deadline")
+    finally:
+        if not completed:
+            stop_owned_standalone_app(trace, job, run_id, executable)
+        reap_open_process(open_process)
+
+
 def bounded_text(value: Any, limit: int = 16000) -> str:
     if not isinstance(value, str):
         raise AcceptanceError("Outcome text field is missing or invalid")
     if len(value.encode("utf-8")) > limit:
         raise AcceptanceError("Outcome text exceeds the reviewed size limit")
     return value
+
+
+def write_checker(trace: Path, result: dict[str, Any]) -> None:
+    (trace / "checker.json").write_text(
+        json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
 def read_outcome(trace: Path, job: str, run_id: str) -> dict[str, Any]:
@@ -1533,7 +1771,7 @@ def check_away(outcome: dict[str, Any]) -> dict[str, Any]:
 
 def verify_run(trace: Path, expected: dict[str, Any], test_code: int) -> tuple[bool, dict[str, Any]]:
     if test_code != 0:
-        return False, {"passed": False, "reason": f"xcodebuild test-without-building exit {test_code}"}
+        return False, {"passed": False, "reason": f"acceptance runner exit {test_code}"}
     outcome = read_outcome(trace, expected["job"], expected["run_id"])
     if outcome["raw_outcome"] in {"not-started", "running"}:
         return False, {"passed": False, "reason": outcome.get("text", "Task did not start"),
@@ -1684,6 +1922,11 @@ def main() -> int:
             print(f"Build failed; trace: {first_trace}", flush=True)
             return 1
 
+        standalone_app: Path | None = None
+        if args.job in STANDALONE_JOBS:
+            standalone_app = standalone_app_path(base_command)
+            validate_standalone_app(standalone_app)
+
         if batch_staged is not None:
             readiness_started = time.monotonic()
             try:
@@ -1712,28 +1955,49 @@ def main() -> int:
         for index, generated_run_id in enumerate(run_ids, 1):
             run_id = web_upload[2] if web_upload is not None else generated_run_id
             trace = first_trace if index == 1 else trace_path(args.job, run_id)
+            run_started = time.monotonic()
             try:
                 if index > 1 and web_upload is not None:
                     wait_for_spotlight_visibility(web_upload[4], timeout=180)
                 expected, _, _ = make_expected(args.job, run_id, index, fixture, cloud_root,
                                                args.send_approval_check, staged_source=batch_staged,
                                                gmail=gmail, web_upload=web_upload)
-                (trace / "expected.json").write_text(json.dumps(expected, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-                test_env = env.copy()
-                test_env.update({
-                    "TEST_RUNNER_CORE_JOB_ACCEPTANCE_JOB": args.job,
-                    "TEST_RUNNER_CORE_JOB_ACCEPTANCE_TRACE": str(trace),
-                    "TEST_RUNNER_CORE_JOB_ACCEPTANCE_FIXTURE_ROOT": str(FIXTURE_ROOT),
-                    "TEST_RUNNER_CORE_JOB_ACCEPTANCE_RUN_ID": run_id,
-                })
+                if expected.get("job") != args.job or expected.get("run_id") != run_id:
+                    raise AcceptanceError("Expected job identity does not match this run")
+                expected_path = trace / "expected.json"
+                with expected_path.open("x", encoding="utf-8") as stream:
+                    stream.write(json.dumps(expected, indent=2, sort_keys=True) + "\n")
+                try:
+                    written_expected = json.loads(expected_path.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError) as error:
+                    raise AcceptanceError("Expected run identity could not be read back") from error
+                if (not isinstance(written_expected, dict) or written_expected.get("job") != args.job
+                        or written_expected.get("run_id") != run_id):
+                    raise AcceptanceError("Written expected.json identity does not match this run")
+
                 test_allowance = 480 if args.job == "gmail" else TIMEOUT_SECONDS
-                command = command_for(base_command, "test-without-building", trace,
-                                      test_allowance=test_allowance)
                 print(f"Run {index}/{args.runs}: {args.job} [{run_id[:8]}]", flush=True)
                 if web_upload is not None:
                     mark_web_upload_attempted(web_upload)
-                test_env["TEST_RUNNER_CORE_JOB_ACCEPTANCE_DEADLINE_EPOCH"] = str(time.time() + test_allowance)
-                code, elapsed = run_logged(command, test_env, trace / "test.log", test_allowance)
+                if args.job in STANDALONE_JOBS:
+                    if standalone_app is None:
+                        raise AcceptanceError("Standalone app product was not selected after the build")
+                    deadline_epoch = time.time() + test_allowance
+                    deadline_monotonic = time.monotonic() + test_allowance
+                    code, elapsed = run_standalone(args.job, run_id, trace, FIXTURE_ROOT,
+                        standalone_app, env, deadline_epoch, deadline_monotonic)
+                else:
+                    test_env = env.copy()
+                    test_env.update({
+                        "TEST_RUNNER_CORE_JOB_ACCEPTANCE_JOB": args.job,
+                        "TEST_RUNNER_CORE_JOB_ACCEPTANCE_TRACE": str(trace),
+                        "TEST_RUNNER_CORE_JOB_ACCEPTANCE_FIXTURE_ROOT": str(FIXTURE_ROOT),
+                        "TEST_RUNNER_CORE_JOB_ACCEPTANCE_RUN_ID": run_id,
+                        "TEST_RUNNER_CORE_JOB_ACCEPTANCE_DEADLINE_EPOCH": str(time.time() + test_allowance),
+                    })
+                    command = command_for(base_command, "test-without-building", trace,
+                                          test_allowance=test_allowance)
+                    code, elapsed = run_logged(command, test_env, trace / "test.log", test_allowance)
                 try:
                     passed, check = verify_run(trace, expected, code)
                 except (AcceptanceError, OSError, ValueError) as error:
@@ -1786,12 +2050,16 @@ def main() -> int:
                               "failure_class": None if passed else (failure_class if failure_class in FAILURE_CLASSES else "other"),
                               "check": check, "trace": str(trace)}
                 results.append(run_result)
-                (trace / "checker.json").write_text(json.dumps(run_result, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+                write_checker(trace, run_result)
                 print(f"  {'PASS' if passed else 'FAIL'} ({elapsed:.1f}s); trace: {trace}", flush=True)
-            except (AcceptanceError, OSError, ValueError) as error:
-                results.append({"job": args.job, "run_id": run_id, "run_index": index,
-                                "passed": False, "failure_class": "other", "check": {"passed": False, "reason": str(error)},
-                                "trace": str(trace)})
+            except Exception as error:
+                failed_result = {"job": args.job, "run_id": run_id, "run_index": index,
+                                 "passed": False, "elapsed_seconds": round(time.monotonic() - run_started, 3),
+                                 "failure_class": "other",
+                                 "check": {"passed": False, "reason": str(error)[:1000]},
+                                 "trace": str(trace)}
+                results.append(failed_result)
+                write_checker(trace, failed_result)
                 print(f"  FAIL; {error}; trace: {trace}", flush=True)
             if not results[-1]["passed"]:
                 break

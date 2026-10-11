@@ -555,6 +555,64 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
         XCTAssertEqual(fallbackCaptures, 2)
     }
 
+    @MainActor
+    func testW2FocusedRetainedCaptureRecapturesOnlyTransientStructureReadFailure() async throws {
+        for scenario in ["once", "persistent", "nontransient", "revoked-gate"] {
+            let fixture = try Fixture()
+            defer { try? FileManager.default.removeItem(at: fixture.root) }
+            let taskID = "w2-structure-read-\(scenario)"
+            let goal = "Upload the selected file to Google Drive."
+            var injectInventoryFailure = false
+            var fallbackCaptures = 0
+            var captureReason: String?
+            var captureAXError: Int?
+            let session = try fixture.session(
+                retainedWindowCapture: { identity, _ in
+                    guard !injectInventoryFailure else { throw ComputerUseDefaultBrowserSession.Failure.targetLost }
+                    return fixture.desktop.snapshot(application: identity)
+                },
+                focusedRetainedWindowCapture: { identity, _, authorizeFallback in
+                    fallbackCaptures += 1
+                    try authorizeFallback()
+                    let shouldFail = scenario == "persistent" || fallbackCaptures == 1
+                    if shouldFail {
+                        captureReason = "focused_retained_structure_read"
+                        captureAXError = Int((scenario == "nontransient" ? AXError.noValue : AXError.cannotComplete).rawValue)
+                        if scenario == "revoked-gate" { fixture.desktop.isActive = false }
+                        throw ComputerUseDefaultBrowserSession.Failure.targetLost
+                    }
+                    captureReason = nil
+                    captureAXError = nil
+                    return fixture.desktop.snapshot(application: identity)
+                },
+                captureDiagnosticProvider: { captureReason },
+                captureDiagnosticAXErrorProvider: { captureAXError })
+
+            try await session.ensure(taskID: taskID, goal: goal, tools: fixture.tools)
+            try session.enableW2FocusedRetainedCaptureFallback(taskID: taskID, goal: goal, tools: fixture.tools)
+            let inputCount = fixture.desktop.keyCount
+            injectInventoryFailure = true
+
+            if scenario == "once" {
+                try session.validate(taskID: taskID, goal: goal, tools: fixture.tools)
+                XCTAssertEqual(fallbackCaptures, 2,
+                    "One exact cannotComplete structure read must recover through one fresh full snapshot")
+            } else if scenario == "revoked-gate" {
+                XCTAssertThrowsError(try session.validate(taskID: taskID, goal: goal, tools: fixture.tools)) { error in
+                    XCTAssertEqual(error.localizedDescription,
+                        ComputerUseHostTools.ToolError.paused.localizedDescription)
+                }
+                XCTAssertEqual(fallbackCaptures, 1, "A changed task gate must stop before recapture")
+            } else {
+                XCTAssertThrowsError(try session.validate(taskID: taskID, goal: goal, tools: fixture.tools))
+                XCTAssertEqual(fallbackCaptures, scenario == "persistent" ? 3 : 1,
+                    "Persistent errors stay within the existing three-attempt bound; nontransient errors stop immediately")
+            }
+            XCTAssertEqual(fixture.desktop.keyCount, inputCount,
+                "Focused-retained capture recovery is read-only and never replays native input")
+        }
+    }
+
     func testW2FocusedRetainedCaptureRequiresExactSafariTargetAndTaskGate() throws {
         let pid = pid_t(47_001)
         let path = "/Applications/Safari.app"

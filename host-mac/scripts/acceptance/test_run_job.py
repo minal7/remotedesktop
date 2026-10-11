@@ -7,11 +7,12 @@ import importlib.util
 import io
 import json
 from pathlib import Path
+import signal
 import sys
 import tempfile
 import unittest
 from urllib.parse import quote
-from unittest.mock import patch
+from unittest.mock import call, patch
 
 
 RUNNER_PATH = Path(__file__).with_name("run_job.py")
@@ -19,6 +20,152 @@ SPEC = importlib.util.spec_from_file_location("acceptance_run_job", RUNNER_PATH)
 assert SPEC is not None and SPEC.loader is not None
 runner = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(runner)
+
+
+class StandaloneLauncherTests(unittest.TestCase):
+    def test_build_command_selects_only_a_literal_debug_app_product(self) -> None:
+        app = runner.standalone_app_path(["xcodebuild", "test", "-configuration", "Debug",
+            "CONFIGURATION_BUILD_DIR=~/Build/Products/CaptureProbe"])
+        self.assertEqual(app, Path.home() / "Build/Products/CaptureProbe/RemoteDesktopHost.app")
+        with self.assertRaises(runner.AcceptanceError):
+            runner.standalone_app_path(["xcodebuild", "test", "-configuration", "Release",
+                "CONFIGURATION_BUILD_DIR=/tmp/products"])
+        with self.assertRaises(runner.AcceptanceError):
+            runner.standalone_app_path(["xcodebuild", "test", "-configuration", "Debug",
+                "CONFIGURATION_BUILD_DIR=$(BUILT_PRODUCTS_DIR)"])
+
+    def test_standalone_markers_require_matching_identity_and_integer_exit_code(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            trace = Path(temporary)
+            (trace / "standalone-started.json").write_text(json.dumps({
+                "schema_version": 1, "job": "drive", "run_id": "right", "pid": 42}), encoding="utf-8")
+            (trace / "standalone-result.json").write_text(json.dumps({
+                "schema_version": 1, "job": "drive", "run_id": "right", "exit_code": 0}), encoding="utf-8")
+            self.assertEqual(runner.read_standalone_started(trace, "drive", "right")["pid"], 42)
+            self.assertEqual(runner.read_standalone_result(trace, "drive", "right")["exit_code"], 0)
+            with self.assertRaises(runner.AcceptanceError):
+                runner.read_standalone_started(trace, "drive", "other")
+            (trace / "standalone-result.json").write_text(json.dumps({
+                "schema_version": 1, "job": "drive", "run_id": "right", "exit_code": True}), encoding="utf-8")
+            with self.assertRaises(runner.AcceptanceError):
+                runner.read_standalone_result(trace, "drive", "right")
+
+    def test_fast_standalone_result_still_requires_started_marker(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            app = root / "RemoteDesktopHost.app"
+            executable = app / "Contents/MacOS/RemoteDesktopHost"
+            test_bundle = app / "Contents/PlugIns/RemoteDesktopHostTests.xctest"
+            executable.parent.mkdir(parents=True)
+            executable.touch()
+            test_bundle.mkdir(parents=True)
+            developer = root / "Xcode/Contents/Developer"
+            (developer / "Platforms/MacOSX.platform/Developer/Library/Frameworks").mkdir(parents=True)
+            (developer / "Platforms/MacOSX.platform/Developer/usr/lib").mkdir(parents=True)
+            trace = root / "trace"
+            trace.mkdir()
+            fixture_root = root / "fixtures"
+            fixture_root.mkdir()
+            run_id = "a" * 32
+            (trace / "expected.json").write_text(json.dumps({"job": "drive", "run_id": run_id}), encoding="utf-8")
+
+            class OpenProcess:
+                def poll(self):
+                    return 0
+
+                def wait(self, timeout=None):
+                    return 0
+
+                def terminate(self):
+                    pass
+
+                def kill(self):
+                    pass
+
+            def launch_open(*args, **kwargs):
+                captured["command"] = args[0]
+                captured["env"] = kwargs["env"]
+                (trace / "standalone-result.json").write_text(json.dumps({
+                    "schema_version": 1, "job": "drive", "run_id": run_id, "exit_code": 0}), encoding="utf-8")
+                return OpenProcess()
+
+            captured = {}
+            with patch.object(runner.subprocess, "Popen", side_effect=launch_open):
+                with self.assertRaisesRegex(runner.AcceptanceError, "started marker"):
+                    runner.run_standalone("drive", run_id, trace, fixture_root, app,
+                        {"DEVELOPER_DIR": str(developer),
+                         "CORE_JOB_ACCEPTANCE_JOB": "leaked"},
+                        deadline_epoch=runner.time.time() + 30,
+                        deadline_monotonic=runner.time.monotonic() + 30)
+            self.assertEqual(captured["env"].get("CORE_JOB_ACCEPTANCE_JOB"), "drive")
+            self.assertIsNone(captured["env"].get("TEST_RUNNER_CORE_JOB_ACCEPTANCE_JOB"))
+            self.assertIn("--env", captured["command"])
+            self.assertIn("CORE_JOB_ACCEPTANCE_JOB=drive", captured["command"])
+
+    def test_timeout_cleanup_rejects_process_with_wrong_executable(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            trace = Path(temporary)
+            executable = Path(temporary) / "RemoteDesktopHost.app/Contents/MacOS/RemoteDesktopHost"
+            run_id = "b" * 32
+            (trace / "standalone-started.json").write_text(json.dumps({
+                "schema_version": 1, "job": "dropbox", "run_id": run_id, "pid": 456}), encoding="utf-8")
+            wrong = type("Result", (), {"returncode": 0, "stdout": "/tmp/other --core-job-acceptance-run-id " + run_id})
+            with patch.object(runner.subprocess, "run", return_value=wrong), \
+                 patch.object(runner.os, "kill") as kill:
+                runner.stop_owned_standalone_app(trace, "dropbox", run_id, executable)
+                kill.assert_not_called()
+
+    def test_timeout_launch_terminates_then_revalidates_exact_process(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            app = root / "RemoteDesktopHost.app"
+            executable = app / "Contents/MacOS/RemoteDesktopHost"
+            executable.parent.mkdir(parents=True)
+            executable.touch()
+            (app / "Contents/PlugIns/RemoteDesktopHostTests.xctest").mkdir(parents=True)
+            developer = root / "Xcode/Contents/Developer"
+            (developer / "Platforms/MacOSX.platform/Developer/Library/Frameworks").mkdir(parents=True)
+            (developer / "Platforms/MacOSX.platform/Developer/usr/lib").mkdir(parents=True)
+            trace = root / "trace"
+            trace.mkdir()
+            fixture_root = root / "fixtures"
+            fixture_root.mkdir()
+            run_id = "c" * 32
+            (trace / "expected.json").write_text(json.dumps({"job": "drive", "run_id": run_id}), encoding="utf-8")
+
+            class OpenProcess:
+                def poll(self):
+                    return None
+
+                def terminate(self):
+                    pass
+
+                def wait(self, timeout=None):
+                    return 0
+
+                def kill(self):
+                    pass
+
+            def launch_open(*args, **kwargs):
+                (trace / "standalone-started.json").write_text(json.dumps({
+                    "schema_version": 1, "job": "drive", "run_id": run_id, "pid": 456}), encoding="utf-8")
+                return OpenProcess()
+
+            exact = type("Result", (), {"returncode": 0,
+                "stdout": f"{executable} --core-job-acceptance-run-id {run_id}"})
+            with patch.object(runner.subprocess, "Popen", side_effect=launch_open), \
+                 patch.object(runner.subprocess, "run", return_value=exact), \
+                 patch.object(runner.os, "kill") as kill, \
+                 patch.object(runner.time, "monotonic", side_effect=[0.0, 6.0, 10.0, 16.0]), \
+                 patch.object(runner.time, "sleep"):
+                with self.assertRaisesRegex(runner.AcceptanceError, "absolute run deadline"):
+                    runner.run_standalone("drive", run_id, trace, fixture_root, app,
+                        {"DEVELOPER_DIR": str(developer)}, deadline_epoch=1_000,
+                        deadline_monotonic=0.0)
+            self.assertEqual(kill.call_args_list, [
+                call(456, signal.SIGTERM),
+                call(456, signal.SIGKILL),
+            ])
 
 
 class GmailHarnessTests(unittest.TestCase):
