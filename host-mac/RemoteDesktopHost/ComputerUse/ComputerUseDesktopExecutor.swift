@@ -498,10 +498,75 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
            ComputerUseScreenCaptureConsentDetector.requiresUserIntervention(context) { throw Failure.authentication }
     }
 
+    /// A capture can lose one of its frontmost-window reads while the
+    /// retained, task-scoped surface is otherwise still available. In either
+    /// exact finite case, discard the failed capture and make one fresh read
+    /// after the caller revalidates all authority.
+    static func captureWithOneScopedWindowReadRetry<Value>(
+        hasSurfaceScope: Bool,
+        failureReason: () -> String?,
+        capture: () throws -> Value,
+        revalidate: () throws -> Void
+    ) throws -> Value {
+        do {
+            return try capture()
+        } catch {
+            let reason = failureReason()
+            let retryableFailure: Bool
+            if let toolError = error as? ComputerUseHostTools.ToolError {
+                switch (reason, toolError) {
+                case ("window_after_unavailable", .visualSurfaceObscured),
+                     ("window_before_unavailable", .focusedDisplayUnavailable):
+                    retryableFailure = true
+                default:
+                    retryableFailure = false
+                }
+            } else {
+                retryableFailure = false
+            }
+            guard hasSurfaceScope, retryableFailure else {
+                throw error
+            }
+            try revalidate()
+            return try capture()
+        }
+    }
+
+    private func isSameAuthoritativeApplication(
+        _ lhs: ComputerUseFrontmostApplicationSnapshot,
+        _ rhs: ComputerUseFrontmostApplicationSnapshot
+    ) -> Bool {
+        guard lhs.identityIsAuthoritative, rhs.identityIsAuthoritative,
+              let lhsIdentity = lhs.identity, lhsIdentity.codeIdentity != nil,
+              let rhsIdentity = rhs.identity, rhsIdentity.codeIdentity != nil else { return false }
+        return lhsIdentity == rhsIdentity && lhs.policyName == rhs.policyName
+    }
+
     private func observe(_ tools: ComputerUseHostTools, includeControls: Bool = false) async throws -> Observation {
         try checkAuthentication(tools)
         let before = tools.frontmostApplicationSnapshot()
-        let screen = try tools.currentScreen()
+        let screen = try Self.captureWithOneScopedWindowReadRetry(
+            hasSurfaceScope: surfaceScopeCheck != nil,
+            failureReason: { tools.lastScreenCaptureFailureForDiagnostics },
+            capture: { try tools.currentScreen() },
+            revalidate: {
+                try Task.checkCancellation()
+                try tools.requireActive()
+                try self.checkAuthentication(tools)
+                try self.checkScopedSurface(nil)
+                let afterScope = tools.frontmostApplicationSnapshot()
+                guard self.isSameAuthoritativeApplication(before, afterScope) else {
+                    throw Failure.changedScreen
+                }
+                try Task.checkCancellation()
+                try tools.requireActive()
+                try self.checkAuthentication(tools)
+                try self.checkScopedSurface(nil)
+                let beforeRetry = tools.frontmostApplicationSnapshot()
+                guard self.isSameAuthoritativeApplication(before, beforeRetry) else {
+                    throw Failure.changedScreen
+                }
+            })
         let after = tools.frontmostApplicationSnapshot()
         guard before.identity == after.identity, before.policyName == after.policyName,
               screen.frontmostWindowBounds != nil else { throw Failure.changedScreen }
@@ -811,6 +876,9 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
                     do { fingerprint = try tools.prepareNativeActionFingerprint(for: action) }
                     catch ComputerUseHostTools.ToolError.approvalTargetChanged {
                         lastRevalidationDiagnostic["blockedAt"] = "approval-fingerprint-preparation"
+                        if let reason = tools.lastScreenCaptureFailureForDiagnostics {
+                            lastRevalidationDiagnostic["screenCaptureFailure"] = reason
+                        }
                         throw Failure.changedScreen
                     }
                     if let reason = tools.approvalReason(for: action) {

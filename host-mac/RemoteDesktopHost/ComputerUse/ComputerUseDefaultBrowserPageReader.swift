@@ -112,6 +112,7 @@ final class ComputerUseDefaultBrowserPageReader {
         let window: AXUIElement
         let webArea: AXUIElement
         let url: String
+        let mode: ReadMode
         let controls: [String: AXUIElement]
         let controlMetadata: [String: Control]
         let listingRows: [String: AXUIElement]
@@ -262,9 +263,21 @@ final class ComputerUseDefaultBrowserPageReader {
     /// authority to inspect controls or act on the page.
     func readRetainedPageURL(window expectedWindow: AXUIElement,
                              application expectedApplication: ComputerUseApplicationIdentity,
-                             mayAct: () -> Bool) throws -> String? {
-        let deadline = ContinuousClock.now.advanced(by: .milliseconds(750))
+                             mayAct: () -> Bool,
+                             diagnostic: ((String, Int) -> Void)? = nil) throws -> String? {
+        let started = ContinuousClock.now
+        let deadline = started.advanced(by: .milliseconds(750))
         var expired = false
+        func report(_ reason: String) {
+            let components = (ContinuousClock.now - started).components
+            let milliseconds = Int(max(0, min(2_000,
+                components.seconds * 1_000 + components.attoseconds / 1_000_000_000_000_000)))
+            diagnostic?(reason, milliseconds)
+        }
+        func failed(_ reason: String) -> String? {
+            report(expired ? "deadline" : reason)
+            return nil
+        }
         func check() throws {
             try Task.checkCancellation()
             guard mayAct() else { throw ComputerUseHostTools.ToolError.paused }
@@ -294,9 +307,14 @@ final class ComputerUseDefaultBrowserPageReader {
                   (try string(kAXRoleAttribute as String, expectedWindow)) == "AXWindow" else { return false }
             return true
         }
-        func uniqueOuterWebArea(in window: AXUIElement) throws -> AXUIElement? {
+        func uniqueOuterWebArea(in window: AXUIElement, phase: String) throws -> (AXUIElement?, String?) {
             let inventory = try discoverOuterPages(in: window, value: value, check: check)
-            return try selectOuterPage(from: inventory, window: window, value: value, check: check)
+            guard inventory.complete else { return (nil, "\(phase)_outer_inventory_incomplete") }
+            guard !inventory.pages.isEmpty else { return (nil, "\(phase)_outer_inventory_empty") }
+            guard let selected = try selectOuterPage(from: inventory, window: window, value: value, check: check) else {
+                return (nil, "\(phase)_outer_selection_ambiguous")
+            }
+            return (selected, nil)
         }
         func httpsURL(from webArea: AXUIElement) throws -> String? {
             guard let rawURL = try string("AXURL", webArea) ?? string(kAXDocumentAttribute as String, webArea),
@@ -306,15 +324,22 @@ final class ComputerUseDefaultBrowserPageReader {
         }
 
         try check()
-        guard let root = try currentRoot(), try listedWindow(root),
-              let webArea = try uniqueOuterWebArea(in: expectedWindow),
-              let url = try httpsURL(from: webArea) else { return nil }
+        guard let root = try currentRoot() else { return failed("initial_app_unavailable") }
+        guard try listedWindow(root) else { return failed("initial_window_unavailable") }
+        let (webArea, initialPageFailure) = try uniqueOuterWebArea(in: expectedWindow, phase: "initial")
+        guard let webArea else { return failed(initialPageFailure ?? "initial_outer_selection_ambiguous") }
+        guard let url = try httpsURL(from: webArea) else { return failed("initial_url_unavailable") }
         try check()
-        guard let afterRoot = try currentRoot(), CFEqual(afterRoot, root),
-              try listedWindow(afterRoot),
-              let afterWebArea = try uniqueOuterWebArea(in: expectedWindow),
-              CFEqual(afterWebArea, webArea), try httpsURL(from: afterWebArea) == url,
-              !expired else { return nil }
+        guard let afterRoot = try currentRoot() else { return failed("fresh_app_unavailable") }
+        guard CFEqual(afterRoot, root) else { return failed("fresh_app_changed") }
+        guard try listedWindow(afterRoot) else { return failed("fresh_window_unavailable") }
+        let (afterWebArea, freshPageFailure) = try uniqueOuterWebArea(in: expectedWindow, phase: "fresh")
+        guard let afterWebArea else { return failed(freshPageFailure ?? "fresh_outer_selection_ambiguous") }
+        guard CFEqual(afterWebArea, webArea) else { return failed("fresh_outer_selection_changed") }
+        guard let freshURL = try httpsURL(from: afterWebArea) else { return failed("fresh_url_unavailable") }
+        guard freshURL == url else { return failed("fresh_url_changed") }
+        guard !expired else { return failed("deadline") }
+        report("complete")
         return url
     }
 
@@ -766,7 +791,7 @@ final class ComputerUseDefaultBrowserPageReader {
             webUploadListingRows: webUploadListingRows,
             webUploadControlsComplete: controlsComplete)
         retained[observationID] = Retained(application: expectedApplication, window: expectedWindow,
-            webArea: webArea, url: url, controls: controlRefs,
+            webArea: webArea, url: url, mode: mode, controls: controlRefs,
             controlMetadata: Dictionary(uniqueKeysWithValues: controls.map { ($0.id, $0) }),
             listingRows: listingRowRefs)
         if retained.count > 32,
@@ -804,7 +829,8 @@ final class ComputerUseDefaultBrowserPageReader {
               suppliedControl == originalControl,
               Self.permittedCenterMetadata(originalControl, within: windowBounds) != nil else { return nil }
 
-        guard let fresh = try read(window: window, application: original.application, mayAct: mayAct) else { return nil }
+        guard let fresh = try read(window: window, application: original.application,
+                                   mayAct: mayAct, mode: original.mode) else { return nil }
         try Task.checkCancellation()
         guard mayAct() else { throw ComputerUseHostTools.ToolError.paused }
         guard fresh.application == original.application, fresh.url == original.url,

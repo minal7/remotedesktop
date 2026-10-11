@@ -145,8 +145,9 @@ final class ComputerUseDefaultBrowserSession {
     @MainActor private final class CaptureDiagnosticState {
         var reason: String?
         var axErrorCode: Int?
+        var elapsedMs: Int?
 
-        func reset() { reason = nil; axErrorCode = nil }
+        func reset() { reason = nil; axErrorCode = nil; elapsedMs = nil }
 
         func record(_ message: String) {
             let token = message.split(separator: " ").first(where: { $0.hasPrefix("reason=") })
@@ -158,11 +159,16 @@ final class ComputerUseDefaultBrowserSession {
                 "capture_deadline", "final_frontmost_unavailable", "final_frontmost_changed",
                 "retained_target_missing_or_ambiguous", "retained_target_pid", "pid", "bounds_read",
                 "bounds_deadline", "bounds_type", "bounds_malformed", "focused_duplicate",
-                "duplicate_id", "duplicate_element", "bounds_ax_read_failure"]
+                "duplicate_id", "duplicate_element", "bounds_ax_read_failure",
+                "startup_role_unclassified", "focused_transient_surface"]
             if let token, allowed.contains(token) { reason = token }
             if let field = message.split(separator: " ").first(where: { $0.hasPrefix("ax_error=") }),
                let code = Int(field.dropFirst("ax_error=".count)), (-65_535...65_535).contains(code) {
                 axErrorCode = code
+            }
+            if let field = message.split(separator: " ").first(where: { $0.hasPrefix("elapsed_ms=") }),
+               let duration = Int(field.dropFirst("elapsed_ms=".count)), (0...2_000).contains(duration) {
+                elapsedMs = duration
             }
         }
     }
@@ -176,6 +182,7 @@ final class ComputerUseDefaultBrowserSession {
     private let safariAddressBarAX: SafariAddressBarAXAccess
     private let captureDiagnosticProvider: @MainActor () -> String?
     private let captureDiagnosticAXErrorProvider: @MainActor () -> Int?
+    private let captureDiagnosticElapsedMsProvider: @MainActor () -> Int?
     private let captureWindowsDiagnostic: @MainActor (String) -> Void
     private var runState: RunState?
     private(set) var lastValidationPhaseForDiagnostics: ValidationPhase?
@@ -188,6 +195,7 @@ final class ComputerUseDefaultBrowserSession {
     var currentActionBounds: CGRect? { runState?.currentActionBounds }
     var lastCaptureReasonForDiagnostics: String? { captureDiagnosticProvider() }
     var lastCaptureAXErrorCodeForDiagnostics: Int? { captureDiagnosticAXErrorProvider() }
+    var lastCaptureElapsedMsForDiagnostics: Int? { captureDiagnosticElapsedMsProvider() }
 
     convenience init(journalDirectory: URL,
                       captureWindowsDiagnostic: @escaping @MainActor (String) -> Void = { _ in }) throws {
@@ -216,6 +224,7 @@ final class ComputerUseDefaultBrowserSession {
                     diagnostic: recordDiagnostic)
             }, captureDiagnosticProvider: { captureDiagnosticState.reason },
             captureDiagnosticAXErrorProvider: { captureDiagnosticState.axErrorCode },
+            captureDiagnosticElapsedMsProvider: { captureDiagnosticState.elapsedMs },
             captureWindowsDiagnostic: captureWindowsDiagnostic)
     }
 
@@ -228,6 +237,7 @@ final class ComputerUseDefaultBrowserSession {
          captureRetainedWindow: CaptureRetainedWindow? = nil,
          captureDiagnosticProvider: @escaping @MainActor () -> String? = { nil },
          captureDiagnosticAXErrorProvider: @escaping @MainActor () -> Int? = { nil },
+         captureDiagnosticElapsedMsProvider: @escaping @MainActor () -> Int? = { nil },
          captureWindowsDiagnostic: @escaping @MainActor (String) -> Void = { _ in }) throws {
         self.journalDirectory = journalDirectory
         self.resolveHandler = resolveHandler
@@ -238,6 +248,7 @@ final class ComputerUseDefaultBrowserSession {
         self.makeStore = makeStore
         self.captureDiagnosticProvider = captureDiagnosticProvider
         self.captureDiagnosticAXErrorProvider = captureDiagnosticAXErrorProvider
+        self.captureDiagnosticElapsedMsProvider = captureDiagnosticElapsedMsProvider
         self.captureWindowsDiagnostic = captureWindowsDiagnostic
     }
 
@@ -1382,10 +1393,9 @@ final class ComputerUseDefaultBrowserSession {
                                 throw Failure.interrupted
                             }
                             recordWindowTransition("phase=startup_pre_effect_read")
-                            let currentSnapshot = try captureWindows(currentApp)
-                            guard try Self.sameSnapshot(originalBefore, currentSnapshot) else {
-                                throw Failure.interrupted
-                            }
+                            try Self.requireSameStartupSnapshotAtEffectBoundary(
+                                originalBefore, app: currentApp, handler: state.handler,
+                                tools: tools, resolveHandler: resolveHandler, captureWindows: captureWindows)
                             recordWindowTransition("phase=startup_pre_effect_verified")
                         }
                     recordWindowTransition("phase=startup_cmd_n_returned")
@@ -1405,10 +1415,12 @@ final class ComputerUseDefaultBrowserSession {
                             try await tools.performNativeAction(action, fingerprint: fingerprint) { [weak state, captureWindows] in
                                 try Task.checkCancellation()
                                 try tools.requireActive()
-                                guard let state, let app = state.app, let originalBefore = state.before,
-                                      try Self.sameSnapshot(originalBefore, captureWindows(app)) else {
+                                guard let state, let app = state.app, let originalBefore = state.before else {
                                     throw Failure.interrupted
                                 }
+                                try Self.requireSameStartupSnapshotAtEffectBoundary(
+                                    originalBefore, app: app, handler: state.handler,
+                                    tools: tools, resolveHandler: resolveHandler, captureWindows: captureWindows)
                                 effectBegan = true
                             }
                             break
@@ -1562,6 +1574,35 @@ final class ComputerUseDefaultBrowserSession {
         }
         return lhs.windows.allSatisfy { prior in
             rhs.windows.filter { sameWindowReference($0, prior, in: lhs.application) }.count == 1
+        }
+    }
+
+    /// Reobserve once at the final effect boundary when Safari's AX window
+    /// inventory is temporarily ambiguous. The retry is read-only and only
+    /// proceeds after the signed foreground app and current default handler
+    /// are revalidated; the exact original snapshot must still match.
+    private static func requireSameStartupSnapshotAtEffectBoundary(
+        _ before: WindowSnapshot,
+        app: ComputerUseApplicationIdentity,
+        handler: ComputerUseDefaultBrowserTarget.Handler,
+        tools: ComputerUseHostTools,
+        resolveHandler: ResolveHandler,
+        captureWindows: CaptureWindows
+    ) throws {
+        do {
+            guard try sameSnapshot(before, captureWindows(app)) else { throw Failure.interrupted }
+        } catch Failure.ambiguousWindows {
+            try Task.checkCancellation()
+            try tools.requireActive()
+            guard try resolveHandler() == handler else { throw Failure.interrupted }
+            try validate(application: app, matches: handler)
+            let frontmost = tools.frontmostApplicationSnapshot()
+            guard frontmost.identityIsAuthoritative,
+                  let current = frontmost.identity,
+                  current == app,
+                  current.codeIdentity == app.codeIdentity else { throw Failure.interrupted }
+            let recaptured = try captureWindows(app)
+            guard try sameSnapshot(before, recaptured) else { throw Failure.interrupted }
         }
     }
 
@@ -1871,7 +1912,9 @@ final class ComputerUseDefaultBrowserSession {
             diagnostic("phase=capture_failure reason=frontmost_identity_mismatch")
             throw Failure.targetLost
         }
-        let deadline = ContinuousClock.now.advanced(by: .seconds(2))
+        // The two application-level AX reads (windows and focused window) may each
+        // take up to 1.5 seconds; share a four-second total budget with geometry.
+        let deadline = ContinuousClock.now.advanced(by: .seconds(4))
         let root = AXUIElementCreateApplication(application.processIdentifier)
         var rootReadAXError: Int?
         func read(_ element: AXUIElement, _ attribute: CFString,
@@ -1880,16 +1923,24 @@ final class ComputerUseDefaultBrowserSession {
             let isApplicationWindowRead = CFEqual(element, root)
                 && (attribute == (kAXWindowsAttribute as CFString)
                     || attribute == (kAXFocusedWindowAttribute as CFString))
-            AXUIElementSetMessagingTimeout(element, messagingTimeout ?? (isApplicationWindowRead ? 0.5 : 0.15))
+            let components = ContinuousClock.now.duration(to: deadline).components
+            let remainingSeconds = Double(components.seconds) + Double(components.attoseconds) / 1_000_000_000_000_000_000
+            guard remainingSeconds > 0 else { return nil }
+            let requestedTimeout: Double = messagingTimeout.map(Double.init) ?? (isApplicationWindowRead ? 1.5 : 0.15)
+            AXUIElementSetMessagingTimeout(element, Float(min(requestedTimeout, remainingSeconds)))
             var value: CFTypeRef?
+            let readStarted = ContinuousClock.now
             let result = AXUIElementCopyAttributeValue(element, attribute, &value)
             guard result == .success else {
+                let readDuration = readStarted.duration(to: .now).components
+                let elapsedMs = max(0, min(2_000, Int(Double(readDuration.seconds) * 1_000
+                    + Double(readDuration.attoseconds) / 1_000_000_000_000_000)))
                 if CFEqual(element, root), attribute == (kAXWindowsAttribute as CFString) {
                     rootReadAXError = Int(result.rawValue)
-                    diagnostic("phase=capture_failure reason=windows_read ax_error=\(result.rawValue)")
+                    diagnostic("phase=capture_failure reason=windows_read ax_error=\(result.rawValue) elapsed_ms=\(elapsedMs)")
                 } else if CFEqual(element, root), attribute == (kAXFocusedWindowAttribute as CFString) {
                     rootReadAXError = Int(result.rawValue)
-                    diagnostic("phase=capture_failure reason=focused_window_read ax_error=\(result.rawValue)")
+                    diagnostic("phase=capture_failure reason=focused_window_read ax_error=\(result.rawValue) elapsed_ms=\(elapsedMs)")
                 }
                 if let expectedWindow,
                    CFEqual(element, expectedWindow.accessibilityElement),
@@ -2048,8 +2099,22 @@ final class ComputerUseDefaultBrowserSession {
             }
             return result
         }
-        func focusedWithin(_ focused: AXUIElement, _ root: AXUIElement) -> Bool {
-            var current: AXUIElement? = focused
+        var focusedAncestry: [AXUIElement]?
+        func focusedWithin(_ root: AXUIElement) -> Bool {
+            // Preserve the direct focused-window match without an AXParent read.
+            if CFEqual(focusedElement, root) { return true }
+            if focusedAncestry == nil {
+                var chain = [focusedElement]
+                while chain.count < 12, let current = chain.last, let next = parent(current) {
+                    if chain.contains(where: { CFEqual($0, next) }) { break }
+                    chain.append(next)
+                }
+                focusedAncestry = chain
+            }
+            return focusedAncestry?.contains(where: { CFEqual($0, root) }) == true
+        }
+        func focusedUIWithin(_ focusedUI: AXUIElement, _ root: AXUIElement) -> Bool {
+            var current: AXUIElement? = focusedUI
             for _ in 0..<12 {
                 guard let element = current else { return false }
                 if CFEqual(element, root) { return true }
@@ -2085,7 +2150,7 @@ final class ComputerUseDefaultBrowserSession {
                     throw Failure.ambiguousWindows
                 }
             }
-            let containsNativeFocus = focusedWithin(focusedElement, element)
+            let containsNativeFocus = focusedWithin(element)
             let isRetainedTarget = expectedWindow.map { CFEqual(element, $0.accessibilityElement) } ?? false
             let requireBounds = expectedWindow != nil || containsNativeFocus
             let bounds: CGRect
@@ -2197,7 +2262,8 @@ final class ComputerUseDefaultBrowserSession {
                 if let focusedUIValue = read(root, kAXFocusedUIElementAttribute as CFString),
                    CFGetTypeID(focusedUIValue) == AXUIElementGetTypeID() {
                     let focusedUI = unsafeBitCast(focusedUIValue, to: AXUIElement.self)
-                    pathFocused = focusedWithin(focusedUI, fields[0])
+                    pathFocused = CFEqual(focusedUI, focusedElement)
+                        ? focusedWithin(fields[0]) : focusedUIWithin(focusedUI, fields[0])
                     if let expectedWindow {
                         detachedGoToPathFieldFocused = Self.isExactRetainedGoToPathFieldFocus(
                             retainedWindow: expectedWindow.accessibilityElement,
@@ -2222,7 +2288,7 @@ final class ComputerUseDefaultBrowserSession {
             }
             fileOpenPanel = FileOpenPanel(parentWindowID: parentWindow.id,
                 parentWindowElement: parentWindow.accessibilityElement, accessibilityElement: panel,
-                bounds: bounds(panel)!, isFocused: focusedWithin(focusedElement, panel) || detachedGoToPathFieldFocused,
+                bounds: bounds(panel)!, isFocused: focusedWithin(panel) || detachedGoToPathFieldFocused,
                 goToFolderBounds: goToBounds, pathTextFieldElement: pathField,
                 selectedFileURLs: selectedURLs(in: listViews[0]),
                 primaryActionElement: primaryButtons[0], primaryActionBounds: bounds(primaryButtons[0]),

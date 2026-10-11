@@ -203,7 +203,7 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
     typealias LocalFileCatalogFactory = ComputerUseDefaultBrowserFileCatalogFactory
     typealias GmailContentExtractor = @MainActor @Sendable (String) async throws -> ComputerUseWebJobContentExtractor.Extraction
     typealias WebUploadContentExtractor = @MainActor @Sendable (String) async throws -> ComputerUseWebJobContentExtractor.UploadExtraction
-    enum WebUploadCheckpoint: Equatable, Sendable { case collisionSearchReady, uploadProgressComplete }
+    enum WebUploadCheckpoint: Equatable, Sendable { case preUploadProgressClean, collisionSearchReady, uploadProgressComplete }
     typealias WebUploadCheckpointObserver = @MainActor @Sendable (WebUploadCheckpoint) -> Void
     typealias GmailRecipientLookup = ComputerUseMailRecipients.Lookup
     enum Failure: Error { case taskAlreadyBound, noRetainedWindow, invalidFileChoice, selectedFileStale, selectedFileChangeNeedsConfirmation }
@@ -275,6 +275,7 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
         var nativeControlErrorDomainForDiagnostics: String?
         var nativeControlErrorCodeForDiagnostics: Int?
         var gmailFieldDiagnostics: [String: String] = [:]
+        var webUploadScopeFailureForDiagnostics: String?
         var gmailNavigationPhase: String?
         var gmailAddressValueWriteAttemptCount = 0
         var gmailAddressValueWriteCompletedCount = 0
@@ -317,12 +318,16 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
             var pendingAction: ComputerUsePredictedAction?
             var pendingStage: WebUploadStage?
             var pendingOpenAction: ComputerUsePredictedAction?
+            var preOpenProgressObserved = false
             var observedCompletionProgress = false
         }
         var webUpload: WebUploadState?
+        let webUploadCheckpointObserver: WebUploadCheckpointObserver?
         init(session: ComputerUseDefaultBrowserSession, pageReader: ComputerUseDefaultBrowserPageReader,
-             localFileCatalogFactory: @escaping ComputerUseDefaultBrowserFileCatalogFactory) {
+             localFileCatalogFactory: @escaping ComputerUseDefaultBrowserFileCatalogFactory,
+             webUploadCheckpointObserver: WebUploadCheckpointObserver?) {
             self.session = session; self.pageReader = pageReader; self.localFileCatalogFactory = localFileCatalogFactory
+            self.webUploadCheckpointObserver = webUploadCheckpointObserver
         }
         func prepare(_ id: String, _ goal: String, _ tools: ComputerUseHostTools) async throws {
             self.tools = tools
@@ -360,6 +365,19 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
         func check(_ action: ComputerUsePredictedAction?, _ tools: ComputerUseHostTools) throws {
             pendingPickerConfirmation = nil
             guard let taskID, let goal else { throw Failure.noRetainedWindow }
+            webUploadScopeFailureForDiagnostics = nil
+            if webUpload != nil {
+                gmailFieldDiagnostics.removeValue(forKey: "webUploadAccountReadFailure")
+                gmailFieldDiagnostics.removeValue(forKey: "webUploadAccountReadElapsedMs")
+                gmailFieldDiagnostics.removeValue(forKey: "webUploadParentInitialReadFailure")
+                gmailFieldDiagnostics.removeValue(forKey: "webUploadParentInitialReadElapsedMs")
+                gmailFieldDiagnostics.removeValue(forKey: "webUploadParentRecheckFailure")
+                gmailFieldDiagnostics.removeValue(forKey: "webUploadParentRecheckElapsedMs")
+            }
+            let rejectWebUploadScope: @MainActor (String) throws -> Never = { reason in
+                if self.webUpload != nil { self.webUploadScopeFailureForDiagnostics = reason }
+                throw ComputerUseDesktopExecutor.Failure.scopedSurfaceChanged
+            }
             lastSessionFailureForDiagnostics = nil
             do { try session.validate(taskID: taskID, goal: goal, tools: tools) }
             catch let failure as ComputerUseDefaultBrowserSession.Failure {
@@ -369,13 +387,18 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
             guard let window = session.currentWindow else { throw Failure.noRetainedWindow }
             self.window = window
             if let panel = session.currentFileOpenPanel {
-                let selectedURL = try selectedFileURL()
+                let selectedURL: URL?
+                do { selectedURL = try selectedFileURL() }
+                catch {
+                    if webUpload != nil { webUploadScopeFailureForDiagnostics = "native_panel_scope" }
+                    throw error
+                }
                 guard panel.parentWindowID == window.id,
                       CFEqual(panel.parentWindowElement, window.accessibilityElement),
                       let bounds = session.currentActionBounds,
                       ComputerUseDefaultBrowserActionScope.permitsFilePanel(action, within: bounds,
                         panel: panel, selectedURL: selectedURL) else {
-                    throw ComputerUseDesktopExecutor.Failure.scopedSurfaceChanged
+                    try rejectWebUploadScope("native_panel_scope")
                 }
                 if let action, let selectedCandidate,
                    let candidateID = ComputerUseDefaultBrowserActionScope.confirmationCandidateID(
@@ -389,12 +412,73 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
             } else if !ComputerUseDefaultBrowserActionScope.permits(action, within: window.identity.bounds) {
                 throw ComputerUseDesktopExecutor.Failure.scopedSurfaceChanged
             }
-            if action != nil, let upload = webUpload {
+            if action != nil, var upload = webUpload {
                 if session.currentFileOpenPanel != nil {
-                    guard try pageReader.readRetainedPageURL(window: window.accessibilityElement,
-                        application: window.application, mayAct: { (try? tools.requireActive()) != nil })
-                        == upload.request.provider.homeURL.absoluteString else {
-                        throw ComputerUseDesktopExecutor.Failure.scopedSurfaceChanged
+                    let parentURL: String?
+                    do {
+                        parentURL = try pageReader.readRetainedPageURL(window: window.accessibilityElement,
+                            application: window.application, mayAct: { (try? tools.requireActive()) != nil },
+                            diagnostic: { failure, elapsed in
+                                self.gmailFieldDiagnostics["webUploadParentInitialReadFailure"] = failure
+                                self.gmailFieldDiagnostics["webUploadParentInitialReadElapsedMs"] = String(elapsed)
+                            })
+                    } catch {
+                        webUploadScopeFailureForDiagnostics = "native_parent_url_unavailable"
+                        throw error
+                    }
+                    guard let parentURL, !parentURL.isEmpty else { try rejectWebUploadScope("native_parent_url_unavailable") }
+                    guard parentURL == upload.request.provider.homeURL.absoluteString else {
+                        try rejectWebUploadScope("native_parent_url_mismatch")
+                    }
+                    if upload.stage == .waitingForPicker, let action,
+                       let candidate = selectedCandidate, let confirmation = pendingPickerConfirmation,
+                       confirmation.0 == candidate.id, confirmation.1 == action {
+                        try Task.checkCancellation()
+                        try tools.requireActive()
+                        guard upload.request.provider == .googleDrive else { try rejectWebUploadScope("native_panel_scope") }
+                        guard upload.preOpenProgressObserved else { try rejectWebUploadScope("native_preopen_baseline_missing") }
+                        guard let expectedLabel = upload.expectedAccountLabel else {
+                            try rejectWebUploadScope("native_account_label_unavailable")
+                        }
+                        let observedLabel: String?
+                        do {
+                            observedLabel = try ComputerUseGmailRecipientVerifier.accountControlLabel(
+                                window: window.accessibilityElement, application: window.application,
+                                revalidate: { try session.validate(taskID: taskID, goal: goal, tools: tools) },
+                                diagnostic: { failure, elapsed in
+                                    self.gmailFieldDiagnostics["webUploadAccountReadFailure"] = failure
+                                    self.gmailFieldDiagnostics["webUploadAccountReadElapsedMs"] = String(elapsed)
+                                })
+                        } catch {
+                            webUploadScopeFailureForDiagnostics = "native_account_label_unavailable"
+                            throw error
+                        }
+                        guard let observedLabel else { try rejectWebUploadScope("native_account_label_unavailable") }
+                        guard observedLabel == expectedLabel else { try rejectWebUploadScope("native_account_label_mismatch") }
+                        let freshParentURL: String?
+                        do {
+                            freshParentURL = try pageReader.readRetainedPageURL(
+                                window: window.accessibilityElement, application: window.application,
+                                mayAct: { (try? tools.requireActive()) != nil },
+                                diagnostic: { failure, elapsed in
+                                    self.gmailFieldDiagnostics["webUploadParentRecheckFailure"] = failure
+                                    self.gmailFieldDiagnostics["webUploadParentRecheckElapsedMs"] = String(elapsed)
+                                })
+                        } catch {
+                            webUploadScopeFailureForDiagnostics = "native_parent_recheck_unavailable"
+                            throw error
+                        }
+                        guard let freshParentURL, !freshParentURL.isEmpty else {
+                            try rejectWebUploadScope("native_parent_recheck_unavailable")
+                        }
+                        guard freshParentURL == parentURL else { try rejectWebUploadScope("native_parent_recheck_mismatch") }
+                        try Task.checkCancellation()
+                        try tools.requireActive()
+                        try session.validate(taskID: taskID, goal: goal, tools: tools)
+                        guard session.currentFileOpenPanel?.parentWindowID == window.id,
+                              session.currentFileOpenPanel.map({ CFEqual($0.parentWindowElement, window.accessibilityElement) }) == true else {
+                            try rejectWebUploadScope("native_panel_recheck_changed")
+                        }
                     }
                 } else {
                     let expectedPageURL: String
@@ -408,16 +492,26 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
                     case .home:
                         expectedPageURL = upload.request.provider.homeURL.absoluteString
                     }
-                    guard let page = try pageReader.read(window: window.accessibilityElement,
-                        application: window.application, mayAct: { (try? tools.requireActive()) != nil },
-                        mode: .webUploadControls),
-                        page.application == window.application,
-                        page.url == expectedPageURL,
-                        page.webUploadControlsComplete,
-                        let expectedLabel = upload.expectedAccountLabel,
-                        ComputerUseDefaultBrowserExecutor.webUploadAccountLabel(page,
-                            provider: upload.request.provider) == expectedLabel else {
-                        throw ComputerUseDesktopExecutor.Failure.scopedSurfaceChanged
+                    let page: ComputerUseDefaultBrowserPageReader.Observation?
+                    do {
+                        page = try pageReader.read(window: window.accessibilityElement,
+                            application: window.application, mayAct: { (try? tools.requireActive()) != nil },
+                            mode: .webUploadControls)
+                    } catch {
+                        webUploadScopeFailureForDiagnostics = "page_scope_unconfirmed"
+                        throw error
+                    }
+                    guard let page else { try rejectWebUploadScope("page_scope_unconfirmed") }
+                    guard page.application == window.application, page.url == expectedPageURL,
+                          page.webUploadControlsComplete,
+                          let expectedLabel = upload.expectedAccountLabel,
+                          ComputerUseDefaultBrowserExecutor.webUploadAccountLabel(page,
+                              provider: upload.request.provider) == expectedLabel else {
+                        try rejectWebUploadScope("page_scope_unconfirmed")
+                    }
+                    if upload.pendingAction == action, upload.pendingStage == .waitingForPicker,
+                       !upload.preOpenProgressObserved {
+                        try verifyAndRecordPreUploadProgressBaseline(&upload, window: window, tools: tools, observedPage: page)
                     }
                 }
             }
@@ -928,6 +1022,119 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
             catch { throw Failure.selectedFileStale }
         }
 
+        func verifyAndRecordPreUploadProgressBaseline(_ upload: inout WebUploadState,
+            window expectedWindow: ComputerUseDefaultBrowserSession.Window,
+            tools: ComputerUseHostTools,
+            observedPage: ComputerUseDefaultBrowserPageReader.Observation? = nil) throws {
+            let recordsShortcutRecheck = upload.stage == .driveKeyboardChooseFileUpload && upload.preOpenProgressObserved
+            func recordShortcutRecheck(_ phase: String) {
+                if recordsShortcutRecheck { gmailFieldDiagnostics["webUploadDriveBaselineRecheckFailure"] = phase }
+            }
+            if recordsShortcutRecheck { recordShortcutRecheck("retained_scope") }
+            guard let taskID, let goal else { throw Failure.noRetainedWindow }
+            try Task.checkCancellation()
+            try tools.requireActive()
+            try session.validate(taskID: taskID, goal: goal, tools: tools)
+            guard session.currentFileOpenPanel == nil,
+                  let current = session.currentWindow,
+                  current.id == expectedWindow.id,
+                  current.application == expectedWindow.application,
+                  CFEqual(current.accessibilityElement, expectedWindow.accessibilityElement),
+                  upload.request.provider == .googleDrive,
+                  upload.expectedAccountLabel != nil else {
+                throw ComputerUseDesktopExecutor.Failure.scopedSurfaceChanged
+            }
+            if upload.preOpenProgressObserved {
+                guard let expectedLabel = upload.expectedAccountLabel else {
+                    recordShortcutRecheck("account_read")
+                    throw ComputerUseDesktopExecutor.Failure.scopedSurfaceChanged
+                }
+                let observedURL: String?
+                do {
+                    observedURL = try pageReader.readRetainedPageURL(window: current.accessibilityElement,
+                        application: current.application, mayAct: { (try? tools.requireActive()) != nil })
+                } catch {
+                    recordShortcutRecheck("url_read")
+                    throw error
+                }
+                guard let observedURL else {
+                    recordShortcutRecheck("url_read")
+                    throw ComputerUseDesktopExecutor.Failure.scopedSurfaceChanged
+                }
+                guard observedURL == upload.request.provider.homeURL.absoluteString else {
+                    recordShortcutRecheck("url_mismatch")
+                    throw ComputerUseDesktopExecutor.Failure.scopedSurfaceChanged
+                }
+                let observedLabel: String?
+                do {
+                    observedLabel = try ComputerUseGmailRecipientVerifier.accountControlLabel(
+                        window: current.accessibilityElement, application: current.application,
+                        revalidate: { try session.validate(taskID: taskID, goal: goal, tools: tools) },
+                        diagnostic: { failure, elapsed in
+                            self.gmailFieldDiagnostics["webUploadAccountReadFailure"] = failure
+                            self.gmailFieldDiagnostics["webUploadAccountReadElapsedMs"] = String(elapsed)
+                        })
+                } catch {
+                    recordShortcutRecheck("account_read")
+                    throw error
+                }
+                guard let observedLabel else {
+                    recordShortcutRecheck("account_read")
+                    throw ComputerUseDesktopExecutor.Failure.scopedSurfaceChanged
+                }
+                guard observedLabel == expectedLabel else {
+                    recordShortcutRecheck("account_mismatch")
+                    throw ComputerUseDesktopExecutor.Failure.scopedSurfaceChanged
+                }
+                try Task.checkCancellation()
+                try tools.requireActive()
+                try session.validate(taskID: taskID, goal: goal, tools: tools)
+                guard session.currentFileOpenPanel == nil,
+                      let confirmed = session.currentWindow,
+                      confirmed.id == expectedWindow.id,
+                      confirmed.application == expectedWindow.application,
+                      CFEqual(confirmed.accessibilityElement, expectedWindow.accessibilityElement) else {
+                    recordShortcutRecheck("retained_scope_recheck")
+                    throw ComputerUseDesktopExecutor.Failure.scopedSurfaceChanged
+                }
+                recordShortcutRecheck("complete")
+                return
+            }
+            let page: ComputerUseDefaultBrowserPageReader.Observation
+            if let observedPage { page = observedPage }
+            else {
+                guard let freshPage = try pageReader.read(window: current.accessibilityElement,
+                    application: current.application, mayAct: { (try? tools.requireActive()) != nil },
+                    mode: .webUploadControls) else {
+                    throw ComputerUseDesktopExecutor.Failure.scopedSurfaceChanged
+                }
+                page = freshPage
+            }
+            guard page.application == expectedWindow.application,
+                  page.url == upload.request.provider.homeURL.absoluteString,
+                  page.webUploadControlsComplete,
+                  let expectedAccountLabel = upload.expectedAccountLabel,
+                  ComputerUseDefaultBrowserExecutor.webUploadAccountLabel(page,
+                    provider: upload.request.provider) == expectedAccountLabel,
+                  ComputerUseDefaultBrowserExecutor.webUploadProgressBaselineIsClean(
+                    controlsComplete: page.webUploadControlsComplete, progressValues: page.exactTextValues) else {
+                throw ComputerUseDesktopExecutor.Failure.scopedSurfaceChanged
+            }
+            try Task.checkCancellation()
+            try tools.requireActive()
+            try session.validate(taskID: taskID, goal: goal, tools: tools)
+            guard session.currentFileOpenPanel == nil,
+                  let confirmed = session.currentWindow,
+                  confirmed.id == expectedWindow.id,
+                  confirmed.application == expectedWindow.application,
+                  CFEqual(confirmed.accessibilityElement, expectedWindow.accessibilityElement) else {
+                throw ComputerUseDesktopExecutor.Failure.scopedSurfaceChanged
+            }
+            upload.preOpenProgressObserved = true
+            webUpload = upload
+            webUploadCheckpointObserver?(.preUploadProgressClean)
+        }
+
         static var notQueriedFileContext: ComputerUseMCPBrowserStepPlanner.LocalFileContext {
             .init(query: .init(), page: .init(candidates: [], isComplete: false, nextCursor: nil,
                 hasTiedSortValues: false, hasMissingSortValues: false), inventoryState: .notQueried)
@@ -1025,7 +1232,13 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
         if let code = scope.nativeControlErrorCodeForDiagnostics {
             diagnostic["nativeControlErrorCode"] = String(code)
         }
+        if let reason = scope.tools?.lastScreenCaptureFailureForDiagnostics {
+            diagnostic["screenCaptureFailure"] = reason
+        }
         diagnostic.merge(scope.gmailFieldDiagnostics) { _, new in new }
+        if let failure = scope.webUploadScopeFailureForDiagnostics {
+            diagnostic["webUploadScopeFailure"] = failure
+        }
         if scope.webUpload != nil {
             for (key, value) in scope.pageReader.lastWebUploadControlsDiagnosticForDiagnostics {
                 diagnostic["webUploadControls_\(key)"] = value
@@ -1051,6 +1264,9 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
         }
         if let code = scope.session.lastCaptureAXErrorCodeForDiagnostics {
             diagnostic["sessionCaptureAXErrorCode"] = String(code)
+        }
+        if let elapsedMs = scope.session.lastCaptureElapsedMsForDiagnostics {
+            diagnostic["sessionCaptureElapsedMs"] = String(elapsedMs)
         }
         if let transition = scope.session.lastWindowTransitionDiagnostic {
             diagnostic["sessionWindowTransitionDiagnostic"] = transition
@@ -1100,7 +1316,8 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
         else { session = try ComputerUseDefaultBrowserSession(journalDirectory: journalDirectory) }
         let accountPreferences = gmailAccountPreferences ?? ComputerUseGmailAccountPreferences()
         let scope = Scope(session: session, pageReader: pageReader ?? ComputerUseDefaultBrowserPageReader(),
-            localFileCatalogFactory: localFileCatalogFactory)
+            localFileCatalogFactory: localFileCatalogFactory,
+            webUploadCheckpointObserver: webUploadCheckpointObserver)
         self.scope = scope
         self.gmailContentExtractor = gmailContentExtractor
         self.webUploadContentExtractor = webUploadContentExtractor
@@ -1671,7 +1888,8 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
                 }
                 if upload.stage == .waitingForUpload {
                     guard let candidate = scope.selectedCandidate,
-                          upload.siteUploadDispatchCount == 1, upload.openDispatchCount == 1 else {
+                          upload.siteUploadDispatchCount == 1, upload.openDispatchCount == 1,
+                          upload.preOpenProgressObserved else {
                         return .init(response: "", decision: .handoff(
                             "The upload action could not be tied to the selected file."), includeInModelHistory: false)
                     }
@@ -2676,6 +2894,9 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
                     // If Control-C may already have been posted, inspect only;
                     // never replay either key after an uncertain macro.
                     guard !upload.dispatchLatch.siteUploadAttempted else { return }
+                    scope.gmailFieldDiagnostics["webUploadDriveShortcutStage"] = "driveKeyboardChooseFileUpload"
+                    scope.gmailFieldDiagnostics["webUploadDriveShortcutAttempted"] = "false"
+                    scope.gmailFieldDiagnostics["webUploadDriveShortcutPhase"] = "before_first_key"
                     guard upload.request.provider == .googleDrive,
                           upload.menuFallbackAttempts == 1,
                           upload.siteUploadDispatchCount == 0,
@@ -2699,20 +2920,16 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
                               CFEqual(current.accessibilityElement, retainedWindow.accessibilityElement),
                               current.application.bundleIdentifier == "com.apple.Safari",
                               current.application.codeIdentity != nil,
-                              let currentUpload = scope.webUpload,
+                              var currentUpload = scope.webUpload,
                               currentUpload.stage == .driveKeyboardChooseFileUpload,
                               currentUpload.request.provider == .googleDrive,
                               currentUpload.expectedAccountLabel == accountLabel,
                               currentUpload.siteUploadDispatchCount == 0,
-                              scope.selectedCandidate?.id == candidateID,
-                              let freshPage = try scope.pageReader.read(window: current.accessibilityElement,
-                                application: current.application, mayAct: { (try? tools.requireActive()) != nil },
-                                mode: .webUploadControls),
-                              freshPage.application == retainedWindow.application,
-                              freshPage.url == ComputerUseWebUploadJob.Provider.googleDrive.homeURL.absoluteString,
-                              Self.webUploadAccountLabel(freshPage, provider: .googleDrive) == accountLabel else {
+                              scope.selectedCandidate?.id == candidateID else {
                             throw ComputerUseDesktopExecutor.Failure.scopedSurfaceChanged
                         }
+                        try scope.verifyAndRecordPreUploadProgressBaseline(&currentUpload,
+                            window: retainedWindow, tools: tools)
                         try Task.checkCancellation()
                         try tools.requireActive()
                         try scope.session.validate(taskID: taskID, goal: goal, tools: tools)
@@ -2728,6 +2945,7 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
                         expectedApplication: retainedWindow.application,
                         isAttempted: { scope.webUpload?.dispatchLatch.siteUploadAttempted ?? true },
                         validateContext: validateDriveShortcutContext,
+                        phaseObserver: { scope.gmailFieldDiagnostics["webUploadDriveShortcutPhase"] = $0 },
                         beginAttempt: {
                             guard var current = scope.webUpload,
                                   current.stage == .driveKeyboardChooseFileUpload,
@@ -2739,6 +2957,7 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
                                 throw ComputerUseDesktopExecutor.Failure.scopedSurfaceChanged
                             }
                             scope.webUpload = current
+                            scope.gmailFieldDiagnostics["webUploadDriveShortcutAttempted"] = "true"
                         })
                     guard var completed = scope.webUpload,
                           completed.dispatchLatch.siteUploadAttempted,
@@ -2840,13 +3059,38 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
 
     private static func webUploadProgress(_ page: ComputerUseDefaultBrowserPageReader.Observation)
         -> ComputerUseWebUploadJob.UploadProgress {
-        let values = page.exactTextValues.map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+        webUploadProgress(page.exactTextValues)
+    }
+
+    static func webUploadProgress(_ textValues: [String]) -> ComputerUseWebUploadJob.UploadProgress {
+        let values = textValues.map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
         if values.contains(where: { $0.contains("upload failed") || $0.contains("couldn't upload") }) { return .failed }
         if values.contains(where: { $0.contains("uploading") || $0.contains("remaining") }) { return .inProgress }
-        if values.contains(where: { $0 == "upload complete" || $0 == "upload complete." || $0 == "uploaded" }) {
+        if values.contains(where: {
+            $0 == "upload complete" || $0 == "upload complete." || $0 == "uploaded"
+                || isCountedWebUploadCompletionLabel($0)
+        }) {
             return .complete
         }
         return .unknown
+    }
+
+    private static func isCountedWebUploadCompletionLabel(_ value: String) -> Bool {
+        let label = value.hasSuffix(".") ? String(value.dropLast()) : value
+        for (suffix, singular) in [(" upload complete", true), (" uploads complete", false)] {
+            guard label.hasSuffix(suffix) else { continue }
+            let count = label.dropLast(suffix.count)
+            let digits = Array(count.utf8)
+            guard !digits.isEmpty, digits.count <= 6, digits[0] != 48,
+                  digits.allSatisfy({ (48 ... 57).contains($0) }),
+                  let number = Int(String(count)) else { return false }
+            return singular ? number == 1 : number >= 2
+        }
+        return false
+    }
+
+    static func webUploadProgressBaselineIsClean(controlsComplete: Bool, progressValues: [String]) -> Bool {
+        controlsComplete && webUploadProgress(progressValues) == .unknown
     }
 
     private static func focusedEditorProposal(_ plan: ComputerUseDefaultBrowserControlPlan,
@@ -2906,21 +3150,28 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
         expectedApplication: ComputerUseApplicationIdentity,
         isAttempted: @escaping () -> Bool,
         validateContext: @escaping () throws -> Void,
+        phaseObserver: @escaping (String) -> Void = { _ in },
         beginAttempt: @escaping () throws -> Void
     ) throws {
         guard !isAttempted() else { throw ComputerUseDesktopExecutor.Failure.scopedSurfaceChanged }
+        phaseObserver("before_first_key")
         try tools.performNativeBrowserHostCommand(.driveOpenNewMenu,
             expectedApplication: expectedApplication, willBeginEffect: {
+                phaseObserver("first_key_validating")
                 try validateContext()
                 guard !isAttempted() else { throw ComputerUseDesktopExecutor.Failure.scopedSurfaceChanged }
                 try beginAttempt()
                 guard isAttempted() else { throw ComputerUseDesktopExecutor.Failure.scopedSurfaceChanged }
             })
+        phaseObserver("first_key_returned")
+        phaseObserver("before_second_key")
         try tools.performNativeBrowserHostCommand(.driveChooseFileUpload,
             expectedApplication: expectedApplication, willBeginEffect: {
+                phaseObserver("second_key_validating")
                 try validateContext()
                 guard isAttempted() else { throw ComputerUseDesktopExecutor.Failure.scopedSurfaceChanged }
             })
+        phaseObserver("second_key_returned")
     }
 
     private static func normalizedPointerAction(center: CGPoint, display: CGRect) throws -> ComputerUseFaraAction {

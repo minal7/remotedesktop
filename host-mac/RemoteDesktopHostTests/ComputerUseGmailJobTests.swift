@@ -5,6 +5,41 @@ import XCTest
 @testable import RemoteDesktopHost
 
 final class ComputerUseGmailJobTests: XCTestCase {
+    @MainActor
+    func testAccountControlScanDeadlineDoesNotIncludeFinalRevalidation() throws {
+        let start = ContinuousClock.now
+        let deadline = start.advanced(by: .seconds(1))
+        var now = start
+        let expected = "Google Account: Test User (test@example.com), Google membership"
+
+        let label = try ComputerUseGmailRecipientVerifier.finishAccountControlLabel(
+            labels: [expected],
+            overflow: false,
+            deadline: deadline,
+            revalidate: { now = deadline.advanced(by: .milliseconds(1)) },
+            now: { now })
+
+        XCTAssertEqual(label, expected,
+            "A completed in-budget scan should not be rejected because final scope revalidation took longer than the scan budget")
+
+        XCTAssertNil(try ComputerUseGmailRecipientVerifier.finishAccountControlLabel(
+            labels: [expected], overflow: false, deadline: start,
+            revalidate: {}, now: { start }), "A scan that is already past its deadline must fail")
+        XCTAssertNil(try ComputerUseGmailRecipientVerifier.finishAccountControlLabel(
+            labels: [expected], overflow: true, deadline: deadline,
+            revalidate: {}, now: { start }), "An incomplete scan must fail")
+        XCTAssertNil(try ComputerUseGmailRecipientVerifier.finishAccountControlLabel(
+            labels: [expected, "Google Account: Other (other@example.com), Google membership"],
+            overflow: false, deadline: deadline, revalidate: {}, now: { start }),
+            "Ambiguous account labels must fail")
+
+        enum ScopeFailure: Error { case changed }
+        XCTAssertThrowsError(try ComputerUseGmailRecipientVerifier.finishAccountControlLabel(
+            labels: [expected], overflow: false, deadline: deadline,
+            revalidate: { throw ScopeFailure.changed }, now: { start }),
+            "Fresh scope validation errors must still propagate")
+    }
+
     func testGmailAccountSnapshotUsesOnlyValidatedSignedInNumericRoutes() throws {
         let snapshot = try XCTUnwrap(ComputerUseGmailAccountDirectory.snapshot(
             currentLabel: "Google Account: Test Current (current@example.com), Google membership",

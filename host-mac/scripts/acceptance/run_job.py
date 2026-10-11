@@ -1211,8 +1211,28 @@ def _upload_progress_is_complete(values: Any) -> bool:
             or "upload error" in item for item in normalized)
             or any("uploading" in item or "remaining" in item for item in normalized)):
         return False
-    return any("upload complete" in item or item == "uploaded"
-               or item in {"100% complete", "100% uploaded"} for item in normalized)
+    return any(_is_counted_upload_completion(item) or item in {
+        "upload complete", "upload complete.", "uploaded", "100% complete", "100% uploaded",
+    } for item in normalized)
+
+
+def _is_counted_upload_completion(value: str) -> bool:
+    match = re.fullmatch(r"([1-9][0-9]{0,5}) (upload|uploads) complete\.?", value)
+    if match is None:
+        return False
+    count, noun = int(match.group(1)), match.group(2)
+    return (count == 1 and noun == "upload") or (count >= 2 and noun == "uploads")
+
+
+def _upload_progress_baseline_is_clean(values: Any) -> bool:
+    if (not isinstance(values, list) or len(values) > 24
+            or any(not isinstance(item, str) or len(item.encode("utf-8")) > 256 for item in values)):
+        return False
+    eligible = {"upload complete", "upload complete.", "uploaded"}
+    normalized = [item.strip().lower() for item in values]
+    return not any(item in eligible or _is_counted_upload_completion(item)
+                   or "upload failed" in item or "couldn't upload" in item
+                   or "uploading" in item or "remaining" in item for item in normalized)
 
 
 def _valid_web_provider_url(provider: str, raw_url: Any, expected_url: Any) -> bool:
@@ -1265,6 +1285,22 @@ def check_web_upload(expected: dict[str, Any], outcome: dict[str, Any]) -> dict[
             or not _valid_web_provider_url(provider, evidence.get("folder_url"), expected.get("folder_url"))):
         raise AcceptanceError("Fresh browser evidence is not from the selected provider folder")
 
+    root_progress = evidence.get("upload_progress_checkpoint")
+    pre_upload = root_progress.get("pre_open") if isinstance(root_progress, dict) else None
+    pre_upload_values = pre_upload.get("progress_values") if isinstance(pre_upload, dict) else None
+    pre_upload_account = pre_upload.get("account_label") if isinstance(pre_upload, dict) else None
+    if (not isinstance(pre_upload, dict) or pre_upload.get("stage") != "preUploadProgressClean"
+            or pre_upload.get("picker_absent") is not True
+            or pre_upload.get("captured") is not True
+            or pre_upload.get("source_verified") is not True
+            or pre_upload.get("controls_complete") is not True
+            or pre_upload.get("progress_values_complete") is not True
+            or not _valid_web_provider_url(provider, pre_upload.get("url"), expected.get("folder_url"))
+            or not isinstance(pre_upload_account, str)
+            or len(account_pattern.findall(pre_upload_account)) != 1
+            or not _upload_progress_baseline_is_clean(pre_upload_values)):
+        raise AcceptanceError("A fresh pre-upload page did not rule out an existing completion label")
+
     if provider == "drive":
         search_query = f'title:"{file_name}"'
         if evidence.get("search_field_values") != [search_query]:
@@ -1294,7 +1330,7 @@ def check_web_upload(expected: dict[str, Any], outcome: dict[str, Any]) -> dict[
             if file_name in row["cells"]:
                 raise AcceptanceError("An exact-name Drive item already exists before upload")
 
-        progress_checkpoint = evidence.get("upload_progress_checkpoint")
+        progress_checkpoint = root_progress
         if (not isinstance(progress_checkpoint, dict) or progress_checkpoint.get("captured") is not True
                 or not _valid_web_provider_url(provider, progress_checkpoint.get("url"), expected.get("folder_url"))
                 or not isinstance(progress_checkpoint.get("account_label"), str)
@@ -1696,6 +1732,7 @@ def main() -> int:
                 print(f"Run {index}/{args.runs}: {args.job} [{run_id[:8]}]", flush=True)
                 if web_upload is not None:
                     mark_web_upload_attempted(web_upload)
+                test_env["TEST_RUNNER_CORE_JOB_ACCEPTANCE_DEADLINE_EPOCH"] = str(time.time() + test_allowance)
                 code, elapsed = run_logged(command, test_env, trace / "test.log", test_allowance)
                 try:
                     passed, check = verify_run(trace, expected, code)

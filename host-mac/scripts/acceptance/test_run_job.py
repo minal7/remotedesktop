@@ -751,8 +751,14 @@ class WebUploadAcceptanceTests(unittest.TestCase):
                 },
                 "upload_progress_checkpoint": {
                     "captured": True, "url": "https://drive.google.com/drive/my-drive",
-                    "account_label": "Test User (user@example.test)", "controls_complete": True,
-                    "progress_values": ["Upload complete"],
+                    "account_label": "Test User (user@example.test)", "source_verified": True,
+                    "controls_complete": True, "progress_values": ["Upload complete"],
+                    "pre_open": {
+                        "stage": "preUploadProgressClean", "picker_absent": True,
+                        "captured": True, "url": "https://drive.google.com/drive/my-drive",
+                        "account_label": "Test User (user@example.test)", "source_verified": True,
+                        "controls_complete": True, "progress_values_complete": True, "progress_values": [],
+                    },
                 },
                 "details_text_values": [self.expected["attachment_name"], "Size 28,273 bytes",
                     "My Drive, show location in the list of files."],
@@ -865,6 +871,85 @@ class WebUploadAcceptanceTests(unittest.TestCase):
                 with self.assertRaises(runner.AcceptanceError):
                     runner.check_web_upload(self.expected, outcome)
 
+    def test_web_upload_counted_completion_requires_exact_positive_count_label(self) -> None:
+        for observations in (["1 upload complete"], ["2 uploads complete"], [" 1 UPLOAD COMPLETE. "]):
+            with self.subTest(accepted=observations):
+                outcome = json.loads(json.dumps(self.outcome))
+                outcome["evidence"]["web_upload"]["upload_progress_checkpoint"]["progress_values"] = observations
+                self.assertTrue(runner.check_web_upload(self.expected, outcome)["passed"])
+
+        for observations in (
+            ["0 upload complete"], ["-1 upload complete"], ["01 upload complete"],
+            ["one upload complete"], ["1.5 uploads complete"],
+            ["2 upload complete"], ["1 uploads complete"], ["1234567 uploads complete"],
+            ["٢ upload complete"],
+            ["the 1 upload complete notice"],
+            ["1 upload complete", "Uploading 15%"],
+            ["1 upload complete", "Upload failed"],
+        ):
+            with self.subTest(rejected=observations):
+                outcome = json.loads(json.dumps(self.outcome))
+                outcome["evidence"]["web_upload"]["upload_progress_checkpoint"]["progress_values"] = observations
+                with self.assertRaises(runner.AcceptanceError):
+                    runner.check_web_upload(self.expected, outcome)
+
+    def test_web_upload_counted_completion_makes_pre_open_baseline_dirty(self) -> None:
+        for value in ("1 upload complete", "2 uploads complete"):
+            with self.subTest(value=value):
+                outcome = json.loads(json.dumps(self.outcome))
+                outcome["evidence"]["web_upload"]["upload_progress_checkpoint"]["pre_open"]["progress_values"] = [value]
+                with self.assertRaises(runner.AcceptanceError):
+                    runner.check_web_upload(self.expected, outcome)
+
+    def test_web_upload_requires_fresh_pre_open_progress_baseline(self) -> None:
+        # The ordinary final checkpoint supplies fresh completion; this baseline
+        # proves the same generic label was absent before opening the picker.
+        self.assertTrue(runner.check_web_upload(self.expected, self.outcome)["passed"])
+        for checkpoint in (
+            None,
+            {"captured": True, "url": "https://drive.google.com/drive/my-drive",
+             "account_label": "Test User (user@example.test)", "source_verified": True,
+             "controls_complete": True, "progress_values_complete": True, "progress_values": ["Upload complete"]},
+            {"captured": True, "url": "https://drive.google.com/drive/my-drive",
+             "account_label": "Test User (user@example.test)", "source_verified": True,
+             "controls_complete": True, "progress_values_complete": True, "progress_values": ["Uploaded"]},
+            {"captured": True, "url": "https://drive.google.com/drive/my-drive",
+             "account_label": "Test User (user@example.test)", "source_verified": True,
+             "controls_complete": True, "progress_values_complete": True, "progress_values": ["Uploading 72%"]},
+            {"captured": True, "url": "https://drive.google.com/drive/my-drive",
+             "account_label": "Other (other@example.test)", "source_verified": True,
+             "controls_complete": True, "progress_values_complete": True, "progress_values": []},
+            {"captured": True, "url": "https://drive.google.com/drive/my-drive",
+             "account_label": "Test User (user@example.test)", "source_verified": False,
+             "controls_complete": True, "progress_values_complete": True, "progress_values": []},
+            {"captured": True, "url": "https://drive.google.com/drive/my-drive",
+             "account_label": "Test User (user@example.test)", "source_verified": True,
+             "controls_complete": False, "progress_values_complete": True, "progress_values": []},
+            {"captured": True, "url": "https://drive.google.com/drive/my-drive",
+             "account_label": "Test User (user@example.test)", "source_verified": True,
+             "controls_complete": True, "progress_values": []},
+            {"captured": True, "url": "https://drive.google.com/drive/my-drive",
+             "account_label": "Test User (user@example.test)", "source_verified": True,
+             "controls_complete": True, "progress_values_complete": False, "progress_values": []},
+            {"stage": "collisionSearchReady", "picker_absent": True,
+             "captured": True, "url": "https://drive.google.com/drive/my-drive",
+             "account_label": "Test User (user@example.test)", "source_verified": True,
+             "controls_complete": True, "progress_values_complete": True, "progress_values": []},
+            {"stage": "preUploadProgressClean",
+             "captured": True, "url": "https://drive.google.com/drive/my-drive",
+             "account_label": "Test User (user@example.test)", "source_verified": True,
+             "controls_complete": True, "progress_values_complete": True, "progress_values": []},
+            {"stage": "preUploadProgressClean", "picker_absent": False,
+             "captured": True, "url": "https://drive.google.com/drive/my-drive",
+             "account_label": "Test User (user@example.test)", "source_verified": True,
+             "controls_complete": True, "progress_values_complete": True, "progress_values": []},
+        ):
+            with self.subTest(checkpoint=checkpoint):
+                outcome = json.loads(json.dumps(self.outcome))
+                outcome["evidence"]["web_upload"]["upload_progress_checkpoint"]["pre_open"] = checkpoint
+                with self.assertRaises(runner.AcceptanceError):
+                    runner.check_web_upload(self.expected, outcome)
+
     def test_drive_size_accepts_only_calibrated_binary_kilobyte_rounding(self) -> None:
         self.assertTrue(runner._displayed_size_matches("drive", ["Size 98 KB"], 100_000))
         self.assertTrue(runner._displayed_size_matches("drive", ["Size 8 KB"], 8_406))
@@ -944,6 +1029,12 @@ class WebUploadAcceptanceTests(unittest.TestCase):
         evidence.update({"provider": "dropbox",
             "origin_url": "https://www.dropbox.com/home/RemoteDesktopAcceptance",
             "folder_url": expected["folder_url"]})
+        evidence["upload_progress_checkpoint"]["pre_open"] = {
+            "stage": "preUploadProgressClean", "picker_absent": True,
+            "captured": True, "url": expected["folder_url"],
+            "account_label": "Test User (user@example.test)", "source_verified": True,
+            "controls_complete": True, "progress_values_complete": True, "progress_values": [],
+        }
         evidence["listing_rows"] = [dict(self.row,
             cells=[expected["attachment_name"], "28,273 bytes"])]
         check = runner.check_web_upload(expected, outcome)

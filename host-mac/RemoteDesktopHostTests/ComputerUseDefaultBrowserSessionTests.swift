@@ -832,6 +832,90 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
         }
     }
 
+    func testInitialWindowCreationReobservesOnePreEffectAmbiguousInventoryWithoutReplayingCmdN() async throws {
+        for persistentAmbiguity in [false, true] {
+            let pid: pid_t = 19_100
+            let bundleURL = URL(fileURLWithPath: "/fixture/Safari.app")
+            let handler = ComputerUseDefaultBrowserTarget.Handler(
+                bundleURL: bundleURL, bundleIdentifier: "com.apple.Safari")
+            let code = ComputerUseApplicationCodeIdentity(authority: .runningCode,
+                bundleIdentifier: handler.bundleIdentifier, canonicalBundlePath: bundleURL.path,
+                canonicalExecutablePath: "\(bundleURL.path)/Contents/MacOS/Safari",
+                designatedRequirement: "fixture", teamIdentifier: "TEST", platformIdentifier: nil)
+            let app = try XCTUnwrap(ComputerUseApplicationIdentity(bundleIdentifier: handler.bundleIdentifier,
+                processIdentifier: pid, launchGeneration: 1, codeIdentity: code))
+            let journal = FileManager.default.temporaryDirectory
+                .appendingPathComponent("SafariPreEffectAmbiguous-\(UUID().uuidString)", isDirectory: true)
+            defer { try? FileManager.default.removeItem(at: journal) }
+            func makeWindow(_ id: String, _ hash: CFHashCode) -> ComputerUseDefaultBrowserSession.Window {
+                let identity = ComputerUseFrontmostWindowCaptureIdentity(applicationProcessIdentifier: pid,
+                    accessibilityWindowHash: hash, bounds: CGRect(x: 1, y: 2, width: 800, height: 600))
+                return .init(id: id, application: app, accessibilityElement: AXUIElementCreateApplication(pid + pid_t(hash)),
+                    identity: identity)
+            }
+            var windows = [makeWindow("existing", 1)]
+            var focusedWindowID = "existing"
+            var preEffectReadPending = false
+            var preEffectCaptureAttempts = 0
+            let captureWindows: ComputerUseDefaultBrowserSession.CaptureWindows = { identity in
+                guard identity == app else { throw ComputerUseDefaultBrowserSession.Failure.targetLost }
+                if preEffectReadPending {
+                    preEffectCaptureAttempts += 1
+                    // Fail the first inventory read inside the closed Cmd+N
+                    // will-begin-effect gate; recovery must obtain a new exact
+                    // snapshot before allowing the command.
+                    if preEffectCaptureAttempts == 1 || persistentAmbiguity {
+                        throw ComputerUseDefaultBrowserSession.Failure.ambiguousWindows
+                    }
+                    preEffectReadPending = false
+                }
+                return .init(application: identity, windows: windows,
+                    focusedWindowID: focusedWindowID, hasSheets: false)
+            }
+            let session = try ComputerUseDefaultBrowserSession(journalDirectory: journal,
+                resolveHandler: { handler },
+                launchApplication: { requestedHandler, beforeOpen in
+                    guard requestedHandler == handler else { throw ComputerUseDefaultBrowserSession.Failure.interrupted }
+                    try beforeOpen()
+                    return app
+                }, captureWindows: captureWindows,
+                captureWindowsDiagnostic: { message in
+                    if message == "phase=startup_pre_effect_read" {
+                        preEffectReadPending = true
+                        preEffectCaptureAttempts = 0
+                    }
+                })
+            var keyCount = 0
+            let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { true },
+                actionPerformer: { action in
+                    guard action == ComputerUseNativeBrowserHostCommand.newWindow.action else {
+                        throw ComputerUseDefaultBrowserSession.Failure.interrupted
+                    }
+                    keyCount += 1
+                    let created = makeWindow("new", 2)
+                    windows.append(created)
+                    focusedWindowID = created.id
+                }, frontmostApplicationIdentityProvider: { app },
+                frontmostApplicationProvider: { handler.bundleIdentifier })
+
+            if persistentAmbiguity {
+                do {
+                    _ = try await session.ensure(taskID: "task-1", goal: "Use the default browser", tools: tools)
+                    XCTFail("Persistent ambiguity at the final pre-effect inventory must stop before Cmd+N")
+                } catch { }
+                XCTAssertEqual(keyCount, 0)
+                XCTAssertEqual(preEffectCaptureAttempts, 2,
+                    "Persistent ambiguity must stop after one fresh pre-effect inventory")
+            } else {
+                let window = try await session.ensure(taskID: "task-1", goal: "Use the default browser", tools: tools)
+                XCTAssertEqual(window.id, "new")
+                XCTAssertEqual(keyCount, 1, "A recovered read must still dispatch only one Cmd+N")
+                XCTAssertEqual(preEffectCaptureAttempts, 2,
+                    "Cmd+N follows one ambiguous read and one fresh verified inventory")
+            }
+        }
+    }
+
     func testInitialWindowCreationDoesNotRetryOtherErrorsOrAfterEffectBegins() async throws {
         for scenario in ["lost-activity", "other-pre-effect-error", "second-stale-target", "window-changed", "after-effect-error"] {
             let fixture = try Fixture()

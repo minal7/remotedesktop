@@ -63,24 +63,29 @@ final class ComputerUseDefaultBrowserExecutorTests: XCTestCase {
 
         for failOnSecond in [false, true] {
             var actions: [ComputerUsePredictedAction] = []
+            var events: [String] = []
             let allowed = true
             let injector = InputInjector(eventPoster: { _ in XCTFail("Virtual host commands must not post native events") })
             let tools = ComputerUseHostTools(injector: injector, mayAct: { allowed }, actionPerformer: { action in
+                events.append("effect")
                 actions.append(action)
                 if failOnSecond && actions.count == 2 { throw ShortcutFailure.injected }
             }, frontmostApplicationIdentityProvider: { application })
             var attempted = false
             var validations = 0
             var begins = 0
+            var phases: [String] = []
             let sequence = {
                 try ComputerUseDefaultBrowserExecutor.performDriveUploadKeyboardSequence(tools: tools,
                     expectedApplication: application,
                     isAttempted: { attempted },
-                    validateContext: { validations += 1 },
+                    validateContext: { validations += 1; events.append("validate") },
+                    phaseObserver: { phases.append($0) },
                     beginAttempt: {
                         guard !attempted else { throw ComputerUseDesktopExecutor.Failure.scopedSurfaceChanged }
                         attempted = true
                         begins += 1
+                        events.append("latch")
                     })
             }
 
@@ -95,6 +100,11 @@ final class ComputerUseDefaultBrowserExecutorTests: XCTestCase {
             XCTAssertEqual(actions.count, 2)
             XCTAssertEqual(validations, 2, "The retained context is rechecked immediately before each key")
             XCTAssertEqual(begins, 1)
+            XCTAssertEqual(phases, failOnSecond
+                ? ["before_first_key", "first_key_validating", "first_key_returned", "before_second_key", "second_key_validating"]
+                : ["before_first_key", "first_key_validating", "first_key_returned", "before_second_key", "second_key_validating", "second_key_returned"])
+            XCTAssertEqual(events, ["validate", "latch", "effect", "validate", "effect"],
+                "The clean-context check and one-shot latch precede the first shortcut command")
             guard case .key(let firstUsage, let firstModifiers) = actions[0],
                   case .key(let secondUsage, let secondModifiers) = actions[1] else {
                 return XCTFail("The fallback must contain only its two fixed keyboard commands")
@@ -104,6 +114,40 @@ final class ComputerUseDefaultBrowserExecutorTests: XCTestCase {
             XCTAssertEqual(secondUsage, 0x18) // U chooses File upload
             XCTAssertEqual(secondModifiers, 0)
         }
+    }
+
+    func testWebUploadRequiresCleanCompleteBaselineBeforeFreshCompletion() {
+        XCTAssertTrue(ComputerUseDefaultBrowserExecutor.webUploadProgressBaselineIsClean(
+            controlsComplete: true, progressValues: []))
+        XCTAssertEqual(ComputerUseDefaultBrowserExecutor.webUploadProgress(["Upload complete"]), .complete)
+        XCTAssertFalse(ComputerUseDefaultBrowserExecutor.webUploadProgressBaselineIsClean(
+            controlsComplete: true, progressValues: ["Upload complete"]))
+        XCTAssertFalse(ComputerUseDefaultBrowserExecutor.webUploadProgressBaselineIsClean(
+            controlsComplete: true, progressValues: ["Uploading 72%"]))
+        XCTAssertFalse(ComputerUseDefaultBrowserExecutor.webUploadProgressBaselineIsClean(
+            controlsComplete: true, progressValues: ["Upload failed"]))
+        XCTAssertFalse(ComputerUseDefaultBrowserExecutor.webUploadProgressBaselineIsClean(
+            controlsComplete: false, progressValues: []))
+    }
+
+    func testWebUploadCountedCompletionLabelsAreExactAndBaselineIsNotClean() {
+        for label in ["1 upload complete", "2 uploads complete"] {
+            XCTAssertEqual(ComputerUseDefaultBrowserExecutor.webUploadProgress([label]), .complete, label)
+            XCTAssertFalse(ComputerUseDefaultBrowserExecutor.webUploadProgressBaselineIsClean(
+                controlsComplete: true, progressValues: [label]), label)
+        }
+
+        for label in ["0 uploads complete", "-1 uploads complete", "01 uploads complete",
+                      "one upload complete", "2 upload complete", "1000000 uploads complete",
+                      "٢ uploads complete", "The provider says 2 uploads complete now"] {
+            XCTAssertEqual(ComputerUseDefaultBrowserExecutor.webUploadProgress([label]), .unknown, label)
+        }
+        XCTAssertEqual(ComputerUseDefaultBrowserExecutor.webUploadProgress(
+            ["2 uploads complete", "Uploading 12%"]), .inProgress,
+            "Pending upload evidence takes precedence over a completion counter")
+        XCTAssertEqual(ComputerUseDefaultBrowserExecutor.webUploadProgress(
+            ["2 uploads complete", "Upload failed"]), .failed,
+            "Failure evidence takes precedence over a completion counter")
     }
 
     private enum ShortcutFailure: Error { case injected }

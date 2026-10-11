@@ -52,6 +52,8 @@ private final class WebUploadAcceptanceCheckpointStore {
     var executor: ComputerUseDefaultBrowserExecutor?
     var collisionSearch: [String: Any]?
     var uploadProgress: [String: Any]?
+    var preOpenProgress: [String: Any]?
+    var latestAccountProofFailure: String?
 }
 
 @MainActor
@@ -282,7 +284,8 @@ final class CoreJobAcceptanceTests: XCTestCase {
             "windows_read", "windows_malformed", "windows_unconvertible", "focused_window_read",
             "focused_window_malformed", "focused_window_unconvertible", "capture_deadline",
             "capture_cancelled", "final_frontmost_unavailable", "final_frontmost_changed",
-            "bounds_read", "bounds_deadline", "bounds_type", "bounds_malformed"] {
+            "bounds_read", "bounds_deadline", "bounds_type", "bounds_malformed",
+            "startup_role_unclassified", "focused_transient_surface"] {
             XCTAssertEqual(Self.sanitizedSessionCaptureReason(reason), reason)
         }
         for rejected in ["https://mail.google.com/", "recipient@example.com", "phase=capture_failure", "unknown"] {
@@ -290,8 +293,20 @@ final class CoreJobAcceptanceTests: XCTestCase {
         }
         XCTAssertNil(Self.sanitizedSessionCaptureReason(nil))
         XCTAssertEqual(Self.sanitizedSessionCaptureAXErrorCode("-25202"), -25_202)
+        XCTAssertEqual(Self.sanitizedSessionCaptureElapsedMs("1499"), 1_499)
+        XCTAssertNil(Self.sanitizedSessionCaptureElapsedMs("2001"))
+        XCTAssertNil(Self.sanitizedSessionCaptureElapsedMs("private text"))
         XCTAssertNil(Self.sanitizedSessionCaptureAXErrorCode("-999999"))
         XCTAssertNil(Self.sanitizedSessionCaptureAXErrorCode("private text"))
+        for reason in ["window_before_unavailable", "display_before_unavailable", "stack_before_obscured",
+            "image_unavailable", "window_after_unavailable", "window_after_changed", "display_after_unavailable", "stack_after_obscured",
+            "digest_window_before_unavailable", "digest_display_before_unavailable",
+            "digest_window_after_unavailable", "digest_window_after_changed",
+            "digest_display_after_unavailable", "digest_display_after_changed"] {
+            XCTAssertEqual(Self.sanitizedScreenCaptureFailure(reason), reason)
+        }
+        XCTAssertNil(Self.sanitizedScreenCaptureFailure("private window title"))
+        XCTAssertNil(Self.sanitizedScreenCaptureFailure(nil))
     }
 
     func testGmailAcceptanceSanitizesWindowTransitionDiagnostic() {
@@ -354,6 +369,57 @@ final class CoreJobAcceptanceTests: XCTestCase {
     }
 
     func testGmailAcceptanceSanitizesDesktopRevalidationEvidence() {
+        let driveShortcut = Self.sanitizedWebUploadDriveShortcutDiagnostic([
+            "webUploadDriveShortcutStage": "driveKeyboardChooseFileUpload",
+            "webUploadDriveShortcutAttempted": "true",
+            "webUploadDriveShortcutPhase": "second_key_validating",
+            "webUploadDriveBaselineRecheckFailure": "account_mismatch",
+            "webUploadDriveShortcutPrivate": "https://drive.google.com/private",
+        ])
+        XCTAssertEqual(driveShortcut["webUploadDriveShortcutStage"] as? String, "driveKeyboardChooseFileUpload")
+        XCTAssertEqual(driveShortcut["webUploadDriveShortcutAttempted"] as? Bool, true)
+        XCTAssertEqual(driveShortcut["webUploadDriveShortcutPhase"] as? String, "second_key_validating")
+        XCTAssertEqual(driveShortcut["webUploadDriveBaselineRecheckFailure"] as? String, "account_mismatch")
+        XCTAssertTrue(Self.sanitizedWebUploadDriveShortcutDiagnostic([
+            "webUploadDriveShortcutStage": "driveKeyboardChooseFileUpload https://private.invalid/",
+            "webUploadDriveShortcutAttempted": "yes",
+            "webUploadDriveShortcutPhase": "second_key_validating private text",
+            "webUploadDriveBaselineRecheckFailure": "someone@example.com",
+        ]).isEmpty)
+
+        let uploadScope = Self.sanitizedWebUploadScopeDiagnostic([
+            "webUploadScopeFailure": "native_account_label_mismatch",
+            "webUploadAccountReadFailure": "ambiguous",
+            "webUploadAccountReadElapsedMs": "1847",
+            "webUploadScopePrivate": "user@example.com https://drive.google.com/private",
+        ])
+        XCTAssertEqual(uploadScope["webUploadScopeFailure"] as? String, "native_account_label_mismatch")
+        XCTAssertEqual(uploadScope["webUploadAccountReadFailure"] as? String, "ambiguous")
+        XCTAssertEqual(uploadScope["webUploadAccountReadElapsedMs"] as? Int, 1_847)
+        XCTAssertNil(uploadScope["webUploadScopePrivate"])
+        XCTAssertTrue(Self.sanitizedWebUploadScopeDiagnostic([
+            "webUploadScopeFailure": "native_account_label_mismatch https://private.invalid/",
+            "webUploadAccountReadFailure": "owner@example.com",
+            "webUploadAccountReadElapsedMs": "2001",
+        ]).isEmpty)
+        let retainedPageRead = Self.sanitizedWebUploadParentReadDiagnostic([
+            "webUploadParentInitialReadFailure": "initial_outer_selection_ambiguous",
+            "webUploadParentInitialReadElapsedMs": "1250",
+            "webUploadParentRecheckFailure": "fresh_url_changed",
+            "webUploadParentRecheckElapsedMs": "2000",
+        ])
+        XCTAssertEqual(retainedPageRead["webUploadParentInitialReadFailure"] as? String,
+            "initial_outer_selection_ambiguous")
+        XCTAssertEqual(retainedPageRead["webUploadParentInitialReadElapsedMs"] as? Int, 1_250)
+        XCTAssertEqual(retainedPageRead["webUploadParentRecheckFailure"] as? String, "fresh_url_changed")
+        XCTAssertEqual(retainedPageRead["webUploadParentRecheckElapsedMs"] as? Int, 2_000)
+        XCTAssertTrue(Self.sanitizedWebUploadParentReadDiagnostic([
+            "webUploadParentInitialReadFailure": "initial_url_unavailable https://private.invalid/",
+            "webUploadParentInitialReadElapsedMs": "2001",
+            "webUploadParentRecheckFailure": "account@example.com",
+            "webUploadParentRecheckElapsedMs": "-1",
+        ]).isEmpty)
+
         let uploadControls = Self.sanitizedWebUploadControlsDiagnostic([
             "webUploadControls_complete": "false", "webUploadControls_truncated": "true",
             "webUploadControls_reasons": "control_count,exact_text_bytes",
@@ -439,6 +505,114 @@ final class CoreJobAcceptanceTests: XCTestCase {
         ])
         XCTAssertNil(rejected["approvedVisualContinuationFailure"])
         XCTAssertNil(rejected["approvedVisualContinuationDesktopFailure"])
+    }
+
+    func testW2RetainedWindowFocusAllowsOnlyItsRecognizedFocusedPicker() {
+        let retained = AXUIElementCreateApplication(91)
+        let foreign = AXUIElementCreateApplication(92)
+        func panel(parentID: String, parent: AXUIElement,
+                   focused: Bool = true) -> ComputerUseDefaultBrowserSession.FileOpenPanel {
+            .init(parentWindowID: parentID, parentWindowElement: parent,
+                accessibilityElement: AXUIElementCreateSystemWide(),
+                bounds: CGRect(x: 0, y: 0, width: 800, height: 600), isFocused: focused,
+                goToFolderBounds: nil, pathTextFieldElement: nil, selectedFileURLs: [],
+                primaryActionElement: nil, primaryActionBounds: nil, primaryActionEnabled: nil)
+        }
+        func accepted(focusedID: String?, panel: ComputerUseDefaultBrowserSession.FileOpenPanel?,
+                      hasSheets: Bool = false, hasUnknownSheets: Bool = false,
+                      requirePicker: Bool) -> Bool {
+            Self.webUploadSnapshotFocusIsAuthorized(focusedWindowID: focusedID,
+                retainedWindowID: "retained", retainedWindowElement: retained, panel: panel,
+                hasSheets: hasSheets, hasUnrecognizedSheets: hasUnknownSheets,
+                requirePicker: requirePicker)
+        }
+        XCTAssertTrue(accepted(focusedID: "retained", panel: nil, requirePicker: false))
+        XCTAssertFalse(accepted(focusedID: nil, panel: nil, requirePicker: false))
+        XCTAssertTrue(accepted(focusedID: nil, panel: panel(parentID: "retained", parent: retained), hasSheets: true, requirePicker: true))
+        XCTAssertFalse(accepted(focusedID: "other", panel: panel(parentID: "retained", parent: retained), hasSheets: true, requirePicker: true))
+        XCTAssertFalse(accepted(focusedID: nil, panel: panel(parentID: "other", parent: retained), hasSheets: true, requirePicker: true))
+        XCTAssertFalse(accepted(focusedID: nil, panel: panel(parentID: "retained", parent: foreign), hasSheets: true, requirePicker: true))
+        XCTAssertFalse(accepted(focusedID: nil, panel: panel(parentID: "retained", parent: retained, focused: false), hasSheets: true, requirePicker: true))
+        XCTAssertFalse(accepted(focusedID: nil, panel: panel(parentID: "retained", parent: retained), hasSheets: true,
+            hasUnknownSheets: true, requirePicker: true))
+    }
+
+    func testW2PreUploadReadinessRequiresFreshCleanHomeAccountAndSourceEvidence() {
+        let homeURL = "https://drive.google.com/drive/my-drive"
+        let account = "user@example.test"
+        let valid: [String: Any] = [
+            "stage": "preUploadProgressClean", "picker_absent": true,
+            "captured": true, "source_verified": true, "controls_complete": true,
+            "progress_values_complete": true, "url": homeURL,
+            "account_label": "Google Account: Test User (user@example.test)",
+            "progress_values": ["Files in My Drive"],
+        ]
+        XCTAssertTrue(Self.webUploadPreOpenBaselineIsFresh(valid,
+            expectedHomeURL: homeURL, expectedAccount: account,
+            currentURL: homeURL, currentAccountLabel: valid["account_label"] as! String))
+        XCTAssertFalse(Self.webUploadPreOpenBaselineIsFresh(valid,
+            expectedHomeURL: homeURL, expectedAccount: account,
+            currentURL: "https://drive.google.com/drive/search?q=x",
+            currentAccountLabel: valid["account_label"] as! String))
+        XCTAssertFalse(Self.webUploadPreOpenBaselineIsFresh(valid,
+            expectedHomeURL: homeURL, expectedAccount: account,
+            currentURL: homeURL, currentAccountLabel: "Google Account: Other (other@example.test)"))
+        for invalid in [
+            ["stage": "preUploadProgressClean", "picker_absent": true,
+             "captured": false, "source_verified": true, "controls_complete": true,
+             "progress_values_complete": true, "url": homeURL,
+             "account_label": "Google Account: Test User (user@example.test)", "progress_values": []] as [String: Any],
+            ["stage": "preUploadProgressClean", "picker_absent": true,
+             "captured": true, "source_verified": false, "controls_complete": true,
+             "progress_values_complete": true, "url": homeURL,
+             "account_label": "Google Account: Test User (user@example.test)", "progress_values": []],
+            ["stage": "preUploadProgressClean", "picker_absent": true,
+             "captured": true, "source_verified": true, "controls_complete": true,
+             "progress_values_complete": true, "url": "https://drive.google.com/drive/search?q=x",
+             "account_label": "Google Account: Test User (user@example.test)", "progress_values": []],
+            ["stage": "preUploadProgressClean", "picker_absent": true,
+             "captured": true, "source_verified": true, "controls_complete": true,
+             "progress_values_complete": true, "url": homeURL,
+             "account_label": "Google Account: Other (other@example.test)", "progress_values": []],
+            ["stage": "preUploadProgressClean", "picker_absent": true,
+             "captured": true, "source_verified": true, "controls_complete": false,
+             "progress_values_complete": true, "url": homeURL,
+             "account_label": "Google Account: Test User (user@example.test)", "progress_values": []],
+            ["stage": "preUploadProgressClean", "picker_absent": true,
+             "captured": true, "source_verified": true, "controls_complete": true,
+             "progress_values_complete": false, "url": homeURL,
+             "account_label": "Google Account: Test User (user@example.test)", "progress_values": []],
+            ["stage": "preUploadProgressClean", "picker_absent": true,
+             "captured": true, "source_verified": true, "controls_complete": true,
+             "progress_values_complete": true, "url": homeURL,
+             "account_label": "Google Account: Test User (user@example.test)", "progress_values": ["Upload complete"]],
+            ["stage": "preUploadProgressClean", "picker_absent": true,
+             "captured": true, "source_verified": true, "controls_complete": true,
+             "progress_values_complete": true, "url": homeURL,
+             "account_label": "Google Account: Test User (user@example.test)", "progress_values": ["1 upload complete"]],
+            ["stage": "preUploadProgressClean", "picker_absent": true,
+             "captured": true, "source_verified": true, "controls_complete": true,
+             "progress_values_complete": true, "url": homeURL,
+             "account_label": "Google Account: Test User (user@example.test)", "progress_values": ["2 uploads complete"]],
+            ["stage": "preUploadProgressClean", "picker_absent": true,
+             "captured": true, "source_verified": true, "controls_complete": true,
+             "progress_values_complete": true, "url": homeURL,
+             "account_label": "Google Account: Test User (user@example.test)", "progress_values": ["Uploading 30%"]],
+        ] {
+            XCTAssertFalse(Self.webUploadPreOpenBaselineIsFresh(invalid,
+                expectedHomeURL: homeURL, expectedAccount: account,
+                currentURL: homeURL, currentAccountLabel: "Google Account: Test User (user@example.test)"))
+        }
+        var wrongStage = valid
+        wrongStage["stage"] = "collisionSearchReady"
+        XCTAssertFalse(Self.webUploadPreOpenBaselineIsFresh(wrongStage,
+            expectedHomeURL: homeURL, expectedAccount: account,
+            currentURL: homeURL, currentAccountLabel: valid["account_label"] as! String))
+        var pickerPresent = valid
+        pickerPresent["picker_absent"] = false
+        XCTAssertFalse(Self.webUploadPreOpenBaselineIsFresh(pickerPresent,
+            expectedHomeURL: homeURL, expectedAccount: account,
+            currentURL: homeURL, currentAccountLabel: valid["account_label"] as! String))
     }
 
     func testGmailSavedRecipientRetryRequiresPreMenuMissingState() {
@@ -977,7 +1151,73 @@ final class CoreJobAcceptanceTests: XCTestCase {
         }
     }
 
-    func testRunJob() async throws {
+    func testAcceptanceBodyBudgetUsesRemainingRunnerDeadline() {
+        XCTAssertEqual(Self.acceptanceBodyBudget(job: "gmail", deadlineEpoch: "1200", nowEpoch: 1_000), 170)
+        XCTAssertEqual(Self.acceptanceBodyBudget(job: "drive", deadlineEpoch: "1200", nowEpoch: 1_050), 120)
+        XCTAssertEqual(Self.acceptanceBodyBudget(job: "gmail", deadlineEpoch: "5000", nowEpoch: 1_000), 470)
+        XCTAssertEqual(Self.acceptanceBodyBudget(job: "drive", deadlineEpoch: "5000", nowEpoch: 1_000), 410)
+        for invalid in [nil, "", "not-a-deadline", "nan", "infinity", "1029", "1030"] {
+            XCTAssertNil(Self.acceptanceBodyBudget(job: "drive", deadlineEpoch: invalid, nowEpoch: 1_000))
+        }
+        XCTAssertNil(Self.acceptanceBodyBudget(job: "drive", deadlineEpoch: "2000", nowEpoch: .infinity))
+    }
+
+    nonisolated func testRunJob() throws {
+        let env = ProcessInfo.processInfo.environment
+        guard let job = env["CORE_JOB_ACCEPTANCE_JOB"],
+              env["CORE_JOB_ACCEPTANCE_TRACE"] != nil,
+              env["CORE_JOB_ACCEPTANCE_FIXTURE_ROOT"] != nil,
+              env["CORE_JOB_ACCEPTANCE_RUN_ID"] != nil else {
+            throw XCTSkip("Opt-in: run_job.sh supplies the M0 job, trace, fixture root, and run ID")
+        }
+        guard let bodyBudget = Self.acceptanceBodyBudget(job: job,
+                deadlineEpoch: env["CORE_JOB_ACCEPTANCE_DEADLINE_EPOCH"],
+                nowEpoch: Date().timeIntervalSince1970) else {
+            throw HarnessError.transport("The opt-in acceptance runner deadline is missing, invalid, or expired")
+        }
+
+        let finished = XCTestExpectation(description: "Run the opt-in acceptance body")
+        let quiesced = XCTestExpectation(description: "Join the cancelled acceptance body")
+        var bodyResult: Result<Void, Error>?
+        let bodyTask = Task { @MainActor in
+            do {
+                try await self.runJobAcceptanceBody()
+                bodyResult = .success(())
+            } catch {
+                bodyResult = .failure(error)
+            }
+            finished.fulfill()
+            quiesced.fulfill()
+        }
+
+        // Keep the synchronous XCTest wrapper inside the external runner limit;
+        // cancel and join the body before returning so it cannot continue effects.
+        guard XCTWaiter.wait(for: [finished], timeout: bodyBudget) == .completed else {
+            bodyTask.cancel()
+            guard XCTWaiter.wait(for: [quiesced], timeout: 10) == .completed else {
+                XCTFail("The acceptance body did not stop after timeout cancellation")
+                Darwin.exit(EXIT_FAILURE)
+            }
+            throw HarnessError.transport("The acceptance body exceeded its bounded test allowance and was cancelled")
+        }
+        guard let bodyResult else {
+            XCTFail("The acceptance body finished without recording its result")
+            return
+        }
+        try bodyResult.get()
+    }
+
+    nonisolated private static func acceptanceBodyBudget(job: String, deadlineEpoch: String?, nowEpoch: TimeInterval)
+        -> TimeInterval? {
+        guard let deadlineEpoch, let deadline = Double(deadlineEpoch), deadline.isFinite,
+              nowEpoch.isFinite else { return nil }
+        let remaining = deadline - nowEpoch - 30
+        guard remaining.isFinite, remaining > 0 else { return nil }
+        let cap: TimeInterval = job == "gmail" ? 470 : 410
+        return min(cap, remaining)
+    }
+
+    private func runJobAcceptanceBody() async throws {
         let env = ProcessInfo.processInfo.environment
         guard let job = env["CORE_JOB_ACCEPTANCE_JOB"],
               let tracePath = env["CORE_JOB_ACCEPTANCE_TRACE"],
@@ -1093,6 +1333,11 @@ final class CoreJobAcceptanceTests: XCTestCase {
                 if let webUploadCheckpoints {
                     webUploadCheckpointObserver = { stage in
                         guard let executor = webUploadCheckpoints.executor else { return }
+                        if stage == .preUploadProgressClean {
+                            webUploadCheckpoints.preOpenProgress = Self.captureWebUploadPreOpenProgress(
+                                expected: expected, executor: executor)
+                            return
+                        }
                         let checkpoint = Self.captureWebUploadCheckpoint(stage: stage,
                             expected: expected, executor: executor)
                         switch stage {
@@ -1100,6 +1345,8 @@ final class CoreJobAcceptanceTests: XCTestCase {
                             webUploadCheckpoints.collisionSearch = checkpoint
                         case .uploadProgressComplete:
                             webUploadCheckpoints.uploadProgress = checkpoint
+                        case .preUploadProgressClean:
+                            break
                         }
                     }
                 } else {
@@ -1173,7 +1420,7 @@ final class CoreJobAcceptanceTests: XCTestCase {
             record["task_id"] = taskID
             record["raw_outcome"] = "running"
             let terminal = try await Self.waitForTerminal(phone, expected: expected, taskID: taskID,
-                deadline: .now + .seconds(job == "gmail" ? 420 : 180), trace: trace,
+                deadline: .now + .seconds((job == "gmail" || job == "drive" || job == "dropbox") ? 420 : 180), trace: trace,
                 visualLoader: gmailVisualLoader)
             record["task_id"] = taskID
             record["raw_outcome"] = terminal.outcome
@@ -1343,6 +1590,9 @@ final class CoreJobAcceptanceTests: XCTestCase {
             if raw[key] == "false" { result[key] = false }
         }
         for (key, value) in Self.sanitizedWebUploadControlsDiagnostic(raw) { result[key] = value }
+        for (key, value) in Self.sanitizedWebUploadScopeDiagnostic(raw) { result[key] = value }
+        for (key, value) in Self.sanitizedWebUploadDriveShortcutDiagnostic(raw) { result[key] = value }
+        for (key, value) in Self.sanitizedWebUploadParentReadDiagnostic(raw) { result[key] = value }
         for (key, value) in Self.sanitizedGmailCompletionProofDiagnostic(raw) {
             result[key] = value
         }
@@ -1364,8 +1614,14 @@ final class CoreJobAcceptanceTests: XCTestCase {
         if let reason = Self.sanitizedSessionCaptureReason(raw["sessionCaptureReason"]) {
             result["sessionCaptureReason"] = reason
         }
+        if let reason = Self.sanitizedScreenCaptureFailure(raw["screenCaptureFailure"]) {
+            result["screenCaptureFailure"] = reason
+        }
         if let code = Self.sanitizedSessionCaptureAXErrorCode(raw["sessionCaptureAXErrorCode"]) {
             result["sessionCaptureAXErrorCode"] = code
+        }
+        if let elapsedMs = Self.sanitizedSessionCaptureElapsedMs(raw["sessionCaptureElapsedMs"]) {
+            result["sessionCaptureElapsedMs"] = elapsedMs
         }
         if let transition = Self.sanitizedSessionWindowTransitionDiagnostic(raw["sessionWindowTransitionDiagnostic"]) {
             result["sessionWindowTransitionDiagnostic"] = transition
@@ -1439,6 +1695,69 @@ final class CoreJobAcceptanceTests: XCTestCase {
             if reasons.count <= allowedReasons.count, reasons.allSatisfy(allowedReasons.contains),
                reasons == reasons.sorted(), Set(reasons).count == reasons.count {
                 result[prefix + "reasons"] = value
+            }
+        }
+        return result
+    }
+
+    private static func sanitizedWebUploadScopeDiagnostic(_ raw: [String: String]) -> [String: Any] {
+        let allowedScopeFailures: Set<String> = [
+            "native_panel_scope", "native_parent_url_unavailable", "native_parent_url_mismatch",
+            "native_preopen_baseline_missing", "native_account_label_unavailable",
+            "native_account_label_mismatch", "native_parent_recheck_unavailable",
+            "native_parent_recheck_mismatch", "native_panel_recheck_changed", "page_scope_unconfirmed",
+        ]
+        let allowedAccountReadFailures: Set<String> = ["deadline", "overflow", "ambiguous", "missing", "complete", "cancelled"]
+        var result: [String: Any] = [:]
+        if let reason = raw["webUploadScopeFailure"], allowedScopeFailures.contains(reason) {
+            result["webUploadScopeFailure"] = reason
+        }
+        if let reason = raw["webUploadAccountReadFailure"], allowedAccountReadFailures.contains(reason) {
+            result["webUploadAccountReadFailure"] = reason
+        }
+        if let elapsed = raw["webUploadAccountReadElapsedMs"], let value = Int(elapsed), (0...2_000).contains(value) {
+            result["webUploadAccountReadElapsedMs"] = value
+        }
+        return result
+    }
+
+    private static func sanitizedWebUploadDriveShortcutDiagnostic(_ raw: [String: String]) -> [String: Any] {
+        let phases: Set<String> = ["before_first_key", "first_key_validating", "first_key_returned",
+            "before_second_key", "second_key_validating", "second_key_returned"]
+        let baselineFailures: Set<String> = ["retained_scope", "url_read", "url_mismatch", "account_read",
+            "account_mismatch", "retained_scope_recheck", "complete"]
+        var result: [String: Any] = [:]
+        if raw["webUploadDriveShortcutStage"] == "driveKeyboardChooseFileUpload" {
+            result["webUploadDriveShortcutStage"] = "driveKeyboardChooseFileUpload"
+        }
+        if raw["webUploadDriveShortcutAttempted"] == "true" { result["webUploadDriveShortcutAttempted"] = true }
+        if raw["webUploadDriveShortcutAttempted"] == "false" { result["webUploadDriveShortcutAttempted"] = false }
+        if let phase = raw["webUploadDriveShortcutPhase"], phases.contains(phase) {
+            result["webUploadDriveShortcutPhase"] = phase
+        }
+        if let failure = raw["webUploadDriveBaselineRecheckFailure"], baselineFailures.contains(failure) {
+            result["webUploadDriveBaselineRecheckFailure"] = failure
+        }
+        return result
+    }
+
+    private static func sanitizedWebUploadParentReadDiagnostic(_ raw: [String: String]) -> [String: Any] {
+        let failures: Set<String> = [
+            "deadline", "initial_app_unavailable", "initial_window_unavailable",
+            "initial_outer_inventory_incomplete", "initial_outer_inventory_empty",
+            "initial_outer_selection_ambiguous", "initial_url_unavailable",
+            "fresh_app_unavailable", "fresh_app_changed", "fresh_window_unavailable",
+            "fresh_outer_inventory_incomplete", "fresh_outer_inventory_empty",
+            "fresh_outer_selection_ambiguous", "fresh_outer_selection_changed",
+            "fresh_url_unavailable", "fresh_url_changed", "complete",
+        ]
+        var result: [String: Any] = [:]
+        for key in ["webUploadParentInitialReadFailure", "webUploadParentRecheckFailure"] {
+            if let reason = raw[key], failures.contains(reason) { result[key] = reason }
+        }
+        for key in ["webUploadParentInitialReadElapsedMs", "webUploadParentRecheckElapsedMs"] {
+            if let elapsed = raw[key], let value = Int(elapsed), (0...2_000).contains(value) {
+                result[key] = value
             }
         }
         return result
@@ -1669,7 +1988,8 @@ final class CoreJobAcceptanceTests: XCTestCase {
             "capture_deadline", "final_frontmost_unavailable", "final_frontmost_changed",
             "retained_target_missing_or_ambiguous", "retained_target_pid", "pid", "bounds_read",
             "bounds_deadline", "bounds_type", "bounds_malformed", "focused_duplicate", "duplicate_id",
-            "duplicate_element", "bounds_ax_read_failure"]
+            "duplicate_element", "bounds_ax_read_failure", "startup_role_unclassified",
+            "focused_transient_surface"]
         guard let raw, allowed.contains(raw) else { return nil }
         return raw
     }
@@ -1677,6 +1997,21 @@ final class CoreJobAcceptanceTests: XCTestCase {
     private static func sanitizedSessionCaptureAXErrorCode(_ raw: String?) -> Int? {
         guard let raw, let code = Int(raw), (-65_535...65_535).contains(code) else { return nil }
         return code
+    }
+
+    private static func sanitizedSessionCaptureElapsedMs(_ raw: String?) -> Int? {
+        guard let raw, let elapsedMs = Int(raw), (0...2_000).contains(elapsedMs) else { return nil }
+        return elapsedMs
+    }
+
+    private static func sanitizedScreenCaptureFailure(_ raw: String?) -> String? {
+        let allowed: Set<String> = ["window_before_unavailable", "display_before_unavailable", "stack_before_obscured",
+            "image_unavailable", "window_after_unavailable", "window_after_changed", "display_after_unavailable", "stack_after_obscured",
+            "digest_window_before_unavailable", "digest_display_before_unavailable",
+            "digest_window_after_unavailable", "digest_window_after_changed",
+            "digest_display_after_unavailable", "digest_display_after_changed"]
+        guard let raw, allowed.contains(raw) else { return nil }
+        return raw
     }
 
     private struct Terminal {
@@ -1820,42 +2155,97 @@ final class CoreJobAcceptanceTests: XCTestCase {
             && fields["Destination"] == "Root folder"
     }
 
+    private static func webUploadSnapshotFocusIsAuthorized(focusedWindowID: String?,
+        retainedWindowID: String, retainedWindowElement: AXUIElement,
+        panel: ComputerUseDefaultBrowserSession.FileOpenPanel?, hasSheets: Bool,
+        hasUnrecognizedSheets: Bool, requirePicker: Bool) -> Bool {
+        guard !hasUnrecognizedSheets else { return false }
+        if focusedWindowID == retainedWindowID { return true }
+        guard focusedWindowID == nil, requirePicker, hasSheets, let panel, panel.isFocused,
+              panel.parentWindowID == retainedWindowID,
+              CFEqual(panel.parentWindowElement, retainedWindowElement) else { return false }
+        return true
+    }
+
     @MainActor
     private static func webUploadAccountProof(expected: Expected,
         executor: ComputerUseDefaultBrowserExecutor, requirePicker: Bool,
         expectedControlTitle: String? = nil,
-        expectedSearchFilename: String? = nil) -> (String, String)? {
+        expectedSearchFilename: String? = nil,
+        diagnostic: ((String) -> Void)? = nil) -> (String, String)? {
+        func fail(_ reason: String) -> (String, String)? {
+            diagnostic?(reason)
+            return nil
+        }
         func readBool(_ attribute: String, _ element: AXUIElement) -> Bool {
             var raw: CFTypeRef?
             return AXUIElementCopyAttributeValue(element, attribute as CFString, &raw) == .success
                 && (raw as? Bool == true)
         }
+        func signedFrontmostDefaultBrowser() -> (ComputerUseDefaultBrowserTarget.Handler,
+            ComputerUseApplicationIdentity)? {
+            guard let handler = ComputerUseDefaultBrowserTarget.currentDefaultHTTPSHandler(),
+                  let running = NSWorkspace.shared.frontmostApplication, !running.isTerminated,
+                  running.bundleIdentifier == handler.bundleIdentifier,
+                  let proof = ComputerUseReviewedApplicationCodeVerifier.proofForRunningApplication(
+                    runningApplication: running),
+                  proof.canonicalBundlePath == handler.bundleURL.resolvingSymlinksInPath().standardizedFileURL.path,
+                  let identity = ComputerUseApplicationIdentity(runningApplication: running, codeIdentity: proof),
+                  identity.matchesReviewedApplication(named: "Safari") else { return nil }
+            return (handler, identity)
+        }
         guard expected.provider != nil, let account = expected.expected_account,
               let sourcePath = expected.source_path, let sourceBytes = expected.source_bytes,
               let sourceDigest = expected.source_sha256?.lowercased(),
               sourceDigest.range(of: #"^[0-9a-f]{64}$"#, options: .regularExpression) != nil,
-              let fileName = expected.attachment_name,
-              let retained = executor.retainedWindowForDiagnostics,
-              let (handler, application, _) = ComputerUseDefaultBrowserTarget.currentDefaultHandlerForegroundWindow(),
-              handler.bundleIdentifier == "com.apple.Safari",
-              application.bundleIdentifier == handler.bundleIdentifier,
-              application.matchesReviewedApplication(named: "Safari"),
-              let snapshot = try? ComputerUseDefaultBrowserSession.captureWindowsForApplication(application),
-              snapshot.application == application, snapshot.focusedWindowID == retained.id,
-              snapshot.windows.filter({ $0.id == retained.id }).count == 1,
-              let window = snapshot.windows.first(where: { $0.id == retained.id }),
-              window.application == application,
-              CFEqual(window.accessibilityElement, retained.accessibilityElement) else { return nil }
+              let fileName = expected.attachment_name else { return fail("expectation_incomplete") }
+        func isExpectedAccountLabel(_ label: String) -> Bool {
+            let providerAnchor = expected.provider != "drive"
+                || label.hasPrefix("Google Account:")
+            return providerAnchor && webUploadEmailOccursExactlyOnce(account, in: label)
+        }
+        guard let retained = executor.retainedWindowForDiagnostics else { return fail("retained_window_missing") }
+        guard let (handler, application) = signedFrontmostDefaultBrowser() else {
+            return fail("signed_safari_unavailable")
+        }
+        let snapshot: ComputerUseDefaultBrowserSession.WindowSnapshot
+        do {
+            snapshot = try ComputerUseDefaultBrowserSession.captureWindowsForApplication(
+                application, expectedWindow: retained)
+        } catch {
+            return fail("retained_capture_failed")
+        }
+        guard snapshot.application == application else { return fail("snapshot_application_mismatch") }
+        guard !snapshot.hasUnrecognizedSheets else { return fail("unrecognized_modal") }
+        guard Self.webUploadSnapshotFocusIsAuthorized(focusedWindowID: snapshot.focusedWindowID,
+                retainedWindowID: retained.id, retainedWindowElement: retained.accessibilityElement,
+                panel: snapshot.fileOpenPanel, hasSheets: snapshot.hasSheets,
+                hasUnrecognizedSheets: snapshot.hasUnrecognizedSheets, requirePicker: requirePicker) else {
+            return fail(requirePicker ? "retained_or_picker_focus_unconfirmed" : "retained_focus_changed")
+        }
+        guard snapshot.windows.filter({ $0.id == retained.id }).count == 1 else {
+            return fail("retained_window_not_unique")
+        }
+        guard let window = snapshot.windows.first(where: { $0.id == retained.id }) else {
+            return fail("retained_window_missing_from_snapshot")
+        }
+        guard window.application == application,
+              CFEqual(window.accessibilityElement, retained.accessibilityElement) else {
+            return fail("retained_window_identity_mismatch")
+        }
         if requirePicker {
-            guard let panel = snapshot.fileOpenPanel, panel.isFocused,
-                  panel.primaryActionEnabled == true, panel.parentWindowID == window.id,
-                  CFEqual(panel.parentWindowElement, window.accessibilityElement),
-                  panel.selectedFileURLs.count == 1,
+            guard let panel = snapshot.fileOpenPanel else { return fail("picker_missing") }
+            guard panel.isFocused else { return fail("picker_not_focused") }
+            guard panel.primaryActionEnabled == true, panel.parentWindowID == window.id,
+                  CFEqual(panel.parentWindowElement, window.accessibilityElement) else { return fail("picker_scope_unconfirmed") }
+            guard panel.selectedFileURLs.count == 1,
                   panel.selectedFileURLs[0].lastPathComponent == fileName,
                   panel.selectedFileURLs[0].standardizedFileURL.resolvingSymlinksInPath().standardizedFileURL
-                    == URL(fileURLWithPath: sourcePath).standardizedFileURL.resolvingSymlinksInPath().standardizedFileURL else { return nil }
+                    == URL(fileURLWithPath: sourcePath).standardizedFileURL.resolvingSymlinksInPath().standardizedFileURL else {
+                return fail("picker_source_unconfirmed")
+            }
         } else if snapshot.hasSheets || snapshot.hasUnrecognizedSheets || snapshot.fileOpenPanel != nil {
-            return nil
+            return fail("unexpected_modal")
         }
         let reader = ComputerUseDefaultBrowserPageReader()
         func matchesExpectedPageURL(_ url: String) -> Bool {
@@ -1865,11 +2255,11 @@ final class CoreJobAcceptanceTests: XCTestCase {
             return ComputerUseWebUploadJob.isDriveTitleSearchURL(parsed, filename: filename)
         }
         guard let url = try? reader.readRetainedPageURL(window: window.accessibilityElement,
-                application: application, mayAct: { !Task.isCancelled }),
-              matchesExpectedPageURL(url),
-              let canonicalSource = Self.canonicalRegularFile(sourcePath, expectedBytes: sourceBytes,
-                expectedSHA256: sourceDigest),
-              !Task.isCancelled else { return nil }
+                application: application, mayAct: { !Task.isCancelled }) else { return fail("page_url_unavailable") }
+        guard matchesExpectedPageURL(url) else { return fail("page_url_unexpected") }
+        guard let canonicalSource = Self.canonicalRegularFile(sourcePath, expectedBytes: sourceBytes,
+                expectedSHA256: sourceDigest) else { return fail("source_unverified") }
+        guard !Task.isCancelled else { return fail("task_cancelled") }
 
         var matchingLabels: [String] = []
         if requirePicker {
@@ -1883,11 +2273,12 @@ final class CoreJobAcceptanceTests: XCTestCase {
                 AXUIElementSetMessagingTimeout(element, 0.1)
                 var roleValue: CFTypeRef?
                 guard AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &roleValue) == .success,
-                      let role = roleValue as? String else { return nil }
+                      let role = roleValue as? String else { return fail("picker_scan_role_unavailable") }
                 if ["AXSheet", "AXSecureTextField"].contains(role)
                     || readBool("AXHidden", element) || readBool("AXProtectedContent", element) {
                     continue
                 }
+                if ["AXTable", "AXOutline", "AXList", "AXRow"].contains(role) { continue }
                 if ["AXButton", "AXMenuButton", "AXPopUpButton"].contains(role) {
                     var matchingLabel: String?
                     for attribute in [kAXTitleAttribute as String, kAXDescriptionAttribute as String,
@@ -1895,7 +2286,7 @@ final class CoreJobAcceptanceTests: XCTestCase {
                         var raw: CFTypeRef?
                         if AXUIElementCopyAttributeValue(element, attribute as CFString, &raw) == .success,
                            let text = raw as? String, text.utf8.count <= 1_024,
-                           webUploadEmailOccursExactlyOnce(account, in: text) {
+                           isExpectedAccountLabel(text) {
                             matchingLabel = text
                             break
                         }
@@ -1905,39 +2296,70 @@ final class CoreJobAcceptanceTests: XCTestCase {
                 var childrenValue: CFTypeRef?
                 let status = AXUIElementCopyAttributeValue(element, kAXChildrenAttribute as CFString, &childrenValue)
                 if status == .success, let children = childrenValue as? [AXUIElement] {
-                    guard children.count <= 1_024 - visited.count - queue.count else { return nil }
+                    guard children.count <= 1_024 - visited.count - queue.count else { return fail("picker_scan_node_limit") }
                     queue.append(contentsOf: children)
                 } else if ["AXWindow", "AXGroup", "AXScrollArea", "AXTabGroup", "AXTab", "AXSplitGroup", "AXUnknown"].contains(role) {
-                    return nil
+                    return fail("picker_scan_container_children_unavailable")
                 }
             }
-            guard queue.isEmpty, ContinuousClock.now < deadline, !Task.isCancelled else { return nil }
+            guard queue.isEmpty, ContinuousClock.now < deadline, !Task.isCancelled else {
+                let reason = Task.isCancelled ? "task_cancelled"
+                    : (ContinuousClock.now >= deadline ? "picker_scan_deadline" : "picker_scan_node_limit")
+                return fail(reason)
+            }
         } else {
             guard let observation = try? reader.read(window: window.accessibilityElement,
                     application: application, mayAct: { !Task.isCancelled }, mode: .webUploadControls),
                   observation.application == application, observation.url == url,
-                  observation.webUploadControlsComplete else { return nil }
+                  observation.webUploadControlsComplete else { return fail("page_controls_incomplete") }
             matchingLabels = observation.controls.filter { control in
                 ["AXButton", "AXMenuButton", "AXPopUpButton"].contains(control.role)
-                    && webUploadEmailOccursExactlyOnce(account, in: control.label)
+                    && isExpectedAccountLabel(control.label)
             }.map(\.label)
             if let expectedControlTitle {
                 guard observation.controls.filter({ control in
                     control.label == expectedControlTitle && control.enabled == true
                         && ["AXButton", "AXMenuButton", "AXMenuItem", "AXLink", "AXPopUpButton"].contains(control.role)
-                }).count == 1 else { return nil }
+                }).count == 1 else { return fail("expected_control_unconfirmed") }
             }
         }
-        guard matchingLabels.count == 1 else { return nil }
-        guard let (freshHandler, freshApplication, _) = ComputerUseDefaultBrowserTarget.currentDefaultHandlerForegroundWindow(),
-              freshHandler == handler, freshApplication == application,
-              let fresh = try? ComputerUseDefaultBrowserSession.captureWindowsForApplication(application),
-              fresh.application == application, fresh.focusedWindowID == retained.id,
-              fresh.windows.filter({ $0.id == retained.id }).count == 1,
-              let freshWindow = fresh.windows.first(where: { $0.id == retained.id }),
-              CFEqual(freshWindow.accessibilityElement, retained.accessibilityElement),
-              let finalURL = try? reader.readRetainedPageURL(window: freshWindow.accessibilityElement,
-                application: application, mayAct: { !Task.isCancelled }), finalURL == url else { return nil }
+        guard matchingLabels.count == 1 else { return fail(matchingLabels.isEmpty ? "account_label_missing" : "account_label_ambiguous") }
+        guard let (freshHandler, freshApplication) = signedFrontmostDefaultBrowser() else {
+            return fail("fresh_signed_safari_unavailable")
+        }
+        guard freshHandler == handler, freshApplication == application else {
+            return fail("fresh_application_changed")
+        }
+        let fresh: ComputerUseDefaultBrowserSession.WindowSnapshot
+        do {
+            fresh = try ComputerUseDefaultBrowserSession.captureWindowsForApplication(
+                application, expectedWindow: retained)
+        } catch {
+            return fail("fresh_retained_capture_failed")
+        }
+        guard fresh.application == application else { return fail("fresh_snapshot_application_mismatch") }
+        guard !fresh.hasUnrecognizedSheets else { return fail("fresh_unrecognized_modal") }
+        guard Self.webUploadSnapshotFocusIsAuthorized(focusedWindowID: fresh.focusedWindowID,
+                retainedWindowID: retained.id, retainedWindowElement: retained.accessibilityElement,
+                panel: fresh.fileOpenPanel, hasSheets: fresh.hasSheets,
+                hasUnrecognizedSheets: fresh.hasUnrecognizedSheets, requirePicker: requirePicker) else {
+            return fail(requirePicker ? "fresh_retained_or_picker_focus_unconfirmed" : "fresh_retained_focus_changed")
+        }
+        guard fresh.windows.filter({ $0.id == retained.id }).count == 1 else {
+            return fail("fresh_retained_window_not_unique")
+        }
+        guard let freshWindow = fresh.windows.first(where: { $0.id == retained.id }) else {
+            return fail("fresh_retained_window_missing_from_snapshot")
+        }
+        guard freshWindow.application == application,
+              CFEqual(freshWindow.accessibilityElement, retained.accessibilityElement) else {
+            return fail("fresh_retained_window_identity_mismatch")
+        }
+        guard let finalURL = try? reader.readRetainedPageURL(window: freshWindow.accessibilityElement,
+                application: application, mayAct: { !Task.isCancelled }) else {
+            return fail("fresh_page_url_unavailable")
+        }
+        guard finalURL == url else { return fail("fresh_page_url_changed") }
         if requirePicker {
             guard let panel = fresh.fileOpenPanel, panel.isFocused, panel.primaryActionEnabled == true,
                   panel.parentWindowID == freshWindow.id,
@@ -1946,7 +2368,7 @@ final class CoreJobAcceptanceTests: XCTestCase {
                   panel.selectedFileURLs[0].lastPathComponent == fileName,
                   panel.selectedFileURLs[0].standardizedFileURL.resolvingSymlinksInPath().standardizedFileURL
                     == canonicalSource else {
-                return nil
+                return fail("picker_revalidation_failed")
             }
         }
         return (url, matchingLabels[0])
@@ -1978,13 +2400,23 @@ final class CoreJobAcceptanceTests: XCTestCase {
         case .uploadProgressComplete:
             stageName = "uploadProgressComplete"
             searchFilename = nil
+        case .preUploadProgressClean:
+            stageName = "preUploadProgressClean"
+            searchFilename = nil
         }
         var result: [String: Any] = ["stage": stageName, "captured": false]
+        var accountProofFailure: String?
         guard let (url, accountLabel) = webUploadAccountProof(expected: expected,
                 executor: executor, requirePicker: false,
-                expectedSearchFilename: searchFilename),
-              let retained = executor.retainedWindowForDiagnostics else {
+                expectedSearchFilename: searchFilename,
+                diagnostic: { accountProofFailure = $0 }) else {
             result["capture_status"] = "account_or_url_unverified"
+            result["account_proof_failure"] = accountProofFailure ?? "unclassified"
+            return result
+        }
+        guard let retained = executor.retainedWindowForDiagnostics else {
+            result["capture_status"] = "retained_window_missing"
+            result["account_proof_failure"] = "retained_window_missing"
             return result
         }
         let mode: ComputerUseDefaultBrowserPageReader.ReadMode = stage == .collisionSearchReady
@@ -2027,6 +2459,101 @@ final class CoreJobAcceptanceTests: XCTestCase {
     }
 
     @MainActor
+    private static func captureWebUploadPreOpenProgress(expected: Expected,
+        executor: ComputerUseDefaultBrowserExecutor) -> [String: Any] {
+        var result: [String: Any] = ["stage": "preUploadProgressClean", "captured": false]
+        guard let expectedHomeURL = expected.folder_url,
+              let sourcePath = expected.source_path, let sourceBytes = expected.source_bytes,
+              let sourceSHA256 = expected.source_sha256?.lowercased(),
+              let (url, accountLabel) = webUploadAccountProof(expected: expected,
+                executor: executor, requirePicker: false),
+              url == expectedHomeURL,
+              Self.canonicalRegularFile(sourcePath, expectedBytes: sourceBytes,
+                expectedSHA256: sourceSHA256) != nil,
+              let retained = executor.retainedWindowForDiagnostics else {
+            result["capture_status"] = "home_account_or_source_unverified"
+            return result
+        }
+        let reader = ComputerUseDefaultBrowserPageReader()
+        guard let page = try? reader.read(window: retained.accessibilityElement,
+                application: retained.application, mayAct: { !Task.isCancelled }, mode: .webUploadControls),
+              page.application == retained.application, page.url == url,
+              page.controls.filter({ $0.label == accountLabel
+                  && ["AXButton", "AXMenuButton", "AXPopUpButton"].contains($0.role) }).count == 1,
+              page.webUploadControlsComplete, !Task.isCancelled,
+              let (finalURL, finalAccountLabel) = webUploadAccountProof(expected: expected,
+                executor: executor, requirePicker: false),
+              finalURL == url, finalAccountLabel == accountLabel else {
+            result["capture_status"] = "home_controls_unavailable"
+            result["url"] = url
+            result["account_label"] = accountLabel
+            return result
+        }
+        let observedProgress = page.exactTextValues.filter { value in
+            value.localizedCaseInsensitiveContains("upload") || value.localizedCaseInsensitiveContains("remaining")
+                || value.contains("%")
+        }
+        let progressIsComplete = observedProgress.count <= 24 && observedProgress.allSatisfy { $0.utf8.count <= 256 }
+        let progress = observedProgress.filter { $0.utf8.count <= 256 }.prefix(24).map { $0 }
+        guard progressIsComplete else {
+            result["url"] = page.url
+            result["account_label"] = accountLabel
+            result["source_verified"] = true
+            result["controls_complete"] = false
+            result["progress_values_complete"] = false
+            result["progress_values"] = progress
+            result["capture_status"] = "progress_observation_incomplete"
+            return result
+        }
+        result["captured"] = true
+        result["picker_absent"] = true
+        result["url"] = page.url
+        result["account_label"] = accountLabel
+        result["source_verified"] = true
+        result["controls_complete"] = true
+        result["progress_values_complete"] = true
+        result["progress_values"] = progress
+        result["capture_status"] = "fresh_root_progress_observed"
+        return result
+    }
+
+    private static func webUploadPreOpenBaselineIsFresh(_ checkpoint: [String: Any]?,
+        expectedHomeURL: String, expectedAccount: String,
+        currentURL: String, currentAccountLabel: String) -> Bool {
+        guard let checkpoint,
+              checkpoint["stage"] as? String == "preUploadProgressClean",
+              checkpoint["picker_absent"] as? Bool == true,
+              checkpoint["captured"] as? Bool == true,
+              checkpoint["source_verified"] as? Bool == true,
+              checkpoint["controls_complete"] as? Bool == true,
+              checkpoint["progress_values_complete"] as? Bool == true,
+              checkpoint["url"] as? String == expectedHomeURL,
+              checkpoint["url"] as? String == currentURL,
+              let accountLabel = checkpoint["account_label"] as? String,
+              webUploadEmailOccursExactlyOnce(expectedAccount, in: accountLabel),
+              accountLabel == currentAccountLabel,
+              webUploadEmailOccursExactlyOnce(expectedAccount, in: currentAccountLabel),
+              let values = checkpoint["progress_values"] as? [String], values.count <= 24,
+              values.allSatisfy({ $0.utf8.count <= 256 }) else { return false }
+        let normalized = values.map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+        let completed: Set<String> = ["upload complete", "upload complete.", "uploaded"]
+        return !normalized.contains(where: {
+            completed.contains($0) || Self.webUploadHasCountedCompletionLabel($0)
+                || $0.contains("upload failed") || $0.contains("couldn't upload")
+                || $0.contains("uploading") || $0.contains("remaining")
+        })
+    }
+
+    private static func webUploadHasCountedCompletionLabel(_ value: String) -> Bool {
+        let withoutPeriod = value.hasSuffix(".") ? String(value.dropLast()) : value
+        let parts = withoutPeriod.split(separator: " ", omittingEmptySubsequences: false)
+        guard parts.count == 3, parts[0].count <= 6, parts[0].first != "0",
+              parts[0].allSatisfy({ $0 >= "0" && $0 <= "9" }),
+              let count = Int(parts[0]), parts[2] == "complete" else { return false }
+        return (count == 1 && parts[1] == "upload") || (count >= 2 && parts[1] == "uploads")
+    }
+
+    @MainActor
     private static func captureWebUpload(expected: Expected, loader: GmailAcceptanceVisualExecutorLoader?,
                                          terminal: Terminal, evidence: inout [String: Any]) async {
         var upload: [String: Any] = [
@@ -2055,9 +2582,15 @@ final class CoreJobAcceptanceTests: XCTestCase {
         upload["site_dispatch_count"] = executor.webUploadDispatchCountForDiagnostics
         upload["open_dispatch_count"] = executor.webUploadOpenDispatchCountForDiagnostics
         upload["upload_control_dispatch_count"] = executor.webUploadDispatchCountForDiagnostics
+        if let accountProofFailure = loader?.webUploadCheckpoints?.latestAccountProofFailure {
+            upload["account_proof_failure"] = accountProofFailure
+        }
         if let checkpoints = loader?.webUploadCheckpoints {
             if let collision = checkpoints.collisionSearch { upload["collision_search_checkpoint"] = collision }
-            if let progress = checkpoints.uploadProgress { upload["upload_progress_checkpoint"] = progress }
+            var progressEvidence: [String: Any] = [:]
+            if let progress = checkpoints.uploadProgress { progressEvidence = progress }
+            if let preOpen = checkpoints.preOpenProgress { progressEvidence["pre_open"] = preOpen }
+            if !progressEvidence.isEmpty { upload["upload_progress_checkpoint"] = progressEvidence }
         }
         guard let request = executor.webUploadRequestForDiagnostics else {
             upload["capture_status"] = "request_not_ready"
@@ -2327,14 +2860,28 @@ final class CoreJobAcceptanceTests: XCTestCase {
                             typed.provider.rawValue == (expected.provider == "drive" ? "googleDrive" : "dropbox")
                                 && typed.destinationFolder == nil
                         } == true
+                        var pickerAccountProofFailure: String?
+                        let currentPickerAccountProof = executor.flatMap { Self.webUploadAccountProof(
+                            expected: expected, executor: $0, requirePicker: true,
+                            diagnostic: { pickerAccountProofFailure = $0 }) }
+                        visualLoader?.webUploadCheckpoints?.latestAccountProofFailure = pickerAccountProofFailure
                         let pickerProof = detailsMatch && webUploadOpenApprovalCount == 1
                             && executor?.webUploadDispatchCountForDiagnostics == 1
                             && executor?.webUploadOpenDispatchCountForDiagnostics == 0 && requestMatches
                             && request.taskID == taskID && !request.requestID.isEmpty
                             && !respondedRequestIDs.contains(request.requestID)
-                            && executor.map { Self.webUploadAccountProof(expected: expected,
-                                executor: $0, requirePicker: true) != nil } == true
-                        if pickerProof, case .approvalRequired(let current) = client.state,
+                            && currentPickerAccountProof != nil
+                        let preOpenProgressIsFresh: Bool
+                        if let homeURL = expected.folder_url, let account = expected.expected_account {
+                            preOpenProgressIsFresh = Self.webUploadPreOpenBaselineIsFresh(
+                                visualLoader?.webUploadCheckpoints?.preOpenProgress,
+                                expectedHomeURL: homeURL, expectedAccount: account,
+                                currentURL: currentPickerAccountProof?.0 ?? "",
+                                currentAccountLabel: currentPickerAccountProof?.1 ?? "")
+                        } else {
+                            preOpenProgressIsFresh = false
+                        }
+                        if pickerProof, preOpenProgressIsFresh, case .approvalRequired(let current) = client.state,
                            current == request, current.taskID == taskID,
                            !respondedRequestIDs.contains(current.requestID) {
                             respondedRequestIDs.insert(request.requestID)

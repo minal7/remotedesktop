@@ -1214,10 +1214,12 @@ enum ComputerUseGmailRecipientVerifier {
     }
 
     static func accountControlLabel(window: AXUIElement, application: ComputerUseApplicationIdentity,
-                                    revalidate: @MainActor () throws -> Void) throws -> String? {
+                                    revalidate: @MainActor () throws -> Void,
+                                    diagnostic: (@MainActor (String, Int) -> Void)? = nil) throws -> String? {
         try revalidate()
         guard frontmostMatches(application) else { return nil }
-        let deadline = ContinuousClock.now.advanced(by: .seconds(1))
+        let scanStart = ContinuousClock.now
+        let deadline = scanStart.advanced(by: .seconds(1))
         var visited = 0
         var overflow = false
         var outerWebAreaSeen = false
@@ -1273,8 +1275,31 @@ enum ComputerUseGmailRecipientVerifier {
             for child in children { visit(child, depth: depth + 1) }
         }
         visit(window, depth: 0)
+        let scanEnd = ContinuousClock.now
+        let elapsed = scanEnd - scanStart
+        let components = elapsed.components
+        let elapsedMilliseconds = Int(max(0, min(2_000,
+            components.seconds * 1_000 + components.attoseconds / 1_000_000_000_000_000)))
+        let uniqueLabels = Array(Set(labels))
+        let scanFailure: String
+        if Task.isCancelled { scanFailure = "cancelled" }
+        else if overflow { scanFailure = "overflow" }
+        else if scanEnd >= deadline { scanFailure = "deadline" }
+        else if uniqueLabels.count > 1 { scanFailure = "ambiguous" }
+        else if uniqueLabels.isEmpty { scanFailure = "missing" }
+        else { scanFailure = "complete" }
+        diagnostic?(scanFailure, elapsedMilliseconds)
+        return try finishAccountControlLabel(labels: labels, overflow: overflow, deadline: deadline,
+            revalidate: revalidate, now: { scanEnd })
+    }
+
+    static func finishAccountControlLabel(labels: [String], overflow: Bool,
+                                          deadline: ContinuousClock.Instant,
+                                          revalidate: @MainActor () throws -> Void,
+                                          now: @MainActor () -> ContinuousClock.Instant) throws -> String? {
+        let scanCompletedWithinBudget = !overflow && !Task.isCancelled && now() < deadline
         try revalidate()
-        guard !overflow, !Task.isCancelled, ContinuousClock.now < deadline else { return nil }
+        guard scanCompletedWithinBudget, !Task.isCancelled else { return nil }
         let uniqueLabels = Array(Set(labels))
         return uniqueLabels.count == 1 ? uniqueLabels[0] : nil
     }

@@ -1384,6 +1384,7 @@ final class ComputerUseHostTools {
     private let usesDefaultNativeTextTarget: Bool
     private let textEditorOverride: ComputerUseTextEditor?
     private(set) var nativeVisualTypingDiagnostic: [String: String] = [:]
+    private(set) var lastScreenCaptureFailureForDiagnostics: String?
     private var browserNavigationTask: ComputerUseBrowserNavigationTask?
     private var browserToolProposals: (id: UUID, taskID: String, propose: ComputerUseFaraBrowserExecutor.ProposeUsingTools)?
     private var browserResearchAdmissionObserver: (@MainActor (ComputerUseBrowserResearchTask) throws -> Void)?
@@ -2198,6 +2199,7 @@ final class ComputerUseHostTools {
     }
 
     func currentScreen() throws -> ComputerUseScreenObservation {
+        lastScreenCaptureFailureForDiagnostics = nil
         guard mayAct() else { throw ToolError.paused }
         if let screenProvider {
             return try screenProvider()
@@ -2207,37 +2209,48 @@ final class ComputerUseHostTools {
         // fact extractors can fail closed to this one active window instead
         // of accepting a coherent stale result from another visible app.
         guard let windowBeforeCapture = liveFrontmostWindowSnapshot() else {
+            lastScreenCaptureFailureForDiagnostics = "window_before_unavailable"
             throw ToolError.focusedDisplayUnavailable
         }
         guard let activeDisplaysBefore = liveActiveDisplayInventory(),
               let selectedDisplayBefore = ComputerUseFocusedDisplaySelector.select(
                 windowBounds: windowBeforeCapture.bounds, activeDisplays: activeDisplaysBefore) else {
+            lastScreenCaptureFailureForDiagnostics = "display_before_unavailable"
             throw ToolError.focusedDisplayUnavailable
         }
         guard let stackBeforeCapture = liveVisibleWindowStack(),
               stackBeforeCapture.assessFocusedWindow(
                 ownerProcessIdentifier: windowBeforeCapture.applicationProcessIdentifier,
                 bounds: windowBeforeCapture.bounds) == .clear else {
+            lastScreenCaptureFailureForDiagnostics = "stack_before_obscured"
             throw ToolError.visualSurfaceObscured
         }
         let displayID = selectedDisplayBefore.identifier
         guard let image = CGDisplayCreateImage(displayID) else {
+            lastScreenCaptureFailureForDiagnostics = "image_unavailable"
             throw ToolError.screenshotUnavailable
         }
         let windowAfterCapture = liveFrontmostWindowSnapshot()
-        guard let windowAfterCapture, windowAfterCapture == windowBeforeCapture else {
+        guard let windowAfterCapture else {
+            lastScreenCaptureFailureForDiagnostics = "window_after_unavailable"
+            throw ToolError.visualSurfaceObscured
+        }
+        guard windowAfterCapture == windowBeforeCapture else {
+            lastScreenCaptureFailureForDiagnostics = "window_after_changed"
             throw ToolError.visualSurfaceObscured
         }
         guard let activeDisplaysAfter = liveActiveDisplayInventory(),
               let selectedDisplayAfter = ComputerUseFocusedDisplaySelector.select(
                 windowBounds: windowAfterCapture.bounds, activeDisplays: activeDisplaysAfter),
               ComputerUseFocusedDisplaySelector.isStable(before: selectedDisplayBefore, after: selectedDisplayAfter) else {
+            lastScreenCaptureFailureForDiagnostics = "display_after_unavailable"
             throw ToolError.focusedDisplayUnavailable
         }
         guard let stackAfterCapture = liveVisibleWindowStack(),
               stackAfterCapture.assessFocusedWindow(
                 ownerProcessIdentifier: windowAfterCapture.applicationProcessIdentifier,
                 bounds: windowAfterCapture.bounds) == .clear else {
+            lastScreenCaptureFailureForDiagnostics = "stack_after_obscured"
             throw ToolError.visualSurfaceObscured
         }
         let frontmostWindowBounds = Self.stableFrontmostWindowBounds(
@@ -2395,6 +2408,7 @@ final class ComputerUseHostTools {
             return nil
         }
         let root = AXUIElementCreateApplication(application.processIdentifier)
+        AXUIElementSetMessagingTimeout(root, 1.5)
         var focusedWindowValue: CFTypeRef?
         guard AXUIElementCopyAttributeValue(
             root,
@@ -2407,6 +2421,7 @@ final class ComputerUseHostTools {
         let focusedWindow = unsafeBitCast(
             focusedWindowValue,
             to: AXUIElement.self)
+        AXUIElementSetMessagingTimeout(focusedWindow, 0.5)
         guard let origin = pointAttribute(
                 kAXPositionAttribute as CFString,
                 from: focusedWindow),
@@ -4554,14 +4569,19 @@ final class ComputerUseHostTools {
     }
 
     private func visualDigest(around points: [CGPoint]) throws -> String? {
+        lastScreenCaptureFailureForDiagnostics = nil
         guard !points.isEmpty else { return nil }
         // A synthetic observation must never be mixed with the live display.
         guard screenProvider == nil else { return nil }
         let windowBefore = liveFrontmostWindowSnapshot()
-        guard let windowBefore,
-              let activeDisplaysBefore = liveActiveDisplayInventory(),
+        guard let windowBefore else {
+            lastScreenCaptureFailureForDiagnostics = "digest_window_before_unavailable"
+            throw ToolError.focusedDisplayUnavailable
+        }
+        guard let activeDisplaysBefore = liveActiveDisplayInventory(),
               let selectedDisplayBefore = ComputerUseFocusedDisplaySelector.select(
                 windowBounds: windowBefore.bounds, activeDisplays: activeDisplaysBefore) else {
+            lastScreenCaptureFailureForDiagnostics = "digest_display_before_unavailable"
             throw ToolError.focusedDisplayUnavailable
         }
         let displayID = selectedDisplayBefore.identifier
@@ -4571,11 +4591,22 @@ final class ComputerUseHostTools {
             throw ToolError.screenshotUnavailable
         }
         let windowAfter = liveFrontmostWindowSnapshot()
-        guard windowBefore == windowAfter,
-              let activeDisplaysAfter = liveActiveDisplayInventory(),
+        guard let windowAfter else {
+            lastScreenCaptureFailureForDiagnostics = "digest_window_after_unavailable"
+            throw ToolError.approvalTargetChanged
+        }
+        guard windowBefore == windowAfter else {
+            lastScreenCaptureFailureForDiagnostics = "digest_window_after_changed"
+            throw ToolError.approvalTargetChanged
+        }
+        guard let activeDisplaysAfter = liveActiveDisplayInventory(),
               let selectedDisplayAfter = ComputerUseFocusedDisplaySelector.select(
-                windowBounds: windowAfter?.bounds ?? .null, activeDisplays: activeDisplaysAfter),
-              ComputerUseFocusedDisplaySelector.isStable(before: selectedDisplayBefore, after: selectedDisplayAfter) else {
+                windowBounds: windowAfter.bounds, activeDisplays: activeDisplaysAfter) else {
+            lastScreenCaptureFailureForDiagnostics = "digest_display_after_unavailable"
+            throw ToolError.approvalTargetChanged
+        }
+        guard ComputerUseFocusedDisplaySelector.isStable(before: selectedDisplayBefore, after: selectedDisplayAfter) else {
+            lastScreenCaptureFailureForDiagnostics = "digest_display_after_changed"
             throw ToolError.approvalTargetChanged
         }
         return try Self.approvalVisualDigest(around: points, image: image, displayBounds: bounds, window: windowAfter)

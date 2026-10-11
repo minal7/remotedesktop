@@ -795,8 +795,13 @@ final class ComputerUseDefaultBrowserPageReaderTests: XCTestCase {
             let key = "global-control-\(index)"
             let control = graph.element(key)
             graph.set(key, kAXRoleAttribute, "AXButton" as NSString)
-            graph.set(key, kAXTitleAttribute, "Control \(index)" as NSString)
+            graph.set(key, kAXTitleAttribute, (index == 42 ? "New" : "Control \(index)") as NSString)
             graph.set(key, kAXEnabledAttribute, NSNumber(value: true))
+            if index == 42 {
+                graph.set(key, kAXParentAttribute, graph.element("web"))
+                graph.setFrame(key, CGRect(x: 50, y: 60, width: 100, height: 40))
+                graph.hitTestElement = control
+            }
             return control
         }
         graph.set("web", kAXChildrenAttribute, (rows + [account, search] + additionalControls) as CFArray)
@@ -816,6 +821,10 @@ final class ComputerUseDefaultBrowserPageReaderTests: XCTestCase {
         XCTAssertEqual(omittedListing["controls"], "45")
         XCTAssertEqual(omittedListing["exact_text"], "45")
         XCTAssertLessThanOrEqual(try XCTUnwrap(Int(omittedListing["visited"] ?? "999")), 256)
+        let newControl = try XCTUnwrap(controls.controls.first(where: { $0.label == "New" }))
+        XCTAssertEqual(try reader.validatedControlCenter(observation: controls, controlID: newControl.id,
+            window: graph.window, windowBounds: CGRect(x: 0, y: 0, width: 1_000, height: 800), mayAct: { true }),
+            CGPoint(x: 100, y: 80), "A W2 control beyond the standard cap remains freshly revalidated")
 
         let listing = try XCTUnwrap(reader.read(window: graph.window, application: graph.identity,
             mayAct: { true }, mode: .standard))
@@ -823,6 +832,8 @@ final class ComputerUseDefaultBrowserPageReaderTests: XCTestCase {
         XCTAssertTrue(listing.truncated)
         XCTAssertFalse(listing.controls.contains { $0.label == "Google Account: Test User" },
             "A row-heavy standard pass can exhaust its traversal bound before global controls")
+        XCTAssertFalse(listing.controls.contains { $0.label == "New" },
+            "The standard pass keeps its original traversal behavior and bound")
 
         let listingGraph = PageAXGraph()
         listingGraph.makePage()
@@ -1522,6 +1533,13 @@ final class ComputerUseDefaultBrowserPageReaderTests: XCTestCase {
         graph.set("other-window", kAXChildrenAttribute, [otherWeb] as CFArray)
         let reader = ComputerUseDefaultBrowserPageReader(access: graph.access)
 
+        graph.reads.removeAll()
+        XCTAssertNil(try reader.read(window: graph.window, application: graph.identity,
+            mayAct: { true }, mode: .webUploadControls),
+            "A full page/control read must not be accepted while a native modal owns focus")
+        XCTAssertFalse(graph.reads.contains { $0.0 == "web" },
+            "The reader must stop at the focused-window guard instead of traversing page controls behind the modal")
+        graph.reads.removeAll()
         XCTAssertEqual(try reader.readRetainedPageURL(window: graph.window,
             application: graph.identity, mayAct: { true }), "https://drive.google.com/drive/my-drive")
         XCTAssertFalse(graph.reads.contains { $0.1 == (kAXFocusedWindowAttribute as String) },

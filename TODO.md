@@ -3,15 +3,15 @@
 | Job | Status | Blocker |
 | --- | --- | --- |
 | W1 Gmail with attachment | passing 10/10 | Accepted: draft batch `215bfefb`→`91255b7b` independently reopened 10 distinct saved drafts with exact fields and one exact attachment name/size, median 132.2 s. Send batch `0bc93140`→`160e72ae`: 3/3 stopped at approval with exact review fields, median 75.4 s; zero Send approvals granted. Coordinate fix committed as `d923f79`. |
-| Build / regression checkpoint | compiled / tested, baseline non-green | W2 full `w2-full-20261010-152910`: 3,152 passed /155 failed /372 skipped in 1,138.7 s; all 155 failures match the immutable baseline, 0 added. Focused W2: 204 broad checks and 127 follow-up checks passed; 52 Python runner/checker tests passed. W1 remains accepted; external traces capped at 20 runs. |
-| W2 Drive / Dropbox web upload | in progress | Compiled: 204 broad focused Swift checks passed; latest W2 follow-up 127 passed; 52 Python runner/checker tests passed. Fixed the observed 32-item scan caps. Real retry `698842d2` hit Safari AXWindows cannotComplete after navigation, before any upload approval or dispatch. No product upload accepted. Dropbox: owner sign-in pending; credentials untouched. |
+| Build / regression checkpoint | compiled / focused tested; full baseline non-green | Focused `w2-upload-narrow-20261010-191440`: 143 passed /0 failed /7 skipped in 70.9 s; Python 55/0 in 0.097 s. Full `w2-full-20261010-191601`: 3,158 passed /157 failed /372 skipped in 1,261.4 s: all 155 baseline failures plus two owned-browser navigation failures. Those two passed 3 repetitions each (6/6) unchanged in `w2-navigation-rerun-20261010-193733`; intermittent, not removed from the full result. |
+| W2 Drive / Dropbox web upload | implemented / focused tested; acceptance failing | Latest diagnostic `be935314`: 0/1, 87.2 s; XCTest aborted before outcome, counters unknown. Exact file absent in the correct account afterward; identity permanently retired without replay. Previous `1a61cf0e`: no native Open, per-key shortcut context rejected. Prior `52b7d40a` uploaded one exact 8 KB file, but its acceptance failed. Size proof currently ≤1 MiB; root folder only. Dropbox: owner sign-in pending. |
 | W3 Flights | not started | After W2; read-only search/extraction, no approvals. |
 | W4 Safari / Chrome DOM bridge | not started | After W3; keep W1–W3 acceptance gates unchanged. |
 | W5 General web tasks | not started | 20 WebTailBench tasks after the bridge. |
 | M4 Away | not started | After W5; physical iPhone on cellular required. |
 | Apple Mail | passing 10/10 | Frozen; historical 3/3 Send-approval stops. Keep tests green. |
-| Sync-folder copy / native apps | in progress | Paused by A6: sync work committed behind computerUseV2, unrouted; acceptance disabled. |
+| Sync-folder copy / native apps | paused / unrouted | Paused by A6: sync work committed behind computerUseV2; acceptance disabled. |
 
-A1 ≤30-minute next step: investigate the retained AXWindows cannotComplete timeout after navigation; preserve exact membership/focus/PID/code/sheet checks and Rule 7.
-The item-cap repair passed focused checks and the full host run added zero baseline failures. Commit this checkpoint, then test the bounded native-read repair and fresh pre-upload progress guard before retrying the same zero-effect source.
-No product upload is accepted; Drive sizes above 1 MiB and named-folder coverage remain unaccepted. Dropbox sign-in stays owner-only.
+A1 ≤30-minute harness experiment: the sync entry still aborted in XCTest’s Swift task observer. Its explicit nonisolated boundary and absolute runner deadline now compile and pass focused tests; run one fresh real diagnostic after this checkpoint to test the boundary.
+Preserve every failed identity without replay. `be935314` has unknown effect counters and independently verified remote absence; the current product is not accepted for Drive.
+Full regression recorded 155 baseline failures plus two intermittent navigation failures (6/6 on unchanged focused reruns); do not claim the full suite green. Dropbox owner sign-in remains pending.

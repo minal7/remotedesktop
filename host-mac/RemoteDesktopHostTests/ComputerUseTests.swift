@@ -12,6 +12,104 @@ import XCTest
 
 @MainActor
 final class ComputerUseTests: XCTestCase {
+    func testScopedScreenCaptureRetriesOnlyOneWindowAfterUnavailableFailure() throws {
+        var captures = 0
+        var validations = 0
+        let recovered = try ComputerUseDesktopExecutor.captureWithOneScopedWindowReadRetry(
+            hasSurfaceScope: true,
+            failureReason: { "window_after_unavailable" },
+            capture: { () throws -> String in
+                captures += 1
+                if captures == 1 { throw ComputerUseHostTools.ToolError.visualSurfaceObscured }
+                return "fresh-screen"
+            },
+            revalidate: { validations += 1 })
+        XCTAssertEqual(recovered, "fresh-screen")
+        XCTAssertEqual(captures, 2)
+        XCTAssertEqual(validations, 1)
+
+        captures = 0
+        validations = 0
+        let recoveredBeforeCapture = try ComputerUseDesktopExecutor.captureWithOneScopedWindowReadRetry(
+            hasSurfaceScope: true,
+            failureReason: { "window_before_unavailable" },
+            capture: { () throws -> String in
+                captures += 1
+                if captures == 1 { throw ComputerUseHostTools.ToolError.focusedDisplayUnavailable }
+                return "fresh-screen-after-before-read"
+            },
+            revalidate: { validations += 1 })
+        XCTAssertEqual(recoveredBeforeCapture, "fresh-screen-after-before-read")
+        XCTAssertEqual(captures, 2)
+        XCTAssertEqual(validations, 1)
+
+        captures = 0
+        validations = 0
+        var failureReason = "window_before_unavailable"
+        XCTAssertThrowsError(try ComputerUseDesktopExecutor.captureWithOneScopedWindowReadRetry(
+            hasSurfaceScope: true,
+            failureReason: { failureReason },
+            capture: { () throws -> String in
+                captures += 1
+                if captures == 1 { throw ComputerUseHostTools.ToolError.focusedDisplayUnavailable }
+                failureReason = "window_after_unavailable"
+                throw ComputerUseHostTools.ToolError.visualSurfaceObscured
+            },
+            revalidate: { validations += 1 }))
+        XCTAssertEqual(captures, 2, "Before/after unavailable failures share one retry budget")
+        XCTAssertEqual(validations, 1)
+
+        captures = 0
+        validations = 0
+        XCTAssertThrowsError(try ComputerUseDesktopExecutor.captureWithOneScopedWindowReadRetry(
+            hasSurfaceScope: true,
+            failureReason: { "window_after_changed" },
+            capture: { () throws -> String in
+                captures += 1
+                throw ComputerUseHostTools.ToolError.visualSurfaceObscured
+            },
+            revalidate: { validations += 1 }))
+        XCTAssertEqual(captures, 1, "A changed window is not a retryable read failure")
+        XCTAssertEqual(validations, 0)
+
+        captures = 0
+        XCTAssertThrowsError(try ComputerUseDesktopExecutor.captureWithOneScopedWindowReadRetry(
+            hasSurfaceScope: true,
+            failureReason: { "window_after_unavailable" },
+            capture: { () throws -> String in
+                captures += 1
+                throw ComputerUseHostTools.ToolError.focusedDisplayUnavailable
+            },
+            revalidate: { XCTFail("Other capture failures must not trigger revalidation") }))
+        XCTAssertEqual(captures, 1)
+
+        let revalidationErrors: [Error] = [CancellationError(), ComputerUseHostTools.ToolError.paused,
+                                            ComputerUseHostTools.ToolError.applicationUnavailable]
+        for revalidationError in revalidationErrors {
+            captures = 0
+            XCTAssertThrowsError(try ComputerUseDesktopExecutor.captureWithOneScopedWindowReadRetry(
+                hasSurfaceScope: true,
+                failureReason: { "window_after_unavailable" },
+                capture: { () throws -> String in
+                    captures += 1
+                    throw ComputerUseHostTools.ToolError.visualSurfaceObscured
+                },
+                revalidate: { throw revalidationError }))
+            XCTAssertEqual(captures, 1, "Failed cancellation, task gate, or app-scope checks prevent recapture")
+        }
+
+        captures = 0
+        XCTAssertThrowsError(try ComputerUseDesktopExecutor.captureWithOneScopedWindowReadRetry(
+            hasSurfaceScope: false,
+            failureReason: { "window_after_unavailable" },
+            capture: { () throws -> String in
+                captures += 1
+                throw ComputerUseHostTools.ToolError.visualSurfaceObscured
+            },
+            revalidate: { XCTFail("Unscoped observations do not retry") }))
+        XCTAssertEqual(captures, 1)
+    }
+
     func test_hostClickApprovalRequiresAnIdentifiedActionableControl() {
         var context = ""
         let tools = ComputerUseHostTools(
