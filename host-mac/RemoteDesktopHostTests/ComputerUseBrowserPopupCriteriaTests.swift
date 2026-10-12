@@ -156,86 +156,6 @@ final class ComputerUseBrowserPopupCriteriaTests: XCTestCase {
         }
     }
 
-    func testDriverCarriesTheDateFromOpeningThroughSelectionAndFreshReading() async throws {
-        let fixture = try await research()
-        defer { fixture.close() }
-        configure(fixture)
-        guard case .browserResearchProgress? = try await fixture.start() else { return XCTFail("The fixture can support only a partial report") }
-        let owner = try fixture.owner()
-        XCTAssertEqual(owner.input.prompt, prompt); XCTAssertEqual(owner.popupHistory.map(\.outcome), [.opened])
-        XCTAssertEqual(owner.optionSelectionHistory.map(\.outcome), [.selected])
-        XCTAssertEqual(try journals(fixture, "Popups").first?.statuses, [.verified])
-        XCTAssertEqual(try journals(fixture, "OptionSelections").first?.statuses, [.verified])
-        let opening = try XCTUnwrap(fixture.actions.inputs.first { !$0.popupControlIDs.isEmpty })
-        XCTAssertEqual(opening.optionReadControls.count, 2); XCTAssertTrue(opening.contextJSON.contains("2026-09-20"))
-        let after = try XCTUnwrap(fixture.actions.inputs.last)
-        XCTAssertTrue(after.contextJSON.contains("original_observed_criteria")); XCTAssertTrue(after.contextJSON.contains("2026-09-20"))
-        XCTAssertFalse(after.contextJSON.contains("privateUnscoped")); XCTAssertFalse(after.contextJSON.contains(owner.popupHistory[0].operationID))
-        try await wait { fixture.server.count("/opened") == 1 && fixture.server.count("/chosen") == 1 }
-    }
-
-    func testChangedCriteriaAfterConfirmedOpeningBlockAChoiceAndResultReading() async throws {
-        for readOnly in [false, true] {
-            let fixture = try await research(extra: OptionSelectionFixture.signal("document.getElementById('date').value='2026-09-21';"), heldSignal: true)
-            defer { fixture.close() }
-            _ = try await fixture.start(); configure(fixture, readOnly: readOnly)
-            let owner = try fixture.owner(), action = try await owner.planNextAction(using: fixture.actions)
-            _ = try await owner.openPopup(for: action)
-            try await wait { fixture.server.count("/signal") == 1 }; fixture.server.releaseHeldResponses()
-            try await wait { fixture.server.count("/changed") == 1 }
-            guard case .userInterventionRequired(let message) = try await fixture.resume() else { return XCTFail("Fresh values cannot replace the original baseline") }
-            XCTAssertTrue(message.contains("criterion")); XCTAssertEqual(owner.input.prompt, prompt)
-            XCTAssertEqual(owner.popupHistory.map(\.outcome), [.opened]); XCTAssertTrue(owner.optionSelectionHistory.isEmpty)
-            XCTAssertTrue(try journals(fixture, "OptionSelections").isEmpty); XCTAssertEqual(fixture.server.count("/chosen"), 0)
-            let context = try XCTUnwrap(fixture.actions.inputs.last).contextJSON
-            XCTAssertTrue(context.contains("2026-09-20")); XCTAssertTrue(context.contains("2026-09-21"))
-        }
-    }
-
-    func testAConfirmedSelectionDoesNotReleaseTheOriginalDateBeforeResultReading() async throws {
-        let fixture = try await research(extra: OptionSelectionFixture.signal("document.getElementById('date').value='2026-09-21';"), heldSignal: true)
-        defer { fixture.close() }
-        _ = try await fixture.start(); configure(fixture)
-        let owner = try fixture.owner(), opening = try await owner.planNextAction(using: fixture.actions)
-        _ = try await owner.openPopup(for: opening)
-        let selection = try await owner.planNextAction(using: fixture.actions)
-        _ = try await owner.selectOption(for: selection)
-        XCTAssertEqual(owner.optionSelectionHistory.map(\.outcome), [.selected])
-        try await wait { fixture.server.count("/signal") == 1 }; fixture.server.releaseHeldResponses()
-        try await wait { fixture.server.count("/changed") == 1 }
-        guard case .userInterventionRequired(let message) = try await fixture.resume() else { return XCTFail("Selection cannot release the original unrelated date") }
-        XCTAssertTrue(message.contains("criterion")); XCTAssertEqual(owner.input.prompt, prompt)
-        XCTAssertEqual(owner.popupHistory.map(\.outcome), [.opened]); XCTAssertEqual(owner.optionSelectionHistory.map(\.outcome), [.selected])
-        XCTAssertEqual(try journals(fixture, "Popups").count, 1); XCTAssertEqual(try journals(fixture, "OptionSelections").count, 1)
-        try await wait { fixture.server.count("/opened") == 1 && fixture.server.count("/chosen") == 1 }
-    }
-
-    func testUnsentPopupRetirementCannotRebaseChangedCriteriaAfterHandback() async throws {
-        let fixture = try await research(extra: OptionSelectionFixture.signal("document.getElementById('date').value='2026-09-21';"), heldSignal: true)
-        defer { fixture.close() }
-        configure(fixture)
-        fixture.state.onCommand = { command in
-            guard command == .validatePopup else { return }
-            fixture.state.onCommand = nil
-            fixture.state.onWrite = {
-                fixture.state.onWrite = nil
-                fixture.tools.ownedBrowserResearch(taskID: ResearchDriverFixture.root)?.pause()
-            }
-        }
-        do { _ = try await fixture.start(); XCTFail("Expected a retained unsent attempt") }
-        catch { XCTAssertTrue(error is CancellationError) }
-        let owner = try fixture.owner(), before = try XCTUnwrap(journals(fixture, "Popups").first)
-        try await wait { fixture.server.count("/signal") == 1 }; fixture.server.releaseHeldResponses()
-        try await wait { fixture.server.count("/changed") == 1 }
-        try await owner.resumeAfterUserControl()
-        guard case .userInterventionRequired(let message) = try await fixture.resume() else { return XCTFail("Retirement cannot discard the original date") }
-        XCTAssertTrue(message.contains("criterion")); XCTAssertEqual(owner.input.prompt, prompt)
-        XCTAssertEqual(owner.popupHistory.map(\.outcome), [.retiredUnsent]); XCTAssertFalse(owner.hasPendingPopup)
-        let saved = try XCTUnwrap(journals(fixture, "Popups").first)
-        XCTAssertEqual(saved.contractDigest, before.contractDigest); XCTAssertEqual(saved.statuses, [.attempted]); XCTAssertNotNil(saved.retirementDigest)
-        XCTAssertEqual(try journals(fixture, "Popups").count, 1); XCTAssertEqual(fixture.server.count("/opened"), 0)
-    }
-
     private func interpretation(taskID: String) throws -> ComputerUseBrowserGoalProposal {
         let goal = try ComputerUseBrowserGoalInput(taskID: taskID, prompt: prompt,
             referenceDate: ResearchDriverFixture.date, timeZoneIdentifier: "America/Los_Angeles")
@@ -267,22 +187,7 @@ final class ComputerUseBrowserPopupCriteriaTests: XCTestCase {
             .replacingOccurrences(of: "id=choices role=listbox", with: "id=choices role=listbox hidden")
             .replacingOccurrences(of: "<h2>Concert Alpha</h2>", with: "<h2>Concert Alpha</h2><a href='/details'>Alpha details</a>")
     }
-    private func research(extra: String = "", heldSignal: Bool = false) async throws -> ResearchDriverFixture {
-        let fixture = try await ResearchDriverFixture.make(request: prompt, heldSignal: heldSignal, searchBodyHTML: page() + extra)
-        fixture.goal.select = { _ in try self.goalJSON() }; fixture.policy.choices = [false]
-        return fixture
-    }
-    private func configure(_ fixture: ResearchDriverFixture, readOnly: Bool = false) {
-        fixture.actions.select = { input in
-            if input.optionSelectionHistory.last?.outcome == .selected { return try self.scope(input, inspection: false) }
-            if input.optionReadControls.isEmpty { return try self.scope(input, inspection: true) }
-            if let review = try EffectScopeFixture.response(input) { return review }
-            if let owner = input.popupControlIDs.first { return self.opening(owner) }
-            if readOnly { return #"{"read_results":true}"# }
-            let choice = try XCTUnwrap(input.optionChoices.first), option = try XCTUnwrap(choice.optionIDs.last)
-            return try ResearchAnswerFixture.json(["select_option":["control":choice.controlID,"option":option,"requirement":1]])
-        }
-    }
+
     private func scope(_ input: ComputerUseBrowserActionInput, inspection: Bool) throws -> String {
         let owner = try XCTUnwrap(input.evidence.page.controls.first { $0.label == "Ticket type" })
         let date = try XCTUnwrap(input.evidence.page.controls.first { $0.label == "Date" })
@@ -291,12 +196,7 @@ final class ComputerUseBrowserPopupCriteriaTests: XCTestCase {
         return try ResearchAnswerFixture.json(proposal)
     }
     private func opening(_ id: String) -> String { "{\"open_popup\":{\"control\":\"\(id)\",\"requirement\":1}}" }
-    private func journals(_ fixture: ResearchDriverFixture, _ folder: String) throws -> [ComputerUseTaskJournal] {
-        let directory = fixture.directory.appendingPathComponent("Research/" + folder)
-        guard FileManager.default.fileExists(atPath: directory.path) else { return [] }
-        return try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
-            .filter { $0.pathExtension == "json" }.map { try JSONDecoder().decode(ComputerUseTaskJournal.self, from: Data(contentsOf: $0)) }
-    }
+
     private func scratch() -> URL { FileManager.default.temporaryDirectory.appendingPathComponent("popup-criteria-" + UUID().uuidString) }
     private func wait(_ predicate: () -> Bool) async throws {
         let deadline = ContinuousClock.now + .seconds(5)

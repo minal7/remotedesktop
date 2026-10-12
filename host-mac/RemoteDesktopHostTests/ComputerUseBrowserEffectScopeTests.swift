@@ -126,48 +126,6 @@ final class ComputerUseBrowserEffectScopeTests: XCTestCase {
         XCTAssertTrue(value.popupControlIDs.isEmpty)
     }
 
-    func testPauseDuringReviewExpiresAuthorityAndHandbackRetainsTheCompleteTask() async throws {
-        let fixture = try await research()
-        defer { fixture.close() }
-        _ = try await fixture.start()
-        configure(fixture)
-        let owner = try fixture.owner(), original = owner.input
-        fixture.actions.beforeReply = {
-            if fixture.actions.inputs.last?.effectReviewNextControlIDs.isEmpty == false {
-                fixture.actions.beforeReply = nil; owner.pause()
-            }
-        }
-        do { _ = try await owner.planNextAction(using: fixture.actions); XCTFail("Review under user control cannot authorize input") }
-        catch { XCTAssertTrue(error is CancellationError) }
-        XCTAssertFalse(owner.isOperating); XCTAssertFalse(owner.hasPendingPopup); XCTAssertEqual(fixture.server.count("/opened"), 0)
-        let oldSnapshot = try XCTUnwrap(fixture.actions.inputs.last).evidence.page.id
-        _ = try fixture.browser.acquireCurrentDocument(taskID: owner.taskID)
-        try await owner.resumeAfterUserControl()
-        let fresh = try await owner.planNextAction(using: fixture.actions)
-        XCTAssertEqual(owner.input, original); XCTAssertNotEqual(fresh.input.evidence.page.id, oldSnapshot)
-        XCTAssertTrue(fresh.input.effectScopeAllowsActions); XCTAssertFalse(fresh.input.effectControlReviews.isEmpty)
-        XCTAssertEqual(fixture.server.count("/opened"), 0)
-    }
-
-    func testReviewPartsShareTheDecisionDeadlineAndJoinCancellation() async throws {
-        let fixture = try await research()
-        defer { fixture.close() }
-        _ = try await fixture.start(); configure(fixture)
-        let owner = try fixture.owner()
-        var waiting = false, cancelled = false
-        fixture.actions.beforeReply = {
-            if fixture.actions.inputs.last?.effectReviewNextControlIDs.isEmpty == false {
-                waiting = true; defer { waiting = false }
-                do { try await Task.sleep(for: .seconds(60)) }
-                catch { cancelled = error is CancellationError; throw error }
-            }
-        }
-        do { _ = try await owner.planNextAction(using: fixture.actions, budget: .seconds(1)); XCTFail("Review cannot renew the action deadline") }
-        catch { XCTAssertEqual(error as? ComputerUseBrowserActionPlanError, .deadlineExceeded) }
-        XCTAssertTrue(cancelled); XCTAssertFalse(waiting); XCTAssertFalse(owner.isOperating)
-        XCTAssertFalse(owner.hasPendingPopup); XCTAssertEqual(fixture.server.count("/opened"), 0)
-    }
-
     func testNativeChangeDuringReviewInvalidatesTheOriginalScopedEvidence() async throws {
         let fixture = try await ControlStateFixture(body: EffectScopeFixture.page() + OptionSelectionFixture.signal("document.getElementById('date').value='2026-09-21';"), heldSignal: true)
         defer { fixture.close() }
@@ -283,19 +241,7 @@ final class ComputerUseBrowserEffectScopeTests: XCTestCase {
     private func retaining(_ value: ComputerUseBrowserActionInput, _ reviews: [ComputerUseBrowserEffectControlReview]) throws -> ComputerUseBrowserActionInput {
         try input(value.evidence, reads: value.optionReadControls, reviews: reviews)
     }
-    private func research() async throws -> ResearchDriverFixture {
-        let fixture = try await ResearchDriverFixture.make(request: EffectScopeFixture.prompt, searchBodyHTML: EffectScopeFixture.page())
-        fixture.goal.select = { _ in try EffectScopeFixture.goalJSON() }; fixture.policy.choices = [false]; return fixture
-    }
-    private func configure(_ fixture: ResearchDriverFixture) {
-        fixture.actions.select = { input in
-            if let review = try EffectScopeFixture.response(input) { return review }
-            if input.optionReadControls.isEmpty {
-                return try ResearchAnswerFixture.json(["inspect_options":[["control":self.control("Ticket type", input),"requirement":1]]])
-            }
-            return try ResearchAnswerFixture.json(["open_popup":["control":XCTUnwrap(input.popupControlIDs.first),"requirement":1]])
-        }
-    }
+
 }
 
 /// Explicit oracle for these authored concert fixtures only. Unknown controls

@@ -191,3 +191,26 @@ struct ComputerUseModelBrowserResearchPlanning: ComputerUseBrowserResearchPlanni
         }
     }
 }
+
+/// Provider policy is host-owned; link selection is a no-effect proposal.
+/// Implementations must consider the entire goal, including source limits.
+/// Native candidate binding and action journals remain the owner's authority.
+@MainActor
+protocol ComputerUseBrowserResearchPlanning {
+    func sources(for interpretation: ComputerUseBrowserResearchTask.Interpretation) throws -> ComputerUseBrowserResearchSources?
+    func selectLink(goal: ComputerUseBrowserGoalInput, candidates: ComputerUseBrowserResultCandidates,
+                    history: [ComputerUseBrowserResearchVisit], evidence: ComputerUseBrowserResearchEvidence?) async throws -> ComputerUseBrowserResearchTask.LinkChoice?
+    func selectDecision(goal: ComputerUseBrowserGoalInput, candidates: ComputerUseBrowserResultCandidates,
+                    history: [ComputerUseBrowserResearchVisit], evidence: ComputerUseBrowserResearchEvidence?) async throws -> ComputerUseBrowserResearchTask.Decision
+}
+
+extension ComputerUseBrowserResearchPlanning {
+    func selectDecision(goal: ComputerUseBrowserGoalInput, candidates: ComputerUseBrowserResultCandidates,
+                    history: [ComputerUseBrowserResearchVisit], evidence: ComputerUseBrowserResearchEvidence?) async throws -> ComputerUseBrowserResearchTask.Decision {
+        try await selectLink(goal: goal, candidates: candidates, history: history, evidence: evidence).map { .link($0) } ?? .unresolved
+    }
+    func selectLink(goal: ComputerUseBrowserGoalInput, candidates: ComputerUseBrowserResultCandidates,
+                    history: [ComputerUseBrowserResearchVisit]) async throws -> ComputerUseBrowserResearchTask.LinkChoice? {
+        try await selectLink(goal: goal, candidates: candidates, history: history, evidence: nil)
+    }
+}

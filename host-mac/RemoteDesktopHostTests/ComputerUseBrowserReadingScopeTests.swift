@@ -112,52 +112,6 @@ final class ComputerUseBrowserReadingScopeTests: XCTestCase {
         }
     }
 
-    func testDriverReadsChosenLocationScopeWithoutEditingOrTreatingItAsAResultFact() async throws {
-        for selectValues in [false, true] {
-            let fixture = try await ResearchAnswerFixture.make(extra: ("In Paris. ", "condition", "location"),
-                controlHTML: "<label>Location<input value=Paris></label>", resultLocation: "Paris")
-            defer { fixture.source.close() }
-            if selectValues { fixture.source.actions.select = { input in try self.scopeJSON(input, requirement: 2) } }
-            let result = try await fixture.source.start(), owner = try fixture.source.owner()
-            if selectValues {
-                guard case .browserResearchAnswer(let answer)? = result else { return XCTFail("Complete result evidence can include scoped current settings") }
-                try owner.validateAnswer(answer)
-                XCTAssertTrue(answer.message.contains("Location: Paris")); XCTAssertTrue(answer.message.contains("Control observations"))
-                let reads = fixture.source.state.commands.filter { $0 == .observeResearchControls }.count
-                XCTAssertGreaterThan(reads, 0); XCTAssertEqual(reads, fixture.source.actions.inputs.count)
-                let reading = try await owner.revalidateCandidates()
-                XCTAssertEqual(reading.candidates[0].fields.first { $0.kind == .location }?.sourceKind, .pageText)
-                XCTAssertEqual(reading.candidates[0].controls.first?.state?.kind, .text)
-            } else {
-                guard case .userInterventionRequired? = result else { return XCTFail("Unobserved control context cannot be silently assumed irrelevant") }
-                XCTAssertFalse(fixture.source.state.commands.contains(.observeResearchControls))
-            }
-            XCTAssertFalse(fixture.source.state.commands.contains(.edit))
-            XCTAssertEqual(owner.input.prompt, fixture.source.request)
-        }
-    }
-
-    func testPauseAndHandbackCannotReviveAnEarlierReadScope() async throws {
-        let fixture = try await ResearchAnswerFixture.make(extra: ("In Paris. ", "condition", "location"),
-            controlHTML: "<label>Location<input value=Paris></label>", resultLocation: "Paris")
-        defer { fixture.source.close() }
-        _ = try await fixture.source.start()
-        let owner = try fixture.source.owner(), original = owner.input
-        fixture.source.actions.select = { input in try self.scopeJSON(input, requirement: 2) }
-        let old = try await owner.planNextAction(using: fixture.source.actions)
-        owner.pause()
-        do { _ = try await owner.readCandidates(for: old); XCTFail("Pause closes the pending read scope") }
-        catch { XCTAssertEqual(error as? ComputerUseBrowserResearchTask.Failure, .paused) }
-        try await owner.resumeAfterUserControl()
-        do { _ = try await owner.readCandidates(for: old); XCTFail("Handback requires a newly selected scope") }
-        catch { XCTAssertEqual(error as? ComputerUseBrowserActionPlanError, .inputChanged) }
-        XCTAssertFalse(fixture.source.state.commands.contains(.observeResearchControls))
-        let fresh = try await owner.planNextAction(using: fixture.source.actions)
-        let reading = try await owner.readCandidates(for: fresh)
-        XCTAssertEqual(reading.candidates[0].controls.first?.state?.value, "Paris")
-        XCTAssertEqual(owner.input, original)
-    }
-
     private func context(_ fixture: ControlStateFixture) async throws -> ComputerUseBrowserActionInput {
         let page = try await fixture.browser.observePage(document: fixture.document)
         let goal = try ComputerUseBrowserGoalInput(taskID: fixture.document.taskID, prompt: "Find concerts. In Paris. Do not buy.",

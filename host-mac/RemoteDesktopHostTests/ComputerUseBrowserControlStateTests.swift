@@ -134,94 +134,6 @@ final class ComputerUseBrowserControlStateTests: XCTestCase {
         }
     }
 
-    func testDriverUsesTheSelectedDateAndReportsControlObservationsSeparatelyFromQuotes() async throws {
-        for selected in ["2026-09-20", "2026-09-21"] {
-            let fixture = try await ResearchAnswerFixture.make(extra: ("On 2026-09-20. ", "condition", "date"),
-                controlHTML: "<label>Date<input type=date value='\(selected)' min=2026-09-01 max=2026-09-30></label><label>Type<select><option value=private-code>General admission</option></select></label>", resultDate: "2026-09-20")
-            defer { fixture.source.close() }
-            let result = try await fixture.source.start(), owner = try fixture.source.owner(), reading = try await owner.revalidateCandidates()
-            let field = try XCTUnwrap(reading.candidates.first?.fields.first { $0.kind == .date && !$0.controlIDs.isEmpty })
-            XCTAssertTrue(field.textIDs.isEmpty); XCTAssertEqual(field.controlIDs.count, 1)
-            let status = try XCTUnwrap(reading.requirementAssessment?.candidates.first?.requirements[2].status)
-            if selected == "2026-09-20" {
-                guard case .browserResearchAnswer(let answer)? = result else { return XCTFail("Expected an answer grounded in the selected date") }
-                try owner.validateAnswer(answer)
-                XCTAssertEqual(status, .quotedValueMatches)
-                for text in ["Control observations", "General admission", "2026-09-20", "2026-09-01", "2026-09-30", "On 2026-09-20.", "Do not buy."] { XCTAssertTrue(answer.message.contains(text), text) }
-                XCTAssertFalse(answer.message.contains("private-code"))
-                XCTAssertFalse(answer.message.contains("│ Control observations"))
-            } else {
-                guard case .userInterventionRequired? = result else { return XCTFail("A conflicting selected date cannot complete the request") }
-                XCTAssertEqual(status, .selectedValueConflicts)
-            }
-            XCTAssertEqual(owner.input.prompt, fixture.source.request); XCTAssertEqual(fixture.source.server.count("/offers"), 0)
-        }
-    }
-
-    func testSelectedQuantityDoesNotResolveARequestedInventoryCount() async throws {
-        let fixture = try await ResearchAnswerFixture.make(inventory: 2, controlHTML: "<label>Tickets<input type=number value=2></label>")
-        defer { fixture.source.close() }
-        let result = try await fixture.source.start()
-        guard case .userInterventionRequired? = result else { return XCTFail("Selection and stock must be reconciled before completion") }
-        let owner = try fixture.source.owner(), reading = try await owner.revalidateCandidates()
-        XCTAssertEqual(reading.review?.candidates[0].fields.last?.quantity, .selectedQuantity)
-        XCTAssertNil(try reading.answerEligibility(goal: owner.input, evidence: owner.researchEvidence(for: owner.input))?.selectionCounts.first)
-        XCTAssertEqual(owner.input.prompt, fixture.source.request)
-    }
-
-    func testMatchingSelectionWithoutAResultDateKeepsTheOriginalTaskOpen() async throws {
-        let fixture = try await ResearchAnswerFixture.make(extra: ("On 2026-09-20. ", "condition", "date"),
-            controlHTML: "<label>Date<input type=date value=2026-09-20></label>")
-        defer { fixture.source.close() }
-        let result = try await fixture.source.start()
-        guard case .userInterventionRequired? = result else { return XCTFail("A chosen setting does not establish the displayed result date") }
-        let owner = try fixture.source.owner(), reading = try await owner.revalidateCandidates()
-        let assessment = try XCTUnwrap(reading.requirementAssessment)
-        XCTAssertEqual(assessment.candidates[0].requirements[2].status, .needsResultObservation)
-        XCTAssertEqual(assessment.candidates[0].quotes.last?.sourceKind, .controlState)
-        XCTAssertTrue(try XCTUnwrap(assessment.candidates[0].quotes.last).textIDs.isEmpty)
-        XCTAssertEqual(try object(ResearchAnswerFixture.json(assessment.plannerContext))["version"] as? Int, 4)
-        XCTAssertTrue(fixture.inputs.allSatisfy { $0.answerCounts.isEmpty })
-        XCTAssertEqual(owner.input.prompt, fixture.source.request)
-    }
-
-    func testMatchingSelectionCannotReplaceAnEarlierDisplayedResultDate() async throws {
-        let fixture = try await ResearchAnswerFixture.make(extra: ("On 2026-09-20. ", "condition", "date"),
-            controlHTML: "<label>Date<input type=date value=2026-09-20></label>", resultDate: "2026-09-19")
-        defer { fixture.source.close() }
-        let result = try await fixture.source.start()
-        guard case .userInterventionRequired? = result else { return XCTFail("Unrefreshed result text cannot inherit the chosen date") }
-        let owner = try fixture.source.owner(), reading = try await owner.revalidateCandidates()
-        let candidate = try XCTUnwrap(reading.requirementAssessment?.candidates.first)
-        XCTAssertEqual(candidate.requirements[2].status, .quotedValueConflicts)
-        let dates = candidate.quotes.filter { $0.kind == .date }
-        XCTAssertEqual(dates.map(\.sourceKind), [.pageText, .controlState])
-        XCTAssertEqual(dates.map(\.source), ["Date: 2026-09-19", "2026-09-20"])
-        XCTAssertTrue(fixture.inputs.allSatisfy { $0.answerCounts.isEmpty })
-        XCTAssertEqual(owner.input.prompt, fixture.source.request)
-    }
-
-    func testEveryProposedDateSelectionMustAgreeWithTheDisplayedResult() async throws {
-        for second in ["2026-09-20", "2026-09-21"] {
-            let fixture = try await ResearchAnswerFixture.make(extra: ("On 2026-09-20. ", "condition", "date"),
-                controlHTML: "<label>First date<input type=date value=2026-09-20></label><label>Second date<input type=date value='\(second)'></label>", resultDate: "2026-09-20")
-            defer { fixture.source.close() }
-            let result = try await fixture.source.start(), owner = try fixture.source.owner(), reading = try await owner.revalidateCandidates()
-            let assessment = try XCTUnwrap(reading.requirementAssessment?.candidates.first)
-            XCTAssertEqual(assessment.quotes.filter { $0.sourceKind == .controlState }.count, 2)
-            if second == "2026-09-20" {
-                guard case .browserResearchAnswer(let answer)? = result else { return XCTFail("Consistent settings and result text remain usable") }
-                try owner.validateAnswer(answer)
-                XCTAssertEqual(assessment.requirements[2].status, .quotedValueMatches)
-                XCTAssertTrue(answer.message.contains("First date")); XCTAssertTrue(answer.message.contains("Second date"))
-            } else {
-                guard case .userInterventionRequired? = result else { return XCTFail("A matching selection cannot hide a conflicting one") }
-                XCTAssertEqual(assessment.requirements[2].status, .selectedValueConflicts)
-            }
-            XCTAssertEqual(owner.input.prompt, fixture.source.request)
-        }
-    }
-
     func testControlAndMixedSourcesCannotSupportResultFactsThroughWholeOrSegmentedReview() async throws {
         for (kind, clause, displayed) in [("date", "On 2026-09-20.", "2026-09-20"),
             ("time", "At 19:00.", "19:00"), ("location", "In Paris.", "Paris"),
@@ -319,19 +231,6 @@ final class ComputerUseBrowserControlStateTests: XCTestCase {
         XCTAssertEqual(try fixture.state("Saved flag", in: evidence.page).kind, .unavailable)
         for value in ["privateNotes", "998877", "privatePassword"] { XCTAssertFalse(input.contextJSON.contains(value)) }
         XCTAssertTrue(input.controlIDs.isEmpty)
-    }
-
-    func testOversizedCompleteControlObservationsCannotBeTruncatedIntoAnAnswer() async throws {
-        let options = (0..<14).map { "<option value='private-\($0)'>Type \($0) " + String(repeating: "x", count: 240) + "</option>" }.joined()
-        let fixture = try await ResearchAnswerFixture.make(controlHTML: "<label>Ticket type<select>\(options)</select></label>")
-        defer { fixture.source.close() }
-        let result = try await fixture.source.start()
-        guard case .userInterventionRequired? = result else { return XCTFail("Complete control qualifications must fit delivery") }
-        let owner = try fixture.source.owner(), reading = try await owner.revalidateCandidates()
-        let eligibility = try XCTUnwrap(reading.answerEligibility(goal: owner.input, evidence: owner.researchEvidence(for: owner.input)))
-        let selection = try eligibility.selection([0])
-        XCTAssertThrowsError(try eligibility.answer(for: selection)) { XCTAssertEqual($0 as? ComputerUseBrowserLinkPlanError, .contextLimit) }
-        XCTAssertEqual(owner.input.prompt, fixture.source.request)
     }
 
     private func object(_ string: String) throws -> [String: Any] { try ResearchAnswerFixture.object(Data(string.utf8)) }

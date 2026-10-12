@@ -149,25 +149,6 @@ final class ComputerUseBrowserReviewPartsTests: XCTestCase {
         }
     }
 
-    func testReviewDeadlineReachesTheDriverAsAResumableOriginalTask() async throws {
-        let fixture = try await ResearchDriverFixture.make()
-        defer { fixture.close() }
-        let transport = try ReviewPartsTransport(input: ReviewPartsFixture.input(), skipsPlan: true)
-        let reviewer = try ReviewPartsFixture.planner(transport, budget: .zero)
-        let driver = ComputerUseBrowserResearchDriver(goalPlanner: fixture.goal,
-            resultPlanner: ComputerUseReviewedBrowserResultPlanner(reader: fixture.results, reviewer: reviewer),
-            searchPlanner: fixture.search, actionPlanner: fixture.actions, formPlanner: fixture.forms, planning: fixture.policy,
-            now: { ResearchDriverFixture.date }, timeZoneIdentifier: { "America/Los_Angeles" })
-        let result = try await driver.executeBrowserResearch(taskID: ResearchDriverFixture.root, prompt: ResearchDriverFixture.prompt,
-            tools: fixture.tools, progress: { _ in })
-        guard case .userInterventionRequired(let message)? = result else { return XCTFail("An unfinished review cannot complete research") }
-        XCTAssertTrue(message.contains("ran out of time")); XCTAssertTrue(message.contains("original task"))
-        let owner = try fixture.owner()
-        XCTAssertEqual(owner.input.prompt, ResearchDriverFixture.prompt); XCTAssertFalse(owner.isOperating)
-        XCTAssertEqual(fixture.server.count("/search?q=concerts"), 1); XCTAssertEqual(fixture.server.count("/details"), 0)
-        let calls = await transport.calls
-        XCTAssertTrue(calls.counts.isEmpty); XCTAssertTrue(calls.completions.isEmpty)
-    }
 }
 
 private enum ReviewPartsFixture {

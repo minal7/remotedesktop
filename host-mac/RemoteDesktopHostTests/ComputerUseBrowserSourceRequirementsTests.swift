@@ -363,82 +363,36 @@ final class ComputerUseBrowserSourceRequirementsTests: XCTestCase {
         XCTAssertFalse(compiled.matchesAnswerPolicy(try .init(goal: goal(current.input.prompt, id: "other-root"), excludedOrigins: [blocked])))
     }
 
-    func testNativeCandidateEvidenceUsesItsCommittedOriginNotAllowedSiteNamesInPageText() async throws {
-        let fixture = try await ResearchDriverFixture.make(additionalCardHTML: "<p>Official offers from allowed.test</p>")
-        defer { fixture.close() }
-        _ = try await fixture.start()
-        let owner = try fixture.owner(), document = try await fixture.browser.acquireObservedDocument(taskID: owner.taskID)
-        let evidence = try await fixture.browser.observePage(document: document), page = try ComputerUseBrowserResultPageInput(page: evidence.page)
-        let proposal = try await fixture.results.propose(goal: owner.input, page: page)
-        let allowed = try ComputerUseBrowserAnswerSourcePolicy(goal: owner.input, allowedOrigins: [ComputerUseBrowserSourceOrigin(fixture.base)])
-        let excluded = try ComputerUseBrowserAnswerSourcePolicy(goal: owner.input, allowedOrigins: [ComputerUseBrowserSourceOrigin(url("https://allowed.test"))])
-        let unconfigured = try await fixture.browser.prepareResultCandidates(proposal, goal: owner.input, evidence: evidence)
-        let auxiliary = try await fixture.browser.prepareResultCandidates(proposal, goal: owner.input, evidence: evidence, answerPolicy: excluded)
-        let eligible = try await fixture.browser.prepareResultCandidates(proposal, goal: owner.input, evidence: evidence, answerPolicy: allowed)
-        XCTAssertEqual(unconfigured.documentAnswerSourceStatus, .unconfigured)
-        XCTAssertEqual(auxiliary.documentAnswerSourceStatus, .excluded); XCTAssertEqual(eligible.documentAnswerSourceStatus, .permitted)
-        XCTAssertNotEqual(auxiliary.candidates[0].id, eligible.candidates[0].id)
-        for batch in [unconfigured, auxiliary] {
-            do { try await fixture.browser.validateResultAnswerSource(batch, goal: owner.input, policy: allowed); XCTFail("An unbound or auxiliary source is not answer evidence") }
-            catch { XCTAssertEqual(error as? ComputerUseBrowserError, .sourceNotAllowed) }
-        }
-        do { try await fixture.browser.validateResultAnswerSource(auxiliary, goal: owner.input, policy: excluded); XCTFail("Even the exact policy rejects excluded evidence") }
-        catch { XCTAssertEqual(error as? ComputerUseBrowserError, .sourceNotAllowed) }
-        try await fixture.browser.validateResultAnswerSource(eligible, goal: owner.input, policy: allowed)
-        let foreign = try ComputerUseBrowserAnswerSourcePolicy(goal: goal("Find tickets.", id: "foreign"))
-        do { _ = try await fixture.browser.prepareResultCandidates(proposal, goal: owner.input, evidence: evidence, answerPolicy: foreign); XCTFail("Foreign goal policy") }
-        catch { XCTAssertEqual(error as? ComputerUseBrowserResultError, .goalChanged) }
-        let input = try ComputerUseBrowserLinkSelectionInput(goal: owner.input, candidates: auxiliary, history: owner.confirmedNavigationHistory)
-        let content = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(input.contextJSON.utf8)) as? [String: Any])
-        XCTAssertEqual(content["document_answer_source_status"] as? String, "excluded")
-        XCTAssertFalse(input.contextJSON.contains(excluded.digest))
-        _ = try await fixture.browser.navigate(taskID: owner.taskID, operationID: "changed-answer-document", to: fixture.base.appendingPathComponent("details"))
-        do { try await fixture.browser.validateResultAnswerSource(eligible, goal: owner.input, policy: allowed); XCTFail("Matching origin does not revive evidence from an old document") }
-        catch { XCTAssertEqual(error as? ComputerUseBrowserError, .pageChanged) }
-    }
-
-    func testCompilerAdapterDriverKeepsAuxiliaryPageIneligibleAndSourceSelectionImmutableAcrossResume() async throws {
-        let fixture = try await ResearchDriverFixture.make()
-        defer { fixture.close() }
-        let rows = [row("Find concerts. "), row("Only report results from tickets.test.", field: "answerSource", values: ["tickets.test"])]
-        let initial = try proposal(rows, id: ResearchDriverFixture.root, date: ResearchDriverFixture.date)
-        let links = SourceLinkFixture(), goals = SourceGoalFixture(initial)
-        let driver = ComputerUseBrowserResearchDriver(goalPlanner: goals, resultPlanner: fixture.results, searchPlanner: fixture.search, actionPlanner: BrowserResearchActionFixture(), formPlanner: BrowserResearchFormFixture(),
-            planning: ComputerUseModelBrowserResearchPlanning(providers: [fixture.policy.provider], linkPlanner: links),
-            now: { ResearchDriverFixture.date }, timeZoneIdentifier: { "America/Los_Angeles" })
-        let result = try await driver.executeBrowserResearch(taskID: initial.input.taskID, prompt: initial.input.prompt, tools: fixture.tools, progress: { _ in })
-        guard case .userInterventionRequired = result else { return XCTFail("A search page is not a verified answer") }
-        let owner = try fixture.owner(), batch = try await owner.readCandidates()
-        XCTAssertEqual(owner.input, initial.input); XCTAssertEqual(batch.documentAnswerSourceStatus, .excluded)
-        XCTAssertEqual(fixture.server.count("/search?q=concerts"), 1); XCTAssertEqual(fixture.server.count("/details"), 0)
-        let widened = try ComputerUseBrowserResearchSources(goal: owner.input, provider: fixture.policy.provider)
-        XCTAssertThrowsError(try owner.configureResearchSources(widened), "Answer-only changes are still policy changes")
-        owner.pause(); try await owner.resumeAfterUserControl()
-        _ = try await driver.continueBrowserResearch(taskID: owner.executionTaskID, research: owner, tools: fixture.tools, progress: { _ in })
-        XCTAssertEqual(fixture.server.count("/search?q=concerts"), 1)
-        XCTAssertEqual(links.inputs.count, 2); XCTAssertTrue(links.inputs.allSatisfy { $0.contextJSON.contains("\"document_answer_source_status\":\"excluded\"") })
-    }
-
     func testPauseDuringNativeSourceInstallationRetainsTheWholeAnswerPolicy() async throws {
-        let fixture = try await ResearchDriverFixture.make()
-        defer { fixture.close() }
+        let server = try OwnedBrowserHTTPFixture(routes: ["/details": .init(body:
+            "<article><h2>Concert Alpha</h2><a href='/offers'>Alpha details</a></article>")])
+        let base = try await server.start()
+        defer { server.stop() }
+        let state = DriverFixtureState()
+        let browser = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: {
+            state.onMayAct?(); return state.allowed
+        })
+        defer { browser.close() }
+        let results = BrowserResearchResultFixture()
+        results.selectedLinkLabel = "Alpha details"
+        let searchProvider = try ComputerUseBrowserSearchProvider(endpoint: base.appendingPathComponent("search"), queryParameter: "q")
         var owner: ComputerUseBrowserResearchTask?
         let input = try goal("Find concerts.")
-        owner = ComputerUseBrowserResearchTask(input: input, browser: fixture.browser, goalPlanner: BrowserResearchGoalFixture(),
-            resultPlanner: fixture.results, mayAct: { true })
+        owner = ComputerUseBrowserResearchTask(input: input, browser: browser, goalPlanner: BrowserResearchGoalFixture(),
+            resultPlanner: results, mayAct: { true })
         let retained = try XCTUnwrap(owner)
         _ = try await retained.interpretGoal()
         // Admit/capture a native session with no configured source plan yet.
-        try fixture.browser.claim(taskID: input.taskID)
-        _ = try await fixture.browser.navigate(taskID: input.taskID, operationID: "seed", to: fixture.base.appendingPathComponent("details"))
+        try browser.claim(taskID: input.taskID)
+        _ = try await browser.navigate(taskID: input.taskID, operationID: "seed", to: base.appendingPathComponent("details"))
         _ = try await retained.readCandidates()
-        let sources = try ComputerUseBrowserResearchSources(goal: input, provider: fixture.policy.provider,
+        let sources = try ComputerUseBrowserResearchSources(goal: input, provider: searchProvider,
             answerAllowedOrigins: [ComputerUseBrowserSourceOrigin(url("https://tickets.test"))])
-        fixture.state.onMayAct = { fixture.state.onMayAct = nil; owner?.pause() }
+        state.onMayAct = { state.onMayAct = nil; owner?.pause() }
         do { try retained.configureResearchSources(sources); XCTFail("Pause must withhold successful publication") }
         catch { XCTAssertEqual(error as? ComputerUseBrowserResearchTask.Failure, .paused) }
         try await retained.resumeAfterUserControl()
-        let widened = try ComputerUseBrowserResearchSources(goal: input, provider: fixture.policy.provider)
+        let widened = try ComputerUseBrowserResearchSources(goal: input, provider: searchProvider)
         XCTAssertThrowsError(try retained.configureResearchSources(widened), "A native installation pinned both policies before Pause")
         try retained.configureResearchSources(sources)
         let candidates = try await retained.readCandidates()

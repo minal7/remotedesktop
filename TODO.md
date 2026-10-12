@@ -47,4 +47,8 @@ Known limitations:
 
 - ≤1day R6 research-driver cleanup: the concrete WK research driver has no production constructor after the routing retirement.
 - Remove the driver and only tests/helpers that instantiate its lifecycle; preserve static fixtures, pure planner contracts, active DOM/Fara/native picker and model-lifecycle safety tests.
-- Root reviews the method-level deletion, regenerates the project/inventory, then builds and runs retained safety tests before committing; no recreated research route or new skips.
+- Review found direct-owner journal/source-policy cases among fixture-dependent tests; migrate those to driver-free setup before committing. Initial retained-contract build passes42/42; cleanup is not yet accepted.
+
+- ≤30min R6 foreground experiment after owner dismissed the system dialog: the original visible-window selector still fails during navigation.
+- Compare the existing stable test-host activation flag, then inspect actual app/key-window state; keep all production foreground checks and deadlines unchanged.
+- Stop on the first reproduced cause and apply only a fixture lifecycle correction supported by evidence; no AX upload work or live website acceptance.

@@ -114,26 +114,6 @@ final class ComputerUseBrowserDeclaredStateTests: XCTestCase {
         }
     }
 
-    func testDriverRetainsWebsiteDeclaredStateBesideIndependentResultFactsWithoutClicking() async throws {
-        let fixture = try await ResearchAnswerFixture.make(controlHTML: "<form action='/filtered'><button aria-label='Show details' aria-pressed=true>Show details</button></form>")
-        defer { fixture.source.close() }
-        fixture.source.actions.select = { input in try self.scopeJSON(input.readableControlIDs, requirement: 0) }
-        guard case .browserResearchAnswer(let answer)? = try await fixture.source.start() else { return XCTFail("Independent result facts can retain a declared setting as context") }
-        let owner = try fixture.source.owner(), reading = try await owner.revalidateCandidates()
-        try owner.validateAnswer(answer)
-        XCTAssertTrue(answer.message.contains("Website-declared accessibility state")); XCTAssertTrue(answer.message.contains("Control observations"))
-        let field = try XCTUnwrap(reading.candidates.first?.fields.last)
-        XCTAssertEqual(field.sourceKind, .controlState); XCTAssertFalse(field.allowsResultSupport)
-        XCTAssertEqual(reading.candidates.first?.controls.first?.state?.kind, .declared)
-        XCTAssertTrue(fixture.source.actions.inputs.allSatisfy { $0.formIDs.isEmpty && $0.queryControlIDs.isEmpty })
-        XCTAssertFalse(fixture.source.state.commands.contains(.edit)); XCTAssertFalse(fixture.source.state.commands.contains(.prepareFormQuery))
-        let old = try await owner.planNextAction(using: fixture.source.actions)
-        owner.pause(); try await owner.resumeAfterUserControl()
-        do { _ = try await owner.readCandidates(for: old); XCTFail("Handback requires a fresh declared-state scope") }
-        catch { XCTAssertEqual(error as? ComputerUseBrowserActionPlanError, .inputChanged) }
-        XCTAssertEqual(owner.input.prompt, fixture.source.request)
-    }
-
     private var widgets: String {
         """
         <style>[role]{display:block;min-height:24px}</style><article><h2>Concert Alpha</h2>

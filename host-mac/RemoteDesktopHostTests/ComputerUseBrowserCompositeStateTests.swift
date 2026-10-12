@@ -174,27 +174,6 @@ final class ComputerUseBrowserCompositeStateTests: XCTestCase {
         }
     }
 
-    func testDriverKeepsOptionDeclarationsSeparateFromOfferFactsAndExpiresScopeOnHandback() async throws {
-        let fixture = try await ResearchAnswerFixture.make(controlHTML: """
-            <div role=listbox aria-label='Ticket choices'><div role=option aria-selected=true>General admission for two tickets</div></div>
-            """)
-        defer { fixture.source.close() }
-        fixture.source.actions.select = { input in try self.scopeJSON(input.readableControlIDs, requirement: 0) }
-        guard case .browserResearchAnswer(let answer)? = try await fixture.source.start() else { return XCTFail("Independent result prose can retain the whole declared choice as context") }
-        let owner = try fixture.source.owner(), reading = try await owner.revalidateCandidates()
-        try owner.validateAnswer(answer)
-        let candidate = try XCTUnwrap(reading.candidates.first), field = try XCTUnwrap(candidate.fields.last)
-        XCTAssertEqual(field.sourceKind, .controlState); XCTAssertFalse(field.allowsResultSupport)
-        XCTAssertFalse(candidate.texts.contains { $0.text.contains("General admission for two tickets") })
-        XCTAssertTrue(answer.message.contains("General admission for two tickets")); XCTAssertTrue(answer.message.contains("Focus is not selection"))
-        XCTAssertFalse(fixture.source.state.commands.contains(.edit)); XCTAssertFalse(fixture.source.state.commands.contains(.prepareFormQuery))
-        let old = try await owner.planNextAction(using: fixture.source.actions)
-        owner.pause(); try await owner.resumeAfterUserControl()
-        do { _ = try await owner.readCandidates(for: old); XCTFail("Handback requires a fresh graph and scope") }
-        catch { XCTAssertEqual(error as? ComputerUseBrowserActionPlanError, .inputChanged) }
-        XCTAssertEqual(owner.input.prompt, fixture.source.request)
-    }
-
     func testNativeDecoderRejectsIncompleteGraphsForeignFocusAndWrongProvenance() async throws {
         let fixture = try await ControlStateFixture(body: nativeCombo)
         defer { fixture.close() }

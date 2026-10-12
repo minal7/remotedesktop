@@ -120,51 +120,6 @@ final class ComputerUseBrowserReadonlyReadingTests: XCTestCase {
         XCTAssertEqual(try fixture.state("Departure", in: general.page).value, "2026-09-20")
     }
 
-    func testDriverRequiresIndependentResultDatesForScopedReadOnlySettings() async throws {
-        for resultDate in [nil, "2026-09-19", "2026-09-20"] {
-            let fixture = try await ResearchAnswerFixture.make(extra: ("On 2026-09-20. ", "condition", "date"),
-                controlHTML: "<label>Date<input type=date readonly value=2026-09-20></label>", resultDate: resultDate)
-            defer { fixture.source.close() }
-            fixture.source.actions.select = { input in try self.scopeJSON(input.readableControlIDs, requirement: 2) }
-            let result = try await fixture.source.start(), owner = try fixture.source.owner(), reading = try await owner.revalidateCandidates()
-            let control = try XCTUnwrap(reading.candidates.first?.controls.first)
-            XCTAssertTrue(control.control.readOnly); XCTAssertEqual(control.state?.value, "2026-09-20")
-            let status = try XCTUnwrap(reading.requirementAssessment?.candidates.first?.requirements[2].status)
-            if resultDate == "2026-09-20" {
-                guard case .browserResearchAnswer(let answer)? = result else { return XCTFail("The read-only setting and independent result agree") }
-                try owner.validateAnswer(answer); XCTAssertEqual(status, .quotedValueMatches)
-                XCTAssertTrue(answer.message.contains("read only: true")); XCTAssertTrue(answer.message.contains("Date: 2026-09-20"))
-            } else {
-                guard case .userInterventionRequired? = result else { return XCTFail("A selected date cannot create or replace a result date") }
-                XCTAssertEqual(status, resultDate == nil ? .needsResultObservation : .quotedValueConflicts)
-            }
-            XCTAssertTrue(fixture.source.state.commands.contains(.observeResearchControls))
-            XCTAssertFalse(fixture.source.state.commands.contains(.edit))
-            XCTAssertEqual(owner.input.prompt, fixture.source.request)
-        }
-    }
-
-    func testReadPermissionCannotAuthorizeFormEditsOrSurvivePauseAndHandback() async throws {
-        let fixture = try await ResearchAnswerFixture.make(extra: ("In Paris. ", "condition", "location"),
-            controlHTML: "<form action='/filtered'><label>Location<input name=city readonly value=Paris></label></form>", resultLocation: "Paris")
-        defer { fixture.source.close() }
-        fixture.source.actions.select = { input in try self.scopeJSON(input.readableControlIDs, requirement: 2) }
-        guard case .browserResearchAnswer? = try await fixture.source.start() else { return XCTFail("Expected scoped location reading") }
-        let owner = try fixture.source.owner(), original = owner.input, old = try await owner.planNextAction(using: fixture.source.actions)
-        XCTAssertTrue(old.input.formIDs.isEmpty)
-        let form = try XCTUnwrap(old.input.evidence.page.controls.first?.form?.id)
-        XCTAssertThrowsError(try ComputerUseBrowserActionProposal.decode(content: ResearchAnswerFixture.json(["form":form, "preserve":[]]), input: old.input))
-        owner.pause()
-        do { _ = try await owner.readCandidates(for: old); XCTFail("Pause expires read authority") }
-        catch { XCTAssertEqual(error as? ComputerUseBrowserResearchTask.Failure, .paused) }
-        try await owner.resumeAfterUserControl()
-        do { _ = try await owner.readCandidates(for: old); XCTFail("Handback cannot reuse an old scope") }
-        catch { XCTAssertEqual(error as? ComputerUseBrowserActionPlanError, .inputChanged) }
-        let fresh = try await owner.planNextAction(using: fixture.source.actions), reading = try await owner.readCandidates(for: fresh)
-        XCTAssertEqual(reading.candidates.first?.controls.first?.state?.value, "Paris")
-        XCTAssertFalse(fixture.source.state.commands.contains(.edit)); XCTAssertEqual(owner.input, original)
-    }
-
     private var criteria: String {
         """
         <article><h2>Concert Alpha</h2>

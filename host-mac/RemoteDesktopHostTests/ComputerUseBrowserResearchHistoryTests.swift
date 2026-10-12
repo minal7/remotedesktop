@@ -5,10 +5,8 @@ import XCTest
 @MainActor
 final class ComputerUseBrowserResearchHistoryTests: XCTestCase {
     func testNativeHistoryTraversesBackAndForwardAndExplicitlyRevisitsAnEvictedGET() async throws {
-        let fixture = try await ResearchDriverFixture.make()
+        let fixture = try await ResearchHistoryFixture.make()
         defer { fixture.close() }
-        fixture.policy.choices = [true, false]
-        _ = try await fixture.start()
         let owner = try fixture.owner(), original = owner.input
         let details = try await owner.revalidateCandidates()
         let back = try XCTUnwrap(details.historyOptions.first { $0.visit == 0 })
@@ -67,10 +65,8 @@ final class ComputerUseBrowserResearchHistoryTests: XCTestCase {
     }
 
     func testActionAndResultContractsBindOfferedVisitsAndCountTheWholeRequest() async throws {
-        let fixture = try await ResearchDriverFixture.make()
+        let fixture = try await ResearchHistoryFixture.make()
         defer { fixture.close() }
-        fixture.policy.choices = [true, false]
-        _ = try await fixture.start()
         let owner = try fixture.owner(), action = try await owner.planNextAction(using: fixture.actions)
         let input = action.input, option = try XCTUnwrap(input.historyOptions.first)
         XCTAssertEqual(option.mode, .back); XCTAssertTrue(input.needsPlanningDecision); XCTAssertFalse(input.needsFormDecision)
@@ -109,27 +105,9 @@ final class ComputerUseBrowserResearchHistoryTests: XCTestCase {
         catch { XCTAssertEqual(error as? ComputerUseBrowserResearchTask.Failure, .paused) }
     }
 
-    func testLastPageResultSelectionCannotTraverseHistoryBeyondTheNavigationLimit() async throws {
-        let fixture = try await ResearchAnswerFixture.make(requested: 2, historyRoute: true, navigationLimit: 2)
-        defer { fixture.source.close() }
-        let result = try await fixture.source.start()
-        guard case .browserResearchProgress(let report)? = result else { return XCTFail("The final-page reading should survive a blocked history choice") }
-        let owner = try fixture.source.owner()
-        XCTAssertEqual(report.pauseReason, .navigationLimit)
-        XCTAssertTrue(report.message.contains("Concert Alpha")); XCTAssertTrue(report.message.contains("2 options."))
-        XCTAssertEqual(fixture.inputs.count, 2)
-        XCTAssertNotNil(fixture.inputs[1].historyOptions.first { $0.visit == 0 })
-        XCTAssertEqual(owner.confirmedNavigationHistory.map(\.kind), [.search, .resultLink])
-        XCTAssertFalse(owner.hasPendingHistoryNavigation)
-        XCTAssertEqual(try fixture.source.browser.navigationDispatchHistory(taskID: owner.taskID).attempts.count, 2)
-        XCTAssertEqual(fixture.source.server.count("/beta"), 0)
-    }
-
     func testPausedUnsentHistoryKeepsItsJournalAndResumesTheSameVisitOnce() async throws {
-        let fixture = try await ResearchDriverFixture.make()
+        let fixture = try await ResearchHistoryFixture.make()
         defer { fixture.close() }
-        fixture.policy.choices = [true, false]
-        _ = try await fixture.start()
         let owner = try fixture.owner(), reading = try await owner.revalidateCandidates()
         let option = try XCTUnwrap(reading.historyOptions.first)
         fixture.state.onWrite = { fixture.state.onWrite = nil; owner.pause() }
@@ -151,10 +129,8 @@ final class ComputerUseBrowserResearchHistoryTests: XCTestCase {
     }
 
     func testAnUncertainHistoryAttemptCannotBeRetriedUnderANewOperation() async throws {
-        let fixture = try await ResearchDriverFixture.make()
+        let fixture = try await ResearchHistoryFixture.make()
         defer { fixture.close() }
-        fixture.policy.choices = [true, false]
-        _ = try await fixture.start()
         let owner = try fixture.owner(), reading = try await owner.revalidateCandidates(), option = try XCTUnwrap(reading.historyOptions.first)
         let beforeDocument = fixture.browser.currentDocument(taskID: owner.taskID)
         fixture.state.failureAtWrite = fixture.state.writes + 2 // Durable attempted replacement fails before WebKit dispatch.
@@ -174,39 +150,6 @@ final class ComputerUseBrowserResearchHistoryTests: XCTestCase {
         XCTAssertNil(refused); XCTAssertTrue(owner.retiredHistoryNavigations.isEmpty)
         XCTAssertNil(try historyJournal(fixture).retirementDigest)
         XCTAssertTrue(owner.hasPendingHistoryNavigation, "An attempted record is never converted to a new selection")
-    }
-
-    func testDriverRetiresEvictedUnsentForwardBeforeSelectingAnExplicitFreshRevisit() async throws {
-        let fixture = try await ResearchDriverFixture.make()
-        defer { fixture.close() }
-        fixture.policy.choices = [true, false]
-        _ = try await fixture.start()
-        let owner = try fixture.owner(), original = owner.input
-        let details = try await owner.revalidateCandidates(), back = try XCTUnwrap(details.historyOptions.first)
-        _ = try await owner.revisitAfterReading(back)
-        let search = try await owner.readCandidates(), forward = try XCTUnwrap(search.historyOptions.first { $0.mode == .forward })
-        fixture.state.onWrite = { fixture.state.onWrite = nil; owner.pause() }
-        do { _ = try await owner.revisitAfterReading(forward); XCTFail("Retain the unsent Forward stage") }
-        catch { XCTAssertTrue(error is CancellationError) }
-        let pending = try XCTUnwrap(historyJournals(fixture).first { $0.statuses == [.planned] })
-        _ = try await fixture.browser.navigate(taskID: owner.taskID, operationID: "different-branch", to: fixture.base.appendingPathComponent("beta"))
-        let before = fixture.server.count("/details")
-        try await owner.resumeAfterUserControl()
-        _ = try await fixture.resume()
-        XCTAssertFalse(owner.hasPendingHistoryNavigation)
-        XCTAssertEqual(owner.retiredHistoryNavigations.count, 1)
-        XCTAssertEqual(owner.retiredHistoryNavigations[0].operationID, pending.stepIDs[0])
-        XCTAssertEqual(fixture.server.count("/details"), before, "Retiring Forward does not silently load its URL")
-        let tombstone = try XCTUnwrap(historyJournals(fixture).first { $0.taskID == pending.taskID })
-        XCTAssertEqual(tombstone.statuses, pending.statuses); XCTAssertNotNil(tombstone.retirementDigest)
-        let current = try await owner.revalidateCandidates()
-        let revisit = try XCTUnwrap(current.historyOptions.first { $0.operationID == forward.operationID })
-        XCTAssertEqual(revisit.mode, .revisit)
-        let receipt = try await owner.revisitAfterReading(revisit)
-        XCTAssertNotEqual(receipt.document.operationID, pending.stepIDs[0])
-        XCTAssertEqual(fixture.server.count("/details"), before + 1)
-        XCTAssertEqual(owner.input, original)
-        XCTAssertEqual(owner.confirmedNavigationHistory.map(\.kind), [.search, .resultLink, .revisit, .revisit])
     }
 
     func testRetirementRejectsOldNativeAndReopenedJournalExecutionEvenIfTheTombstoneDisappears() async throws {
@@ -255,7 +198,7 @@ final class ComputerUseBrowserResearchHistoryTests: XCTestCase {
         fixture.state.failureAtWrite = nil
         do { _ = try await owner.resumeHistoryNavigation(); XCTFail("Only retirement can resume now") }
         catch { XCTAssertEqual(error as? ComputerUseBrowserResearchHistoryNavigation.Failure, .retirementPending) }
-        _ = try await fixture.resume()
+        _ = try await owner.retirePendingUnsentHistoryNavigation()
         XCTAssertEqual(fixture.state.writes, writes + 1, "Retry flushes the same retirement without executing navigation")
         XCTAssertEqual(try historyJournal(fixture), uncertain)
         XCTAssertEqual(owner.retiredHistoryNavigations.first?.digest, uncertain.retirementDigest)
@@ -328,10 +271,8 @@ final class ComputerUseBrowserResearchHistoryTests: XCTestCase {
     }
 
     func testConfirmedHistoryCannotBeRetiredAndStillReplaysItsReceipt() async throws {
-        let fixture = try await ResearchDriverFixture.make()
+        let fixture = try await ResearchHistoryFixture.make()
         defer { fixture.close() }
-        fixture.policy.choices = [true, false]
-        _ = try await fixture.start()
         let owner = try fixture.owner(), page = try await owner.revalidateCandidates(), option = try XCTUnwrap(page.historyOptions.first)
         let completed = try await owner.revisitAfterReading(option), before = fixture.server.count("/search?q=concerts")
         let refused = try await owner.retirePendingUnsentHistoryNavigation()
@@ -342,11 +283,9 @@ final class ComputerUseBrowserResearchHistoryTests: XCTestCase {
         XCTAssertTrue(owner.retiredHistoryNavigations.isEmpty)
     }
 
-    private func pausedBackVisit() async throws -> (ResearchDriverFixture, ComputerUseBrowserHistoryOption) {
-        let fixture = try await ResearchDriverFixture.make()
+    private func pausedBackVisit() async throws -> (ResearchHistoryFixture, ComputerUseBrowserHistoryOption) {
+        let fixture = try await ResearchHistoryFixture.make()
         do {
-            fixture.policy.choices = [true, false]
-            _ = try await fixture.start()
             let owner = try fixture.owner(), reading = try await owner.revalidateCandidates(), option = try XCTUnwrap(reading.historyOptions.first)
             fixture.state.onWrite = { fixture.state.onWrite = nil; owner.pause() }
             do { _ = try await owner.revisitAfterReading(option); XCTFail("Pause keeps the planned visit") }
@@ -356,19 +295,104 @@ final class ComputerUseBrowserResearchHistoryTests: XCTestCase {
         } catch { fixture.close(); throw error }
     }
 
-    private func historyDirectory(_ fixture: ResearchDriverFixture) -> URL { fixture.directory.appendingPathComponent("Research/History") }
-    private func historyJournals(_ fixture: ResearchDriverFixture) throws -> [ComputerUseTaskJournal] {
-        let files = try FileManager.default.contentsOfDirectory(at: historyDirectory(fixture).appendingPathComponent("Observed Destinations"), includingPropertiesForKeys: nil)
-        return try files.filter { $0.pathExtension == "json" }.map { try JSONDecoder().decode(ComputerUseTaskJournal.self, from: Data(contentsOf: $0)) }
-    }
-
-    private func historyJournal(_ fixture: ResearchDriverFixture) throws -> ComputerUseTaskJournal {
+    private func historyDirectory(_ fixture: ResearchHistoryFixture) -> URL { fixture.directory.appendingPathComponent("Research/History") }
+    private func historyJournal(_ fixture: ResearchHistoryFixture) throws -> ComputerUseTaskJournal {
         let directory = fixture.directory.appendingPathComponent("Research/History/Observed Destinations")
         let files = try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil).filter { $0.pathExtension == "json" }
         XCTAssertEqual(files.count, 1)
         return try JSONDecoder().decode(ComputerUseTaskJournal.self, from: Data(contentsOf: XCTUnwrap(files.first)))
     }
     private func object(_ text: String) throws -> [String: Any] { try XCTUnwrap(JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any]) }
+}
+
+@MainActor
+private struct ResearchHistoryFixture {
+    static let root = "research-driver"
+    static let prompt = "Find concerts under USD 50. Do not buy."
+    static let date = Date(timeIntervalSince1970: 1_800_000_000)
+
+    let server: OwnedBrowserHTTPFixture
+    let base: URL
+    let directory: URL
+    let browser: ComputerUseOwnedBrowser
+    let navigation: ComputerUseBrowserNavigationTask
+    let researchOwner: ComputerUseBrowserResearchTask
+    let actions: BrowserResearchActionFixture
+    let state: DriverFixtureState
+
+    static func make() async throws -> Self {
+        func card(_ destination: String) -> String {
+            "<article><h2>Concert Alpha</h2><a href='\(destination)'>Alpha details</a></article>"
+        }
+        let server = try OwnedBrowserHTTPFixture(routes: [
+            "/search?q=concerts": .init(body: card("/details")),
+            "/details": .init(body: card("/offers")),
+            "/beta": .init(body: card("/more"))
+        ])
+        let base = try await server.start()
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let state = DriverFixtureState()
+        let browser = ComputerUseOwnedBrowser(presentsWindow: false, domScriptDidDispatch: { command in
+            state.commands.append(command)
+            state.onCommand?(command)
+        }, mayAct: {
+            state.onMayAct?()
+            return state.allowed
+        })
+        do {
+            let navigation = ComputerUseBrowserNavigationTask(browser: browser, journalDirectory: directory,
+                observedNavigationStore: { location in
+                    try .init(directory: location, afterReplacement: {
+                        try MainActor.assumeIsolated {
+                            state.writes += 1
+                            state.onWrite?()
+                            if state.failureAtWrite == state.writes {
+                                throw ComputerUseTaskJournalStore.StoreError.unavailable
+                            }
+                        }
+                    })
+                })
+            let goalPlanner = BrowserResearchGoalFixture()
+            let resultPlanner = BrowserResearchResultFixture()
+            resultPlanner.selectedLinkLabel = "Alpha details"
+            let search = DriverSearchFixture()
+            let actions = BrowserResearchActionFixture()
+            let input = try ComputerUseBrowserGoalInput(taskID: root, prompt: prompt,
+                referenceDate: date, timeZoneIdentifier: "America/Los_Angeles")
+            let owner = try navigation.prepareResearchTask(taskID: root, prompt: prompt,
+                goalPlanner: goalPlanner, resultPlanner: resultPlanner,
+                mayAct: { state.allowed }, referenceDate: date, timeZoneIdentifier: "America/Los_Angeles")
+            guard owner.input == input else { throw ComputerUseBrowserResearchTask.Failure.goalChanged }
+            let interpretation = try await owner.interpretGoal()
+            let provider = try ComputerUseBrowserSearchProvider(endpoint: base.appendingPathComponent("search"), queryParameter: "q")
+            try owner.configureResearchSources(try ComputerUseBrowserResearchSources(goal: owner.input, provider: provider))
+            let query = try await owner.planInitialSearch(using: search)
+            _ = try await owner.openInitialSearch(query, provider: provider)
+            let candidates = try await owner.readCandidates()
+            let candidate = try XCTUnwrap(candidates.candidates.first)
+            let linkID = try XCTUnwrap(candidate.selectedLinkIDs.first)
+            _ = try await owner.openCandidateLink(candidateID: candidate.id, linkID: linkID)
+            _ = try await owner.readCandidates()
+            XCTAssertEqual(interpretation.proposal.disposition, .research)
+            return .init(server: server, base: base, directory: directory, browser: browser,
+                navigation: navigation, researchOwner: owner, actions: actions, state: state)
+        } catch {
+            browser.close()
+            server.stop()
+            try? FileManager.default.removeItem(at: directory)
+            throw error
+        }
+    }
+
+    func owner() throws -> ComputerUseBrowserResearchTask { researchOwner }
+    func close() {
+        state.onCommand = nil
+        state.onMayAct = nil
+        state.onWrite = nil
+        navigation.close()
+        server.stop()
+        try? FileManager.default.removeItem(at: directory)
+    }
 }
 
 private actor HistoryActionTransport: ComputerUseTextModelTransport {
