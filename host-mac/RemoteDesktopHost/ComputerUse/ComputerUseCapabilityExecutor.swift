@@ -63,13 +63,23 @@ final class ComputerUseCapabilityExecutor: ComputerUseTaskAwareExecuting,
     private var routedClarifiedGoal: ComputerUseUnresolvedTextGoal?
     private var isExecuting = false
     private var nativeOnlyTask = false
+    let agentAdapter: AgentCapabilityAdapter?
 
     init(nativeExecution: @escaping NativeExecution, desktopFactory: DesktopFactory? = nil,
          desktopIncludesVisualControl: Bool = true, nativeClarification: ComputerUseNativeTextExecutor? = nil) {
         self.nativeExecution = nativeExecution
+        self.agentAdapter = nil
         self.nativeClarification = nativeClarification
         self.desktopFactory = desktopFactory
         self.desktopIncludesVisualControl = desktopFactory != nil && desktopIncludesVisualControl
+    }
+
+    init(agentAdapter: AgentCapabilityAdapter) {
+        self.agentAdapter = agentAdapter
+        self.nativeExecution = { _, _, _ in nil }
+        self.nativeClarification = nil
+        self.desktopFactory = nil
+        self.desktopIncludesVisualControl = false
     }
 
     convenience init(native: ComputerUseNativeTextExecutor, desktopFactory: DesktopFactory? = nil) {
@@ -81,8 +91,9 @@ final class ComputerUseCapabilityExecutor: ComputerUseTaskAwareExecuting,
     let isReady = true
     let supportsNativeTextTasks = true
     let requiresMacControlHelper = false
-    var hasAdditionalSetup: Bool { desktopFactory == nil || !desktopIncludesVisualControl }
+    var hasAdditionalSetup: Bool { agentAdapter == nil && (desktopFactory == nil || !desktopIncludesVisualControl) }
     var readyDetail: String {
+        if let agentAdapter { return agentAdapter.readyDetail }
         guard desktopFactory != nil else { return "Form editing is ready; desktop tools need setup" }
         return desktopIncludesVisualControl
             ? "Form editing, Mac tools and visual control are ready"
@@ -125,6 +136,10 @@ final class ComputerUseCapabilityExecutor: ComputerUseTaskAwareExecuting,
     func execute(taskID: String, goal: ComputerUseUnresolvedTextGoal,
         tools: ComputerUseHostTools, progress: @escaping (String) -> Void) async throws
         -> ComputerUseExecutionResult {
+        if let agentAdapter {
+            return try await agentAdapter.execute(taskID: taskID, prompt: goal.userTurns.joined(separator: "\n"),
+                trustedUserPrompt: goal.userTurns[0], tools: tools, progress: progress)
+        }
         guard !isExecuting else { throw RoutingError.alreadyExecuting }
         isExecuting = true
         defer { isExecuting = false }
@@ -181,6 +196,10 @@ final class ComputerUseCapabilityExecutor: ComputerUseTaskAwareExecuting,
     private func executeResolved(taskID: String, modelPrompt: String, currentUserPrompt: String,
         conversation: [ComputerUseConversationTurn], tools: ComputerUseHostTools,
         nativeOnly: Bool, progress: @escaping (String) -> Void) async throws -> ComputerUseExecutionResult? {
+        if let agentAdapter {
+            return try await agentAdapter.execute(taskID: taskID, prompt: currentUserPrompt,
+                trustedUserPrompt: currentUserPrompt, tools: tools, progress: progress)
+        }
         guard !isExecuting else { throw RoutingError.alreadyExecuting }
         isExecuting = true
         defer { isExecuting = false }
@@ -252,6 +271,7 @@ final class ComputerUseCapabilityExecutor: ComputerUseTaskAwareExecuting,
     }
 
     func clarification(taskID: String) throws -> ComputerUseNativeTextExecutor.Clarification? {
+        if let agentAdapter { return try agentAdapter.clarification(taskID: taskID) }
         guard self.taskID == taskID else { return nil }
         if route == .native { return try nativeClarification?.clarification(taskID: taskID) }
         if route == .desktop { return try (desktop as? any ComputerUseTextClarificationContinuing)?.clarification(taskID: taskID) }
@@ -259,6 +279,7 @@ final class ComputerUseCapabilityExecutor: ComputerUseTaskAwareExecuting,
     }
 
     func invalidateClarification(taskID: String?) {
+        if let agentAdapter { agentAdapter.invalidateClarification(taskID: taskID); return }
         if taskID == nil || taskID == self.taskID { routedClarifiedGoal = nil }
         nativeClarification?.invalidateClarification(taskID: taskID)
         (desktop as? any ComputerUseTextClarificationContinuing)?.invalidateClarification(taskID: taskID)
@@ -266,6 +287,10 @@ final class ComputerUseCapabilityExecutor: ComputerUseTaskAwareExecuting,
 
     func continueClarification(taskID: String, originatingTaskID: String, goal: ComputerUseUnresolvedTextGoal,
                                progress: @escaping (String) -> Void) async throws -> ComputerUseExecutionResult {
+        if let agentAdapter {
+            return try await agentAdapter.continueClarification(taskID: taskID, originatingTaskID: originatingTaskID,
+                goal: goal, progress: progress)
+        }
         guard !isExecuting else { throw RoutingError.alreadyExecuting }
         guard route == .native && nativeClarification != nil || route == .desktop && desktop is any ComputerUseTextClarificationContinuing else { throw RoutingError.missingContinuation }
         let digest = ComputerUseTextTaskContract.digest(goal.taskIdentityText)
@@ -296,6 +321,10 @@ final class ComputerUseCapabilityExecutor: ComputerUseTaskAwareExecuting,
     func continueClarification(taskID: String, originatingTaskID: String, goal: ComputerUseUnresolvedTextGoal,
                                selectedChoice: ComputerUseClarificationChoice?,
                                progress: @escaping (String) -> Void) async throws -> ComputerUseExecutionResult {
+        if let agentAdapter {
+            return try await agentAdapter.continueClarification(taskID: taskID, originatingTaskID: originatingTaskID,
+                goal: goal, selectedChoice: selectedChoice, progress: progress)
+        }
         guard let selectedChoice else {
             return try await continueClarification(taskID: taskID, originatingTaskID: originatingTaskID,
                 goal: goal, progress: progress)

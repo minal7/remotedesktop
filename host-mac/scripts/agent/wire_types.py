@@ -153,7 +153,7 @@ class Focus(TypedDict):
 
 
 class HistoryItem(TypedDict):
-    action: Action
+    action: Action | None
     result: str
 
 
@@ -175,6 +175,9 @@ class Observation(TypedDict):
 class Gate(TypedDict):
     decision: Literal["allowed", "needs_approval", "rejected"]
     reason: str
+    fingerprint: NotRequired[str]
+    scope_identity: NotRequired[str]
+    risk_tier: NotRequired[Literal["low", "medium", "high"]]
 
 
 class Execution(TypedDict):

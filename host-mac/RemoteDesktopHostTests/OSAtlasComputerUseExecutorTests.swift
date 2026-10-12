@@ -2875,6 +2875,97 @@ final class OSAtlasLlamaRuntimeTests: XCTestCase {
     }
 }
 
+extension OSAtlasLlamaRuntimeTests {
+    func testAgentActionUsesFaraRuntimeGrammarAndImageRequest() async throws {
+        let events = RuntimeEventLog(), launcher = FakeLlamaLauncher(events: events)
+        let response = try JSONSerialization.data(withJSONObject: [
+            "model": ComputerUseFaraRuntimeInputs.modelAlias,
+            "choices": [["finish_reason": "stop", "message": ["role": "assistant",
+                "content": #"{"type":"done","answer":"Completed."}"#]]],
+        ])
+        let transport = FakeTransportMaker(events: events, completionDataResponses: [response])
+        let runtime = textRuntime(launcher, transports: transport)
+        do {
+            let endpoint = try await runtime.activateFara(faraInputs)
+            let input = try agentRuntimeRequestInput()
+            let content = try await runtime.completeAgentAction(endpoint: endpoint, input: input)
+            XCTAssertEqual(content, #"{"type":"done","answer":"Completed."}"#)
+            let request = try XCTUnwrap(transport.recordedCompletionRequests().first)
+            XCTAssertEqual(transport.recordedTokenCountRequests(), [request])
+            XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer \(endpoint.bearerToken)")
+            let body = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(request.httpBody)) as? [String: Any])
+            XCTAssertEqual(body["model"] as? String, ComputerUseFaraRuntimeInputs.modelAlias)
+            let format = try XCTUnwrap(body["response_format"] as? [String: Any])
+            XCTAssertEqual(format["type"] as? String, "json_schema")
+            let user = try XCTUnwrap((body["messages"] as? [[String: Any]])?[1]["content"] as? [[String: Any]])
+            XCTAssertEqual(user.map { $0["type"] as? String ?? "" }, ["text", "image_url"])
+            let launchConfigurations = await launcher.configurations()
+            XCTAssertEqual(launchConfigurations.count, 1)
+        } catch {
+            await runtime.shutdown()
+            throw error
+        }
+        await runtime.shutdown()
+    }
+
+    func testAgentActionRejectsInactiveWorkerAndContextOverflow() async throws {
+        let events = RuntimeEventLog(), launcher = FakeLlamaLauncher(events: events)
+        let transport = FakeTransportMaker(events: events, inputTokenCounts: [6_000])
+        let runtime = textRuntime(launcher, transports: transport)
+        do {
+            let endpoint = try await runtime.activateFara(faraInputs)
+            let input = try agentRuntimeRequestInput()
+            do {
+                _ = try await runtime.completeAgentAction(endpoint: endpoint, input: input)
+                XCTFail("Oversized Agent context was sent")
+            } catch { XCTAssertEqual(error as? OSAtlasLlamaRuntimeError, .inputContextTooLarge) }
+            XCTAssertTrue(transport.recordedCompletionRequests().isEmpty)
+            XCTAssertEqual(transport.recordedTokenCountRequests().count, 1)
+            await runtime.cancel(endpoint: endpoint)
+            do {
+                _ = try await runtime.completeAgentAction(endpoint: endpoint, input: input)
+                XCTFail("An inactive worker accepted an Agent request")
+            } catch { XCTAssertEqual(error as? OSAtlasLlamaRuntimeError, .inactiveSession) }
+            XCTAssertEqual(transport.recordedTokenCountRequests().count, 1)
+        } catch {
+            await runtime.shutdown()
+            throw error
+        }
+        await runtime.shutdown()
+    }
+
+    func testAgentActionCancellationCancelsItsRuntimeRequest() async throws {
+        let events = RuntimeEventLog(), launcher = FakeLlamaLauncher(events: events)
+        let transport = FakeTransportMaker(events: events, blocksCompletion: true)
+        let runtime = textRuntime(launcher, transports: transport)
+        do {
+            let endpoint = try await runtime.activateFara(faraInputs)
+            let input = try agentRuntimeRequestInput()
+            let request = Task { try await runtime.completeAgentAction(endpoint: endpoint, input: input) }
+            await transport.waitUntilCompletionStarted()
+            request.cancel()
+            do { _ = try await request.value; XCTFail("A cancelled Agent request returned") }
+            catch { XCTAssertTrue(error is CancellationError) }
+            XCTAssertEqual(transport.recordedCompletionRequests().count, 1)
+            XCTAssertEqual(transport.recordedTokenCountRequests().count, 1)
+        } catch {
+            await runtime.shutdown()
+            throw error
+        }
+        await runtime.shutdown()
+    }
+
+    private func agentRuntimeRequestInput() throws -> AgentVLMRequestInput {
+        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent()
+        let prompt = try String(contentsOf: root.appendingPathComponent("policy/prompts/v1.txt"), encoding: .utf8)
+        let schema = try Data(contentsOf: root.appendingPathComponent("host-mac/RemoteDesktopHost/Agent/Schemas/action.schema.json"))
+        return AgentVLMRequestInput(prompt: prompt,
+            observationJSON: #"{"task":"Complete a generic task","screenshot":"[attached PNG image]","elements":[]}"#,
+            screenshotPNG: try faraTestPNG(), actionSchema: schema)
+    }
+}
+
 private actor RuntimeEventLog {
     private var events: [String] = []
 

@@ -1,17 +1,18 @@
 {
   "manifest_version": 3,
   "name": "Remote Desktop Computer Use Bridge",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "description": "Task-scoped Safari transport for Remote Desktop Computer Use.",
   "permissions": [
     "nativeMessaging",
-    "tabs"
+    "tabs",
+    "scripting"
   ],
   "host_permissions": [
-    "https://mail.google.com/*",
-    "https://drive.google.com/*",
-    "https://www.dropbox.com/*",
-    "https://www.google.com/travel/*"
+    "https://*/*",
+    "http://localhost/*",
+    "http://127.0.0.1/*",
+    "http://[::1]/*"
   ],
   "background": {
     "service_worker": "background.js"
@@ -19,10 +20,10 @@
   "content_scripts": [
     {
       "matches": [
-        "https://mail.google.com/*",
-        "https://drive.google.com/*",
-        "https://www.dropbox.com/*",
-        "https://www.google.com/travel/*"
+        "https://*/*",
+        "http://localhost/*",
+        "http://127.0.0.1/*",
+        "http://[::1]/*"
       ],
       "js": ["content.js"],
       "run_at": "document_start",

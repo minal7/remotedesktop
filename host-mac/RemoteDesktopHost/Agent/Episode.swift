@@ -6,18 +6,44 @@ public enum AgentExecutionStatus: String, Codable { case ok, rejected, error, no
 public struct AgentGateResult: Equatable, Codable {
     public let decision: AgentGateDecision
     public let reason: String
+    public let fingerprint: String?
+    public let scopeIdentity: String?
+    public let riskTier: String?
 
-    public init(decision: AgentGateDecision, reason: String) { self.decision = decision; self.reason = reason }
+    public init(decision: AgentGateDecision, reason: String, fingerprint: String? = nil,
+                scopeIdentity: String? = nil, riskTier: String? = nil) {
+        self.decision = decision; self.reason = reason; self.fingerprint = fingerprint
+        self.scopeIdentity = scopeIdentity; self.riskTier = riskTier
+    }
+
+    private func validate() throws {
+        if let fingerprint {
+            try AgentContractValidation.require(fingerprint.utf8.count == 64 && fingerprint.utf8.allSatisfy {
+                (48...57).contains($0) || (97...102).contains($0)
+            }, "gate.fingerprint must be a SHA-256 digest")
+        }
+        if let scopeIdentity { try AgentContractValidation.requireNonEmpty(scopeIdentity, "gate.scope_identity") }
+        if let riskTier { try AgentContractValidation.require(["low", "medium", "high"].contains(riskTier), "invalid risk tier") }
+    }
 
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: AgentCodingKey.self)
-        try container.requireKeys(["decision", "reason"])
-        decision = try container.decodeRequired(AgentGateDecision.self, "decision"); reason = try container.decodeRequired(String.self, "reason")
+        try container.requireKeys(["decision", "reason"], optional: ["fingerprint", "scope_identity", "risk_tier"])
+        decision = try container.decodeRequired(AgentGateDecision.self, "decision")
+        reason = try container.decodeRequired(String.self, "reason")
+        fingerprint = try container.decodeOptionalValue(String.self, "fingerprint")
+        scopeIdentity = try container.decodeOptionalValue(String.self, "scope_identity")
+        riskTier = try container.decodeOptionalValue(String.self, "risk_tier")
+        try validate()
     }
 
     public func encode(to encoder: Encoder) throws {
+        try validate()
         var container = encoder.container(keyedBy: AgentCodingKey.self)
         try container.encodeRequired(decision, "decision"); try container.encodeRequired(reason, "reason")
+        try container.encodeIfPresent(fingerprint, forKey: AgentCodingKey("fingerprint"))
+        try container.encodeIfPresent(scopeIdentity, forKey: AgentCodingKey("scope_identity"))
+        try container.encodeIfPresent(riskTier, forKey: AgentCodingKey("risk_tier"))
     }
 }
 

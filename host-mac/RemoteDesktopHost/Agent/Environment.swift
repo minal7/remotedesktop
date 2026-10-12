@@ -1,0 +1,52 @@
+import Foundation
+
+/// Host authority is separate from the model-facing observation.
+struct AgentScope: Equatable {
+    enum Kind: String { case web, app }
+    let taskID: String
+    let kind: Kind
+    let identity: String
+}
+
+struct AgentObservationContext {
+    let task: String
+    let history: [AgentHistoryItem]
+    let budget: AgentStepBudget
+}
+
+struct AgentFrame {
+    let observation: AgentObservation
+    let scope: AgentScope
+    /// Complete nonsecure payload digest, computed by the host adapter before model truncation.
+    /// This authority metadata is deliberately absent from the policy observation schema.
+    var authorityDigest: String? = nil
+}
+
+/// Freshly resolved targets and surface identity, never authority supplied by a model.
+struct AgentResolvedAction {
+    let action: AgentAction
+    let frame: AgentFrame
+    let targets: [AgentElement]
+}
+
+@MainActor
+protocol AgentEnvironment: AnyObject {
+    func observe(_ context: AgentObservationContext) async throws -> AgentFrame
+    /// Re-observe and resolve element identities; reject gone/changed/covered targets.
+    func resolve(_ action: AgentAction, in frame: AgentFrame) async throws -> AgentResolvedAction
+    /// Recheck the resolved scope at the final input boundary, including cancellation.
+    func execute(_ resolved: AgentResolvedAction) async throws -> AgentExecutionResult
+    func suspend() async
+    func resume() async throws
+    func stop() async
+}
+
+extension AgentEnvironment {
+    func suspend() async {}
+    func resume() async throws {}
+}
+
+enum AgentEnvironmentError: Error, Equatable {
+    case unavailable(String), scopeChanged, targetGone, targetChanged, targetCovered
+    case disabledTarget, unsupportedAction, credentialHandoff
+}

@@ -106,23 +106,45 @@ final class SafariBridgeContractTests: XCTestCase {
         XCTAssertFalse(SafariBridgeResult(command: command, status: .error).matches(command))
     }
 
-    func testMalformedOrNonHTTPSOpenTabCommandIsRejected() {
+    func testGenericHTTPSAndLoopbackHTTPAreAllowedButCredentialAndDangerousSchemesAreRejected() {
         let token = "0123456789abcdef0123456789abcdef"
         XCTAssertFalse(SafariBridgeCommand(taskToken: token, operation: .openTab, url: "file:///tmp/a")
             .isStructurallyValid)
-        XCTAssertFalse(SafariBridgeCommand(taskToken: token, operation: .openTab, url: "https://www.google.com/search?q=travel")
+        XCTAssertFalse(SafariBridgeCommand(taskToken: token, operation: .openTab, url: "javascript:alert(1)")
             .isStructurallyValid)
         XCTAssertFalse(SafariBridgeCommand(taskToken: token, operation: .openTab, url: "https://user:pass@drive.google.com/")
             .isStructurallyValid)
-        XCTAssertFalse(SafariBridgeCommand(taskToken: token, operation: .openTab, url: "https://drive.google.com:444/")
+        XCTAssertFalse(SafariBridgeCommand(taskToken: token, operation: .openTab, url: "http://example.com/")
+            .isStructurallyValid)
+        XCTAssertFalse(SafariBridgeCommand(taskToken: token, operation: .openTab, url: "http://127.attacker.example/")
             .isStructurallyValid)
         XCTAssertFalse(SafariBridgeCommand(taskToken: token, operation: .endTask, tabId: 17, windowId: 4)
             .isStructurallyValid)
         XCTAssertFalse(SafariBridgeCommand(taskToken: "０123456789abcdef0123456789abcde", operation: .openTab, url: "https://mail.google.com/")
             .isStructurallyValid)
-        XCTAssertTrue(SafariBridgeCommand(taskToken: token, operation: .openTab, url: "https://www.google.com/travel/activities?hl=en")
+        XCTAssertTrue(SafariBridgeCommand(taskToken: token, operation: .openTab, url: "https://example.org/search?q=general")
             .isStructurallyValid)
-        XCTAssertTrue(SafariBridgeCommand(taskToken: token, operation: .openTab, url: "https://www.dropbox.com/home/photos")
+        XCTAssertTrue(SafariBridgeCommand(taskToken: token, operation: .openTab, url: "http://127.0.0.1:8765/forms/basic.html")
             .isStructurallyValid)
+        XCTAssertTrue(SafariBridgeCommand(taskToken: token, operation: .openTab, url: "https://example.org:8443/path")
+            .isStructurallyValid)
+    }
+
+    func testTypedDOMCommandRequiresBoundTaskTabAndCorrelatedResult() throws {
+        let token = "0123456789abcdef0123456789abcdef"
+        var bindings = SafariBridgeTaskBindings(); try bindings.register(taskToken: token)
+        let open = SafariBridgeCommand(taskToken: token, operation: .openTab, url: "https://example.org/")
+        try bindings.accept(SafariBridgeResult(command: open, status: .ok, tabId: 17, windowId: 4), for: open)
+        let snapshot = SafariBridgeCommand(taskToken: token, operation: .snapshot, tabId: 17, windowId: 4,
+            payload: ["maxBytes": 65_536, "viewportOnly": false])
+        XCTAssertTrue(snapshot.isStructurallyValid)
+        XCTAssertNoThrow(try bindings.validate(snapshot))
+        let response = SafariBridgeResult(command: snapshot, status: .ok, tabId: 17, windowId: 4,
+            documentId: "doc-1", resultJSON: #"{"url":"https://example.org/"}"#)
+        XCTAssertTrue(response.matches(snapshot))
+        XCTAssertFalse(SafariBridgeResult(command: snapshot, status: .ok, tabId: 18, windowId: 4,
+            documentId: "doc-1", resultJSON: "{}").matches(snapshot))
+        XCTAssertThrowsError(try bindings.validate(SafariBridgeCommand(taskToken: token, operation: .snapshot,
+            tabId: 18, windowId: 4, payload: ["maxBytes": 65_536])))
     }
 }

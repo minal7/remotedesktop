@@ -285,27 +285,6 @@ struct ComputerUseWebJobRequest: Sendable {
     }
 }
 
-/// Release admission uses only the already-typed deterministic web-job route.
-/// Unsupported fresh requests are declined before any browser or native route
-/// is entered; Experimental leaves the existing wider planner available.
-enum ComputerUseReleaseJobScope {
-    enum Admission: Equatable {
-        case admitted
-        case outOfScope
-    }
-
-    static let outOfScopeResponse = "Right now I can email files (Gmail or Apple Mail), upload files to Google Drive or Dropbox, and find flights. Turn on Experimental in Settings to try other web tasks."
-
-    static func admission(for prompt: String, experimentalEnabled: Bool) -> Admission {
-        switch ComputerUseWebJobRequest.route(prompt) {
-        case .gmail, .googleDriveUpload, .dropboxUpload, .explicitAppleMail, .ambiguousStorage:
-            return .admitted
-        case .none:
-            return experimentalEnabled ? .admitted : .outOfScope
-        }
-    }
-}
-
 struct ComputerUseWebJobContentExtractor: Sendable {
     struct Extraction: Equatable, Sendable {
         let subject: String

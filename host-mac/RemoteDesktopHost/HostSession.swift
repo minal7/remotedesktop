@@ -111,7 +111,6 @@ final class HostSession: ObservableObject {
         self.computerUse = computerUseManager ?? HostComputerUseManager(
             injector: injector,
             executor: computerUseExecutor,
-            nativeTextInstaller: ComputerUseInstaller.nativeText(),
             taskLedger: computerUseTaskLedger ?? ComputerUseTaskLedger(),
             browserNavigationFactory: computerUseBrowserNavigationFactory,
             allowsExternalServices: allowsExternalComputerUseServices)

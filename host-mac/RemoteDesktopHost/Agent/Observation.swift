@@ -4,6 +4,10 @@ public enum AgentSurface: Equatable, Codable {
     case web(url: String, title: String?)
     case app(bundleID: String, title: String?)
 
+    public var title: String? {
+        switch self { case .web(_, let title), .app(_, let title): title }
+    }
+
     public func validate() throws {
         switch self {
         case let .web(url, _): try AgentContractValidation.requireNonEmpty(url, "surface.url")
@@ -168,20 +172,20 @@ public struct AgentFocus: Equatable, Codable {
 }
 
 public struct AgentHistoryItem: Equatable, Codable {
-    public let action: AgentAction
+    public let action: AgentAction?
     public let result: String
 
-    public init(action: AgentAction, result: String) { self.action = action; self.result = result }
+    public init(action: AgentAction?, result: String) { self.action = action; self.result = result }
 
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: AgentCodingKey.self)
         try container.requireKeys(["action", "result"])
-        action = try container.decodeRequired(AgentAction.self, "action"); result = try container.decodeRequired(String.self, "result")
+        action = try container.decodeNullable(AgentAction.self, "action"); result = try container.decodeRequired(String.self, "result")
     }
 
     public func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: AgentCodingKey.self)
-        try container.encodeRequired(action, "action"); try container.encodeRequired(result, "result")
+        try container.encodeNullable(action, "action"); try container.encodeRequired(result, "result")
     }
 }
 

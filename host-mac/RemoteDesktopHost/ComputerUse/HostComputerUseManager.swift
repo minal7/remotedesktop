@@ -5131,6 +5131,7 @@ enum ComputerUseExecutionResult: Equatable {
         action: ComputerUsePredictedAction,
         continuation: ComputerUseVisualApprovalContinuation)
     case mcpApprovalRequired(MCPPreparedApproval)
+    case agentApprovalRequired(AgentApprovalRequest)
 }
 
 protocol HostComputerUseChannel: Sendable {
@@ -5712,6 +5713,7 @@ final class HostComputerUseManager: ObservableObject {
             action: ComputerUsePredictedAction,
             fingerprint: ComputerUseApprovalFingerprint)
         case mcp(MCPPreparedApproval)
+        case agent(AgentApprovalRequest)
     }
 
     private enum VisualApprovalContinuationError: Error, LocalizedError {
@@ -5735,6 +5737,12 @@ final class HostComputerUseManager: ObservableObject {
     }
 
     private var executor: (any ComputerUseExecuting)?
+    private let generalAgentFactory: ((ComputerUseInstallationReceipt) throws -> ComputerUseCapabilityExecutor)?
+    private var agentLifecycleTask: Task<Void, Never>?
+    var hasRetainedAgentTask: Bool { generalAgent?.hasRetainedTask == true }
+    private var generalAgent: AgentCapabilityAdapter? {
+        (executor as? ComputerUseCapabilityExecutor)?.agentAdapter ?? executor as? AgentCapabilityAdapter
+    }
     private let injector: InputInjector
     private let tools: ComputerUseHostTools
     var nativeVisualTypingDiagnosticForTests: [String: String] {
@@ -5879,6 +5887,12 @@ final class HostComputerUseManager: ObservableObject {
         let modelInstaller = installer ?? ComputerUseInstaller()
         self.installer = modelInstaller
         self.nativeTextInstaller = nativeTextInstaller
+        if executor == nil, visualExecutorLoader == nil, executorComposer == nil,
+           nativeTextLoader == nil, nativeTextPreparer == nil, macControlInstaller == nil {
+            generalAgentFactory = { receipt in
+                try AgentHostFactory.make(receipt: receipt, injector: injector, mayAct: mayAct)
+            }
+        } else { generalAgentFactory = nil }
         self.nativeTextLoader = nativeTextLoader ?? { receipt, tools, progress in
             try await ComputerUseNativeTextExecutorLoader.load(receipt: receipt, tools: tools, progress: progress)
         }
@@ -5951,6 +5965,19 @@ final class HostComputerUseManager: ObservableObject {
         let task = Task { [weak self] in
             guard let self else { return }
             defer { modelCheckTask = nil }
+            if let generalAgentFactory {
+                if let receipt = await installer.currentInstallation() {
+                    guard !Task.isCancelled, !isShuttingDown else { return }
+                    do {
+                        executor = try generalAgentFactory(receipt)
+                        modelState = .ready(runtimeName: executor!.runtimeName)
+                    } catch { modelState = .error(error.localizedDescription) }
+                } else if await installer.interruptedInstallationExists() {
+                    guard !Task.isCancelled, !isShuttingDown else { return }
+                    startSetupPipeline()
+                } else { modelState = .downloadRequired }
+                return
+            }
             if let nativeTextInstaller {
                 let receipt = await nativeTextInstaller.currentInstallation()
                 guard !Task.isCancelled, !isShuttingDown else { return }
@@ -6330,6 +6357,7 @@ final class HostComputerUseManager: ObservableObject {
         setupTask?.cancel()
         modelCheckTask?.cancel()
         await pendingExecution?.value
+        await agentLifecycleTask?.value
         await pendingSetup?.value
         await pendingModelCheck?.value
 
@@ -7075,7 +7103,7 @@ final class HostComputerUseManager: ObservableObject {
         currentExecutionToken = nil
         cancelActiveVisualApprovalContinuation()
         cancelActiveMCPWork(preservingBrowserProgress: true)
-        executionTask?.cancel()
+        if generalAgent == nil { executionTask?.cancel() }
         activity = .paused
         sendUserInterventionStatus(
             guidance,
@@ -7244,6 +7272,19 @@ final class HostComputerUseManager: ObservableObject {
         approvalDeliveryTask?.cancel()
         approvalDeliveryTask = nil
 
+        if case let .agent(request) = pendingApproval.operation {
+            guard let agent = generalAgent,
+                  agent.ownsApproval(request, hostTaskID: pendingApproval.context.envelope.id) else { return }
+            let admission = admitAutomation { actionGate.beginApprovedAutomation() }
+            guard admission == .admitted else {
+                cancelApprovalIfNeeded(pendingApproval, preservingBrowserProgress: true)
+                pauseForLocalIntervention(pendingApproval.context, guidance: Self.admissionGuidance(admission))
+                return
+            }
+            continueApprovedAgent(request, approved: response.approved, agent: agent, context: pendingApproval.context)
+            return
+        }
+
         guard response.approved,
               let executor,
               executor.isReady else {
@@ -7274,6 +7315,7 @@ final class HostComputerUseManager: ObservableObject {
         }
 
         switch pendingApproval.operation {
+        case .agent: return
         case .mcp(let prepared):
             continueApprovedMCP(
                 prepared,
@@ -7294,6 +7336,27 @@ final class HostComputerUseManager: ObservableObject {
         context: ExecutionContext
     ) {
         pauseForLocalIntervention(context)
+    }
+
+    private func continueApprovedAgent(_ request: AgentApprovalRequest, approved: Bool,
+                                       agent: AgentCapabilityAdapter, context: ExecutionContext) {
+        let token = UUID()
+        currentExecution = context; currentExecutionToken = token
+        activity = .working("Continuing the approved agent task…")
+        let lifecycle = agentLifecycleTask
+        executionTask = Task { [weak self] in
+            guard let self else { return }
+            await lifecycle?.value
+            guard !Task.isCancelled, currentExecutionToken == token else { return }
+            let result = await agent.resumeApproval(request: request, approved: approved)
+            guard !Task.isCancelled, currentExecutionToken == token, let executor else { return }
+            do { try await acceptExecutionResult(result, executor: executor, context: context, token: token) }
+            catch {
+                guard currentExecutionToken == token else { return }
+                currentExecution = nil; currentExecutionToken = nil; executionTask = nil
+                finishApprovedActionFailure(error, context: context)
+            }
+        }
     }
 
     private func approvalResponse(
@@ -7328,6 +7391,8 @@ final class HostComputerUseManager: ObservableObject {
     private func cancelApprovalIfNeeded(_ approval: PendingApproval?, preservingBrowserProgress: Bool = false) {
         guard let approval else { return }
         switch approval.operation {
+        case .agent:
+            cancelActiveMCPWork(preservingBrowserProgress: preservingBrowserProgress)
         case .visual(let token, _, _):
             cancelVisualApprovalContinuation(token)
         case .mcp:
@@ -7380,6 +7445,17 @@ final class HostComputerUseManager: ObservableObject {
     /// asynchronous stop to that captured generation, so stale cleanup cannot
     /// terminate the generation started by the resumed task.
     private func cancelActiveMCPWork(preservingBrowserProgress: Bool = false) {
+        if let agent = generalAgent {
+            if preservingBrowserProgress { agent.requestPause() }
+            else { agent.requestCancellation() }
+            let previous = agentLifecycleTask
+            agentLifecycleTask = Task {
+                await previous?.value
+                if preservingBrowserProgress { await agent.pauseAgent() }
+                else { await agent.cancelAgent() }
+            }
+            return
+        }
         guard let continuation = executor as? any MCPApprovalContinuing else { return }
         if preservingBrowserProgress { continuation.pauseMCPWork() }
         else { continuation.cancelMCPWork() }
@@ -7527,6 +7603,10 @@ final class HostComputerUseManager: ObservableObject {
         guard allowsExternalServices,
               !isShuttingDown,
               setupTask == nil else { return }
+        if let generalAgentFactory {
+            startGeneralAgentSetup(factory: generalAgentFactory)
+            return
+        }
         modelCheckTask?.cancel()
         modelCheckTask = nil
         lastInstallerProgressPhase = nil
@@ -7649,6 +7729,29 @@ final class HostComputerUseManager: ObservableObject {
                     fraction: nil,
                     detail: "Setup needs attention",
                     errorMessage: message)
+            }
+        }
+    }
+
+    private func startGeneralAgentSetup(factory: @escaping (ComputerUseInstallationReceipt) throws -> ComputerUseCapabilityExecutor) {
+        modelCheckTask?.cancel(); modelCheckTask = nil
+        publishSetupProgress(phase: .queued, fraction: 0, detail: "Checking the local model package…")
+        modelState = .installing(detail: "Checking the local model package…", fraction: 0)
+        setupTask = Task { [weak self] in
+            guard let self else { return }
+            defer { setupTask = nil }
+            do {
+                let receipt = try await installer.install { [weak self] update in self?.consumeInstallerUpdate(update) }
+                try Task.checkCancellation()
+                executor = try factory(receipt)
+                modelState = .ready(runtimeName: executor!.runtimeName)
+                publishSetupProgress(phase: .ready, fraction: 1, detail: executor!.readyDetail)
+            } catch is CancellationError {
+                modelState = executor.map { .ready(runtimeName: $0.runtimeName) } ?? .downloadRequired
+                publishSetupProgress(phase: .failed, fraction: nil, detail: "Setup stopped", errorMessage: "Setup stopped before the local agent was ready.")
+            } catch {
+                modelState = .error(error.localizedDescription)
+                publishSetupProgress(phase: .failed, fraction: nil, detail: "Setup needs attention", errorMessage: error.localizedDescription)
             }
         }
     }
@@ -8424,12 +8527,9 @@ final class HostComputerUseManager: ObservableObject {
                             originatingTaskID: textClarification.originatingTaskID, goal: textClarification.goal,
                             selectedChoice: textClarification.selectedChoice, progress: progress)
                     } else {
-                        if !isResuming,
-                           ComputerUseReleaseJobScope.admission(
-                            for: trustedUserPrompt,
-                            experimentalEnabled: experimentalEnabled()) == .outOfScope {
-                            result = .unableToComplete(ComputerUseReleaseJobScope.outOfScopeResponse)
-                        } else {
+                        await agentLifecycleTask?.value
+                        try Task.checkCancellation()
+                        guard currentExecutionToken == token else { throw CancellationError() }
                             result = try await executor.execute(
                                 taskID: envelope.id,
                                 modelPrompt: envelope.body,
@@ -8437,7 +8537,6 @@ final class HostComputerUseManager: ObservableObject {
                                 conversation: conversation,
                                 tools: tools,
                                 progress: progress)
-                        }
                     }
                 }
                 guard !Task.isCancelled,
@@ -8952,6 +9051,16 @@ final class HostComputerUseManager: ObservableObject {
         let envelope = context.envelope
 
         switch result {
+        case .agentApprovalRequired(let request):
+            guard let agent = generalAgent, agent.ownsApproval(request, hostTaskID: envelope.id) else {
+                throw AgentLoopError.noMatchingApproval
+            }
+            let action = String(decoding: try JSONEncoder().encode(request.action), as: UTF8.self)
+            let presentation = ComputerUseApprovalRequest(taskID: envelope.id,
+                message: request.reason,
+                details: [.init(label: "Action", value: action), .init(label: "Fingerprint", value: request.fingerprint)]
+                    + request.reviewFields.map { .init(label: $0.label, value: $0.value) })
+            enterApproval(.init(request: presentation, context: context, operation: .agent(request)))
         case .browserResearchAnswer(let answer):
             guard executor is any ComputerUseBrowserResearchContinuing,
                   let owner = tools.ownedBrowserResearch(taskID: answer.rootTaskID),

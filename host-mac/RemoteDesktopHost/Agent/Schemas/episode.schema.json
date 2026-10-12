@@ -2,47 +2,204 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "episode.schema.json",
   "title": "Computer-use episode JSONL record",
-  "oneOf": [{"$ref": "#/$defs/step"}, {"$ref": "#/$defs/footer"}],
+  "oneOf": [
+    {
+      "$ref": "#/$defs/step"
+    },
+    {
+      "$ref": "#/$defs/footer"
+    }
+  ],
   "$defs": {
     "gate": {
-      "type": "object", "additionalProperties": false, "required": ["decision", "reason"],
-      "properties": {"decision": {"enum": ["allowed", "needs_approval", "rejected"]}, "reason": {"type": "string"}}
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "decision",
+        "reason"
+      ],
+      "properties": {
+        "decision": {
+          "enum": [
+            "allowed",
+            "needs_approval",
+            "rejected"
+          ]
+        },
+        "reason": {
+          "type": "string"
+        },
+        "fingerprint": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "scope_identity": {
+          "type": "string",
+          "minLength": 1
+        },
+        "risk_tier": {
+          "enum": [
+            "low",
+            "medium",
+            "high"
+          ]
+        }
+      }
     },
     "execution": {
-      "type": "object", "additionalProperties": false, "required": ["status", "result"],
-      "properties": {"status": {"enum": ["ok", "rejected", "error", "not_executed"]}, "result": {"type": "string"}}
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "result"
+      ],
+      "properties": {
+        "status": {
+          "enum": [
+            "ok",
+            "rejected",
+            "error",
+            "not_executed"
+          ]
+        },
+        "result": {
+          "type": "string"
+        }
+      }
     },
     "timings": {
-      "type": "object", "additionalProperties": false,
-      "required": ["observation_ms", "policy_ms", "gate_ms", "execution_ms", "record_ms", "total_ms"],
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "observation_ms",
+        "policy_ms",
+        "gate_ms",
+        "execution_ms",
+        "record_ms",
+        "total_ms"
+      ],
       "properties": {
-        "observation_ms": {"type": "integer", "minimum": 0},
-        "policy_ms": {"type": "integer", "minimum": 0},
-        "gate_ms": {"type": "integer", "minimum": 0},
-        "execution_ms": {"type": "integer", "minimum": 0},
-        "record_ms": {"type": "integer", "minimum": 0},
-        "total_ms": {"type": "integer", "minimum": 0}
+        "observation_ms": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "policy_ms": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "gate_ms": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "execution_ms": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "record_ms": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "total_ms": {
+          "type": "integer",
+          "minimum": 0
+        }
       }
     },
     "step": {
-      "type": "object", "additionalProperties": false,
-      "required": ["type", "episode_id", "step", "observation", "prompt_version", "raw_model_output", "action", "gate", "execution", "timings"],
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "episode_id",
+        "step",
+        "observation",
+        "prompt_version",
+        "raw_model_output",
+        "action",
+        "gate",
+        "execution",
+        "timings"
+      ],
       "properties": {
-        "type": {"const": "step"}, "episode_id": {"type": "string", "minLength": 1}, "step": {"type": "integer", "minimum": 0},
-        "observation": {"$ref": "observation.schema.json"}, "prompt_version": {"type": "string", "minLength": 1}, "raw_model_output": {"type": "string"},
-        "action": {"oneOf": [{"type": "null"}, {"$ref": "action.schema.json#/$defs/action"}]},
-        "gate": {"$ref": "#/$defs/gate"},
-        "execution": {"$ref": "#/$defs/execution"},
-        "timings": {"$ref": "#/$defs/timings"}
+        "type": {
+          "const": "step"
+        },
+        "episode_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "step": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "observation": {
+          "$ref": "observation.schema.json"
+        },
+        "prompt_version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "raw_model_output": {
+          "type": "string"
+        },
+        "action": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "action.schema.json#/$defs/action"
+            }
+          ]
+        },
+        "gate": {
+          "$ref": "#/$defs/gate"
+        },
+        "execution": {
+          "$ref": "#/$defs/execution"
+        },
+        "timings": {
+          "$ref": "#/$defs/timings"
+        }
       }
     },
     "footer": {
-      "type": "object", "additionalProperties": false,
-      "required": ["type", "episode_id", "outcome", "approvals", "corrections"],
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "episode_id",
+        "outcome",
+        "approvals",
+        "corrections"
+      ],
       "properties": {
-        "type": {"const": "footer"}, "episode_id": {"type": "string", "minLength": 1}, "outcome": {"type": "string", "minLength": 1},
-        "approvals": {"type": "array", "items": {"type": "string"}}, "corrections": {"type": "array", "items": {"type": "string"}},
-        "checker_verdict": {"type": "string"}
+        "type": {
+          "const": "footer"
+        },
+        "episode_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "outcome": {
+          "type": "string",
+          "minLength": 1
+        },
+        "approvals": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "corrections": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "checker_verdict": {
+          "type": "string"
+        }
       }
     }
   }

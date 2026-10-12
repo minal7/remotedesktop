@@ -1482,6 +1482,45 @@ actor OSAtlasLlamaRuntime {
         }
     }
 
+    /// Runs one schema-constrained Agent action through the already active Fara
+    /// worker. It holds the shared model lease through token counting and decode.
+    func completeAgentAction(endpoint: OSAtlasLlamaEndpoint, input: AgentVLMRequestInput) async throws -> String {
+        let lease = try await acquireModelAccessLease()
+        defer { releaseModelAccessLease(lease) }
+        guard let server = active, server.endpoint == endpoint, server.inputs.fara != nil else {
+            throw OSAtlasLlamaRuntimeError.inactiveSession
+        }
+        do {
+            try validateResources(minimumReclaimableBytes: server.resourceProfile.minimumInferenceMemoryBytes)
+            let request = try OSAtlasLlamaHTTPClient.makeAgentActionRequest(endpoint: endpoint, input: input)
+            let answer = try await withTaskCancellationHandler {
+                try Task.checkCancellation()
+                let exactTokens = try await server.transport.exactInputTokenCount(completionRequest: request)
+                try Task.checkCancellation()
+                guard active?.endpoint == endpoint else { throw OSAtlasLlamaRuntimeError.inactiveSession }
+                let reservedTokens = ComputerUseFaraModel.contextImageTokensPerScreenshot
+                    + OSAtlasLlamaHTTPClient.agentMaximumCompletionTokens
+                    + ComputerUseFaraModel.contextSafetyReserveTokens
+                guard exactTokens > 0, exactTokens <= server.resourceProfile.contextSize - reservedTokens else {
+                    throw OSAtlasLlamaRuntimeError.inputContextTooLarge
+                }
+                try validateResources(minimumReclaimableBytes: server.resourceProfile.minimumInferenceMemoryBytes)
+                let data = try await server.transport.complete(request: request)
+                try Task.checkCancellation()
+                guard active?.endpoint == endpoint else { throw OSAtlasLlamaRuntimeError.inactiveSession }
+                return try ComputerUseFaraModel.decodePageAnswer(data)
+            } onCancel: {
+                Task { await self.cancel(endpoint: endpoint) }
+            }
+            try Task.checkCancellation()
+            guard active?.endpoint == endpoint else { throw OSAtlasLlamaRuntimeError.inactiveSession }
+            return answer
+        } catch {
+            if active?.endpoint == endpoint { try await stopActiveServerUnserialized() }
+            throw error
+        }
+    }
+
     /// Page extraction shares the action model's serialized owner and cancellation.
     func readFaraPage(endpoint: OSAtlasLlamaEndpoint, reading: ComputerUseFaraModel.PageReading) async throws -> String {
         let lease = try await acquireModelAccessLease()
@@ -2633,6 +2672,42 @@ enum OSAtlasLlamaHTTPClient {
     static let maximumTemplateResponseBytes = 512 * 1_024
     static let maximumTokenizeResponseBytes = 1_024 * 1_024
     static let maximumTokenizedInputTokens = 65_536
+    static let agentMaximumCompletionTokens = 1_024
+
+    static func makeAgentActionRequest(endpoint: OSAtlasLlamaEndpoint,
+                                       input: AgentVLMRequestInput) throws -> URLRequest {
+        try OSAtlasLlamaRuntime.validateLoopbackEndpoint(endpoint.baseURL)
+        guard endpoint.variant == nil, !endpoint.bearerToken.isEmpty,
+              !input.prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              !input.observationJSON.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              !input.screenshotPNG.isEmpty else {
+            throw OSAtlasLlamaRuntimeError.invalidResponse
+        }
+        try ComputerUseFaraModel.validatePNG(input.screenshotPNG)
+        guard let schema = try JSONSerialization.jsonObject(with: input.actionSchema) as? [String: Any] else {
+            throw OSAtlasLlamaRuntimeError.invalidResponse
+        }
+        var request = URLRequest(url: endpoint.baseURL.appendingPathComponent("v1/chat/completions"))
+        request.httpMethod = "POST"
+        request.timeoutInterval = 45
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("Bearer " + endpoint.bearerToken, forHTTPHeaderField: "Authorization")
+        let userContent: [[String: Any]] = [
+            ["type": "text", "text": "Observation JSON (screenshot attached separately):\n" + input.observationJSON],
+            ["type": "image_url", "image_url": ["url": "data:image/png;base64," + input.screenshotPNG.base64EncodedString()]],
+        ]
+        request.httpBody = try JSONSerialization.data(withJSONObject: [
+            "model": ComputerUseFaraRuntimeInputs.modelAlias,
+            "messages": [["role": "system", "content": input.prompt], ["role": "user", "content": userContent]],
+            "response_format": ["type": "json_schema", "json_schema": ["name": "agent_action", "strict": true, "schema": schema]],
+            "temperature": 0, "max_tokens": agentMaximumCompletionTokens, "stream": false,
+            "reasoning_format": "none",
+        ], options: [.sortedKeys, .withoutEscapingSlashes])
+        guard let body = request.httpBody, body.count <= 9 * 1_024 * 1_024 else {
+            throw OSAtlasLlamaRuntimeError.invalidResponse
+        }
+        return request
+    }
 
     static func makeCompletionRequest(
         endpoint: OSAtlasLlamaEndpoint,

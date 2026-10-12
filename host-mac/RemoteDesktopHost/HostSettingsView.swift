@@ -7,7 +7,7 @@ import SwiftUI
 struct HostSettingsView: View {
     @ObservedObject var session: HostSession
     let openSetup: () -> Void
-    @AppStorage(ComputerUseFeatureFlags.experimentalPreferenceKey) private var experimentalEnabled = false
+    @State private var historyMessage: String?
 
     var body: some View {
         TabView {
@@ -77,7 +77,7 @@ struct HostSettingsView: View {
                 title: "AI Computer Use",
                 subtitle: computerUseStatusDetail)
 
-            GroupBox("Browser Computer Use") {
+            GroupBox("Local Computer Use") {
                 VStack(alignment: .leading, spacing: 10) {
                     HStack {
                         Label("Fara 1.5 4B", systemImage: "globe")
@@ -87,7 +87,7 @@ struct HostSettingsView: View {
                             .font(.caption.weight(.semibold))
                             .foregroundStyle(modelStatusColor)
                     }
-                    Text("Reads browser screenshots and performs browser tasks locally. Requires a Mac with at least 16 GB of memory.")
+                    Text("Uses the task window or browser tab to work locally. Requires a Mac with at least 16 GB of memory.")
                         .font(.callout)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -105,30 +105,18 @@ struct HostSettingsView: View {
                 .padding(6)
             }
 
-            GroupBox("Experimental") {
+            GroupBox("Task History") {
                 VStack(alignment: .leading, spacing: 8) {
-                    Toggle("Allow other web and native app tasks", isOn: $experimentalEnabled)
-                    Text("Off by default. When off, Computer Use is limited to its supported email, cloud upload, and flight search jobs.")
+                    Text("Task screenshots and actions stay on this Mac and are kept for seven days.")
                         .font(.callout)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
-                }
-                .padding(6)
-            }
-
-            GroupBox("Local Mac Tools") {
-                HStack {
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text("mac-control-mcp")
-                            .font(.headline)
-                        Text("Version \(MacControlMCPArtifactManifest.current.version)")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+                    Button("Delete task history", role: .destructive) {
+                        do { try TrajectoryRecorder.deleteHistory(); historyMessage = "Local task history deleted." }
+                        catch { historyMessage = "Could not delete local task history: \(error.localizedDescription)" }
                     }
-                    Spacer()
-                    Image(systemName: "checkmark.seal.fill")
-                        .foregroundStyle(.green)
-                        .accessibilityLabel("Verified")
+                    .disabled(session.computerUse.activity != .idle || session.computerUse.hasRetainedAgentTask)
+                    if let historyMessage { Text(historyMessage).font(.caption).foregroundStyle(.secondary) }
                 }
                 .padding(6)
             }

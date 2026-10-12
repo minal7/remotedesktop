@@ -1287,6 +1287,7 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
             case .clarificationRequired: return "clarificationRequired"
             case .completed: return "completed"
             case .mcpApprovalRequired: return "mcpApprovalRequired"
+            case .agentApprovalRequired: return "agentApprovalRequired"
             case .unableToComplete: return "unableToComplete"
             case .userInterventionRequired: return "userInterventionRequired"
             }
@@ -1850,6 +1851,7 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                 case .clarificationRequired: return "clarificationRequired"
                 case .completed: return "completed"
                 case .mcpApprovalRequired: return "mcpApprovalRequired"
+                case .agentApprovalRequired: return "agentApprovalRequired"
                 case .unableToComplete: return "unableToComplete"
                 case .userInterventionRequired: return "userInterventionRequired"
                 }
