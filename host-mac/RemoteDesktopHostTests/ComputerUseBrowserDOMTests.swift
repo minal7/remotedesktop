@@ -2028,9 +2028,10 @@ final class ComputerUseBrowserDOMTests: XCTestCase {
         let operationID = ComputerUseTaskContract.digest(["verified-query"])
         let navigation = ComputerUseBrowserNavigationTask(browser: fixture.browser, journalDirectory: directory)
         let receipt = try await navigation.openObservedDestination(target, promptDigest: promptDigest, operationID: operationID, willBeginEffect: {})
-        let query = try XCTUnwrap(URLComponents(url: receipt.document.requestedURL, resolvingAgainstBaseURL: false)?.queryItems)
-        XCTAssertEqual(query.map(\.name), ["q", "cabin", "server"])
-        XCTAssertEqual(query.map(\.value), ["Café & music", "P", "private-state"])
+        // HTML GET forms use application/x-www-form-urlencoded: spaces are
+        // '+', while a literal ampersand remains an escaped field value.
+        let query = try XCTUnwrap(URLComponents(url: receipt.document.requestedURL, resolvingAgainstBaseURL: false)?.percentEncodedQuery)
+        XCTAssertEqual(query, "q=Caf%C3%A9+%26+music&cabin=P&server=private-state")
         let replay = try await navigation.openObservedDestination(target, promptDigest: promptDigest, operationID: operationID,
             willBeginEffect: { XCTFail("A verified form query must not be dispatched twice") })
         XCTAssertEqual(replay, receipt)
@@ -2049,16 +2050,21 @@ final class ComputerUseBrowserDOMTests: XCTestCase {
         let fields = try await fixture.target.fields(), field = try XCTUnwrap(fields.first)
         let contract = try ComputerUseTextTaskContract(taskID: "fixture", prompt: "Controlled exact query repeated twice", fields: fields,
             edits: Array(repeating: .init(targetID: field.snapshot.targetID, mode: .replaceAll, text: "Paris"), count: 2))
-        func recovered(_ status: ComputerUseTaskStepStatus) throws -> ComputerUseTextTask {
+        func recovered(_ statuses: [ComputerUseTaskStepStatus]) throws -> ComputerUseTextTask {
             try fixture.textTask(contract: contract, recovered: .init(taskID: contract.taskID, promptDigest: contract.promptDigest,
-                contractDigest: contract.contractDigest, stepIDs: contract.steps.map(\.id), statuses: [status, status]))
+                contractDigest: contract.contractDigest, stepIDs: contract.steps.map(\.id), statuses: statuses))
         }
-        for status in [ComputerUseTaskStepStatus.planned, .attempted, .uncertain] {
-            XCTAssertThrowsError(try recovered(status).verifiedContinuation()) {
+        // A sequential journal can have one attempted/uncertain step followed
+        // by a planned suffix; two active steps would be a malformed journal.
+        let unfinishedPrefixes: [[ComputerUseTaskStepStatus]] = [
+            [.planned, .planned], [.attempted, .planned], [.uncertain, .planned],
+        ]
+        for prefix in unfinishedPrefixes {
+            XCTAssertThrowsError(try recovered(prefix).verifiedContinuation()) {
                 XCTAssertEqual($0 as? ComputerUseTextTaskError, .incompleteOutcome)
             }
         }
-        let continuation = try recovered(.verified).verifiedContinuation()
+        let continuation = try recovered([.verified, .verified]).verifiedContinuation()
         XCTAssertEqual(continuation.finalValues, [field.snapshot.targetID: "Paris"])
         XCTAssertFalse(String(reflecting: continuation).contains("Paris"))
         let evidence = try await fixture.browser.observePage(document: fixture.document)

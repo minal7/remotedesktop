@@ -698,14 +698,15 @@ public struct ComputerUseClarificationAnswerPolicy: Codable, Equatable, Sendable
             }
         }
         public func accepts(_ answer: String) -> Bool {
-            guard answer.utf8.count <= 32 * 1_024 else { return false }
+            guard answer.utf8.count <= 32 * 1_024, !Self.containsFormatControls(answer) else { return false }
             switch self {
             case .adultCount, .childCount: return count(in: answer) != nil
             case .partyCounts: return Self.partyLiteral(in: Self.answerSource(answer)) != nil
             }
         }
         public func count(in answer: String) -> Int64? {
-            guard self != .partyCounts, answer.utf8.count <= 32 * 1_024 else { return nil }
+            guard self != .partyCounts, answer.utf8.count <= 32 * 1_024,
+                  !Self.containsFormatControls(answer) else { return nil }
             let source = Self.answerSource(answer)
             let category = self == .adultCount ? "adults?" : "(?:children|child)"
             let pattern = #"(?:exactly\s+)?"# + Self.numberPattern + #"\s+"# + category
@@ -721,7 +722,7 @@ public struct ComputerUseClarificationAnswerPolicy: Codable, Equatable, Sendable
             return #"(?:for\s+)?(?:exactly\s+)?"# + partyComponentPattern + separator + partyComponentPattern
         }
         public static func partyLiteral(in source: String) -> PartyCounts? {
-            guard source.utf8.count <= 32 * 1_024,
+            guard source.utf8.count <= 32 * 1_024, !containsFormatControls(source),
                   let match = completeMatch(partyLiteralPattern, source: source) else { return nil }
             let captures = (1...4).compactMap { index -> String? in
                 guard let range = Range(match.range(at: index), in: source) else { return nil }
@@ -744,6 +745,9 @@ public struct ComputerUseClarificationAnswerPolicy: Codable, Equatable, Sendable
             guard let expression = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]),
                   let match = expression.firstMatch(in: source, range: range), match.range == range else { return nil }
             return match
+        }
+        private static func containsFormatControls(_ source: String) -> Bool {
+            source.unicodeScalars.contains { $0.properties.generalCategory == .format }
         }
         private static func answerSource(_ answer: String) -> String {
             var source = answer.trimmingCharacters(in: .whitespacesAndNewlines)

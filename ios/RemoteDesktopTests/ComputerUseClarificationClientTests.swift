@@ -572,6 +572,18 @@ final class ComputerUseClarificationClientTests: XCTestCase {
         try await fixture.wait { fixture.store.load(hostID: "HOST-ID", pairingCode: "123456")?.question?.draft == draft }
         let saved = try XCTUnwrap(fixture.store.load(hostID: "HOST-ID", pairingCode: "123456")?.question)
         XCTAssertEqual(saved.answerPolicy, policy); XCTAssertEqual(saved.reference, reference)
+        let invisibleControlDraft = "3 adults and 0 children\u{200B}"
+        fixture.model.updateQuestionDraft(invisibleControlDraft)
+        XCTAssertFalse(fixture.model.sendPrompt(invisibleControlDraft), "A zero-width format character must not make a valid party answer pass")
+        XCTAssertEqual(fixture.model.composerMode, mode)
+        XCTAssertFalse(fixture.model.hasActivePrompt)
+        XCTAssertEqual(fixture.model.statusText, policy.format?.instruction)
+        try await fixture.wait { fixture.store.load(hostID: "HOST-ID", pairingCode: "123456")?.question?.draft == invisibleControlDraft }
+        let retained = try XCTUnwrap(fixture.store.load(hostID: "HOST-ID", pairingCode: "123456")?.question)
+        XCTAssertEqual(retained.reference, reference)
+        XCTAssertTrue(try XCTUnwrap(retained.draft).utf8.elementsEqual(invisibleControlDraft.utf8))
+        let sentBeforeCorrection = await fixture.channel.sentCount()
+        XCTAssertEqual(sentBeforeCorrection, 1, "The invalid answer remains local and cannot create a new prompt")
         let correctedText = "zero children and 3 adults"
         XCTAssertTrue(fixture.model.sendPrompt(correctedText))
         let corrected = try await fixture.channel.prompt(at: 1), request = try ComputerUsePromptRequest.decodeBody(corrected.body)
@@ -620,7 +632,17 @@ final class ComputerUseClarificationClientTests: XCTestCase {
         let saved = try XCTUnwrap(fixture.store.load(hostID: "HOST-ID", pairingCode: "123456")?.question)
         XCTAssertEqual(saved.reference, reference); XCTAssertEqual(saved.answerPolicy, policy)
         XCTAssertTrue(try XCTUnwrap(saved.draft).utf8.elementsEqual(draft.utf8))
-        let sent = await fixture.channel.sentCount(); XCTAssertEqual(sent, 1)
+        let invisibleControlDraft = "0 children\u{200B}"
+        fixture.model.updateQuestionDraft(invisibleControlDraft)
+        XCTAssertFalse(fixture.model.sendPrompt(invisibleControlDraft), "A zero-width format character must not make a valid count pass")
+        XCTAssertEqual(fixture.model.composerMode, mode)
+        XCTAssertFalse(fixture.model.hasActivePrompt)
+        XCTAssertEqual(fixture.model.statusText, policy.format?.instruction)
+        try await fixture.wait { fixture.store.load(hostID: "HOST-ID", pairingCode: "123456")?.question?.draft == invisibleControlDraft }
+        let retained = try XCTUnwrap(fixture.store.load(hostID: "HOST-ID", pairingCode: "123456")?.question)
+        XCTAssertEqual(retained.reference, reference)
+        XCTAssertTrue(try XCTUnwrap(retained.draft).utf8.elementsEqual(invisibleControlDraft.utf8))
+        let sent = await fixture.channel.sentCount(); XCTAssertEqual(sent, 1, "The invalid answer remains local and cannot create a new prompt")
         XCTAssertTrue(fixture.model.sendPrompt("zero children"))
         let corrected = try await fixture.channel.prompt(at: 1), request = try ComputerUsePromptRequest.decodeBody(corrected.body)
         XCTAssertEqual(request.prompt, "zero children"); XCTAssertEqual(request.clarification, reference)

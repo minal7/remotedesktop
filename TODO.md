@@ -25,3 +25,6 @@ Known limitations:
 - Owner approved a draft PR after local gates pass (October12), resolving the G7/G10 chronology. Merge and release workflow remain owner actions.
 
 - R6 timing experiment compiled/tested: per-session fixture deadline reduced two synthetic ownership tests from60.26s to0.77s combined. Production30s, single-Cmd+N and fail-closed assertions remain unchanged.
+
+- R6 clarification/form-query repair compiled/tested: focused RED reproduced4/4 failures; GREEN21/21 host and3/3 iOS, zero skips. Raw invisible format controls are rejected before trimming; invalid iPhone answers retain exact drafts and stay unsent.
+- Corrected test-only HTML form query interpretation and sequential journal fixtures; production encoding, continuation authority and no-replay checks remain intact.
