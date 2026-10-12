@@ -5,15 +5,11 @@ import XCTest
 final class LlamaSemanticActionRouterTests: XCTestCase {
     @MainActor
     func testEveryBudgetCandidateKeepsTheCompleteOrderedActionSequence() throws {
-        let raw = ["OPEN_APP [Safari]", "CLICK [[1,2]]", "TYPE [private first value]", "ENTER",
-            "CLICK [[3,4]]", "TYPE [private second value]", "ENTER", "SCROLL [DOWN]", "SCROLL [UP]", "SCROLL [DOWN]"]
         let expected = ["OPEN_APP [Safari]", "CLICK", "TYPE", "ENTER", "CLICK", "TYPE", "ENTER", "SCROLL [DOWN]", "SCROLL [UP]", "SCROLL [DOWN]"]
-        let history = OSAtlasComputerUseExecutor.semanticRoutingHistory(raw)
-        XCTAssertEqual(history, expected)
         let request = OSAtlasSemanticRoutingRequest(task: "Find travel options, then compare the concert dates and movie times.",
             conversation: (1...12).map { .init(role: .user, text: "Earlier context \($0)") },
             frontmostApplication: "Safari", visibleText: (1...64).map { "Visible row \($0)" }.joined(separator: "\n"),
-            history: history, availableDirectives: [.click, .type, .scroll, .answer])
+            history: expected, availableDirectives: [.click, .type, .scroll, .answer])
         let candidates = try LlamaSemanticActionRouter.semanticRequests(for: request)
         XCTAssertGreaterThan(candidates.count, 1)
         for candidate in candidates {
@@ -42,8 +38,7 @@ final class LlamaSemanticActionRouterTests: XCTestCase {
     func testHistoryOverflowIsRejectedWithoutCreatingAnApparentlyFreshSuffix() throws {
         let limit = OSAtlasSemanticRoutingRequest.maximumHistoryEntries
         XCTAssertEqual(limit, 128)
-        let history = OSAtlasComputerUseExecutor.semanticRoutingHistory(Array(repeating: "CLICK [[1,2]]", count: limit + 1))
-        XCTAssertEqual(history, Array(repeating: "CLICK", count: limit + 1))
+        let history = Array(repeating: "CLICK", count: limit + 1)
         let overflow = OSAtlasSemanticRoutingRequest(task: "Continue the exact remaining goal.", frontmostApplication: "Safari",
             visibleText: "Results", history: history, availableDirectives: [.click])
         XCTAssertEqual(overflow.history.count, limit + 1)
@@ -64,9 +59,10 @@ final class LlamaSemanticActionRouterTests: XCTestCase {
         let context = try ComputerUseBrowserPlanningContext(page: page)
         let request = OSAtlasSemanticRoutingRequest(task: "Click Prices.", frontmostApplication: nil,
             visibleText: "Prices", browserPageContext: context, history: [], availableDirectives: [.click])
-        let paired = OSAtlasComputerUseExecutor.semanticCandidateRoutingRequests(for: request, rawHistory: ["CLICK", "TYPE [private history payload]"])
-        XCTAssertEqual(paired.proposalRequest.browserPageContext, context)
-        XCTAssertEqual(paired.selectorRequest.browserPageContext, context)
+        let proposalRequest = request.replacingHistory(["CLICK", "TYPE"])
+        let selectorRequest = request.replacingHistory(["CLICK", "TYPE"])
+        XCTAssertEqual(proposalRequest.browserPageContext, context)
+        XCTAssertEqual(selectorRequest.browserPageContext, context)
         XCTAssertEqual(request.replacingHistory(["CLICK"]).browserPageContext, context)
         let candidates = try OSAtlasSemanticActionCandidateSet.deterministic(caseID: "browser-context",
             routes: [.init(directive: .click, argument: .targetHint("Prices"))])
@@ -169,10 +165,10 @@ final class LlamaSemanticActionRouterTests: XCTestCase {
     }
 
     func testCanonicalSystemAndUserPromptSnapshotsOmitOpenedApplications() throws {
-        XCTAssertEqual(LlamaSemanticActionRouter.systemPrompt.utf8.count, 2_174)
+        XCTAssertEqual(LlamaSemanticActionRouter.systemPrompt.utf8.count, 2_334)
         XCTAssertEqual(
             MCPDigest.sha256(Data(LlamaSemanticActionRouter.systemPrompt.utf8)),
-            "ac12d6d7126a1339ebbc9ca707340ca52cde33b463aac61b1604c4d34e877961")
+            "21e803d095c06b2f5ea449bf2bbc4981962ec438a0ec5e020b8fa148aa8d9216")
 
         let request = OSAtlasSemanticRoutingRequest(
             task: "Copy the visible account total.",
@@ -644,11 +640,10 @@ final class LlamaSemanticActionRouterTests: XCTestCase {
         let authDefinitions = SemanticNativeToolWireContract.definitions(
             for: authRequest,
             includeEvaluatorAbstain: true)
-        let compactedHistory = OSAtlasComputerUseExecutor
-            .semanticRoutingHistory([
-                "OPEN_APP [Notes]", "TYPE [secret]", "CLICK [[1,2]]",
-                "SCROLL [DOWN]", "SCROLL [UP]", "ENTER",
-            ])
+        let compactedHistory = [
+            "OPEN_APP [Notes]", "TYPE", "CLICK",
+            "SCROLL [DOWN]", "SCROLL [UP]", "ENTER",
+        ]
         let snapshot = MCPJSONValue.object([
             "contract_version": .string("4.0.0"),
             "system_prompt": .string(LlamaSemanticActionRouter.systemPrompt),

@@ -9,6 +9,8 @@ settings:
   SWIFT_VERSION: "5.10"
   SWIFT_STRICT_CONCURRENCY: targeted
   ENABLE_USER_SCRIPT_SANDBOXING: YES
+  MARKETING_VERSION: 0.2.1
+  CURRENT_PROJECT_VERSION: 2
 
 packages:
   LiveKitWebRTC:
@@ -59,6 +61,11 @@ targets:
       - path: RemoteDesktopHost/Resources/ComputerUseSkills
         type: folder
         buildPhase: resources
+      - path: SafariBridgeBroker/LaunchAgent.plist
+        buildPhase:
+          copyFiles:
+            destination: wrapper
+            subpath: Contents/Library/LaunchAgents
     dependencies:
       - package: LiveKitWebRTC
         product: LiveKitWebRTC
@@ -66,6 +73,13 @@ targets:
         product: MCP
       - package: SwiftSystem
         product: SystemPackage
+      - target: RemoteDesktopSafariWebExtension
+        embed: true
+      - target: SafariBridgeBroker
+        embed: true
+        link: false
+        copy:
+          destination: executables
     postBuildScripts:
       - path: scripts/package_llama_runtime.sh
         name: Package and Sign Pinned llama.cpp Runtime
@@ -108,31 +122,21 @@ targets:
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         NSAudioCaptureUsageDescription: "Remote Desktop Host captures your Mac's system audio so sound playing on the host can be heard on your client device."
         NSMicrophoneUsageDescription: "Remote Desktop Host uses the microphone permission because the host audio pipeline relies on the system audio engine's recording path to forward your Mac's sound to your client device. The app does not transmit microphone audio."
-        NSAppleEventsUsageDescription: "Remote Desktop Host uses Apple events only after your approval to open an email draft or send the exact email shown on your mobile device."
+        NSAppleEventsUsageDescription: "Remote Desktop Host uses Apple events to create requested Mail drafts and, after your approval, send the exact email shown on your mobile device."
+        NSContactsUsageDescription: "Remote Desktop Host looks up people you name when preparing an email on your Mac."
         NSHumanReadableCopyright: "Copyright © 2026"
         NSSupportsAutomaticTermination: false
         NSSupportsSuddenTermination: false
+        SafariBridgeHostIdentifier: $(HOST_BUNDLE_IDENTIFIER)
+        SafariBridgeExtensionIdentifier: $(HOST_BUNDLE_IDENTIFIER).safari
+        SafariBridgeHelperIdentifier: $(HOST_BUNDLE_IDENTIFIER).bridge-broker
     # Sandbox is intentionally OFF: Accessibility-based CGEvent
     # injection is incompatible with the App Sandbox. This host
     # ships as a signed, notarized user-installed agent (not App
     # Store) — same model as every other remote-control tool.
-    entitlements:
-      path: RemoteDesktopHost/RemoteDesktopHost.entitlements
-      properties:
-        com.apple.developer.icloud-container-identifiers:
-          - iCloud.com.threadmark.remotedesktop
-        # Directly-distributed (Developer ID, non-App-Store) builds pick
-        # their CloudKit environment from this entitlement. Without it the
-        # app defaults to Development, which is invisible to the App
-        # Store/TestFlight iOS client (always Production). The value is
-        # supplied per build configuration (see ICLOUD_CONTAINER_ENVIRONMENT
-        # below): Debug = Development (pairs with an Xcode-run iOS client),
-        # Release = Production (pairs with the TestFlight/App Store client).
-        com.apple.developer.icloud-container-environment: $(ICLOUD_CONTAINER_ENVIRONMENT)
-        com.apple.developer.icloud-services:
-          - CloudKit
-        com.apple.security.automation.apple-events: true
-        com.apple.security.device.audio-input: true
+    # Keep the tracked entitlements file as the source of truth. A host-only
+    # override lets local verification preserve its TCC identity without
+    # applying host entitlements to the embedded extension or helper.
     settings:
       base:
         CODE_SIGN_IDENTITY: Apple Development
@@ -143,18 +147,66 @@ targets:
         # that tree, so it must be disabled for this build-only phase. This is
         # unrelated to the app sandbox, hardened runtime, or runtime security.
         ENABLE_USER_SCRIPT_SANDBOXING: NO
-        PRODUCT_BUNDLE_IDENTIFIER: com.threadmark.remotedesktop.host
-        MARKETING_VERSION: 0.2.1
-        CURRENT_PROJECT_VERSION: 2
+        PRODUCT_BUNDLE_IDENTIFIER: $(HOST_BUNDLE_IDENTIFIER)
+        HOST_BUNDLE_IDENTIFIER: com.threadmark.remotedesktop.host
+        HOST_CODE_SIGN_ENTITLEMENTS: RemoteDesktopHost/RemoteDesktopHost.entitlements
         ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
         COMBINE_HIDPI_IMAGES: YES
         ENABLE_HARDENED_RUNTIME: YES
         MACOSX_DEPLOYMENT_TARGET: "14.0"
       configs:
         Debug:
+          CODE_SIGN_ENTITLEMENTS: $(HOST_CODE_SIGN_ENTITLEMENTS)
           ICLOUD_CONTAINER_ENVIRONMENT: Development
         Release:
+          CODE_SIGN_ENTITLEMENTS: $(HOST_CODE_SIGN_ENTITLEMENTS)
           ICLOUD_CONTAINER_ENVIRONMENT: Production
+
+  RemoteDesktopSafariWebExtension:
+    type: app-extension
+    platform: macOS
+    sources:
+      - path: SafariWebExtensionNative
+      - path: RemoteDesktopHost/SafariBridgeContract.swift
+      - path: RemoteDesktopHost/SafariBridgeXPC.swift
+      - path: SafariBridgeBroker/SafariBridgeXPCClient.swift
+      - path: SafariWebExtension/Resources
+        buildPhase: resources
+    settings:
+      CODE_SIGN_IDENTITY: Apple Development
+      CODE_SIGN_STYLE: Automatic
+      DEVELOPMENT_TEAM: V9AX39SPJD
+      PRODUCT_NAME: RemoteDesktopSafariWebExtension
+      PRODUCT_BUNDLE_IDENTIFIER: $(HOST_BUNDLE_IDENTIFIER).safari
+      HOST_BUNDLE_IDENTIFIER: com.threadmark.remotedesktop.host
+      INFOPLIST_FILE: SafariWebExtensionNative/Info.plist
+      CODE_SIGN_ENTITLEMENTS: SafariWebExtensionNative/SafariWebExtension.entitlements
+      ENABLE_HARDENED_RUNTIME: YES
+      APPLICATION_EXTENSION_API_ONLY: YES
+      MACOSX_DEPLOYMENT_TARGET: "14.0"
+      SKIP_INSTALL: YES
+
+  SafariBridgeBroker:
+    type: tool
+    platform: macOS
+    sources:
+      - path: SafariBridgeBroker/SafariBridgeBrokerMain.swift
+      - path: RemoteDesktopHost/SafariBridgeContract.swift
+      - path: RemoteDesktopHost/SafariBridgeXPC.swift
+    settings:
+      CODE_SIGN_IDENTITY: Apple Development
+      CODE_SIGN_STYLE: Automatic
+      DEVELOPMENT_TEAM: V9AX39SPJD
+      PRODUCT_NAME: RemoteDesktopBridgeBroker
+      PRODUCT_BUNDLE_IDENTIFIER: $(HOST_BUNDLE_IDENTIFIER).bridge-broker
+      HOST_BUNDLE_IDENTIFIER: com.threadmark.remotedesktop.host
+      GENERATE_INFOPLIST_FILE: NO
+      INFOPLIST_FILE: SafariBridgeBroker/Info.plist
+      CREATE_INFOPLIST_SECTION_IN_BINARY: YES
+      CODE_SIGN_ENTITLEMENTS: SafariBridgeBroker/SafariBridgeBroker.entitlements
+      ENABLE_HARDENED_RUNTIME: YES
+      MACOSX_DEPLOYMENT_TARGET: "14.0"
+      SKIP_INSTALL: YES
 
   # Compile the shipped phone session state for composed app-hosted tests.
   # This framework is a test dependency only; it is not embedded in the host app.

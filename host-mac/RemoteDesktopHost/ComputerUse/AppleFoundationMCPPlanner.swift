@@ -1144,7 +1144,7 @@ struct AppleFoundationVisualActionRouter: OSAtlasSemanticActionRouting {
         availableDirectives: [OSAtlasExplicitActionDirective]
     ) -> OSAtlasSemanticActionRoute? {
         guard trailingWaitCount(in: history)
-                < OSAtlasComputerUseExecutor
+                < ComputerUsePendingObservationPolicy
                     .maximumConsecutivePendingObservations,
               hostVerifiesPendingWait(
                 for: task,
@@ -2755,7 +2755,7 @@ struct AppleFoundationVisualActionRouter: OSAtlasSemanticActionRouting {
         }
         let trailing = history[history.index(after: enterIndex)...]
         guard trailing.allSatisfy({ $0 == "WAIT" }),
-              trailing.count < OSAtlasComputerUseExecutor
+              trailing.count < ComputerUsePendingObservationPolicy
                 .maximumConsecutivePendingObservations else {
             return nil
         }

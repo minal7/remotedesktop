@@ -4,6 +4,10 @@ import CoreText
 import XCTest
 @testable import RemoteDesktopHost
 
+private enum FixtureRenderingError: Error {
+    case couldNotRenderFixture
+}
+
 enum OSAtlasAcceptanceFixtureRenderer {
     private static let width = 448
     private static let height = 448
@@ -835,11 +839,11 @@ enum OSAtlasAcceptanceFixtureRenderer {
             bytesPerRow: width * 4,
             space: CGColorSpaceCreateDeviceRGB(),
             bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else {
-            throw OSAtlasAcceptanceFailure.couldNotRenderFixture
+            throw FixtureRenderingError.couldNotRenderFixture
         }
         drawing(canvas)
         guard let image = canvas.makeImage() else {
-            throw OSAtlasAcceptanceFailure.couldNotRenderFixture
+            throw FixtureRenderingError.couldNotRenderFixture
         }
         return ComputerUseScreenObservation(
             image: CIImage(cgImage: image),

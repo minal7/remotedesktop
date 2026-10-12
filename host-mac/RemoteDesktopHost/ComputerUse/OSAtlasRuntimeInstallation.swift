@@ -39,8 +39,6 @@ struct OSAtlasResolvedRuntimeInstallation: Equatable, Sendable {
 enum OSAtlasResolvedRuntimePackage: Equatable, Sendable {
     case fara(ComputerUseFaraRuntimeInputs)
     case holo(ComputerUseHoloRuntimeInputs)
-    case visualOnly(OSAtlasLlamaRuntimeInputs)
-    case visualAndSemantic(OSAtlasResolvedRuntimeInstallation)
 }
 
 /// Converts a verified, data-only model receipt into the exact local inputs
@@ -200,9 +198,9 @@ struct OSAtlasRuntimeInputResolver {
             semanticRouterModelURL: semanticURL)
     }
 
-    /// Resolves exactly the package shape declared by the pinned manifest.
-    /// Fara uses its two-file shape. Legacy visual packages may additionally
-    /// contain exactly one semantic artifact; other shapes fail closed.
+    /// Resolves only browser-trained packages that remain in the shipped
+    /// visual route. Legacy OS-Atlas visual receipts are rejected before any
+    /// model activation can occur.
     func resolveAvailablePackage(
         receipt: ComputerUseInstallationReceipt,
         runtimeDirectoryURL: URL,
@@ -216,23 +214,7 @@ struct OSAtlasRuntimeInputResolver {
             return .holo(try resolveHolo(receipt: receipt, runtimeDirectoryURL: runtimeDirectoryURL,
                 enclosingBundleURL: enclosingBundleURL))
         }
-        let semanticArtifactCount = manifest.modelArtifacts.filter {
-            $0.kind == .semanticRouterModel
-        }.count
-        switch semanticArtifactCount {
-        case 0:
-            return .visualOnly(try resolve(
-                receipt: receipt,
-                runtimeDirectoryURL: runtimeDirectoryURL,
-                enclosingBundleURL: enclosingBundleURL))
-        case 1:
-            return .visualAndSemantic(try resolvePackage(
-                receipt: receipt,
-                runtimeDirectoryURL: runtimeDirectoryURL,
-                enclosingBundleURL: enclosingBundleURL))
-        default:
-            throw OSAtlasRuntimeInstallationError.invalidReceipt
-        }
+        throw OSAtlasRuntimeInstallationError.invalidReceipt
     }
 
     /// The receipt must already have passed installer checksum verification.
@@ -697,20 +679,6 @@ final class OSAtlasVisualExecutorLoader: ComputerUseVisualExecutorLoading {
                 await runtime.shutdown()
                 throw error
             }
-        case .visualOnly(let inputs):
-            return try await OSAtlasComputerUseExecutor.load(
-                inputs: inputs,
-                runtime: runtime,
-                browserActionAttestationLedger:
-                    browserActionAttestationLedger,
-                progress: progress)
-        case .visualAndSemantic(let installation):
-            return try await OSAtlasComputerUseExecutor.load(
-                installation: installation,
-                runtime: runtime,
-                browserActionAttestationLedger:
-                    browserActionAttestationLedger,
-                progress: progress)
         }
     }
 

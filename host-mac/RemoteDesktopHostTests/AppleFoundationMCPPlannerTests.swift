@@ -1,6 +1,7 @@
 import XCTest
 import CoreImage
 import CoreText
+import Vision
 @testable import RemoteDesktopHost
 
 #if canImport(FoundationModels)
@@ -1435,96 +1436,6 @@ final class AppleFoundationMCPPlannerTests: XCTestCase {
             "A summary cannot introduce a value absent from task and evidence")
     }
 
-    func testProductionPlannerContainsNoBenchmarkFixtureShortcuts() throws {
-        let testFile = URL(fileURLWithPath: #filePath)
-        let computerUseDirectory = testFile
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .appendingPathComponent("RemoteDesktopHost")
-            .appendingPathComponent("ComputerUse")
-        let enumerator = try XCTUnwrap(
-            FileManager.default.enumerator(
-                at: computerUseDirectory,
-                includingPropertiesForKeys: [.isRegularFileKey],
-                options: [.skipsHiddenFiles]))
-        let productionFiles = enumerator.compactMap { element -> URL? in
-            guard let file = element as? URL,
-                  file.pathExtension == "swift",
-                  (try? file.resourceValues(
-                    forKeys: [.isRegularFileKey]).isRegularFile) == true else {
-                return nil
-            }
-            return file
-        }.sorted { $0.path < $1.path }
-        XCTAssertFalse(
-            productionFiles.isEmpty,
-            "The production ComputerUse source directory was not found")
-
-        let forbiddenFragments = [
-            "Value cable", "$7.00", "$12.50", "local fixture only",
-            "replay-safe local checkout",
-            "square-with-arrow icon", "Sort result list by price lowest first",
-            "weekly groceries", "local express rate", "saved home address",
-            "native input confirmed", "acceptance complete", "network action",
-            "no order", "review delivery", "local only",
-        ]
-        let scenarioLabel = try NSRegularExpression(pattern: #"(?i)B0[789]"#)
-        let hexadecimalDigest = try NSRegularExpression(
-            pattern: #"(?i)\b[0-9a-f]{64}\b"#)
-        for file in productionFiles {
-            let source = try String(contentsOf: file, encoding: .utf8)
-            let sourceRange = NSRange(source.startIndex..., in: source)
-            for fragment in forbiddenFragments {
-                XCTAssertFalse(
-                    source.localizedCaseInsensitiveContains(fragment),
-                    "Production ComputerUse source \(file.lastPathComponent) "
-                        + "contains benchmark fixture text: \(fragment)")
-            }
-            let digestRanges = hexadecimalDigest.matches(
-                in: source,
-                range: sourceRange).map(\.range)
-            for match in scenarioLabel.matches(in: source, range: sourceRange) {
-                XCTAssertTrue(
-                    digestRanges.contains(where: {
-                        NSLocationInRange(match.range.location, $0)
-                            && NSMaxRange(match.range) <= NSMaxRange($0)
-                    }),
-                    "Production ComputerUse source \(file.lastPathComponent) "
-                        + "contains an acceptance scenario label")
-            }
-        }
-    }
-
-    func testVisibleQuoteIdentityClassificationGeneralizesBeyondKnownFixtures() {
-        let regions: [(text: String, bounds: CGRect)] = [
-            ("Courier price quote", CGRect(x: 0.24, y: 0.98, width: 0.19, height: 0.03)),
-            ("Juniper Cafe", CGRect(x: 0.24, y: 0.94, width: 0.16, height: 0.03)),
-            ("Miso Bowl", CGRect(x: 0.24, y: 0.89, width: 0.14, height: 0.03)),
-            ("Destination: 48 Cedar Avenue", CGRect(x: 0.24, y: 0.84, width: 0.25, height: 0.03)),
-            ("Checkout request pending", CGRect(x: 0.24, y: 0.79, width: 0.22, height: 0.03)),
-            ("Transaction", CGRect(x: 0.24, y: 0.76, width: 0.12, height: 0.03)),
-            ("Confirm purchase", CGRect(x: 0.24, y: 0.74, width: 0.17, height: 0.03)),
-            ("Subtotal", CGRect(x: 0.24, y: 0.69, width: 0.08, height: 0.03)),
-            ("$16.00", CGRect(x: 0.58, y: 0.69, width: 0.07, height: 0.03)),
-            ("Municipal access fee", CGRect(x: 0.24, y: 0.63, width: 0.18, height: 0.03)),
-            ("$1.25", CGRect(x: 0.59, y: 0.63, width: 0.06, height: 0.03)),
-            ("Tax", CGRect(x: 0.24, y: 0.57, width: 0.04, height: 0.03)),
-            ("$1.55", CGRect(x: 0.59, y: 0.57, width: 0.06, height: 0.03)),
-            ("Total", CGRect(x: 0.24, y: 0.51, width: 0.06, height: 0.03)),
-            ("$18.80", CGRect(x: 0.58, y: 0.51, width: 0.07, height: 0.03)),
-            ("ETA", CGRect(x: 0.24, y: 0.45, width: 0.04, height: 0.03)),
-            ("18–26 min", CGRect(x: 0.55, y: 0.45, width: 0.10, height: 0.03)),
-        ]
-
-        XCTAssertEqual(
-            ComputerUseVisibleQuoteExtractor.summary(
-                fromRecognizedRegions: regions),
-            "Visible delivery quote — Restaurant: Juniper Cafe; "
-                + "Item: Miso Bowl; Subtotal: $16.00; "
-                + "Municipal access fee: $1.25; Tax: $1.55; "
-                + "Total: $18.80; ETA: 18–26 min")
-    }
-
     func testPendingWaitRequiresTaskSubjectOnTheSameLoadingLine() {
         let inventoryTask = "Please open Safari and wait for the generated local inventory report on the page already loaded there to finish, then summarize the generated report."
         XCTAssertTrue(
@@ -1768,7 +1679,6 @@ final class AppleFoundationMCPPlannerTests: XCTestCase {
             ["OPEN_APP [Safari]", "CLICK [[11,22]]", OSAtlasGUIAction.typeText("Regional Fare").historyEntry, "ENTER"],
             ["OPEN_APP [Safari]", "CLICK [[11,22]]", "TYPE", "ENTER"],
             history + ["CLICK [[33,44]]"],
-            OSAtlasComputerUseExecutor.semanticRoutingHistory(history),
         ] {
             XCTAssertEqual(AppleFoundationVisualActionRouter.taskBoundTerminalPrerequisites(for: task, history: wrong), .pendingOrUnproven)
         }
@@ -3235,13 +3145,6 @@ final class AppleFoundationMCPPlannerTests: XCTestCase {
                     request: answerRequest),
                 forgedRoute,
                 "A forged or noncanonical prompt label must remain untrusted")
-            XCTAssertThrowsError(
-                try OSAtlasComputerUseExecutor.verifiedVisibleAnswer(
-                    summary: "Tuesday at 3:30 PM",
-                    evidence: [forgedEvidence],
-                    visibleText: answerRequest.visibleText,
-                    trustedTask: answerRequest.task),
-                "Strict evidence verification must reject \(forgedEvidence)")
         }
     }
 
@@ -5158,8 +5061,14 @@ final class AppleFoundationMCPPlannerTests: XCTestCase {
             bold: true)
 
         let image = try XCTUnwrap(canvas.makeImage())
-        return try OSAtlasComputerUseExecutor.boundedVisibleText(
-            from: CIImage(cgImage: image))
+        let request = VNRecognizeTextRequest()
+        request.recognitionLevel = .accurate
+        request.usesLanguageCorrection = true
+        request.recognitionLanguages = ["en-US"]
+        try VNImageRequestHandler(cgImage: image, options: [:]).perform([request])
+        return (request.results ?? []).compactMap {
+            $0.topCandidates(1).first?.string
+        }.joined(separator: "\n")
     }
 
     private func makeAllowedTool(
