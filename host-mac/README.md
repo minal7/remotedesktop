@@ -310,40 +310,11 @@ acceptance result.
   Safari History, Everyday Planner,
   Reminders/Calendar/Contacts, or MCP UI. It deliberately performs no OCR
   during the person's private sign-in window.
-- `host-mac/scripts/run_osatlas_acceptance.sh` runs a hidden deterministic
-  parser/executor/safety/native-input matrix by default. That matrix covers the
-  full host grammar: 16 semantic operations across 17 raw variants.
-- `host-mac/scripts/run_osatlas_acceptance.sh --actual-model` additionally
-  begins with a final-package release gate that resolves
-  `ComputerUseArtifactManifest.current` through the production package
-  resolver, loads its installed Granite semantic GGUF and OS-Atlas Pro through
-  the production multi-model API, and forces Apple's model unavailable. A
-  purchase scenario must then pass strict Granite tool decoding, OS-Atlas point
-  grounding, and host approval validation without posting input. Until the
-  immutable V4 semantic artifact is published in the production manifest and
-  installed, that test reports the prerequisite explicitly instead of falling
-  back to the visual-only package. The remaining hidden semantic matrix covers
-  all 16 host actions:
-  direct actions use the typed plan, while pointer actions require one or two
-  real OS-Atlas point-grounding inferences. Separate stateful delivery
-  component tests retain the legacy raw parser in a test-only configuration;
-  they are not production-equivalent fallback tests. Production loading always
-  installs the semantic router and disables explicit raw-action compatibility.
-  A separate 15-scenario regular-user matrix forces the Apple planner
-  unavailable and classifies each terminal state as `task completed`, `user
-  intervention required`, or `unable to complete`. It includes authentication,
-  purchase approval, persistent-error, platform-incompatibility, and an
-  unrecognized-operation fail-closed boundary. Every raw checkpoint response
-  in that matrix must be a `CLICK` point carrier for a typed pointer route;
-  direct and terminal routes require zero checkpoint calls.
-  These tests do not capture the desktop, post system input, or advance
-  checkout.
-- Live DoorDash quote reading requires `--live-doordash`,
-  `--allow-visible-ui`, and exact `DOORDASH_EXPECTED_ITEM`,
-  `DOORDASH_EXPECTED_TOTAL`, and `DOORDASH_EXPECTED_ETA` values. It reads a
-  review page prepared by the user and uses local Vision OCR for the itemized
-  quote. It intercepts all input, so it cannot advance checkout or place an
-  order. A login wall always pauses for user takeover.
+- `host-mac/scripts/run_osatlas_acceptance.sh` runs the hidden deterministic
+  OS-Atlas compatibility tests selected by the checked-in inventory. It
+  defaults to Debug and accepts `--configuration Release`; the inventory is
+  verified before and after the test run, with automatic package resolution
+  disabled and the resolved package versions enforced.
 
 See [AcceptanceFixtures/README.md](AcceptanceFixtures/README.md) for exact
 commands, mode boundaries, privacy guidance, and the MCP operation matrix.

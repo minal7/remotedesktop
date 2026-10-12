@@ -1,5 +1,6 @@
 import os
 import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -9,46 +10,18 @@ SCRIPT = ROOT / "host-mac/scripts/run_osatlas_acceptance.sh"
 
 
 class OSAtlasAcceptanceRunnerContractTests(unittest.TestCase):
-    def run_script(self, *arguments: str) -> subprocess.CompletedProcess[str]:
+    def run_script(self, *arguments: str, path: str | None = None) -> subprocess.CompletedProcess[str]:
+        environment = os.environ.copy()
+        if path is not None:
+            environment["PATH"] = path
         return subprocess.run(
             [str(SCRIPT), *arguments],
             cwd=ROOT,
             capture_output=True,
             text=True,
             check=False,
+            env=environment,
         )
-
-    def test_actual_model_requires_explicit_release_before_build(self) -> None:
-        defaulted = self.run_script("--actual-model")
-        explicit_debug = self.run_script(
-            "--actual-model", "--configuration", "Debug"
-        )
-
-        for completed in (defaulted, explicit_debug):
-            self.assertEqual(completed.returncode, 2)
-            self.assertIn(
-                "Actual-model and live acceptance require --configuration Release.",
-                completed.stderr,
-            )
-        model_flag = Path(
-            f"/tmp/com.threadmark.remotedesktop.osatlas-model-e2e-{os.getuid()}"
-        )
-        self.assertFalse(model_flag.exists())
-
-    def test_live_debug_rejects_before_task_environment_or_build(self) -> None:
-        completed = self.run_script(
-            "--live-doordash",
-            "--allow-visible-ui",
-            "--configuration",
-            "Debug",
-        )
-
-        self.assertEqual(completed.returncode, 2)
-        self.assertIn(
-            "Actual-model and live acceptance require --configuration Release.",
-            completed.stderr,
-        )
-        self.assertNotIn("DOORDASH_EXPECTED_ITEM", completed.stderr)
 
     def test_configuration_value_is_required_and_allowlisted(self) -> None:
         missing = self.run_script("--configuration")
@@ -59,27 +32,43 @@ class OSAtlasAcceptanceRunnerContractTests(unittest.TestCase):
         self.assertEqual(invalid.returncode, 2)
         self.assertIn("Unsupported configuration: Profile", invalid.stderr)
 
-    def test_all_xcodebuild_lanes_share_the_selected_configuration(self) -> None:
+    def test_removed_acceptance_lanes_fail_fast_as_unknown_options(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            marker = Path(directory) / "xcodebuild-called"
+            fake_xcodebuild = Path(directory) / "xcodebuild"
+            fake_xcodebuild.write_text(
+                f"#!/bin/sh\ntouch '{marker}'\nexit 99\n", encoding="utf-8"
+            )
+            fake_xcodebuild.chmod(0o755)
+
+            for obsolete_flag in (
+                "--actual-model",
+                "--future-semantic-package",
+                "--live-doordash",
+                "--allow-visible-ui",
+            ):
+                with self.subTest(flag=obsolete_flag):
+                    completed = self.run_script(obsolete_flag, path=directory)
+                    self.assertEqual(completed.returncode, 2)
+                    self.assertIn(f"Unknown option: {obsolete_flag}", completed.stderr)
+                    self.assertFalse(marker.exists())
+
+    def test_deterministic_lane_keeps_selected_configuration_lock_and_inventory(self) -> None:
         source = SCRIPT.read_text(encoding="utf-8")
 
-        self.assertEqual(source.count('-configuration "$configuration"'), 3)
-        self.assertEqual(source.count("-disableAutomaticPackageResolution"), 3)
-        self.assertEqual(
-            source.count("-onlyUsePackageVersionsFromResolvedFile"), 3
-        )
-        self.assertEqual(source.count("ENABLE_TESTABILITY=YES"), 3)
-        self.assertNotIn("    -configuration Debug \\\n", source)
+        self.assertEqual(source.count("xcodebuild test"), 1)
+        self.assertEqual(source.count('-configuration "$configuration"'), 1)
+        self.assertEqual(source.count("-disableAutomaticPackageResolution"), 1)
+        self.assertEqual(source.count("-onlyUsePackageVersionsFromResolvedFile"), 1)
+        self.assertEqual(source.count("ENABLE_TESTABILITY=YES"), 1)
         self.assertIn('configuration="Debug"', source)
-        self.assertNotIn("DETERMINISTIC_EXPECTED_TESTS=", source)
+        self.assertIn("    Debug|Release)", source)
         self.assertIn('"${deterministic_selectors[@]}"', source)
+        self.assertIn("--selectors", source)
         self.assertIn('--result "$deterministic_result"', source)
-
-    def test_future_package_is_a_separate_explicit_release_lane(self) -> None:
-        completed = self.run_script("--future-semantic-package")
-        self.assertEqual(completed.returncode, 2)
-        source = SCRIPT.read_text(encoding="utf-8")
-        self.assertIn("testCurrentProductionPackageRoutesNaturalLanguageToGroundedApproval", source)
-        self.assertIn('if [[ $run_future_semantic_package -eq 1 ]]; then', source)
+        self.assertNotIn("DETERMINISTIC_EXPECTED_TESTS=", source)
+        for removed_lane in ("actual_model", "future_semantic_package", "live_doordash"):
+            self.assertNotIn(removed_lane, source)
 
 
 if __name__ == "__main__":

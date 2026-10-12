@@ -89,79 +89,17 @@ operation runs.
 
 ## OS-Atlas acceptance modes
 
-The OS-Atlas runner keeps model acceptance separate from MCP acceptance. Its
-default matrix is deterministic and hidden:
+The OS-Atlas compatibility script runs only the deterministic hidden inventory:
 
 ```sh
 host-mac/scripts/run_osatlas_acceptance.sh
 ```
 
-The default command exercises the full deterministic host parser grammar: 16
-semantic operations across 17 raw variants, including validated app opening,
-left/double/right click, drag, text, four-direction scroll, Return, and hotkey
-translation against in-memory event and screen providers. It also verifies the
-hybrid boundary: a typed semantic plan owns the operation, OS-Atlas output is a
-non-executable point carrier for pointer actions, and direct actions require no
-visual-model completion. A separate native input-layer assertion covers middle
-click; middle click is not an OS-Atlas parser action.
-It does not load the multi-gigabyte checkpoint, open a fixture window, capture
-the user's desktop, or post real input.
-
-To exercise the actual installed OS-Atlas Pro checkpoint and bundled llama.cpp
-runtime, opt in separately:
-
-```sh
-host-mac/scripts/run_osatlas_acceptance.sh --actual-model
-```
-
-This mode does not download or install a model. Its first release gate resolves
-the verified active package with `ComputerUseArtifactManifest.current` and
-`resolvePackage`, then loads the installed semantic GGUF through the production
-multi-model API. Apple routing is forced unavailable without supplying a mock
-semantic answer, so a purchase prompt must travel through real Granite typed
-routing, OS-Atlas point grounding, and host approval validation. The gate
-reports an explicit prerequisite until the immutable V4 semantic artifact is
-present in the production manifest and installed; it never substitutes the
-legacy visual-only package.
-
-The additional diagnostic matrices invoke Apple's installed on-device language
-model and the installed OS-Atlas package.
-The ordinary-language matrix covers all 16 host-composed semantic actions.
-Click, double-click, secondary-click, and drag require real OS-Atlas point
-grounding; other actions are produced directly from the typed semantic plan.
-`ANSWER` and `REPORT` share one visible-evidence behavior. Production always
-installs the semantic router, including when Apple's model is warming up or
-unavailable at startup. Deterministic app-first, literal-entry, and unambiguous
-navigation routes run before the per-step model check. An unavailable
-non-deterministic step returns `unable to complete`; it never asks OS-Atlas for
-an executable verb. OS-Atlas receives only typed pointer-grounding requests.
-
-The opt-in mode also runs a consolidated 15-scenario regular-user matrix. Its
-terminal result is asserted as exactly one of `task completed`,
-`user intervention required`, or `unable to complete`. The matrix includes app
-opening, Return submission, exact text entry, scrolling to a named section,
-visible-fact answers, an already-finished task, wait-then-answer, missing input,
-authentication takeover, purchase approval, persistent unavailable content, a
-platform-incompatible app, two additional real OS-Atlas pointer-grounding
-tasks, and an unrecognized-operation fail-closed case. Purchase, calendar, and
-folder pointer proposals are the only three model calls in that forced-Apple-
-unavailable matrix, and each raw response must be a CLICK point carrier. Every
-screen is rendered in memory and every proposed host action is intercepted.
-
-The same actual-model test command retains stateful delivery-address-to-
-itemized-quote fixtures for regression measurement of the legacy raw checkpoint
-parser. Those fixtures use the executor's test-only compatibility configuration;
-production installs typed semantic routing and disables that raw-action mode.
-The shorter fixture requires actual OS-Atlas to emit `TYPE` with the exact
-address before local Vision OCR returns the completed quote. A separate complex
-fixture keeps one executor loop alive across four page states and measures
-`TYPE`, `SCROLL DOWN`, then `SCROLL DOWN`. Only after that does local Vision
-OCR—not model-authored pricing—extract the restaurant, item, subtotal, every
-recognized fee row, tax, total, and ETA. Both fixtures remain hidden, do not
-read the desktop, and intercept model actions before any system input is
-posted. Login always pauses for user takeover, and no path advances checkout.
-The XCTest cases are skipped with a clear reason if the installed checkpoint
-or bundled runtime is unavailable.
+Pass `--configuration Release` to use the Release configuration. The script
+verifies the checked-in test inventory before and after the run and uses the
+resolved package versions without automatic package resolution. This lane does
+not load a model, open a fixture window, capture the user's desktop, or post
+real input.
 
 ### Shipped-path local hybrid fixture
 
@@ -306,34 +244,6 @@ and stop, then wait up to 60 seconds for the corresponding terminal response.
 The live UI currently selects the first visible **Use AI Computer Use on ...**
 button; it does not expose a code-hash assertion. Operationally isolate this
 run by leaving only the exact signed host build under test advertising Ready.
-
-The live DoorDash smoke test is a separate, manual, visible-screen opt-in. Open
-and prepare the DoorDash delivery review yourself, keep the quote visible and
-frontmost, close unrelated private windows, and provide exact expected values:
-
-```sh
-DOORDASH_EXPECTED_ITEM='Large Pepperoni Pizza' \
-DOORDASH_EXPECTED_TOTAL='$34.51' \
-DOORDASH_EXPECTED_ETA='28–38 min' \
-host-mac/scripts/run_osatlas_acceptance.sh \
-  --live-doordash --allow-visible-ui
-```
-
-All three environment variables are required and must match the visible page:
-`DOORDASH_EXPECTED_ITEM`, `DOORDASH_EXPECTED_TOTAL`, and
-`DOORDASH_EXPECTED_ETA`. `--live-doordash` also runs the hidden deterministic
-matrix and installed-checkpoint workflow. The script refuses the live capture
-without `--allow-visible-ui`.
-
-The live workflow is quote-only. Local Vision OCR requires the restaurant,
-item, subtotal, every recognized fee row, tax, delivered total, and ETA, then
-verifies the expected item, total, and ETA. It returns those exact visible facts
-without asking the model to author a quote. Every click, typing, scroll, and
-other input action is intercepted before `InputInjector`; the test cannot
-advance checkout or place an order. It does not open DoorDash, navigate, sign
-in, add an item, or submit anything on the user's behalf. The runner copies
-expected values into a per-user temporary config, restricts it to mode `0600`,
-and removes it on exit.
 
 If DoorDash stops at its real guest sign-in wall, validate the shipped takeover
 experience through the Release iOS Simulator instead of entering credentials in
