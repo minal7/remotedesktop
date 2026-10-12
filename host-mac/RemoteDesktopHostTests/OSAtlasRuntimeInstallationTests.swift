@@ -237,9 +237,9 @@ final class OSAtlasRuntimeInstallationTests: XCTestCase {
         XCTAssertEqual(inputs.llamaServerURL, fixture.runtimeDirectory.appendingPathComponent("llama-server"))
         XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: fixture.modelDirectory.path),
                        ["Qwen3.5-4B-Q4_K_M.gguf"])
-        XCTAssertThrowsError(try resolver.resolve(receipt: fixture.receipt,
+        XCTAssertThrowsError(try resolver.resolveAvailablePackage(receipt: fixture.receipt,
             runtimeDirectoryURL: fixture.runtimeDirectory, enclosingBundleURL: fixture.bundleDirectory)) {
-            XCTAssertEqual($0 as? OSAtlasRuntimeInstallationError, .proModelRequired)
+            XCTAssertEqual($0 as? OSAtlasRuntimeInstallationError, .invalidReceipt)
         }
     }
 
@@ -284,52 +284,6 @@ final class OSAtlasRuntimeInstallationTests: XCTestCase {
             manifest: manifest, receipt: receipt)
     }
 
-    func testVerifiedProReceiptResolvesOnlyDataFilesAndBundledExecutable() throws {
-        let fixture = try makeFixture()
-        defer { try? FileManager.default.removeItem(at: fixture.root) }
-
-        let inputs = try OSAtlasRuntimeInputResolver(
-            manifest: fixture.manifest).resolve(
-                receipt: fixture.receipt,
-                runtimeDirectoryURL: fixture.runtimeDirectory,
-                enclosingBundleURL: fixture.bundleDirectory)
-
-        XCTAssertEqual(inputs.variant, .pro4B)
-        XCTAssertEqual(
-            inputs.modelFirstSplitURL,
-            fixture.modelDirectory.appendingPathComponent(
-                fixture.manifest.modelArtifacts[0].fileName))
-        XCTAssertEqual(
-            inputs.multimodalProjectorURL,
-            fixture.modelDirectory.appendingPathComponent(
-                fixture.manifest.modelArtifacts[2].fileName))
-        XCTAssertEqual(
-            inputs.llamaServerURL,
-            fixture.runtimeDirectory.appendingPathComponent("llama-server"))
-        XCTAssertTrue(inputs.llamaServerURL.path.hasPrefix(
-            fixture.bundleDirectory.path + "/"))
-    }
-
-    func testMultiModelPackageResolvesVisualAndSemanticInputsFromManifest() throws {
-        let fixture = try makeFixture()
-        defer { try? FileManager.default.removeItem(at: fixture.root) }
-
-        let package = try OSAtlasRuntimeInputResolver(
-            manifest: fixture.manifest).resolvePackage(
-                receipt: fixture.receipt,
-                runtimeDirectoryURL: fixture.runtimeDirectory,
-                enclosingBundleURL: fixture.bundleDirectory)
-
-        XCTAssertEqual(
-            package.visualInputs.modelFirstSplitURL,
-            fixture.modelDirectory.appendingPathComponent(
-                fixture.manifest.modelArtifacts[0].fileName))
-        XCTAssertEqual(
-            package.semanticRouterModelURL,
-            fixture.modelDirectory.appendingPathComponent(
-                fixture.manifest.modelArtifacts[3].fileName))
-    }
-
     func testAvailablePackageRejectsLegacyVisualPackageBeforeActivation() throws {
         let fixture = try makeFixture()
         defer { try? FileManager.default.removeItem(at: fixture.root) }
@@ -342,133 +296,8 @@ final class OSAtlasRuntimeInstallationTests: XCTestCase {
         }
     }
 
-    func testMultiModelPackageRequiresExactlyOneSemanticArtifact() throws {
-        let fixture = try makeFixture()
-        defer { try? FileManager.default.removeItem(at: fixture.root) }
-
-        let missingManifest = manifest(
-            from: fixture.manifest,
-            artifacts: Array(fixture.manifest.modelArtifacts.dropLast()))
-        XCTAssertThrowsError(try OSAtlasRuntimeInputResolver(
-            manifest: missingManifest).resolvePackage(
-                receipt: fixture.receipt,
-                runtimeDirectoryURL: fixture.runtimeDirectory,
-                enclosingBundleURL: fixture.bundleDirectory)) { error in
-            XCTAssertEqual(
-                error as? OSAtlasRuntimeInstallationError,
-                .invalidReceipt)
-        }
-
-        let duplicate = ComputerUseArtifactManifest.DownloadableArtifact(
-            kind: .semanticRouterModel,
-            fileName: "semantic-router-copy.gguf",
-            byteCount: 6,
-            sha256: String(repeating: "e", count: 64),
-            downloadURL: URL(string:
-                "https://example.invalid/semantic-router-copy.gguf")!)
-        try Data(repeating: 5, count: 6).write(to:
-            fixture.modelDirectory.appendingPathComponent(duplicate.fileName))
-        let duplicateManifest = manifest(
-            from: fixture.manifest,
-            artifacts: fixture.manifest.modelArtifacts + [duplicate])
-        XCTAssertThrowsError(try OSAtlasRuntimeInputResolver(
-            manifest: duplicateManifest).resolvePackage(
-                receipt: fixture.receipt,
-                runtimeDirectoryURL: fixture.runtimeDirectory,
-                enclosingBundleURL: fixture.bundleDirectory)) { error in
-            XCTAssertEqual(
-                error as? OSAtlasRuntimeInstallationError,
-                .invalidReceipt)
-        }
-
-        XCTAssertThrowsError(try OSAtlasRuntimeInputResolver(
-            manifest: duplicateManifest).resolveAvailablePackage(
-                receipt: fixture.receipt,
-                runtimeDirectoryURL: fixture.runtimeDirectory,
-                enclosingBundleURL: fixture.bundleDirectory)) { error in
-            XCTAssertEqual(
-                error as? OSAtlasRuntimeInstallationError,
-                .invalidReceipt)
-        }
-    }
-
-    func testMultiModelPackageFailsWhenPinnedSemanticFileIsMissing() throws {
-        let fixture = try makeFixture()
-        defer { try? FileManager.default.removeItem(at: fixture.root) }
-        let semantic = try XCTUnwrap(fixture.manifest.modelArtifacts.last)
-        try FileManager.default.removeItem(at:
-            fixture.modelDirectory.appendingPathComponent(semantic.fileName))
-
-        XCTAssertThrowsError(try OSAtlasRuntimeInputResolver(
-            manifest: fixture.manifest).resolvePackage(
-                receipt: fixture.receipt,
-                runtimeDirectoryURL: fixture.runtimeDirectory,
-                enclosingBundleURL: fixture.bundleDirectory)) { error in
-            XCTAssertEqual(
-                error as? OSAtlasRuntimeInstallationError,
-                .missingModelArtifact(semantic.fileName))
-        }
-    }
-
-    func testLegacyVisualOnlyResolveAPIStaysCompatible() throws {
-        let fixture = try makeFixture()
-        defer { try? FileManager.default.removeItem(at: fixture.root) }
-        let visualManifest = manifest(
-            from: fixture.manifest,
-            artifacts: Array(fixture.manifest.modelArtifacts.dropLast()))
-
-        let inputs = try OSAtlasRuntimeInputResolver(
-            manifest: visualManifest).resolve(
-                receipt: fixture.receipt,
-                runtimeDirectoryURL: fixture.runtimeDirectory,
-                enclosingBundleURL: fixture.bundleDirectory)
-
-        XCTAssertEqual(inputs.variant, .pro4B)
-        XCTAssertEqual(
-            inputs.multimodalProjectorURL.lastPathComponent,
-            "mmproj-os-atlas-pro-4b-f16.gguf")
-    }
-
-    func testBaseReceiptIsRejectedBeforeRuntimeLaunch() throws {
-        let fixture = try makeFixture()
-        defer { try? FileManager.default.removeItem(at: fixture.root) }
-        let baseReceipt = ComputerUseInstallationReceipt(
-            installationVersion: fixture.receipt.installationVersion,
-            modelVariant: .base4B,
-            modelDirectory: fixture.receipt.modelDirectory,
-            installedAt: fixture.receipt.installedAt)
-
-        XCTAssertThrowsError(try OSAtlasRuntimeInputResolver(
-            manifest: fixture.manifest).resolve(
-                receipt: baseReceipt,
-                runtimeDirectoryURL: fixture.runtimeDirectory,
-                enclosingBundleURL: fixture.bundleDirectory)) { error in
-            XCTAssertEqual(
-                error as? OSAtlasRuntimeInstallationError,
-                .proModelRequired)
-        }
-    }
-
-    func testMissingModelShardFailsClosed() throws {
-        let fixture = try makeFixture()
-        defer { try? FileManager.default.removeItem(at: fixture.root) }
-        let missing = fixture.modelDirectory.appendingPathComponent(
-            fixture.manifest.modelArtifacts[1].fileName)
-        try FileManager.default.removeItem(at: missing)
-
-        XCTAssertThrowsError(try OSAtlasRuntimeInputResolver(
-            manifest: fixture.manifest).resolve(
-                receipt: fixture.receipt,
-                runtimeDirectoryURL: fixture.runtimeDirectory,
-                enclosingBundleURL: fixture.bundleDirectory)) { error in
-            XCTAssertEqual(
-                error as? OSAtlasRuntimeInstallationError,
-                .missingModelArtifact(missing.lastPathComponent))
-        }
-    }
-
     func testRuntimeOutsideSignedBundleFailsClosed() throws {
-        let fixture = try makeFixture()
+        let fixture = try makeFaraFixture()
         defer { try? FileManager.default.removeItem(at: fixture.root) }
         let unrelatedBundle = fixture.root.appendingPathComponent(
             "Other.app",
@@ -478,7 +307,7 @@ final class OSAtlasRuntimeInstallationTests: XCTestCase {
             withIntermediateDirectories: true)
 
         XCTAssertThrowsError(try OSAtlasRuntimeInputResolver(
-            manifest: fixture.manifest).resolve(
+            manifest: fixture.manifest).resolveAvailablePackage(
                 receipt: fixture.receipt,
                 runtimeDirectoryURL: fixture.runtimeDirectory,
                 enclosingBundleURL: unrelatedBundle)) { error in
@@ -489,14 +318,14 @@ final class OSAtlasRuntimeInstallationTests: XCTestCase {
     }
 
     func testMissingBundledDependencyFailsBeforeProcessLaunch() throws {
-        let fixture = try makeFixture()
+        let fixture = try makeFaraFixture()
         defer { try? FileManager.default.removeItem(at: fixture.root) }
         let missingName = "libmtmd.0.dylib"
         try FileManager.default.removeItem(at:
             fixture.runtimeDirectory.appendingPathComponent(missingName))
 
         XCTAssertThrowsError(try OSAtlasRuntimeInputResolver(
-            manifest: fixture.manifest).resolve(
+            manifest: fixture.manifest).resolveAvailablePackage(
                 receipt: fixture.receipt,
                 runtimeDirectoryURL: fixture.runtimeDirectory,
                 enclosingBundleURL: fixture.bundleDirectory)) { error in
@@ -507,7 +336,7 @@ final class OSAtlasRuntimeInstallationTests: XCTestCase {
     }
 
     func testBundledCompatibilitySymlinkToInternalRegularFileIsAccepted() throws {
-        let fixture = try makeFixture()
+        let fixture = try makeFaraFixture()
         defer { try? FileManager.default.removeItem(at: fixture.root) }
         let compatibilityName = "libllama-common.0.dylib"
         let compatibilityURL = fixture.runtimeDirectory.appendingPathComponent(
@@ -518,14 +347,14 @@ final class OSAtlasRuntimeInstallationTests: XCTestCase {
             withDestinationPath: "libllama-common.0.0.9992.dylib")
 
         XCTAssertNoThrow(try OSAtlasRuntimeInputResolver(
-            manifest: fixture.manifest).resolve(
+            manifest: fixture.manifest).resolveAvailablePackage(
                 receipt: fixture.receipt,
                 runtimeDirectoryURL: fixture.runtimeDirectory,
                 enclosingBundleURL: fixture.bundleDirectory))
     }
 
     func testBundledCompatibilitySymlinkEscapingRuntimeFailsClosed() throws {
-        let fixture = try makeFixture()
+        let fixture = try makeFaraFixture()
         defer { try? FileManager.default.removeItem(at: fixture.root) }
         let compatibilityName = "libllama-common.0.dylib"
         let compatibilityURL = fixture.runtimeDirectory.appendingPathComponent(
@@ -538,7 +367,7 @@ final class OSAtlasRuntimeInstallationTests: XCTestCase {
             withDestinationPath: outsideURL.path)
 
         XCTAssertThrowsError(try OSAtlasRuntimeInputResolver(
-            manifest: fixture.manifest).resolve(
+            manifest: fixture.manifest).resolveAvailablePackage(
                 receipt: fixture.receipt,
                 runtimeDirectoryURL: fixture.runtimeDirectory,
                 enclosingBundleURL: fixture.bundleDirectory)) { error in
@@ -549,7 +378,7 @@ final class OSAtlasRuntimeInstallationTests: XCTestCase {
     }
 
     func testBrokenBundledCompatibilitySymlinkFailsClosed() throws {
-        let fixture = try makeFixture()
+        let fixture = try makeFaraFixture()
         defer { try? FileManager.default.removeItem(at: fixture.root) }
         let compatibilityName = "libllama-common.0.dylib"
         let compatibilityURL = fixture.runtimeDirectory.appendingPathComponent(
@@ -560,7 +389,7 @@ final class OSAtlasRuntimeInstallationTests: XCTestCase {
             withDestinationPath: "missing-libllama-common.dylib")
 
         XCTAssertThrowsError(try OSAtlasRuntimeInputResolver(
-            manifest: fixture.manifest).resolve(
+            manifest: fixture.manifest).resolveAvailablePackage(
                 receipt: fixture.receipt,
                 runtimeDirectoryURL: fixture.runtimeDirectory,
                 enclosingBundleURL: fixture.bundleDirectory)) { error in

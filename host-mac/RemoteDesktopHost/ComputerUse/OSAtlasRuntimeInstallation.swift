@@ -1,7 +1,6 @@
 import Foundation
 
 enum OSAtlasRuntimeInstallationError: Error, LocalizedError, Equatable {
-    case proModelRequired
     case invalidReceipt
     case missingModelArtifact(String)
     case invalidModelArtifact(String)
@@ -10,8 +9,6 @@ enum OSAtlasRuntimeInstallationError: Error, LocalizedError, Equatable {
 
     var errorDescription: String? {
         switch self {
-        case .proModelRequired:
-            return "AI Computer Use requires the verified OS-Atlas Pro 4B package. Choose Retry to repair it."
         case .invalidReceipt:
             return "The AI model installation receipt is invalid. Choose Retry to repair it."
         case .missingModelArtifact(let fileName):
@@ -24,14 +21,6 @@ enum OSAtlasRuntimeInstallationError: Error, LocalizedError, Equatable {
             return "The signed local AI runtime is incomplete (\(fileName)). Reinstall or update the host app."
         }
     }
-}
-
-/// Fully resolved inputs for the two-model local package. Both paths are
-/// derived from one verified receipt and its pinned manifest; callers cannot
-/// inject a semantic model path independently from the visual package.
-struct OSAtlasResolvedRuntimeInstallation: Equatable, Sendable {
-    let visualInputs: OSAtlasLlamaRuntimeInputs
-    let semanticRouterModelURL: URL
 }
 
 /// The verified receipt selects the trained browser model or a supported
@@ -78,124 +67,6 @@ struct OSAtlasRuntimeInputResolver {
     ) {
         self.manifest = manifest
         self.fileManager = fileManager
-    }
-
-    func resolve(
-        receipt: ComputerUseInstallationReceipt,
-        runtimeDirectoryURL: URL,
-        enclosingBundleURL: URL
-    ) throws -> OSAtlasLlamaRuntimeInputs {
-        guard manifest.modelVariant == .pro4B,
-              receipt.modelVariant == .pro4B else {
-            throw OSAtlasRuntimeInstallationError.proModelRequired
-        }
-        guard receipt.installationVersion == manifest.installationVersion,
-              !receipt.modelDirectory.isEmpty else {
-            throw OSAtlasRuntimeInstallationError.invalidReceipt
-        }
-
-        let modelDirectoryURL = URL(
-            fileURLWithPath: receipt.modelDirectory,
-            isDirectory: true).standardizedFileURL
-        guard (receipt.modelDirectory as NSString).isAbsolutePath,
-              isStrictDirectory(modelDirectoryURL) else {
-            throw OSAtlasRuntimeInstallationError.invalidReceipt
-        }
-
-        let textArtifacts = manifest.modelArtifacts.filter {
-            $0.kind == .textModelShard
-        }
-        let projectors = manifest.modelArtifacts.filter {
-            $0.kind == .visionProjector
-        }
-        guard let firstTextArtifact = textArtifacts.first,
-              projectors.count == 1,
-              let projectorArtifact = projectors.first else {
-            throw OSAtlasRuntimeInstallationError.invalidReceipt
-        }
-
-        for artifact in manifest.modelArtifacts {
-            let url = modelDirectoryURL.appendingPathComponent(
-                artifact.fileName,
-                isDirectory: false)
-            guard contains(modelDirectoryURL, url) else {
-                throw OSAtlasRuntimeInstallationError.invalidModelArtifact(
-                    artifact.fileName)
-            }
-            guard fileManager.fileExists(atPath: url.path) else {
-                throw OSAtlasRuntimeInstallationError.missingModelArtifact(
-                    artifact.fileName)
-            }
-            let values: URLResourceValues
-            do {
-                values = try url.resourceValues(forKeys: [
-                    .isRegularFileKey,
-                    .isSymbolicLinkKey,
-                    .fileSizeKey,
-                ])
-            } catch {
-                throw OSAtlasRuntimeInstallationError.invalidModelArtifact(
-                    artifact.fileName)
-            }
-            guard values.isRegularFile == true,
-                  values.isSymbolicLink != true,
-                  Int64(values.fileSize ?? -1) == artifact.byteCount else {
-                throw OSAtlasRuntimeInstallationError.invalidModelArtifact(
-                    artifact.fileName)
-            }
-        }
-
-        let llamaServerURL = try resolveBundledExecutable(
-            runtimeDirectoryURL: runtimeDirectoryURL, enclosingBundleURL: enclosingBundleURL)
-
-        return OSAtlasLlamaRuntimeInputs(
-            variant: .pro4B,
-            modelDirectoryURL: modelDirectoryURL,
-            modelFirstSplitFileName: firstTextArtifact.fileName,
-            multimodalProjectorFileName: projectorArtifact.fileName,
-            llamaServerURL: llamaServerURL)
-    }
-
-    func resolvePackage(
-        receipt: ComputerUseInstallationReceipt,
-        runtimeDirectoryURL: URL,
-        enclosingBundleURL: URL
-    ) throws -> OSAtlasResolvedRuntimeInstallation {
-        let textArtifacts = manifest.modelArtifacts.filter {
-            $0.kind == .textModelShard
-        }
-        let projectors = manifest.modelArtifacts.filter {
-            $0.kind == .visionProjector
-        }
-        let semanticArtifacts = manifest.modelArtifacts.filter {
-            $0.kind == .semanticRouterModel
-        }
-        guard !textArtifacts.isEmpty,
-              projectors.count == 1,
-              semanticArtifacts.count == 1,
-              let semanticArtifact = semanticArtifacts.first else {
-            throw OSAtlasRuntimeInstallationError.invalidReceipt
-        }
-
-        // `resolve` validates every manifest artifact (not just the visual
-        // inputs) as a contained, non-symlink regular file with exact size.
-        let visualInputs = try resolve(
-            receipt: receipt,
-            runtimeDirectoryURL: runtimeDirectoryURL,
-            enclosingBundleURL: enclosingBundleURL)
-        let modelDirectoryURL = URL(
-            fileURLWithPath: receipt.modelDirectory,
-            isDirectory: true).standardizedFileURL
-        let semanticURL = modelDirectoryURL.appendingPathComponent(
-            semanticArtifact.fileName,
-            isDirectory: false)
-        guard contains(modelDirectoryURL, semanticURL) else {
-            throw OSAtlasRuntimeInstallationError.invalidModelArtifact(
-                semanticArtifact.fileName)
-        }
-        return OSAtlasResolvedRuntimeInstallation(
-            visualInputs: visualInputs,
-            semanticRouterModelURL: semanticURL)
     }
 
     /// Resolves only browser-trained packages that remain in the shipped

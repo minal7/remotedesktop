@@ -39,4 +39,12 @@ Known limitations:
 
 - ≤30min R6 window-fixture experiment: existing DOM/native-picker cases fail frontmost-window checks; first reproduce one selector against the already-built pre-scope binary.
 - Determine whether blank-session capture can establish and verify the real owned window before fixture navigation; keep all production presentation, picker and authority checks.
-- Stop on the first failure, retain its trace, and change fixture setup only if evidence supports it; no Drive/Dropbox AX patches or increased deadlines.
+- Blocked: corrected blank-session preflight fails before navigation because UserNotificationCenter owns the foreground; Computer Use refuses access to that system app. Owner dismissal requested; production guards/deadlines unchanged and no acceptance counted.
+
+- ≤1day R6 resolver cleanup: legacy OS-Atlas Pro/two-model resolve APIs have no production callers; Fara/Holo/nativeText use separate resolver entry points.
+- Remove those dead APIs and their seven dedicated tests; preserve pinned-data, bundled-executable, symlink and legacy-rejection checks on the shipped entry points.
+- Compiled/tested:14 remaining resolver tests pass with one existing opt-in skip, including bundle boundaries, internal/escaping/broken symlinks and legacy rejection. This is source cleanup, not live job acceptance.
+
+- ≤1day R6 research-driver cleanup: the concrete WK research driver has no production constructor after the routing retirement.
+- Remove the driver and only tests/helpers that instantiate its lifecycle; preserve static fixtures, pure planner contracts, active DOM/Fara/native picker and model-lifecycle safety tests.
+- Root reviews the method-level deletion, regenerates the project/inventory, then builds and runs retained safety tests before committing; no recreated research route or new skips.
