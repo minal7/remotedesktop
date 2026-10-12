@@ -56,6 +56,13 @@ targets:
       - path: RemoteDesktopHost
         excludes:
           - Resources/ComputerUseSkills
+          - Agent/Schemas
+      - path: RemoteDesktopHost/Agent/Schemas
+        type: folder
+        buildPhase: resources
+      - path: ../policy
+        type: folder
+        buildPhase: resources
       - path: RemoteDesktopHost/WebRTCAliases.swift
       - path: ../protocol/Swift
       - path: RemoteDesktopHost/Resources/ComputerUseSkills

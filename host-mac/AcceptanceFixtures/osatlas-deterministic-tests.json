@@ -1,5 +1,6 @@
 {
   "selectors": [
+    "RemoteDesktopHostTests/AgentContractsTests",
     "RemoteDesktopHostTests/AppleFoundationMCPPlannerTests/testCountedInputExpandsBeforeEffectAndTerminalQueries",
     "RemoteDesktopHostTests/AppleFoundationMCPPlannerTests/testCountedInputRejectsUncompiledCountsAndProtectsQuotedData",
     "RemoteDesktopHostTests/AppleFoundationMCPPlannerTests/testOrderedInputCannotDiscardUnknownOrTerminalHistoryWhenAuthorizingRepetition",
@@ -383,6 +384,13 @@
     "RemoteDesktopHostTests/ScreenCaptureSizingTests/test_fullDisplayConfigurationFillsCodecSurfaceWithoutAspectPadding"
   ],
   "expectedTests": [
+    "RemoteDesktopHostTests/AgentContractsTests/testActionRejectsUnknownKeysInvalidTargetsNullOptionalsAndOutOfRangeNumbers",
+    "RemoteDesktopHostTests/AgentContractsTests/testEpisodeRejectsUnknownKeysNullOptionalsAndBadTimingValues",
+    "RemoteDesktopHostTests/AgentContractsTests/testEpisodeStepAndFooterRoundTripAsJSONLLines",
+    "RemoteDesktopHostTests/AgentContractsTests/testEveryActionVariantRoundTripsWithTheFlatDiscriminator",
+    "RemoteDesktopHostTests/AgentContractsTests/testObservationRejectsStructuralErrorsAndSecureValueLeaks",
+    "RemoteDesktopHostTests/AgentContractsTests/testObservationRoundTripsExactFieldsAndKeepsSecureValuesRedacted",
+    "RemoteDesktopHostTests/AgentContractsTests/testSharedCrossLanguageContractCorpus",
     "RemoteDesktopHostTests/AppleFoundationMCPPlannerTests/testCountedInputExpandsBeforeEffectAndTerminalQueries",
     "RemoteDesktopHostTests/AppleFoundationMCPPlannerTests/testCountedInputRejectsUncompiledCountsAndProtectsQuotedData",
     "RemoteDesktopHostTests/AppleFoundationMCPPlannerTests/testOrderedInputCannotDiscardUnknownOrTerminalHistoryWhenAuthorizingRepetition",

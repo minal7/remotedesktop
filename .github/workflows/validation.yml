@@ -119,6 +119,12 @@ jobs:
           ./script/verify_apple_configuration_pair.sh Debug Debug
           ./script/verify_apple_configuration_pair.sh Release Release
 
+      - name: Install Agent contract validator
+        run: python3 -m pip install -r host-mac/scripts/agent/requirements.txt
+
+      - name: Validate general Agent contracts
+        run: python3 -m unittest discover -s host-mac/scripts/agent -t host-mac/scripts -p 'test_*.py'
+
       - name: Run deterministic Computer Use harness tests
         run: python3 -m unittest discover -s host-mac/scripts/tests -p 'test_*.py'
 
