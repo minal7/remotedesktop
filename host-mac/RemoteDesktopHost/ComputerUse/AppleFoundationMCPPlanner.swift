@@ -426,8 +426,7 @@ struct AppleFoundationVisualActionRouter: OSAtlasSemanticActionRouting {
         var graniteChunk = ""
 
         func appendGraniteChunk() {
-            let encoded = LlamaSemanticActionRouter
-                .canonicalJSONString(graniteChunk)
+            let encoded = canonicalJSONString(graniteChunk)
             output.append(contentsOf: encoded.dropFirst().dropLast())
             graniteChunk.removeAll(keepingCapacity: true)
         }
@@ -441,6 +440,30 @@ struct AppleFoundationVisualActionRouter: OSAtlasSemanticActionRouting {
             }
         }
         appendGraniteChunk()
+        output += "\""
+        return output
+    }
+
+    /// Stable JSON-string encoding used by the Foundation prompt bridge.
+    /// Keep the pinned lowercase control escapes and U+2028/U+2029 behavior
+    /// byte-for-byte aligned with the previous shared implementation.
+    private static func canonicalJSONString(_ value: String) -> String {
+        var output = "\""
+        for scalar in value.unicodeScalars {
+            switch scalar.value {
+            case 0x08: output += "\\b"
+            case 0x09: output += "\\t"
+            case 0x0A: output += "\\n"
+            case 0x0C: output += "\\f"
+            case 0x0D: output += "\\r"
+            case 0x22: output += "\\\""
+            case 0x5C: output += "\\\\"
+            case 0x00 ... 0x1F, 0x2028, 0x2029:
+                output += String(format: "\\u%04x", scalar.value)
+            default:
+                output.unicodeScalars.append(scalar)
+            }
+        }
         output += "\""
         return output
     }

@@ -116,6 +116,7 @@ final class ComputerUseDefaultBrowserSession {
     typealias CaptureFocusedRetainedWindow = @MainActor (ComputerUseApplicationIdentity, Window,
         @MainActor () throws -> Void) throws -> WindowSnapshot
 
+    static let defaultNewWindowWaitBudget: Duration = .seconds(30)
     private static let nativeWindowCaptureBudget: Duration = .seconds(4)
 
     private final class RunState {
@@ -209,6 +210,7 @@ final class ComputerUseDefaultBrowserSession {
     private let captureRetainedWindow: CaptureRetainedWindow?
     private let captureFocusedRetainedWindow: CaptureFocusedRetainedWindow?
     private let makeStore: (URL) throws -> ComputerUseTaskJournalStore
+    private let newWindowWaitBudget: Duration
     private let safariAddressBarAX: SafariAddressBarAXAccess
     private let captureDiagnosticProvider: @MainActor () -> String?
     private let captureDiagnosticAXErrorProvider: @MainActor () -> Int?
@@ -278,6 +280,7 @@ final class ComputerUseDefaultBrowserSession {
          captureWindows: @escaping CaptureWindows,
          safariAddressBarAX: SafariAddressBarAXAccess = .live,
          makeStore: @escaping (URL) throws -> ComputerUseTaskJournalStore = { try .init(directory: $0) },
+         newWindowWaitBudget: Duration = ComputerUseDefaultBrowserSession.defaultNewWindowWaitBudget,
          captureRetainedWindow: CaptureRetainedWindow? = nil,
          captureFocusedRetainedWindow: CaptureFocusedRetainedWindow? = nil,
          captureDiagnosticProvider: @escaping @MainActor () -> String? = { nil },
@@ -293,6 +296,7 @@ final class ComputerUseDefaultBrowserSession {
         self.captureFocusedRetainedWindow = captureFocusedRetainedWindow
         self.safariAddressBarAX = safariAddressBarAX
         self.makeStore = makeStore
+        self.newWindowWaitBudget = newWindowWaitBudget
         self.captureDiagnosticProvider = captureDiagnosticProvider
         self.captureDiagnosticAXErrorProvider = captureDiagnosticAXErrorProvider
         self.captureDiagnosticElapsedMsProvider = captureDiagnosticElapsedMsProvider
@@ -1458,6 +1462,7 @@ final class ComputerUseDefaultBrowserSession {
                     guard let app = state.app, let before = state.before, let target = state.target else { return false }
                     let current = try await Self.waitForNewFocusedWindow(
                         before: before, app: app, tools: tools, captureWindows: captureWindows,
+                        budget: self.newWindowWaitBudget,
                         diagnostic: recordWindowTransition)
                     return Self.sameWindowReference(current, target, in: app)
                 default: return false
@@ -1534,6 +1539,7 @@ final class ComputerUseDefaultBrowserSession {
                 }
                 state.target = try await Self.waitForNewFocusedWindow(
                     before: before, app: app, tools: tools, captureWindows: captureWindows,
+                    budget: self.newWindowWaitBudget,
                     diagnostic: recordWindowTransition)
             }, persist: { [weak state, store] journal in
                 guard let state else { throw ComputerUseTaskExecutionError.invalidContract }
@@ -1853,14 +1859,16 @@ final class ComputerUseDefaultBrowserSession {
     private static func waitForNewFocusedWindow(
         before: WindowSnapshot, app: ComputerUseApplicationIdentity, tools: ComputerUseHostTools,
         captureWindows: @escaping CaptureWindows,
+        budget: Duration,
         diagnostic: @MainActor (String) -> Void = { _ in }
     ) async throws -> Window {
         // A capture can spend up to two seconds reading Safari's window list;
         // keep observing for a delayed Cmd+N result without ever replaying it.
-        let budgetSeconds = 30
-        let deadline = ContinuousClock.now.advanced(by: .seconds(budgetSeconds))
+        let deadline = ContinuousClock.now.advanced(by: budget)
         let startedAt = ContinuousClock.now
-        let budgetMilliseconds = budgetSeconds * 1_000
+        let budgetParts = budget.components
+        let budgetMilliseconds = max(0, budgetParts.seconds * 1_000
+            + budgetParts.attoseconds / 1_000_000_000_000_000)
         var transitionDiagnostics = 0
         var successfulCaptureCount = 0
         var transientCaptureFailureCount = 0

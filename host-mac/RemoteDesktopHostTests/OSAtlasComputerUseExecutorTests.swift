@@ -1649,151 +1649,17 @@ final class OSAtlasLlamaRuntimeTests: XCTestCase {
         XCTAssertThrowsError(try presetFile.verify())
     }
 
-    func testSemanticRequestPinsNativeToolModelAndDeterministicPolicy() throws {
-        let endpoint = OSAtlasLlamaEndpoint(
-            generation: 9,
-            variant: .pro4B,
-            baseURL: URL(string: "http://127.0.0.1:43123")!,
-            bearerToken: "unit-test-token")
-        let request = try OSAtlasLlamaHTTPClient.makeSemanticRequest(
-            endpoint: endpoint,
-            request: OSAtlasLlamaSemanticRequest(
-                contract: .nativeRoutingV4,
-                messages: [
-                    OSAtlasLlamaSemanticMessage(
-                        role: .system,
-                        content: "Select exactly one native routing tool."),
-                    OSAtlasLlamaSemanticMessage(
-                        role: .user,
-                        content: "Type hello into the focused field."),
-                ],
-                tools: [
-                    OSAtlasLlamaSemanticTool(
-                        name: "type_text",
-                        description:
-                            "Type exact user-authorized text in Finder/Desktop.",
-                        parameters: .object([
-                            "type": .string("object"),
-                            "properties": .object([
-                                "text": .object([
-                                    "type": .string("string"),
-                                    "maxLength": .number(512),
-                                ]),
-                            ]),
-                            "required": .array([.string("text")]),
-                            "additionalProperties": .boolean(false),
-                        ])),
-                ],
-                maxTokens: 96))
-
-        XCTAssertEqual(
-            request.url?.absoluteString,
-            "http://127.0.0.1:43123/v1/chat/completions")
-        XCTAssertEqual(
-            request.value(forHTTPHeaderField: "Authorization"),
-            "Bearer unit-test-token")
-        let body = try XCTUnwrap(request.httpBody)
-        let json = try XCTUnwrap(
-            JSONSerialization.jsonObject(with: body) as? [String: Any])
-        let canonicalBody = try JSONSerialization.data(
-            withJSONObject: json,
-            options: [.sortedKeys, .withoutEscapingSlashes])
-        XCTAssertEqual(
-            body,
-            canonicalBody,
-            "semantic request JSON must remain recursively key-sorted so "
-                + "b9992 renders the same prompt on every platform")
-        XCTAssertEqual(
-            MCPDigest.sha256(body),
-            "c407ccd298efa1b8d6a4c2fb8f5ba2b52654517628d47b81e015a877097d3923",
-            "this golden digest was produced by the V4 Python canonical "
-                + "request encoder and binds Swift to the same exact bytes")
-        XCTAssertEqual(json["model"] as? String, "semantic-router-v1")
-        XCTAssertEqual(json["tool_choice"] as? String, "required")
-        XCTAssertEqual(json["parallel_tool_calls"] as? Bool, false)
-        XCTAssertEqual(json["temperature"] as? Double, 0)
-        XCTAssertEqual(json["seed"] as? Int, 0)
-        XCTAssertEqual(json["max_tokens"] as? Int, 96)
-        XCTAssertEqual(json["stream"] as? Bool, false)
-        XCTAssertEqual(
-            Set(json.keys),
-            Set([
-                "model", "messages", "tools", "tool_choice",
-                "parallel_tool_calls", "temperature", "seed",
-                "max_tokens", "stream",
-            ]))
-        let tools = try XCTUnwrap(json["tools"] as? [[String: Any]])
-        XCTAssertEqual(tools.count, 1)
-        XCTAssertEqual(tools[0]["type"] as? String, "function")
-        let function = try XCTUnwrap(tools[0]["function"] as? [String: Any])
-        XCTAssertEqual(function["name"] as? String, "type_text")
-        XCTAssertEqual(function["description"] as? String,
-            "Type exact user-authorized text in Finder/Desktop.")
-        XCTAssertEqual(function["strict"] as? Bool, true)
-        XCTAssertEqual(
-            Set(function.keys),
-            Set(["name", "description", "parameters", "strict"]))
-        let parameters = try XCTUnwrap(
-            function["parameters"] as? [String: Any])
-        XCTAssertEqual(parameters["type"] as? String, "object")
-        XCTAssertEqual(parameters["additionalProperties"] as? Bool, false)
-        let properties = try XCTUnwrap(
-            parameters["properties"] as? [String: Any])
-        let text = try XCTUnwrap(properties["text"] as? [String: Any])
-        XCTAssertEqual(text["type"] as? String, "string")
-        XCTAssertEqual(text["maxLength"] as? Int, 512)
-        let expectedBody: NSDictionary = [
-            "model": "semantic-router-v1",
-            "messages": [
-                [
-                    "role": "system",
-                    "content": "Select exactly one native routing tool.",
-                ],
-                [
-                    "role": "user",
-                    "content": "Type hello into the focused field.",
-                ],
-            ],
-            "tools": [[
-                "type": "function",
-                "function": [
-                    "name": "type_text",
-                    "description":
-                        "Type exact user-authorized text in Finder/Desktop.",
-                    "strict": true,
-                    "parameters": [
-                        "type": "object",
-                        "properties": [
-                            "text": [
-                                "type": "string",
-                                "maxLength": 512,
-                            ],
-                        ],
-                        "required": ["text"],
-                        "additionalProperties": false,
-                    ],
-                ],
-            ]],
-            "tool_choice": "required",
-            "parallel_tool_calls": false,
-            "temperature": 0.0,
-            "seed": 0,
-            "max_tokens": 96,
-            "stream": false,
-        ]
-        XCTAssertEqual(json as NSDictionary, expectedBody)
-    }
-
-    func testSemanticTokenBudgetRequestsUseExactB9992TemplateAndTokenizerContract()
+    func testTextTokenBudgetRequestsUseExactB9992TemplateAndTokenizerContract()
         throws {
-        let endpoint = OSAtlasLlamaEndpoint(
-            generation: 9,
-            variant: .pro4B,
+        let planner = ComputerUseLocalTextGoalPlanner(connection: try ComputerUseTextModelConnection(
             baseURL: URL(string: "http://127.0.0.1:43123")!,
-            bearerToken: "unit-test-token")
-        let completion = try OSAtlasLlamaHTTPClient.makeSemanticRequest(
-            endpoint: endpoint,
-            request: semanticRequest())
+            bearerToken: "unit-test-token-16",
+            modelAlias: ComputerUseNativeTextRuntimeInputs.modelAlias))
+        let completion = try planner.makeRequest(
+            catalog: ComputerUseTextPayloadCatalog("Set Destination to Oslo."),
+            fields: [ComputerUseTextField(label: "Destination", snapshot: ComputerUseTextSnapshot(
+                targetID: "field-1", value: "", selection: NSRange(location: 0, length: 0),
+                isEditable: true, isSecure: false))])
         let template = try OSAtlasLlamaHTTPClient
             .makeSemanticTemplateRequest(from: completion)
 
@@ -1803,7 +1669,7 @@ final class OSAtlasLlamaRuntimeTests: XCTestCase {
         XCTAssertEqual(template.httpBody, completion.httpBody)
         XCTAssertEqual(
             template.value(forHTTPHeaderField: "Authorization"),
-            "Bearer unit-test-token")
+            "Bearer unit-test-token-16")
 
         let rendered = "<|system|>route<|end|><|assistant|>"
         let templateData = try JSONSerialization.data(withJSONObject: [
@@ -1821,14 +1687,14 @@ final class OSAtlasLlamaRuntimeTests: XCTestCase {
             "http://127.0.0.1:43123/tokenize")
         XCTAssertEqual(
             tokenize.value(forHTTPHeaderField: "Authorization"),
-            "Bearer unit-test-token")
+            "Bearer unit-test-token-16")
         let tokenizeBody = try XCTUnwrap(tokenize.httpBody)
         let tokenizeJSON = try XCTUnwrap(
             JSONSerialization.jsonObject(with: tokenizeBody)
                 as? [String: Any])
         XCTAssertEqual(
             tokenizeJSON["model"] as? String,
-            OSAtlasLlamaServedModel.semanticRouter.rawValue)
+            ComputerUseNativeTextRuntimeInputs.modelAlias)
         XCTAssertEqual(tokenizeJSON["content"] as? String, rendered)
         XCTAssertEqual(tokenizeJSON["add_special"] as? Bool, false)
         XCTAssertEqual(tokenizeJSON["parse_special"] as? Bool, true)
@@ -1839,7 +1705,7 @@ final class OSAtlasLlamaRuntimeTests: XCTestCase {
             4)
     }
 
-    func testSemanticTokenBudgetParsersFailClosedOnResponseDrift() throws {
+    func testTextTokenBudgetParsersFailClosedOnResponseDrift() throws {
         for value in [
             #"{"prompt":"ok","extra":true}"#,
             #"{"prompt":"","prompt":"duplicate"}"#,
@@ -1859,66 +1725,6 @@ final class OSAtlasLlamaRuntimeTests: XCTestCase {
             XCTAssertThrowsError(try OSAtlasLlamaHTTPClient.tokenCount(
                 from: Data(value.utf8)), value)
         }
-    }
-
-    func testSemanticRequestRejectsDuplicateOrCallerControlledToolNames() throws {
-        let endpoint = OSAtlasLlamaEndpoint(
-            generation: 9,
-            variant: .pro4B,
-            baseURL: URL(string: "http://127.0.0.1:43123")!,
-            bearerToken: "unit-test-token")
-        let messages = [
-            OSAtlasLlamaSemanticMessage(role: .system, content: "Route."),
-            OSAtlasLlamaSemanticMessage(role: .user, content: "Do task."),
-        ]
-        let schema = OSAtlasLlamaJSONValue.object([
-            "type": .string("object"),
-        ])
-        XCTAssertThrowsError(try OSAtlasLlamaHTTPClient.makeSemanticRequest(
-            endpoint: endpoint,
-            request: OSAtlasLlamaSemanticRequest(
-                contract: .nativeRoutingV4,
-                messages: messages,
-                tools: [
-                    OSAtlasLlamaSemanticTool(
-                        name: "bad tool name",
-                        description: "Bad.",
-                        parameters: schema),
-                ])))
-        XCTAssertThrowsError(try OSAtlasLlamaHTTPClient.makeSemanticRequest(
-            endpoint: endpoint,
-            request: OSAtlasLlamaSemanticRequest(
-                contract: .nativeRoutingV4,
-                messages: messages,
-                tools: [
-                    OSAtlasLlamaSemanticTool(
-                        name: "click",
-                        description: "First.",
-                        parameters: schema),
-                    OSAtlasLlamaSemanticTool(
-                        name: "click",
-                        description: "Duplicate.",
-                        parameters: schema),
-                ])))
-        XCTAssertThrowsError(try OSAtlasLlamaHTTPClient.makeSemanticRequest(
-            endpoint: endpoint,
-            request: OSAtlasLlamaSemanticRequest(
-                contract: .nativeRoutingV4,
-                messages: messages,
-                tools: [
-                    OSAtlasLlamaSemanticTool(
-                        name: "oversized_string",
-                        description: "Must not reach the model.",
-                        parameters: .object([
-                            "type": .string("object"),
-                            "properties": .object([
-                                "text": .object([
-                                    "type": .string("string"),
-                                    "maxLength": .number(513),
-                                ]),
-                            ]),
-                        ])),
-                ])))
     }
 
     func testCompactLaunchArgumentsBoundEightGiBRuntimeAllocations() throws {
@@ -2476,278 +2282,6 @@ final class OSAtlasLlamaRuntimeTests: XCTestCase {
         await runtime.shutdown()
     }
 
-    func testMultiModelActivationExplicitlyLoadsOnlyFixedWorkers() async throws {
-        let events = RuntimeEventLog()
-        let launcher = FakeLlamaLauncher(events: events)
-        let runtime = OSAtlasLlamaRuntime(
-            launcher: launcher,
-            transportMaker: FakeTransportMaker(events: events),
-            portProvider: FixedPortProvider(port: 43123),
-            tokenProvider: FixedTokenProvider(token: "token"),
-            readinessAttempts: 1,
-            readinessDelay: .zero,
-            resourceInspector: FixedResourceInspector.sufficient)
-
-        let endpoint = try await runtime.activateMultiModel(
-            visualInputs: inputs(variant: .pro4B, name: "pro"),
-            semanticModelURL: URL(
-                fileURLWithPath: "/models/semantic-Q4_K_M.gguf"))
-        let configurations = await launcher.configurations()
-        let configuration = try XCTUnwrap(configurations.first)
-        let presetURL = try XCTUnwrap(
-            configuration.routerPresetFile?.fileURL)
-        XCTAssertEqual(endpoint.generation, 1)
-        let activationEvents = await events.values()
-        XCTAssertEqual(activationEvents, [
-            "launch:pro-Q4_K_M-00001-of-00002.gguf",
-            "health",
-            "load:visual-grounder-v1",
-            "model-health:visual-grounder-v1",
-            "load:semantic-router-v1",
-            "model-health:semantic-router-v1",
-        ])
-        XCTAssertTrue(configuration.arguments.contains("--no-models-autoload"))
-        XCTAssertTrue(FileManager.default.fileExists(atPath: presetURL.path))
-
-        let response = try await runtime.completeSemantic(
-            endpoint: endpoint,
-            request: semanticRequest())
-        XCTAssertFalse(response.isEmpty)
-
-        await runtime.shutdown()
-        XCTAssertFalse(FileManager.default.fileExists(atPath: presetURL.path))
-        let finalEvents = await events.values()
-        XCTAssertTrue(finalEvents.contains("complete"))
-        XCTAssertTrue(finalEvents.contains("cancel-http"))
-        XCTAssertTrue(finalEvents.contains(
-            "terminate:pro-Q4_K_M-00001-of-00002.gguf"))
-        XCTAssertTrue(finalEvents.contains(
-            "wait:pro-Q4_K_M-00001-of-00002.gguf"))
-    }
-
-    func testSemanticRuntimeRejectsV5AndMislabeledV5ShapeBeforeTransportAgainstV1Alias()
-        async throws {
-        let events = RuntimeEventLog()
-        let transports = FakeTransportMaker(events: events)
-        let runtime = OSAtlasLlamaRuntime(
-            launcher: FakeLlamaLauncher(events: events),
-            transportMaker: transports,
-            portProvider: FixedPortProvider(port: 43_123),
-            tokenProvider: FixedTokenProvider(token: "token"),
-            readinessAttempts: 1,
-            readinessDelay: .zero,
-            resourceInspector: FixedResourceInspector.sufficient)
-        let endpoint = try await runtime.activateMultiModel(
-            visualInputs: inputs(variant: .pro4B, name: "pro"),
-            semanticModelURL: URL(
-                fileURLWithPath: "/models/semantic-Q4_K_M.gguf"))
-        let activationEvents = await events.values()
-
-        let routingRequest = OSAtlasSemanticRoutingRequest(
-            task: "Click Continue.",
-            frontmostApplication: "Safari",
-            visibleText: "Continue",
-            history: [],
-            availableDirectives: [.click])
-        let candidates = try OSAtlasSemanticActionCandidateSet.deterministic(
-            caseID: "runtime.contract-mismatch",
-            routes: [OSAtlasSemanticActionRoute(
-                directive: .click,
-                argument: .targetHint("Continue"))])
-        let v5Request = try LlamaSemanticActionCandidateSelector
-            .semanticRequest(
-                for: routingRequest,
-                candidates: candidates)
-        let mislabeledV5Request = OSAtlasLlamaSemanticRequest(
-            contract: .nativeRoutingV4,
-            messages: v5Request.messages,
-            tools: v5Request.tools,
-            maxTokens: v5Request.maxTokens)
-
-        for request in [v5Request, mislabeledV5Request] {
-            do {
-                _ = try await runtime.completeSemantic(
-                    endpoint: endpoint,
-                    candidateRequests: [request],
-                    maximumInputTokens:
-                        SemanticCandidateSelectionV5.maximumInputTokens)
-                XCTFail("V5 shape must not reach the V1 served alias")
-            } catch let error as OSAtlasLlamaRuntimeError {
-                XCTAssertEqual(error, .invalidResponse)
-            }
-        }
-
-        XCTAssertTrue(transports.recordedTokenCountRequests().isEmpty)
-        XCTAssertTrue(transports.recordedCompletionRequests().isEmpty)
-        let postRejectionEvents = await events.values()
-        let activeVariant = await runtime.activeVariant()
-        XCTAssertEqual(postRejectionEvents, activationEvents)
-        XCTAssertEqual(activeVariant, .pro4B)
-        await runtime.shutdown()
-    }
-
-    func testSemanticRuntimeExactCountsCandidatesAndCompletesFirstWithinBudget()
-        async throws {
-        let events = RuntimeEventLog()
-        let transports = FakeTransportMaker(
-            events: events,
-            inputTokenCounts: [3_100, 1_900])
-        let runtime = OSAtlasLlamaRuntime(
-            launcher: FakeLlamaLauncher(events: events),
-            transportMaker: transports,
-            portProvider: FixedPortProvider(port: 43_123),
-            tokenProvider: FixedTokenProvider(token: "token"),
-            readinessAttempts: 1,
-            readinessDelay: .zero,
-            resourceInspector: FixedResourceInspector.sufficient)
-        let endpoint = try await runtime.activateMultiModel(
-            visualInputs: inputs(variant: .pro4B, name: "pro"),
-            semanticModelURL: URL(
-                fileURLWithPath: "/models/semantic-Q4_K_M.gguf"))
-        let base = semanticRequest()
-        func candidate(_ marker: String) -> OSAtlasLlamaSemanticRequest {
-            OSAtlasLlamaSemanticRequest(
-                contract: .nativeRoutingV4,
-                messages: [
-                    base.messages[0],
-                    .init(role: .user, content: marker),
-                ],
-                tools: base.tools,
-                maxTokens: base.maxTokens)
-        }
-
-        _ = try await runtime.completeSemantic(
-            endpoint: endpoint,
-            candidateRequests: [
-                candidate("full-context-marker"),
-                candidate("reduced-context-marker"),
-            ],
-            maximumInputTokens: 2_304)
-
-        XCTAssertEqual(transports.recordedTokenCountRequests().count, 2)
-        let completedRequests = transports.recordedCompletionRequests()
-        XCTAssertEqual(completedRequests.count, 1)
-        let completed = try XCTUnwrap(completedRequests.first)
-        let body = try XCTUnwrap(completed.httpBody)
-        let json = try XCTUnwrap(
-            JSONSerialization.jsonObject(with: body) as? [String: Any])
-        let messages = try XCTUnwrap(json["messages"] as? [[String: Any]])
-        XCTAssertEqual(
-            messages.last?["content"] as? String,
-            "reduced-context-marker")
-        await runtime.shutdown()
-    }
-
-    func testSemanticRuntimeFailsClosedWhenIrreducibleCandidateExceedsBudget()
-        async throws {
-        let events = RuntimeEventLog()
-        let transports = FakeTransportMaker(
-            events: events,
-            inputTokenCounts: [3_100, 2_500])
-        let runtime = OSAtlasLlamaRuntime(
-            launcher: FakeLlamaLauncher(events: events),
-            transportMaker: transports,
-            portProvider: FixedPortProvider(port: 43_123),
-            tokenProvider: FixedTokenProvider(token: "token"),
-            readinessAttempts: 1,
-            readinessDelay: .zero,
-            resourceInspector: FixedResourceInspector.sufficient)
-        let endpoint = try await runtime.activateMultiModel(
-            visualInputs: inputs(variant: .pro4B, name: "pro"),
-            semanticModelURL: URL(
-                fileURLWithPath: "/models/semantic-Q4_K_M.gguf"))
-
-        do {
-            _ = try await runtime.completeSemantic(
-                endpoint: endpoint,
-                candidateRequests: [semanticRequest(), semanticRequest()],
-                maximumInputTokens: 2_304)
-            XCTFail("Irreducible over-budget context must never complete")
-        } catch let error as OSAtlasLlamaRuntimeError {
-            XCTAssertEqual(error, .invalidResponse)
-        }
-        XCTAssertEqual(transports.recordedTokenCountRequests().count, 2)
-        XCTAssertTrue(transports.recordedCompletionRequests().isEmpty)
-        let activeVariant = await runtime.activeVariant()
-        XCTAssertNil(activeVariant)
-    }
-
-    func testCompactRouterSmokeLoadsBothWorkersRestoresVisualAndSwitchesSafely()
-        async throws {
-        let events = RuntimeEventLog()
-        let launcher = FakeLlamaLauncher(events: events)
-        let runtime = OSAtlasLlamaRuntime(
-            launcher: launcher,
-            transportMaker: FakeTransportMaker(events: events),
-            portProvider: FixedPortProvider(port: 43123),
-            tokenProvider: FixedTokenProvider(token: "token"),
-            readinessAttempts: 1,
-            readinessDelay: .zero,
-            resourceInspector: FixedResourceInspector.compactSufficient)
-
-        let endpoint = try await runtime.activateMultiModel(
-            visualInputs: inputs(variant: .pro4B, name: "pro"),
-            semanticModelURL: URL(
-                fileURLWithPath: "/models/semantic-Q4_K_M.gguf"))
-        let configurations = await launcher.configurations()
-        let configuration = try XCTUnwrap(configurations.first)
-        XCTAssertEqual(configuration.resourceProfile, .compact)
-        XCTAssertEqual(configuration.maximumProcessCount, 2)
-        let modelsMax = try XCTUnwrap(
-            configuration.arguments.firstIndex(of: "--models-max"))
-        XCTAssertEqual(configuration.arguments[modelsMax + 1], "1")
-        let activationEvents = await events.values()
-        XCTAssertEqual(activationEvents, [
-            "launch:pro-Q4_K_M-00001-of-00002.gguf",
-            "health",
-            "load:visual-grounder-v1",
-            "model-health:visual-grounder-v1",
-            "unload:visual-grounder-v1",
-            "model-health:visual-grounder-v1",
-            "load:semantic-router-v1",
-            "model-health:semantic-router-v1",
-            "unload:semantic-router-v1",
-            "model-health:semantic-router-v1",
-            "load:visual-grounder-v1",
-            "model-health:visual-grounder-v1",
-        ])
-
-        _ = try await runtime.completeSemantic(
-            endpoint: endpoint,
-            request: semanticRequest())
-        _ = try await runtime.complete(
-            endpoint: endpoint,
-            prompt: "Locate the requested control <image> and return one action.",
-            jpegData: try makeTestJPEG(width: 32, height: 24))
-
-        let completionEvents = await events.values()
-        XCTAssertEqual(completionEvents, [
-            "launch:pro-Q4_K_M-00001-of-00002.gguf",
-            "health",
-            "load:visual-grounder-v1",
-            "model-health:visual-grounder-v1",
-            "unload:visual-grounder-v1",
-            "model-health:visual-grounder-v1",
-            "load:semantic-router-v1",
-            "model-health:semantic-router-v1",
-            "unload:semantic-router-v1",
-            "model-health:semantic-router-v1",
-            "load:visual-grounder-v1",
-            "model-health:visual-grounder-v1",
-            "unload:visual-grounder-v1",
-            "model-health:visual-grounder-v1",
-            "load:semantic-router-v1",
-            "model-health:semantic-router-v1",
-            "complete",
-            "unload:semantic-router-v1",
-            "model-health:semantic-router-v1",
-            "load:visual-grounder-v1",
-            "model-health:visual-grounder-v1",
-            "complete",
-        ])
-        await runtime.shutdown()
-    }
-
     func testCompactCachedActivationChecksOnlyResidentWorker() async throws {
         let events = RuntimeEventLog()
         let runtime = OSAtlasLlamaRuntime(
@@ -2790,136 +2324,6 @@ final class OSAtlasLlamaRuntimeTests: XCTestCase {
         await runtime.shutdown()
     }
 
-    func testShutdownInvalidatesCompactActivationWaitingForModelLease() async throws {
-        let events = RuntimeEventLog()
-        let launcher = FakeLlamaLauncher(events: events)
-        let transports = FakeTransportMaker(
-            events: events,
-            blocksCompletion: true)
-        let runtime = OSAtlasLlamaRuntime(
-            launcher: launcher,
-            transportMaker: transports,
-            portProvider: FixedPortProvider(port: 43123),
-            tokenProvider: FixedTokenProvider(token: "token"),
-            readinessAttempts: 1,
-            readinessDelay: .zero,
-            resourceInspector: FixedResourceInspector.compactSufficient)
-        let visualInputs = inputs(variant: .pro4B, name: "pro")
-        let semanticURL = URL(
-            fileURLWithPath: "/models/semantic-Q4_K_M.gguf")
-        let endpoint = try await runtime.activateMultiModel(
-            visualInputs: visualInputs,
-            semanticModelURL: semanticURL)
-        let completion = Task {
-            try await runtime.completeSemantic(
-                endpoint: endpoint,
-                request: semanticRequest())
-        }
-        await transports.waitUntilCompletionStarted()
-        let cachedActivation = Task {
-            try await runtime.activateMultiModel(
-                visualInputs: visualInputs,
-                semanticModelURL: semanticURL)
-        }
-        for _ in 0 ..< 20 { await Task.yield() }
-
-        await runtime.shutdown()
-        _ = try? await completion.value
-        do {
-            _ = try await cachedActivation.value
-            XCTFail("Shutdown must invalidate an activation waiting for the model lease")
-        } catch is CancellationError {
-            // Expected: its pre-shutdown activation epoch may not relaunch.
-        } catch {
-            XCTFail("Expected cancellation, got \(error)")
-        }
-
-        let configurations = await launcher.configurations()
-        XCTAssertEqual(configurations.count, 1)
-        let activeVariant = await runtime.activeVariant()
-        XCTAssertNil(activeVariant)
-    }
-
-    func testCompactSwitchUnloadFailureStopsRouterBeforeReplacementLoad() async throws {
-        let events = RuntimeEventLog()
-        let runtime = OSAtlasLlamaRuntime(
-            launcher: FakeLlamaLauncher(events: events),
-            transportMaker: FakeTransportMaker(
-                events: events,
-                failingUnloadModel: .visualGrounder,
-                failingUnloadOccurrence: 2),
-            portProvider: FixedPortProvider(port: 43123),
-            tokenProvider: FixedTokenProvider(token: "token"),
-            readinessAttempts: 1,
-            readinessDelay: .zero,
-            resourceInspector: FixedResourceInspector.compactSufficient)
-        let endpoint = try await runtime.activateMultiModel(
-            visualInputs: inputs(variant: .pro4B, name: "pro"),
-            semanticModelURL: URL(
-                fileURLWithPath: "/models/semantic-Q4_K_M.gguf"))
-
-        do {
-            _ = try await runtime.completeSemantic(
-                endpoint: endpoint,
-                request: semanticRequest())
-            XCTFail("A failed compact unload must fail closed")
-        } catch let error as OSAtlasLlamaRuntimeError {
-            XCTAssertEqual(error, .invalidResponse)
-        }
-
-        let values = await events.values()
-        XCTAssertTrue(values.contains("unload:visual-grounder-v1"))
-        XCTAssertEqual(
-            values.filter { $0 == "load:semantic-router-v1" }.count,
-            1,
-            "Only the activation smoke load may occur; the failed switch must not load a replacement")
-        XCTAssertTrue(values.contains("cancel-http"))
-        let activeVariant = await runtime.activeVariant()
-        XCTAssertNil(activeVariant)
-    }
-
-    func testCompactSwitchLoadFailureStopsRouterAfterConfirmedUnload() async throws {
-        let events = RuntimeEventLog()
-        let runtime = OSAtlasLlamaRuntime(
-            launcher: FakeLlamaLauncher(events: events),
-            transportMaker: FakeTransportMaker(
-                events: events,
-                failingLoadModel: .semanticRouter,
-                failingLoadOccurrence: 2),
-            portProvider: FixedPortProvider(port: 43123),
-            tokenProvider: FixedTokenProvider(token: "token"),
-            readinessAttempts: 1,
-            readinessDelay: .zero,
-            resourceInspector: FixedResourceInspector.compactSufficient)
-        let endpoint = try await runtime.activateMultiModel(
-            visualInputs: inputs(variant: .pro4B, name: "pro"),
-            semanticModelURL: URL(
-                fileURLWithPath: "/models/semantic-Q4_K_M.gguf"))
-
-        do {
-            _ = try await runtime.completeSemantic(
-                endpoint: endpoint,
-                request: semanticRequest())
-            XCTFail("A failed compact replacement load must fail closed")
-        } catch let error as OSAtlasLlamaRuntimeError {
-            XCTAssertEqual(error, .invalidResponse)
-        }
-
-        let values = await events.values()
-        let unload = try XCTUnwrap(
-            values.firstIndex(of: "unload:visual-grounder-v1"))
-        let oldWorkerGone = try XCTUnwrap(
-            values[values.index(after: unload)...]
-                .firstIndex(of: "model-health:visual-grounder-v1"))
-        let replacementLoad = try XCTUnwrap(
-            values.firstIndex(of: "load:semantic-router-v1"))
-        XCTAssertLessThan(unload, oldWorkerGone)
-        XCTAssertLessThan(oldWorkerGone, replacementLoad)
-        XCTAssertTrue(values.contains("cancel-http"))
-        let activeVariant = await runtime.activeVariant()
-        XCTAssertNil(activeVariant)
-    }
-
     func testMultiModelLoadFailureTearsDownProcessAndPreset() async throws {
         let events = RuntimeEventLog()
         let launcher = FakeLlamaLauncher(events: events)
@@ -2959,74 +2363,6 @@ final class OSAtlasLlamaRuntimeTests: XCTestCase {
             "wait:pro-Q4_K_M-00001-of-00002.gguf"))
         let activeVariant = await runtime.activeVariant()
         XCTAssertNil(activeVariant)
-    }
-
-    func testSemanticHTTPFailureStopsBothWorkersWithoutRetry() async throws {
-        let events = RuntimeEventLog()
-        let runtime = OSAtlasLlamaRuntime(
-            launcher: FakeLlamaLauncher(events: events),
-            transportMaker: FakeTransportMaker(
-                events: events,
-                failsCompletion: true),
-            portProvider: FixedPortProvider(port: 43123),
-            tokenProvider: FixedTokenProvider(token: "token"),
-            readinessAttempts: 1,
-            readinessDelay: .zero,
-            resourceInspector: FixedResourceInspector.sufficient)
-        let endpoint = try await runtime.activateMultiModel(
-            visualInputs: inputs(variant: .pro4B, name: "pro"),
-            semanticModelURL: URL(
-                fileURLWithPath: "/models/semantic-Q4_K_M.gguf"))
-
-        do {
-            _ = try await runtime.completeSemantic(
-                endpoint: endpoint,
-                request: semanticRequest())
-            XCTFail("An HTTP 500 or invalid sampler response must fail closed")
-        } catch let error as OSAtlasLlamaRuntimeError {
-            XCTAssertEqual(error, .invalidResponse)
-        }
-
-        let values = await events.values()
-        XCTAssertEqual(values.filter { $0 == "complete" }.count, 1)
-        XCTAssertTrue(values.contains("cancel-http"))
-        XCTAssertTrue(values.contains(
-            "terminate:pro-Q4_K_M-00001-of-00002.gguf"))
-        XCTAssertTrue(values.contains(
-            "wait:pro-Q4_K_M-00001-of-00002.gguf"))
-        let activeVariant = await runtime.activeVariant()
-        XCTAssertNil(activeVariant)
-    }
-
-    func testStaleMultiModelEndpointCannotCompleteSemanticAfterReplacement() async throws {
-        let events = RuntimeEventLog()
-        let runtime = OSAtlasLlamaRuntime(
-            launcher: FakeLlamaLauncher(events: events),
-            transportMaker: FakeTransportMaker(events: events),
-            portProvider: FixedPortProvider(port: 43123),
-            tokenProvider: FixedTokenProvider(token: "token"),
-            readinessAttempts: 1,
-            readinessDelay: .zero,
-            resourceInspector: FixedResourceInspector.sufficient)
-        let stale = try await runtime.activateMultiModel(
-            visualInputs: inputs(variant: .pro4B, name: "pro"),
-            semanticModelURL: URL(
-                fileURLWithPath: "/models/semantic-Q4_K_M.gguf"))
-        let current = try await runtime.activateMultiModel(
-            visualInputs: inputs(variant: .pro4B, name: "replacement"),
-            semanticModelURL: URL(
-                fileURLWithPath: "/models/semantic-Q4_K_M.gguf"))
-        XCTAssertNotEqual(stale.generation, current.generation)
-
-        do {
-            _ = try await runtime.completeSemantic(
-                endpoint: stale,
-                request: semanticRequest())
-            XCTFail("A stale generation must never reach the semantic worker")
-        } catch let error as OSAtlasLlamaRuntimeError {
-            XCTAssertEqual(error, .inactiveSession)
-        }
-        await runtime.shutdown()
     }
 
     func testLateStaleCancelCannotAbortBlockedReplacementOrItsCachedEndpoint()
@@ -3514,54 +2850,6 @@ final class OSAtlasLlamaRuntimeTests: XCTestCase {
         XCTAssertTrue(values.contains("terminate:pro-Q4_K_M-00001-of-00002.gguf"))
     }
 
-    func testCompactSwitchRechecksHeadroomAfterReplacementWorkerLoads()
-        async throws {
-        let events = RuntimeEventLog()
-        let sufficient = OSAtlasLlamaResourceSnapshot(
-            physicalMemoryBytes:
-                OSAtlasLlamaResourceProfile.minimumPhysicalMemoryBytes,
-            reclaimableMemoryBytes: .max)
-        let pressured = OSAtlasLlamaResourceSnapshot(
-            physicalMemoryBytes:
-                OSAtlasLlamaResourceProfile.minimumPhysicalMemoryBytes,
-            reclaimableMemoryBytes:
-                OSAtlasLlamaResourceProfile.compact
-                    .minimumInferenceMemoryBytes - 1)
-        // Launch selection, three compact smoke loads, final readiness, and
-        // the pre-inference check all pass. Only the post-replacement-load
-        // snapshot fails.
-        let resources = SequenceResourceInspector(
-            snapshots: Array(repeating: sufficient, count: 6) + [pressured])
-        let runtime = OSAtlasLlamaRuntime(
-            launcher: FakeLlamaLauncher(events: events),
-            transportMaker: FakeTransportMaker(events: events),
-            portProvider: FixedPortProvider(port: 43123),
-            tokenProvider: FixedTokenProvider(token: "token"),
-            readinessAttempts: 1,
-            readinessDelay: .zero,
-            resourceInspector: resources)
-        let endpoint = try await runtime.activateMultiModel(
-            visualInputs: inputs(variant: .pro4B, name: "pro"),
-            semanticModelURL: URL(
-                fileURLWithPath: "/models/semantic-Q4_K_M.gguf"))
-
-        do {
-            _ = try await runtime.completeSemantic(
-                endpoint: endpoint,
-                request: semanticRequest())
-            XCTFail("A loaded replacement worker without headroom must not run")
-        } catch let error as OSAtlasLlamaRuntimeError {
-            XCTAssertEqual(error, .insufficientAvailableMemory)
-        }
-
-        let values = await events.values()
-        XCTAssertEqual(values.filter { $0 == "complete" }.count, 0)
-        XCTAssertTrue(values.contains("load:semantic-router-v1"))
-        XCTAssertTrue(values.contains("cancel-http"))
-        let activeVariant = await runtime.activeVariant()
-        XCTAssertNil(activeVariant)
-    }
-
     func testInferenceMemoryPressureStopsResidentModelBeforeHTTP() async throws {
         let events = RuntimeEventLog()
         let resources = SequenceResourceInspector(snapshots: [
@@ -3607,18 +2895,6 @@ final class OSAtlasLlamaRuntimeTests: XCTestCase {
             "Actions:\nWAIT")
         let multiple = Data(#"{"choices":[{"message":{"content":"WAIT"}},{"message":{"content":"WAIT"}}]}"#.utf8)
         XCTAssertThrowsError(try OSAtlasLlamaHTTPClient.responseText(from: multiple))
-    }
-
-    private func semanticRequest() -> OSAtlasLlamaSemanticRequest {
-        // This is the actual frozen V4 factory path so runtime tests exercise
-        // the same shape validation as production instead of a loose fixture.
-        try! LlamaSemanticActionRouter.semanticRequest(
-            for: OSAtlasSemanticRoutingRequest(
-                task: "Click the visible Continue button.",
-                frontmostApplication: "Safari",
-                visibleText: "Continue",
-                history: [],
-                availableDirectives: [.click]))
     }
 
     private func inputs(

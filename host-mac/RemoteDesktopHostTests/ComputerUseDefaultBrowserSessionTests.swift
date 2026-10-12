@@ -1685,6 +1685,8 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
     }
 
     func testWindowCreationReobservesOneFocusedAdditionWhenOneBaselineAXWindowIsTemporarilyMissing() async throws {
+        XCTAssertEqual(ComputerUseDefaultBrowserSession.defaultNewWindowWaitBudget, .seconds(30),
+            "Production ownership wait remains bounded by its 30-second budget")
         for persistentOmission in [false, true] {
             let fixture = try Fixture()
             defer { try? FileManager.default.removeItem(at: fixture.root) }
@@ -1704,7 +1706,8 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                     focusedWindowID: snapshot.focusedWindowID, hasSheets: snapshot.hasSheets,
                     fileOpenPanel: snapshot.fileOpenPanel, hasUnrecognizedSheets: snapshot.hasUnrecognizedSheets)
             }
-            let session = try fixture.session(captureWindowsOverride: captureWindows)
+            let session = try fixture.session(captureWindowsOverride: captureWindows,
+                newWindowWaitBudget: .milliseconds(250))
 
             if persistentOmission {
                 do {
@@ -1795,7 +1798,7 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
         for createdCount in [0, 2] {
             let fixture = try Fixture(createCount: createdCount)
             defer { try? FileManager.default.removeItem(at: fixture.root) }
-            let session = try fixture.session()
+            let session = try fixture.session(newWindowWaitBudget: .milliseconds(250))
             do {
                 _ = try await session.ensure(taskID: "task-1", goal: "Use the default browser", tools: fixture.tools)
                 XCTFail("Only exactly one new focused AX window is accepted")
@@ -8207,6 +8210,7 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                      captureWindowsOverride: ComputerUseDefaultBrowserSession.CaptureWindows? = nil,
                      retainedWindowCapture: ComputerUseDefaultBrowserSession.CaptureRetainedWindow? = nil,
                      focusedRetainedWindowCapture: ComputerUseDefaultBrowserSession.CaptureFocusedRetainedWindow? = nil,
+                     newWindowWaitBudget: Duration = ComputerUseDefaultBrowserSession.defaultNewWindowWaitBudget,
                      captureDiagnosticProvider: @escaping @MainActor () -> String? = { nil },
                      captureDiagnosticAXErrorProvider: @escaping @MainActor () -> Int? = { nil}) throws -> ComputerUseDefaultBrowserSession {
             let defaultCaptureWindows: ComputerUseDefaultBrowserSession.CaptureWindows = { identity in
@@ -8241,6 +8245,7 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                 resolveHandler: { handler },
                 launchApplication: { _, beforeOpen in try beforeOpen(); desktop.launchCount += 1; return app },
                 captureWindows: captureWindowsOverride ?? defaultCaptureWindows,
+                newWindowWaitBudget: newWindowWaitBudget,
                 captureRetainedWindow: retainedWindowCapture,
                 captureFocusedRetainedWindow: focusedRetainedWindowCapture,
                 captureDiagnosticProvider: captureDiagnosticProvider,
