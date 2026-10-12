@@ -3,6 +3,14 @@ import Foundation
 
 /// Experimental work remains disabled until explicitly enabled by the host.
 enum ComputerUseFeatureFlags {
+    static let experimentalPreferenceKey = "computerUseExperimental"
+
+    static var experimental: Bool { isExperimentalEnabled(in: .standard) }
+
+    static func isExperimentalEnabled(in defaults: UserDefaults) -> Bool {
+        defaults.bool(forKey: experimentalPreferenceKey)
+    }
+
     static var computerUseV2: Bool { UserDefaults.standard.bool(forKey: "computerUseV2") }
 }
 

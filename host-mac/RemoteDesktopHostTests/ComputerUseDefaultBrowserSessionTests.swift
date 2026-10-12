@@ -7160,7 +7160,7 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                 }
                 managerApprovalStage = nil
             }
-            let manager = HostComputerUseManager(injector: InputInjector(), executor: observer,
+            let manager = HostComputerUseManager(experimentalEnabled: { true }, injector: InputInjector(), executor: observer,
                 taskLedger: .init(fileURL: directory.appendingPathComponent("client-manager-ledger.json")),
                 nativeTextTargetDiagnosticObserver: textTargetDiagnosticObserver,
                 channelFactory: { _ in mailbox })

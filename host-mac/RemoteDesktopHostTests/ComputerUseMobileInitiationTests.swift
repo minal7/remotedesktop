@@ -5922,7 +5922,7 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
                     usesDirectActionPlanning: true, inspectExchange: inspectExchange)
             }
         }
-        let manager = HostComputerUseManager(injector: InputInjector(), installer: visual,
+        let manager = HostComputerUseManager(experimentalEnabled: { true }, injector: InputInjector(), installer: visual,
             nativeTextInstaller: native,
             macControlInstaller: MobileInitiationMacControlInstaller(status: .ready(helperReceipt)),
             visualExecutorLoader: loader,
@@ -7066,7 +7066,7 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
         } } else { trace = nil }
         let runtime = OSAtlasLlamaRuntime(inspectFaraExchange: trace)
         let ledger = ComputerUseTaskLedger(fileURL: output.appendingPathComponent("tasks.json"))
-        let diagnosticManager: HostComputerUseManager? = diagnostic ? HostComputerUseManager(injector: InputInjector(),
+        let diagnosticManager: HostComputerUseManager? = diagnostic ? HostComputerUseManager(experimentalEnabled: { true }, injector: InputInjector(),
             nativeTextInstaller: ComputerUseInstaller.nativeText(),
             visualExecutorLoader: OSAtlasVisualExecutorLoader(runtime: runtime, faraJournalDirectory: output.appendingPathComponent("fara")),
             taskLedger: ledger, browserNavigationFactory: browserFactory, allowsExternalServices: true) : nil
@@ -7293,7 +7293,7 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
         })
         let native = MobileInitiationModelInstaller(receipt: nativeReceipt, alreadyInstalled: true)
         let visual = MobileInitiationVisualLoader(), channel = MobileInitiationTestChannel()
-        let manager = HostComputerUseManager(injector: InputInjector(),
+        let manager = HostComputerUseManager(experimentalEnabled: { true }, injector: InputInjector(),
             installer: MobileInitiationModelInstaller(receipt: mobileInitiationModelReceipt()),
             nativeTextInstaller: native,
             macControlInstaller: MobileInitiationMacControlInstaller(status: .ready(helperReceipt)),
@@ -7349,7 +7349,7 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
             let makeNative = {
                 ComputerUseCapabilityExecutor(nativeExecution: { _, _, _ in nativeExecutions += 1; return nil })
             }
-            let manager = HostComputerUseManager(injector: InputInjector(),
+            let manager = HostComputerUseManager(experimentalEnabled: { true }, injector: InputInjector(),
                 installer: MobileInitiationModelInstaller(receipt: mobileInitiationModelReceipt()),
                 nativeTextInstaller: native, nativeTextLoader: { _, _, _ in runtimeLoads += 1; return makeNative() },
                 nativeTextPreparer: { _, _, _ in preparations += 1; return makeNative() },
@@ -7386,7 +7386,7 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
             let pool = MobileInitiationStructuredPool(), channel = MobileInitiationTestChannel()
             var preparations = 0, runtimeLoads = 0
             var releasePreparation = false
-            let manager = HostComputerUseManager(injector: InputInjector(),
+            let manager = HostComputerUseManager(experimentalEnabled: { true }, injector: InputInjector(),
                 installer: MobileInitiationModelInstaller(receipt: mobileInitiationModelReceipt()),
                 nativeTextInstaller: native, nativeTextLoader: { _, _, _ in
                     runtimeLoads += 1
@@ -7435,7 +7435,7 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
             let visual = MobileInitiationVisualLoader()
             let pool = MobileInitiationStructuredPool()
             let channel = MobileInitiationTestChannel()
-            let manager = HostComputerUseManager(injector: InputInjector(), installer: model,
+            let manager = HostComputerUseManager(experimentalEnabled: { true }, injector: InputInjector(), installer: model,
                 nativeTextInstaller: native, nativeTextLoader: { _, _, _ in
                     XCTFail("An absent native package must not be loaded during passive activation")
                     throw CocoaError(.fileNoSuchFile)
@@ -7465,7 +7465,7 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
                 let pool = MobileInitiationStructuredPool()
                 let channel = MobileInitiationTestChannel()
                 var nativeCalls = 0
-                let manager = HostComputerUseManager(injector: InputInjector(),
+                let manager = HostComputerUseManager(experimentalEnabled: { true }, injector: InputInjector(),
                     installer: MobileInitiationModelInstaller(receipt: mobileInitiationModelReceipt(), alreadyInstalled: visualInstalled),
                     nativeTextInstaller: MobileInitiationModelInstaller(receipt: nativeReceipt, alreadyInstalled: !explicitSetup),
                     nativeTextLoader: { _, _, _ in
@@ -7502,7 +7502,7 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
         let pool = MobileInitiationStructuredPool()
         let channel = MobileInitiationTestChannel()
         var compositions = 0
-        let manager = HostComputerUseManager(injector: InputInjector(),
+        let manager = HostComputerUseManager(experimentalEnabled: { true }, injector: InputInjector(),
             installer: MobileInitiationModelInstaller(receipt: mobileInitiationModelReceipt()),
             nativeTextInstaller: native, macControlInstaller: helper,
             visualExecutorLoader: visual, executorComposer: { receipt, fallback in
@@ -7533,7 +7533,7 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
         let pool = MobileInitiationStructuredPool()
         let channel = MobileInitiationTestChannel()
         let helper = MobileInitiationMacControlInstaller(status: .notInstalled)
-        let manager = HostComputerUseManager(injector: InputInjector(),
+        let manager = HostComputerUseManager(experimentalEnabled: { true }, injector: InputInjector(),
             installer: MobileInitiationModelInstaller(receipt: mobileInitiationModelReceipt()),
             nativeTextInstaller: MobileInitiationModelInstaller(receipt: nativeReceipt), nativeTextLoader: { _, _, _ in
                 ComputerUseCapabilityExecutor(nativeExecution: { _, _, _ in nil })
@@ -7562,7 +7562,7 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
             let channel = MobileInitiationTestChannel()
             var loadStarted = false
             var releaseLoad = false
-            let manager = HostComputerUseManager(injector: InputInjector(),
+            let manager = HostComputerUseManager(experimentalEnabled: { true }, injector: InputInjector(),
                 installer: MobileInitiationModelInstaller(receipt: mobileInitiationModelReceipt()),
                 nativeTextInstaller: native, nativeTextLoader: { _, _, _ in
                     loadStarted = true
@@ -7639,7 +7639,7 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
                 interrupted: interruptedVisual)
             let visual = MobileInitiationVisualLoader(throwsLoadFailure: true)
             var nativeLoads = 0
-            let manager = HostComputerUseManager(injector: InputInjector(), installer: visualInstaller,
+            let manager = HostComputerUseManager(experimentalEnabled: { true }, injector: InputInjector(), installer: visualInstaller,
                 nativeTextInstaller: nativeInstaller, nativeTextLoader: { _, _, _ in
                     nativeLoads += 1
                     return ComputerUseCapabilityExecutor(nativeExecution: { _, _, _ in .completed("verified") })
@@ -7669,7 +7669,7 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
             var loadCount = 0
             var releaseInitialLoad = false
             let visual = MobileInitiationVisualLoader(throwsLoadFailure: true)
-            let manager = HostComputerUseManager(injector: InputInjector(),
+            let manager = HostComputerUseManager(experimentalEnabled: { true }, injector: InputInjector(),
                 installer: MobileInitiationModelInstaller(receipt: mobileInitiationModelReceipt()),
                 nativeTextInstaller: nativeInstaller, nativeTextLoader: { _, _, _ in
                     loadCount += 1
@@ -7717,7 +7717,7 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
             while !release { try await Task.sleep(for: .milliseconds(10)) }
             return .completed("verified")
         })
-        let manager = HostComputerUseManager(injector: InputInjector(), executor: native,
+        let manager = HostComputerUseManager(experimentalEnabled: { true }, injector: InputInjector(), executor: native,
             installer: MobileInitiationModelInstaller(receipt: mobileInitiationModelReceipt()),
             nativeTextInstaller: nativeInstaller,
             macControlInstaller: MobileInitiationMacControlInstaller(status: .notInstalled),
@@ -7770,7 +7770,7 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
         let native = ComputerUseCapabilityExecutor(nativeExecution: { _, _, _ in
             calls += 1; return .completed("verified")
         })
-        let manager = HostComputerUseManager(injector: InputInjector(), executor: native,
+        let manager = HostComputerUseManager(experimentalEnabled: { true }, injector: InputInjector(), executor: native,
             installer: MobileInitiationModelInstaller(receipt: mobileInitiationModelReceipt()),
             nativeTextInstaller: nativeInstaller, nativeTextLoader: { _, _, _ in
                 loadStarted = true
@@ -7828,7 +7828,7 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
         let helper = MobileInitiationMacControlInstaller(status: .notInstalled)
         let visual = MobileInitiationVisualLoader()
         var nativeLoads = 0
-        let manager = HostComputerUseManager(injector: InputInjector(), installer: visualInstaller,
+        let manager = HostComputerUseManager(experimentalEnabled: { true }, injector: InputInjector(), installer: visualInstaller,
             nativeTextInstaller: nativeInstaller, nativeTextLoader: { receipt, _, _ in
                 XCTAssertEqual(receipt.modelVariant, .nativeText4B)
                 nativeLoads += 1
@@ -7855,7 +7855,7 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
         let helper = MobileInitiationMacControlInstaller(status: .notInstalled)
         let channel = MobileInitiationTestChannel()
         let visual = MobileInitiationVisualLoader(throwsLoadFailure: true)
-        let manager = HostComputerUseManager(injector: InputInjector(),
+        let manager = HostComputerUseManager(experimentalEnabled: { true }, injector: InputInjector(),
             installer: MobileInitiationModelInstaller(receipt: mobileInitiationModelReceipt()),
             nativeTextInstaller: nativeInstaller, nativeTextLoader: { _, _, _ in
                 ComputerUseCapabilityExecutor(nativeExecution: { _, _, _ in .completed("verified") })
@@ -7887,7 +7887,7 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
         let helper = MobileInitiationMacControlInstaller(status: .ready(mobileInitiationMacControlReceipt))
         let visual = MobileInitiationVisualLoader()
         var coordinator: ComputerUseCapabilityExecutor?
-        let manager = HostComputerUseManager(injector: InputInjector(),
+        let manager = HostComputerUseManager(experimentalEnabled: { true }, injector: InputInjector(),
             installer: MobileInitiationModelInstaller(receipt: mobileInitiationModelReceipt(), alreadyInstalled: true),
             nativeTextInstaller: MobileInitiationModelInstaller(receipt: nativeReceipt, alreadyInstalled: true),
             nativeTextLoader: { _, _, _ in
@@ -7924,6 +7924,7 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
             status: .notInstalled)
         let channel = MobileInitiationTestChannel(delayedFraction: 0.99)
         let manager = HostComputerUseManager(
+            experimentalEnabled: { true },
             injector: InputInjector(),
             installer: modelInstaller,
             macControlInstaller: macControlInstaller,
@@ -7997,6 +7998,7 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
 
         let channel = MobileInitiationTestChannel()
         let manager = HostComputerUseManager(
+            experimentalEnabled: { true },
             injector: InputInjector(),
             installer: MobileInitiationModelInstaller(
                 receipt: mobileInitiationModelReceipt()),
@@ -8058,6 +8060,7 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
         let composerRecorder = MobileInitiationComposerRecorder()
         let channel = MobileInitiationTestChannel()
         let manager = HostComputerUseManager(
+            experimentalEnabled: { true },
             injector: InputInjector(),
             installer: modelInstaller,
             macControlInstaller: MobileInitiationMacControlInstaller(
@@ -8103,6 +8106,7 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
         let visualLoader = MobileInitiationVisualLoader(throwsLoadFailure: true)
         let channel = MobileInitiationTestChannel()
         let manager = HostComputerUseManager(
+            experimentalEnabled: { true },
             injector: InputInjector(),
             installer: modelInstaller,
             macControlInstaller: MobileInitiationMacControlInstaller(
@@ -8143,6 +8147,7 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
         let visualLoader = MobileInitiationVisualLoader()
         let channel = MobileInitiationTestChannel()
         let manager = HostComputerUseManager(
+            experimentalEnabled: { true },
             injector: InputInjector(),
             installer: modelInstaller,
             macControlInstaller: MobileInitiationMacControlInstaller(
@@ -8186,6 +8191,7 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
             status: .notInstalled)
         let channel = MobileInitiationTestChannel()
         let manager = HostComputerUseManager(
+            experimentalEnabled: { true },
             injector: InputInjector(),
             installer: installer,
             macControlInstaller: macControlInstaller,
@@ -8253,6 +8259,7 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
             status: .ready(mobileInitiationMacControlReceipt))
         let channel = MobileInitiationTestChannel()
         let manager = HostComputerUseManager(
+            experimentalEnabled: { true },
             injector: InputInjector(),
             installer: installer,
             macControlInstaller: macControlInstaller,
@@ -8287,6 +8294,7 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
                 downloadedByteCount: 250,
                 totalByteCount: 1_000))
         let manager = HostComputerUseManager(
+            experimentalEnabled: { true },
             injector: InputInjector(),
             installer: installer,
             macControlInstaller: macControlInstaller,
@@ -8313,6 +8321,7 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
         let macControlInstaller = MobileInitiationMacControlInstaller(
             status: .notInstalled)
         let manager = HostComputerUseManager(
+            experimentalEnabled: { true },
             injector: InputInjector(),
             executor: MobileInitiationReadyExecutor(),
             installer: ComputerUseInstaller(
@@ -8336,6 +8345,7 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
 
         let visualLoader = MobileInitiationVisualLoader()
         let manager = HostComputerUseManager(
+            experimentalEnabled: { true },
             injector: InputInjector(),
             installer: MobileInitiationModelInstaller(
                 receipt: mobileInitiationModelReceipt()),
@@ -8364,6 +8374,7 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
         let channel = MobileInitiationTestChannel()
         var channelFactoryCalls = 0
         let manager = HostComputerUseManager(
+            experimentalEnabled: { true },
             injector: InputInjector(),
             installer: modelInstaller,
             macControlInstaller: macControlInstaller,

@@ -32,3 +32,11 @@ Known limitations:
 - ≤1day R6 research-route deletion slice: the old WK research driver is never constructed by production composition; Safari bridge jobs replace that route.
 - Remove only CapabilityExecutor research injection/routing and its dedicated route tests; keep manager compatibility, shared DOM/Fara/form code, and existing unrouted-response validation.
 - Compiled/tested: native/desktop routing and all migrated manager clarification/lifecycle callers pass30/30 with zero skips; broader research helpers remain pending and are not counted finished. Test fixtures retain exact Resume owners and use the existing navigation tool.
+
+- ≤1day R6 scope repair: fresh generic web/native goals currently reach effects before release-job admission; add the required default-off Experimental setting.
+- Use the existing typed job route at the manager boundary before executor dispatch; keep approved actions, scoped answers and admitted Resume authority unchanged.
+- Compiled/tested: the authenticated decline, supported jobs, preference and Resume tests pass; continuation/default-browser regression tests bring this slice to98 passes, zero failures and16 existing opt-in skips. No live acceptance is counted.
+
+- ≤30min R6 window-fixture experiment: existing DOM/native-picker cases fail frontmost-window checks; first reproduce one selector against the already-built pre-scope binary.
+- Determine whether blank-session capture can establish and verify the real owned window before fixture navigation; keep all production presentation, picker and authority checks.
+- Stop on the first failure, retain its trace, and change fixture setup only if evidence supports it; no Drive/Dropbox AX patches or increased deadlines.

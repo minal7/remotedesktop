@@ -5756,6 +5756,7 @@ final class HostComputerUseManager: ObservableObject {
     /// keep the production default so their installer lifecycle tests retain
     /// the behavior they are explicitly exercising.
     let allowsExternalServices: Bool
+    private let experimentalEnabled: @MainActor () -> Bool
     private let peerAuthorizationEpoch = ComputerUsePeerAuthorizationEpoch()
     private let webRTCAuthorizationFence =
         ComputerUseWebRTCAuthorizationFence()
@@ -5824,6 +5825,7 @@ final class HostComputerUseManager: ObservableObject {
     private var isShuttingDown = false
 
     init(
+        experimentalEnabled: @escaping @MainActor () -> Bool = { ComputerUseFeatureFlags.experimental },
         injector: InputInjector,
         executor: (any ComputerUseExecuting)? = nil,
         installer: (any ComputerUseModelProvisioning)? = nil,
@@ -5858,6 +5860,7 @@ final class HostComputerUseManager: ObservableObject {
         }
     ) {
         let gate = ComputerUseActionGate()
+        self.experimentalEnabled = experimentalEnabled
         let mayAct = { [weak gate] in gate?.allowsActions == true }
         self.executor = executor
         self.injector = injector
@@ -8421,13 +8424,20 @@ final class HostComputerUseManager: ObservableObject {
                             originatingTaskID: textClarification.originatingTaskID, goal: textClarification.goal,
                             selectedChoice: textClarification.selectedChoice, progress: progress)
                     } else {
-                        result = try await executor.execute(
-                            taskID: envelope.id,
-                            modelPrompt: envelope.body,
-                            currentUserPrompt: trustedUserPrompt,
-                            conversation: conversation,
-                            tools: tools,
-                            progress: progress)
+                        if !isResuming,
+                           ComputerUseReleaseJobScope.admission(
+                            for: trustedUserPrompt,
+                            experimentalEnabled: experimentalEnabled()) == .outOfScope {
+                            result = .unableToComplete(ComputerUseReleaseJobScope.outOfScopeResponse)
+                        } else {
+                            result = try await executor.execute(
+                                taskID: envelope.id,
+                                modelPrompt: envelope.body,
+                                currentUserPrompt: trustedUserPrompt,
+                                conversation: conversation,
+                                tools: tools,
+                                progress: progress)
+                        }
                     }
                 }
                 guard !Task.isCancelled,

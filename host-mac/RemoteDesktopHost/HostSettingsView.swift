@@ -7,6 +7,7 @@ import SwiftUI
 struct HostSettingsView: View {
     @ObservedObject var session: HostSession
     let openSetup: () -> Void
+    @AppStorage(ComputerUseFeatureFlags.experimentalPreferenceKey) private var experimentalEnabled = false
 
     var body: some View {
         TabView {
@@ -100,6 +101,17 @@ struct HostSettingsView: View {
                         }
                         .controlSize(.small)
                     }
+                }
+                .padding(6)
+            }
+
+            GroupBox("Experimental") {
+                VStack(alignment: .leading, spacing: 8) {
+                    Toggle("Allow other web and native app tasks", isOn: $experimentalEnabled)
+                    Text("Off by default. When off, Computer Use is limited to its supported email, cloud upload, and flight search jobs.")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
                 .padding(6)
             }

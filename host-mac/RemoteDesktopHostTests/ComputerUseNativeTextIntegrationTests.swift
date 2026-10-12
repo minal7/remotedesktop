@@ -1543,7 +1543,7 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
             })
             let executor = try await MCPFirstComputerUseExecutor.load(binaryURL: helper, visualFallback: fallback,
                 clientPool: pool, planningTimeout: 15, documentPlanner: .init(inspectProposal: { proposals.append($0) }))
-            let host = HostComputerUseManager(injector: InputInjector(), executor: executor, taskLedger: ledger,
+            let host = HostComputerUseManager(experimentalEnabled: { true }, injector: InputInjector(), executor: executor, taskLedger: ledger,
                 allowsExternalServices: false, channelFactory: { _ in channel })
             manager = host
             host.authorizePeer(senderID: "TEXTEDIT-TEST")

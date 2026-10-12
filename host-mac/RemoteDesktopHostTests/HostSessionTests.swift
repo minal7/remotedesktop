@@ -257,6 +257,7 @@ final class HostSessionTests: XCTestCase {
         let ledgerURL = ledgerDirectory.appendingPathComponent("ledger.json")
         defer { try? FileManager.default.removeItem(at: ledgerDirectory) }
         let manager = HostComputerUseManager(
+            experimentalEnabled: { true },
             injector: InputInjector(),
             executor: executor,
             taskLedger: ComputerUseTaskLedger(fileURL: ledgerURL),
@@ -435,6 +436,7 @@ final class HostSessionTests: XCTestCase {
         let ledgerURL = ledgerDirectory.appendingPathComponent("ledger.json")
         defer { try? FileManager.default.removeItem(at: ledgerDirectory) }
         let manager = HostComputerUseManager(
+            experimentalEnabled: { true },
             injector: InputInjector(),
             executor: executor,
             taskLedger: ComputerUseTaskLedger(fileURL: ledgerURL),

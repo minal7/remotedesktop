@@ -234,7 +234,7 @@ final class ComputerUseTests: XCTestCase {
             let deferred = ComputerUseDeferredVisualExecutor(loader: { _ in executor })
             selected = ComputerUseCapabilityExecutor(nativeExecution: { _, _, _ in nil }, desktopFactory: { _ in deferred })
         } else { selected = executor }
-        let manager = HostComputerUseManager(injector: InputInjector(), executor: selected, taskLedger: ledger,
+        let manager = HostComputerUseManager(experimentalEnabled: { true }, injector: InputInjector(), executor: selected, taskLedger: ledger,
             browserNavigationFactory: { mayAct in
                 let browser = ComputerUseOwnedBrowser(mayAct: mayAct); owned = browser
                 return ComputerUseBrowserNavigationTask(browser: browser, journalDirectory: ledgerURL.deletingLastPathComponent().appendingPathComponent("navigation"))
@@ -772,7 +772,7 @@ final class ComputerUseTests: XCTestCase {
             XCTAssertFalse(try String(contentsOf: file, encoding: .utf8).contains("private-"))
         }
         let replayExecutor = SuspendingComputerUseExecutor(), replayChannel = FakeHostComputerUseChannel()
-        let replayManager = HostComputerUseManager(injector: InputInjector(), executor: replayExecutor,
+        let replayManager = HostComputerUseManager(experimentalEnabled: { true }, injector: InputInjector(), executor: replayExecutor,
             taskLedger: restored, allowsExternalServices: false, channelFactory: { _ in replayChannel })
         defer { replayManager.stop() }
         replayManager.authorizePeer(senderID: prompt.senderID)
@@ -828,7 +828,7 @@ final class ComputerUseTests: XCTestCase {
             return ImmediateComputerUseExecutor(results: [.completed("Unexpected fallback")])
         })
         let ledger = ComputerUseTaskLedger(fileURL: url)
-        let manager = HostComputerUseManager(injector: InputInjector(), executor: coordinator, taskLedger: ledger,
+        let manager = HostComputerUseManager(experimentalEnabled: { true }, injector: InputInjector(), executor: coordinator, taskLedger: ledger,
             browserNavigationFactory: { gate in
                 mayAct = gate
                 let owned = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: gate)
@@ -1034,7 +1034,7 @@ final class ComputerUseTests: XCTestCase {
         let url = temporaryLedgerURL(), channel = FakeHostComputerUseChannel()
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
         var posted: [ComputerUsePredictedAction] = []
-        let manager = HostComputerUseManager(injector: InputInjector(), executor: executor,
+        let manager = HostComputerUseManager(experimentalEnabled: { true }, injector: InputInjector(), executor: executor,
             taskLedger: ComputerUseTaskLedger(fileURL: url), allowsExternalServices: false,
             approvalTargetProvider: { _ in ComputerUseApprovalTargetSnapshot(context: "fixture target",
                 applicationID: "com.threadmark.tests.fixture", accessibilityIdentity: "epoch-fixture-target") },
@@ -1246,7 +1246,7 @@ final class ComputerUseTests: XCTestCase {
         executor.choicesForQuestion = choices
         executor.completeAfterClarification = true
         let ledgerURL = temporaryLedgerURL()
-        let manager = HostComputerUseManager(injector: InputInjector(), executor: executor,
+        let manager = HostComputerUseManager(experimentalEnabled: { true }, injector: InputInjector(), executor: executor,
             taskLedger: ComputerUseTaskLedger(fileURL: ledgerURL), allowsExternalServices: false,
             channelFactory: { _ in channel })
         let root = makeEnvelope(id: "choice-question", kind: .prompt, body: "Upload a presentation")
@@ -1297,7 +1297,7 @@ final class ComputerUseTests: XCTestCase {
         for change in ["missing", "scope", "legacy-restart"] {
             let url = temporaryLedgerURL(), executor = ScopedClarificationTestExecutor(), channel = FakeHostComputerUseChannel()
             defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
-            let manager = HostComputerUseManager(injector: InputInjector(), executor: executor,
+            let manager = HostComputerUseManager(experimentalEnabled: { true }, injector: InputInjector(), executor: executor,
                 taskLedger: ComputerUseTaskLedger(fileURL: url), allowsExternalServices: false, channelFactory: { _ in channel })
             defer { manager.stop() }
             let root = makeEnvelope(id: "text-question-replay", kind: .prompt, body: "Put blue in a field.")
@@ -1316,7 +1316,7 @@ final class ComputerUseTests: XCTestCase {
                 let legacyURL = url.deletingLastPathComponent().appendingPathComponent("legacy.json")
                 try JSONSerialization.data(withJSONObject: records).write(to: legacyURL)
                 let restartedExecutor = ScopedClarificationTestExecutor(), restartedChannel = FakeHostComputerUseChannel()
-                let restarted = HostComputerUseManager(injector: InputInjector(), executor: restartedExecutor,
+                let restarted = HostComputerUseManager(experimentalEnabled: { true }, injector: InputInjector(), executor: restartedExecutor,
                     taskLedger: ComputerUseTaskLedger(fileURL: legacyURL), allowsExternalServices: false, channelFactory: { _ in restartedChannel })
                 defer { restarted.stop() }
                 restarted.authorizePeer(senderID: root.senderID)
@@ -2060,7 +2060,7 @@ final class ComputerUseTests: XCTestCase {
         let url = temporaryLedgerURL()
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
         let executor = SuspendingComputerUseExecutor(requiresMacControlHelper: false), channel = FakeHostComputerUseChannel()
-        let manager = HostComputerUseManager(injector: InputInjector(), executor: executor,
+        let manager = HostComputerUseManager(experimentalEnabled: { true }, injector: InputInjector(), executor: executor,
             taskLedger: ComputerUseTaskLedger(fileURL: url), allowsExternalServices: false)
         let session = HostSession(computerUseManager: manager)
         let menu = HostMenuTestSurface(session: session)
@@ -2091,7 +2091,7 @@ final class ComputerUseTests: XCTestCase {
         let url = temporaryLedgerURL()
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
         let executor = SuspendingComputerUseExecutor(requiresMacControlHelper: false), channel = FakeHostComputerUseChannel()
-        let manager = HostComputerUseManager(injector: InputInjector(), executor: executor,
+        let manager = HostComputerUseManager(experimentalEnabled: { true }, injector: InputInjector(), executor: executor,
             taskLedger: ComputerUseTaskLedger(fileURL: url), allowsExternalServices: false)
         let request = makeEnvelope(id: "native-local-control-1", kind: .prompt, body: "Edit the open document")
         manager.authorizePeer(senderID: request.senderID)
@@ -2274,7 +2274,7 @@ final class ComputerUseTests: XCTestCase {
         let ledger = ComputerUseTaskLedger(fileURL: ledgerURL)
         let channel = FakeHostComputerUseChannel()
         var browser: ComputerUseOwnedBrowser?
-        let manager = HostComputerUseManager(injector: injector, executor: executor,
+        let manager = HostComputerUseManager(experimentalEnabled: { true }, injector: injector, executor: executor,
             taskLedger: ledger, browserNavigationFactory: { mayAct in
                 let owned = ComputerUseOwnedBrowser(presentsWindow: false, domScriptDidDispatch: domScriptDidDispatch, mayAct: mayAct)
                 browser = owned
@@ -2457,6 +2457,7 @@ final class ComputerUseTests: XCTestCase {
                                                      browser: { browser })
         let channel = FakeHostComputerUseChannel()
         let manager = HostComputerUseManager(
+            experimentalEnabled: { true },
             injector: InputInjector(), executor: executor,
             taskLedger: ComputerUseTaskLedger(fileURL: ledgerURL),
             browserNavigationFactory: { mayAct in
@@ -2792,7 +2793,7 @@ final class ComputerUseTests: XCTestCase {
         let url = temporaryLedgerURL()
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
         let executor = SuspendingComputerUseExecutor(), channel = FakeHostComputerUseChannel()
-        let manager = HostComputerUseManager(injector: InputInjector(), executor: executor,
+        let manager = HostComputerUseManager(experimentalEnabled: { true }, injector: InputInjector(), executor: executor,
             taskLedger: ComputerUseTaskLedger(fileURL: url), allowsExternalServices: false, channelFactory: { _ in channel })
         defer { manager.stop() }
         let original = makeEnvelope(id: "retained-pause", kind: .prompt,
@@ -2839,7 +2840,7 @@ final class ComputerUseTests: XCTestCase {
             }
             let saved = try Data(contentsOf: url)
             let executor = ImmediateComputerUseExecutor(results: []), channel = FakeHostComputerUseChannel()
-            let manager = HostComputerUseManager(injector: InputInjector(), executor: executor,
+            let manager = HostComputerUseManager(experimentalEnabled: { true }, injector: InputInjector(), executor: executor,
                 taskLedger: ComputerUseTaskLedger(fileURL: url), allowsExternalServices: false, channelFactory: { _ in channel })
             defer { manager.stop() }
             manager.authorizePeer(senderID: original.senderID)
@@ -2888,7 +2889,7 @@ final class ComputerUseTests: XCTestCase {
             try JSONSerialization.data(withJSONObject: records).write(to: url)
             let saved = try Data(contentsOf: url), restored = ComputerUseTaskLedger(fileURL: url)
             let executor = ImmediateComputerUseExecutor(results: []), channel = FakeHostComputerUseChannel()
-            let manager = HostComputerUseManager(injector: InputInjector(), executor: executor, taskLedger: restored,
+            let manager = HostComputerUseManager(experimentalEnabled: { true }, injector: InputInjector(), executor: executor, taskLedger: restored,
                 allowsExternalServices: false, channelFactory: { _ in channel })
             defer { manager.stop() }
             manager.authorizePeer(senderID: prompt.senderID)
@@ -3000,7 +3001,7 @@ final class ComputerUseTests: XCTestCase {
             try ledger.recordApprovedActionResult(taskID: prompt.id, senderID: prompt.senderID, sessionID: prompt.sessionID,
                 fingerprint: prepared.fingerprint, response: response)
             let executor = SuspendingComputerUseExecutor(), channel = FakeHostComputerUseChannel()
-            let manager = HostComputerUseManager(injector: InputInjector(), executor: executor,
+            let manager = HostComputerUseManager(experimentalEnabled: { true }, injector: InputInjector(), executor: executor,
                 taskLedger: ComputerUseTaskLedger(fileURL: url), allowsExternalServices: false, channelFactory: { _ in channel })
             defer { manager.stop() }
             manager.authorizePeer(senderID: prompt.senderID)
@@ -3036,7 +3037,7 @@ final class ComputerUseTests: XCTestCase {
                 prompt: "Draft the fixture email", supportsApprovedActionEvidence: true).encodedBody())
             let executor = ApprovalHoldingMCPComputerUseExecutor(prepared: try receiptApproval(taskID: prompt.id), resultGate: action)
             let channel = FakeHostComputerUseChannel()
-            let manager = HostComputerUseManager(injector: InputInjector(), executor: executor, taskLedger: ledger,
+            let manager = HostComputerUseManager(experimentalEnabled: { true }, injector: InputInjector(), executor: executor, taskLedger: ledger,
                 allowsExternalServices: false, channelFactory: { _ in channel })
             defer { manager.stop() }
             manager.authorizePeer(senderID: prompt.senderID)
@@ -3133,7 +3134,7 @@ final class ComputerUseTests: XCTestCase {
                 fingerprint: prepared.fingerprint, response: "Draft confirmed", completionPromptDigest: proof)
             let restored = ComputerUseTaskLedger(fileURL: url)
             let executor = ImmediateComputerUseExecutor(results: []), channel = FakeHostComputerUseChannel()
-            let manager = HostComputerUseManager(injector: InputInjector(), executor: executor, taskLedger: restored,
+            let manager = HostComputerUseManager(experimentalEnabled: { true }, injector: InputInjector(), executor: executor, taskLedger: restored,
                 allowsExternalServices: false, channelFactory: { _ in channel })
             defer { manager.stop() }
             manager.authorizePeer(senderID: envelope.senderID)
@@ -3167,7 +3168,7 @@ final class ComputerUseTests: XCTestCase {
                     ? try MCPDigest.sha256(of: .string("Another task")) : confirmed.completionPromptDigest)
             let executor = ApprovalHoldingMCPComputerUseExecutor(prepared: prepared, approvalResult: supplied)
             let channel = FakeHostComputerUseChannel()
-            let manager = HostComputerUseManager(injector: InputInjector(), executor: executor, taskLedger: ledger,
+            let manager = HostComputerUseManager(experimentalEnabled: { true }, injector: InputInjector(), executor: executor, taskLedger: ledger,
                 allowsExternalServices: false, channelFactory: { _ in channel })
             defer { manager.stop() }
             manager.authorizePeer(senderID: prompt.senderID)
@@ -3353,7 +3354,7 @@ final class ComputerUseTests: XCTestCase {
         let routed: any ComputerUseExecuting = mode == "wrapped"
             ? ComputerUseCapabilityExecutor(nativeExecution: { _, _, _ in nil }, desktopFactory: { _ in executor }) : executor
         let ledger = ComputerUseTaskLedger(fileURL: url), channel = FakeHostComputerUseChannel()
-        let manager = HostComputerUseManager(injector: InputInjector(), executor: routed, taskLedger: ledger,
+        let manager = HostComputerUseManager(experimentalEnabled: { true }, injector: InputInjector(), executor: routed, taskLedger: ledger,
             allowsExternalServices: false, channelFactory: { _ in channel })
         defer { manager.stop() }
         manager.authorizePeer(senderID: prompt.senderID)
@@ -3654,7 +3655,7 @@ final class ComputerUseTests: XCTestCase {
         var nativeCalls = 0
         let executor = ComputerUseCapabilityExecutor(nativeExecution: { _, _, _ in nativeCalls += 1; return nil }, desktopFactory: { _ in desktop })
         let channel = FakeHostComputerUseChannel()
-        let manager = HostComputerUseManager(injector: InputInjector(), executor: executor, taskLedger: ledger,
+        let manager = HostComputerUseManager(experimentalEnabled: { true }, injector: InputInjector(), executor: executor, taskLedger: ledger,
             allowsExternalServices: false, channelFactory: { _ in channel })
         defer { manager.stop() }
         manager.authorizePeer(senderID: prompt.senderID)
@@ -4953,6 +4954,7 @@ final class ComputerUseTests: XCTestCase {
 
     func test_webRTCOfferBecomesSidecarOnlyForAuthenticatedLANOwner() {
         let manager = HostComputerUseManager(
+            experimentalEnabled: { true },
             injector: InputInjector(),
             allowsExternalServices: false)
         defer { manager.stop() }
@@ -4981,6 +4983,7 @@ final class ComputerUseTests: XCTestCase {
                 at: ledgerURL.deletingLastPathComponent())
         }
         let manager = HostComputerUseManager(
+            experimentalEnabled: { true },
             injector: InputInjector(),
             executor: executor,
             taskLedger: ComputerUseTaskLedger(fileURL: ledgerURL),
@@ -5019,6 +5022,7 @@ final class ComputerUseTests: XCTestCase {
 
     func test_staleWebRTCCallbackCannotDeauthorizeReplacementGeneration() {
         let manager = HostComputerUseManager(
+            experimentalEnabled: { true },
             injector: InputInjector(),
             allowsExternalServices: false)
         defer { manager.stop() }
@@ -5063,6 +5067,7 @@ final class ComputerUseTests: XCTestCase {
         let events = CapturedCGEventStore()
         let injector = InputInjector(eventPoster: { events.append($0) })
         let manager = HostComputerUseManager(
+            experimentalEnabled: { true },
             injector: injector,
             allowsExternalServices: false)
         defer { manager.stop() }
@@ -5108,6 +5113,7 @@ final class ComputerUseTests: XCTestCase {
         let ledgerURL = temporaryLedgerURL()
         defer { try? FileManager.default.removeItem(at: ledgerURL.deletingLastPathComponent()) }
         let manager = HostComputerUseManager(
+            experimentalEnabled: { true },
             injector: InputInjector(),
             executor: executor,
             taskLedger: ComputerUseTaskLedger(fileURL: ledgerURL),
@@ -5144,6 +5150,7 @@ final class ComputerUseTests: XCTestCase {
                 at: ledgerURL.deletingLastPathComponent())
         }
         let manager = HostComputerUseManager(
+            experimentalEnabled: { true },
             injector: InputInjector(),
             executor: nil,
             taskLedger: ComputerUseTaskLedger(fileURL: ledgerURL),
@@ -5197,6 +5204,7 @@ final class ComputerUseTests: XCTestCase {
                 at: ledgerURL.deletingLastPathComponent())
         }
         let manager = HostComputerUseManager(
+            experimentalEnabled: { true },
             injector: InputInjector(),
             executor: executor,
             taskLedger: ComputerUseTaskLedger(fileURL: ledgerURL),
@@ -5239,6 +5247,7 @@ final class ComputerUseTests: XCTestCase {
         let channel = FakeHostComputerUseChannel()
         let ledgerURL = temporaryLedgerURL()
         let manager = HostComputerUseManager(
+            experimentalEnabled: { true },
             injector: InputInjector(),
             executor: executor,
             taskLedger: ComputerUseTaskLedger(fileURL: ledgerURL),
@@ -5344,6 +5353,7 @@ final class ComputerUseTests: XCTestCase {
                 at: ledgerURL.deletingLastPathComponent())
         }
         let manager = HostComputerUseManager(
+            experimentalEnabled: { true },
             injector: InputInjector(),
             executor: executor,
             taskLedger: ComputerUseTaskLedger(fileURL: ledgerURL),
@@ -5439,6 +5449,7 @@ final class ComputerUseTests: XCTestCase {
                 at: ledgerURL.deletingLastPathComponent())
         }
         let manager = HostComputerUseManager(
+            experimentalEnabled: { true },
             injector: InputInjector(),
             executor: executor,
             taskLedger: ComputerUseTaskLedger(fileURL: ledgerURL),
@@ -5521,6 +5532,7 @@ final class ComputerUseTests: XCTestCase {
                 at: ledgerURL.deletingLastPathComponent())
         }
         let manager = HostComputerUseManager(
+            experimentalEnabled: { true },
             injector: InputInjector(),
             executor: executor,
             visualExecutorLoader: visualLoader,
@@ -5562,6 +5574,7 @@ final class ComputerUseTests: XCTestCase {
                 at: ledgerURL.deletingLastPathComponent())
         }
         let manager = HostComputerUseManager(
+            experimentalEnabled: { true },
             injector: InputInjector(),
             executor: executor,
             taskLedger: ComputerUseTaskLedger(fileURL: ledgerURL),
@@ -5625,6 +5638,7 @@ final class ComputerUseTests: XCTestCase {
                 at: ledgerURL.deletingLastPathComponent())
         }
         let manager = HostComputerUseManager(
+            experimentalEnabled: { true },
             injector: InputInjector(),
             executor: executor,
             taskLedger: ComputerUseTaskLedger(fileURL: ledgerURL),
@@ -5679,6 +5693,7 @@ final class ComputerUseTests: XCTestCase {
                 at: ledgerURL.deletingLastPathComponent())
         }
         let manager = HostComputerUseManager(
+            experimentalEnabled: { true },
             injector: InputInjector(),
             executor: executor,
             taskLedger: ComputerUseTaskLedger(fileURL: ledgerURL),
@@ -5757,6 +5772,7 @@ final class ComputerUseTests: XCTestCase {
                 at: ledgerURL.deletingLastPathComponent())
         }
         let manager = HostComputerUseManager(
+            experimentalEnabled: { true },
             injector: InputInjector(),
             executor: executor,
             taskLedger: ComputerUseTaskLedger(fileURL: ledgerURL),
@@ -5809,6 +5825,7 @@ final class ComputerUseTests: XCTestCase {
                 at: ledgerURL.deletingLastPathComponent())
         }
         let manager = HostComputerUseManager(
+            experimentalEnabled: { true },
             injector: InputInjector(),
             executor: executor,
             taskLedger: ComputerUseTaskLedger(fileURL: ledgerURL),
@@ -5858,6 +5875,7 @@ final class ComputerUseTests: XCTestCase {
                 at: ledgerURL.deletingLastPathComponent())
         }
         let manager = HostComputerUseManager(
+            experimentalEnabled: { true },
             injector: InputInjector(),
             executor: executor,
             taskLedger: ComputerUseTaskLedger(fileURL: ledgerURL),
@@ -5927,6 +5945,7 @@ final class ComputerUseTests: XCTestCase {
         }
         var channelCreationCount = 0
         let manager = HostComputerUseManager(
+            experimentalEnabled: { true },
             injector: InputInjector(),
             executor: executor,
             taskLedger: ComputerUseTaskLedger(fileURL: ledgerURL),
@@ -5968,6 +5987,7 @@ final class ComputerUseTests: XCTestCase {
         let ledgerURL = temporaryLedgerURL()
         defer { try? FileManager.default.removeItem(at: ledgerURL.deletingLastPathComponent()) }
         let manager = HostComputerUseManager(
+            experimentalEnabled: { true },
             injector: InputInjector(),
             executor: executor,
             taskLedger: ComputerUseTaskLedger(fileURL: ledgerURL),
@@ -6001,7 +6021,7 @@ final class ComputerUseTests: XCTestCase {
         let executor = ScopedClarificationTestExecutor(), channel = FakeHostComputerUseChannel()
         let ledgerURL = temporaryLedgerURL()
         defer { try? FileManager.default.removeItem(at: ledgerURL.deletingLastPathComponent()) }
-        let manager = HostComputerUseManager(injector: InputInjector(), executor: executor,
+        let manager = HostComputerUseManager(experimentalEnabled: { true }, injector: InputInjector(), executor: executor,
             taskLedger: ComputerUseTaskLedger(fileURL: ledgerURL), allowsExternalServices: false, channelFactory: { _ in channel })
         defer { manager.stop() }
         let original = "Put \"  e\u{301} 😀\n" + String(repeating: "x", count: 5_000) + "  \" in a field."
@@ -6034,7 +6054,7 @@ final class ComputerUseTests: XCTestCase {
         let executor = ScopedClarificationTestExecutor(), channel = FakeHostComputerUseChannel()
         let ledgerURL = temporaryLedgerURL()
         defer { try? FileManager.default.removeItem(at: ledgerURL.deletingLastPathComponent()) }
-        let manager = HostComputerUseManager(injector: InputInjector(), executor: executor,
+        let manager = HostComputerUseManager(experimentalEnabled: { true }, injector: InputInjector(), executor: executor,
             taskLedger: ComputerUseTaskLedger(fileURL: ledgerURL), allowsExternalServices: false, channelFactory: { _ in channel })
         defer { manager.stop() }
         let prompt = makeEnvelope(id: "q", kind: .prompt, body: "Put blue in a field.")
@@ -6069,7 +6089,7 @@ final class ComputerUseTests: XCTestCase {
         executor.pauseFirstAnswer = true
         let ledgerURL = temporaryLedgerURL()
         defer { try? FileManager.default.removeItem(at: ledgerURL.deletingLastPathComponent()) }
-        let manager = HostComputerUseManager(injector: InputInjector(), executor: executor,
+        let manager = HostComputerUseManager(experimentalEnabled: { true }, injector: InputInjector(), executor: executor,
             taskLedger: ComputerUseTaskLedger(fileURL: ledgerURL), allowsExternalServices: false, channelFactory: { _ in channel })
         defer { manager.stop() }
         let prompt = makeEnvelope(id: "q", kind: .prompt, body: "Put blue in a field.")
@@ -6089,7 +6109,7 @@ final class ComputerUseTests: XCTestCase {
         XCTAssertEqual(executor.answers.last?.goal.userTurns, [prompt.body, "Destination"])
         XCTAssertEqual(executor.normalPrompts, [prompt.body]); XCTAssertEqual(executor.effects, 0)
         let restartedExecutor = ScopedClarificationTestExecutor()
-        let restarted = HostComputerUseManager(injector: InputInjector(), executor: restartedExecutor,
+        let restarted = HostComputerUseManager(experimentalEnabled: { true }, injector: InputInjector(), executor: restartedExecutor,
             taskLedger: ComputerUseTaskLedger(fileURL: ledgerURL), allowsExternalServices: false, channelFactory: { _ in channel })
         defer { restarted.stop() }
         restarted.authorizePeer(senderID: prompt.senderID)
@@ -6107,7 +6127,7 @@ final class ComputerUseTests: XCTestCase {
             var now = Date()
             let ledgerURL = temporaryLedgerURL()
             defer { try? FileManager.default.removeItem(at: ledgerURL.deletingLastPathComponent()) }
-            let manager = HostComputerUseManager(injector: InputInjector(), executor: executor,
+            let manager = HostComputerUseManager(experimentalEnabled: { true }, injector: InputInjector(), executor: executor,
                 taskLedger: ComputerUseTaskLedger(fileURL: ledgerURL), textClarifications: ComputerUseTextClarificationStore(now: { now }),
                 allowsExternalServices: false, channelFactory: { _ in channel })
             defer { manager.stop() }
@@ -6138,7 +6158,7 @@ final class ComputerUseTests: XCTestCase {
         let executor = ScopedClarificationTestExecutor(), channel = FakeHostComputerUseChannel()
         let ledgerURL = temporaryLedgerURL(), directory = ledgerURL.deletingLastPathComponent()
         defer { try? FileManager.default.removeItem(at: directory) }
-        let manager = HostComputerUseManager(injector: InputInjector(), executor: executor,
+        let manager = HostComputerUseManager(experimentalEnabled: { true }, injector: InputInjector(), executor: executor,
             taskLedger: ComputerUseTaskLedger(fileURL: ledgerURL), allowsExternalServices: false, channelFactory: { _ in channel })
         defer { manager.stop() }
         executor.beforeQuestion = {
@@ -6181,6 +6201,7 @@ final class ComputerUseTests: XCTestCase {
         let ledgerURL = temporaryLedgerURL()
         defer { try? FileManager.default.removeItem(at: ledgerURL.deletingLastPathComponent()) }
         let manager = HostComputerUseManager(
+            experimentalEnabled: { true },
             injector: InputInjector(),
             executor: executor,
             taskLedger: ComputerUseTaskLedger(fileURL: ledgerURL),
@@ -6217,7 +6238,7 @@ final class ComputerUseTests: XCTestCase {
         let channel = FakeHostComputerUseChannel()
         let ledgerURL = temporaryLedgerURL()
         defer { try? FileManager.default.removeItem(at: ledgerURL.deletingLastPathComponent()) }
-        let manager = HostComputerUseManager(injector: InputInjector(), executor: executor,
+        let manager = HostComputerUseManager(experimentalEnabled: { true }, injector: InputInjector(), executor: executor,
             taskLedger: ComputerUseTaskLedger(fileURL: ledgerURL), channelFactory: { _ in channel })
         defer { manager.stop() }
         let prompt = makeEnvelope(kind: .prompt, body: goal)
@@ -6240,7 +6261,7 @@ final class ComputerUseTests: XCTestCase {
             let channel = FakeHostComputerUseChannel()
             let ledgerURL = temporaryLedgerURL()
             defer { try? FileManager.default.removeItem(at: ledgerURL.deletingLastPathComponent()) }
-            let manager = HostComputerUseManager(injector: InputInjector(), executor: executor,
+            let manager = HostComputerUseManager(experimentalEnabled: { true }, injector: InputInjector(), executor: executor,
                 taskLedger: ComputerUseTaskLedger(fileURL: ledgerURL), channelFactory: { _ in channel })
             defer { manager.stop() }
             let prompt = makeEnvelope(id: "semantic-clarification-\(index)", kind: .prompt, body: goal)
@@ -6269,7 +6290,7 @@ final class ComputerUseTests: XCTestCase {
         let channel = FakeHostComputerUseChannel()
         let ledgerURL = temporaryLedgerURL()
         defer { try? FileManager.default.removeItem(at: ledgerURL.deletingLastPathComponent()) }
-        let manager = HostComputerUseManager(injector: InputInjector(), executor: executor,
+        let manager = HostComputerUseManager(experimentalEnabled: { true }, injector: InputInjector(), executor: executor,
             taskLedger: ComputerUseTaskLedger(fileURL: ledgerURL), channelFactory: { _ in channel })
         defer { manager.stop() }
         let prompt = makeEnvelope(kind: .prompt, body: "")
@@ -6294,6 +6315,7 @@ final class ComputerUseTests: XCTestCase {
                 at: ledgerURL.deletingLastPathComponent())
         }
         let manager = HostComputerUseManager(
+            experimentalEnabled: { true },
             injector: InputInjector(),
             executor: executor,
             taskLedger: ComputerUseTaskLedger(fileURL: ledgerURL),
@@ -6335,6 +6357,7 @@ final class ComputerUseTests: XCTestCase {
                 at: ledgerURL.deletingLastPathComponent())
         }
         let manager = HostComputerUseManager(
+            experimentalEnabled: { true },
             injector: InputInjector(),
             executor: executor,
             taskLedger: ComputerUseTaskLedger(fileURL: ledgerURL),
@@ -6387,6 +6410,7 @@ final class ComputerUseTests: XCTestCase {
         let ledgerURL = temporaryLedgerURL()
         defer { try? FileManager.default.removeItem(at: ledgerURL.deletingLastPathComponent()) }
         let manager = HostComputerUseManager(
+            experimentalEnabled: { true },
             injector: InputInjector(),
             executor: executor,
             taskLedger: ComputerUseTaskLedger(fileURL: ledgerURL),
@@ -6419,6 +6443,7 @@ final class ComputerUseTests: XCTestCase {
             .userInterventionRequired(guidance),
             .completed("Visible delivery quote returned after sign-in."),
         ])
+        var experimentalEnabled = true
         let channel = FakeHostComputerUseChannel()
         let ledgerURL = temporaryLedgerURL()
         defer {
@@ -6426,6 +6451,7 @@ final class ComputerUseTests: XCTestCase {
                 at: ledgerURL.deletingLastPathComponent())
         }
         let manager = HostComputerUseManager(
+            experimentalEnabled: { experimentalEnabled },
             injector: InputInjector(),
             executor: executor,
             taskLedger: ComputerUseTaskLedger(fileURL: ledgerURL),
@@ -6460,6 +6486,7 @@ final class ComputerUseTests: XCTestCase {
             pausedMessages.contains(where: { $0.kind == .assistant }),
             "A person-only sign-in step must keep the task resumable")
 
+        experimentalEnabled = false
         XCTAssertTrue(manager.handle(
             try makeControlEnvelope(kind: .resume, taskID: prompt.id, revision: 1, hostEpoch: 1),
             channel: channel))
@@ -6489,6 +6516,7 @@ final class ComputerUseTests: XCTestCase {
         let ledgerURL = temporaryLedgerURL()
         defer { try? FileManager.default.removeItem(at: ledgerURL.deletingLastPathComponent()) }
         let manager = HostComputerUseManager(
+            experimentalEnabled: { true },
             injector: InputInjector(),
             executor: executor,
             taskLedger: ComputerUseTaskLedger(fileURL: ledgerURL),
@@ -6543,6 +6571,7 @@ final class ComputerUseTests: XCTestCase {
         let ledgerURL = temporaryLedgerURL()
         defer { try? FileManager.default.removeItem(at: ledgerURL.deletingLastPathComponent()) }
         let manager = HostComputerUseManager(
+            experimentalEnabled: { true },
             injector: InputInjector(),
             executor: executor,
             taskLedger: ComputerUseTaskLedger(fileURL: ledgerURL),
@@ -6627,6 +6656,7 @@ final class ComputerUseTests: XCTestCase {
                 at: ledgerURL.deletingLastPathComponent())
         }
         let manager = HostComputerUseManager(
+            experimentalEnabled: { true },
             injector: InputInjector(),
             executor: executor,
             taskLedger: ComputerUseTaskLedger(fileURL: ledgerURL),
@@ -6714,6 +6744,7 @@ final class ComputerUseTests: XCTestCase {
                 at: ledgerURL.deletingLastPathComponent())
         }
         let manager = HostComputerUseManager(
+            experimentalEnabled: { true },
             injector: InputInjector(),
             executor: executor,
             taskLedger: ComputerUseTaskLedger(fileURL: ledgerURL),
@@ -6827,6 +6858,7 @@ final class ComputerUseTests: XCTestCase {
                 at: ledgerURL.deletingLastPathComponent())
         }
         manager = HostComputerUseManager(
+            experimentalEnabled: { true },
             injector: injector,
             executor: executor,
             taskLedger: ComputerUseTaskLedger(fileURL: ledgerURL),
@@ -6939,6 +6971,7 @@ final class ComputerUseTests: XCTestCase {
                 at: ledgerURL.deletingLastPathComponent())
         }
         let manager = HostComputerUseManager(
+            experimentalEnabled: { true },
             injector: InputInjector(),
             executor: executor,
             taskLedger: ComputerUseTaskLedger(fileURL: ledgerURL),
@@ -7020,6 +7053,7 @@ final class ComputerUseTests: XCTestCase {
                 at: ledgerURL.deletingLastPathComponent())
         }
         let manager = HostComputerUseManager(
+            experimentalEnabled: { true },
             injector: InputInjector(),
             executor: executor,
             taskLedger: ComputerUseTaskLedger(fileURL: ledgerURL),
@@ -7073,6 +7107,7 @@ final class ComputerUseTests: XCTestCase {
                 at: ledgerURL.deletingLastPathComponent())
         }
         let manager = HostComputerUseManager(
+            experimentalEnabled: { true },
             injector: InputInjector(),
             executor: executor,
             taskLedger: ComputerUseTaskLedger(fileURL: ledgerURL),
@@ -7142,6 +7177,7 @@ final class ComputerUseTests: XCTestCase {
                 at: ledgerURL.deletingLastPathComponent())
         }
         let manager = HostComputerUseManager(
+            experimentalEnabled: { true },
             injector: InputInjector(),
             executor: executor,
             taskLedger: ComputerUseTaskLedger(fileURL: ledgerURL),
@@ -7184,6 +7220,7 @@ final class ComputerUseTests: XCTestCase {
                 at: ledgerURL.deletingLastPathComponent())
         }
         let manager = HostComputerUseManager(
+            experimentalEnabled: { true },
             injector: InputInjector(),
             executor: executor,
             taskLedger: ComputerUseTaskLedger(fileURL: ledgerURL),
@@ -7221,6 +7258,7 @@ final class ComputerUseTests: XCTestCase {
                 at: ledgerURL.deletingLastPathComponent())
         }
         let manager = HostComputerUseManager(
+            experimentalEnabled: { true },
             injector: InputInjector(),
             executor: executor,
             taskLedger: ComputerUseTaskLedger(fileURL: ledgerURL),
@@ -8031,7 +8069,7 @@ final class ComputerUseTests: XCTestCase {
         let executor = SuspendingComputerUseExecutor(), channel = FakeHostComputerUseChannel()
         let url = temporaryLedgerURL(), ledger = ComputerUseTaskLedger(fileURL: url)
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
-        let manager = HostComputerUseManager(injector: injector, executor: executor, taskLedger: ledger,
+        let manager = HostComputerUseManager(experimentalEnabled: { true }, injector: injector, executor: executor, taskLedger: ledger,
             allowsExternalServices: false, channelFactory: { _ in channel })
         defer { manager.stop() }
         let authority = HostPeerInputAuthorization(injector: injector, initialCaptureAvailable: true, requiresCaptureDisplay: false)
@@ -8184,7 +8222,7 @@ final class ComputerUseTests: XCTestCase {
                 .approvalRequired(message: "Send", action: .key(usage: 0x28, modifiers: 0), continuation: .init(taskID: "", nonce: UUID())), .completed("Continued")])
             let channel = FakeHostComputerUseChannel(), url = temporaryLedgerURL(), ledger = ComputerUseTaskLedger(fileURL: url)
             defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
-            let manager = HostComputerUseManager(injector: injector, executor: executor, taskLedger: ledger,
+            let manager = HostComputerUseManager(experimentalEnabled: { true }, injector: injector, executor: executor, taskLedger: ledger,
                 allowsExternalServices: false, approvalTargetProvider: { _ in
                     .init(context: "Fixture send", applicationID: "com.threadmark.tests.fixture", accessibilityIdentity: "fixture-send")
                 }, actionPerformer: { _ in XCTFail("Held physical input must prevent the approved action") }, channelFactory: { _ in channel })
@@ -8320,7 +8358,7 @@ final class ComputerUseTests: XCTestCase {
         let executor = ReadinessHookComputerUseExecutor(results: [.completed("Found the requested information")])
         let channel = FakeHostComputerUseChannel(), url = temporaryLedgerURL(), ledger = ComputerUseTaskLedger(fileURL: url)
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
-        let manager = HostComputerUseManager(injector: injector, executor: executor, taskLedger: ledger,
+        let manager = HostComputerUseManager(experimentalEnabled: { true }, injector: injector, executor: executor, taskLedger: ledger,
             allowsExternalServices: false, channelFactory: { _ in channel })
         defer { manager.stop() }
         XCTAssertNil(injectManualInput(.key(usage: 0x04, down: true, modifiers: 0), injector: injector, inputSession: inputSession, manager: manager))
@@ -8348,7 +8386,7 @@ final class ComputerUseTests: XCTestCase {
         let channel = FakeHostComputerUseChannel(), url = temporaryLedgerURL(), ledger = ComputerUseTaskLedger(fileURL: url)
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
         var actions: [ComputerUsePredictedAction] = []
-        let manager = HostComputerUseManager(injector: injector, executor: executor, taskLedger: ledger,
+        let manager = HostComputerUseManager(experimentalEnabled: { true }, injector: injector, executor: executor, taskLedger: ledger,
             allowsExternalServices: false, approvalTargetProvider: { _ in
                 .init(context: "Fixture send", applicationID: "com.threadmark.tests.fixture", accessibilityIdentity: "fixture-send")
             }, actionPerformer: { actions.append($0) }, channelFactory: { _ in channel })
@@ -8424,7 +8462,7 @@ final class ComputerUseTests: XCTestCase {
         let url = temporaryLedgerURL(), ledger = ComputerUseTaskLedger(fileURL: url)
         defer { executor.releaseFirstExecution(); try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
         var actions: [ComputerUsePredictedAction] = []
-        let manager = HostComputerUseManager(injector: InputInjector(), executor: executor, taskLedger: ledger,
+        let manager = HostComputerUseManager(experimentalEnabled: { true }, injector: InputInjector(), executor: executor, taskLedger: ledger,
             allowsExternalServices: false, actionPerformer: { actions.append($0) }, channelFactory: { _ in channel })
         defer { manager.stop() }
         let first = makeEnvelope(id: "interrupted-before-stop", kind: .prompt, body: "Find concert tickets")
@@ -8454,7 +8492,7 @@ final class ComputerUseTests: XCTestCase {
         let executor = SuspendingComputerUseExecutor(), channel = FakeHostComputerUseChannel()
         let url = temporaryLedgerURL(), ledger = ComputerUseTaskLedger(fileURL: url)
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
-        let manager = HostComputerUseManager(injector: InputInjector(), executor: executor, taskLedger: ledger,
+        let manager = HostComputerUseManager(experimentalEnabled: { true }, injector: InputInjector(), executor: executor, taskLedger: ledger,
             allowsExternalServices: false, channelFactory: { _ in channel })
         defer { manager.stop() }
         let prompt = makeEnvelope(id: "same-task-input-receipts", kind: .prompt, body: "Find travel tickets")
@@ -8497,7 +8535,7 @@ final class ComputerUseTests: XCTestCase {
         var actions: [ComputerUsePredictedAction] = []
         var receipt: ComputerUseActionGate.InputIntervention?
         var manager: HostComputerUseManager!
-        manager = HostComputerUseManager(injector: InputInjector(), executor: executor, taskLedger: ledger,
+        manager = HostComputerUseManager(experimentalEnabled: { true }, injector: InputInjector(), executor: executor, taskLedger: ledger,
             allowsExternalServices: false, approvalTargetProvider: { _ in
                 receipt = manager.recordUserInputForIntervention()
                 return ComputerUseApprovalTargetSnapshot(context: "Fixture send button", applicationID: "com.threadmark.tests.fixture",
@@ -8532,7 +8570,7 @@ final class ComputerUseTests: XCTestCase {
         let executor = ApprovalHoldingMCPComputerUseExecutor(prepared: prepared, resultAfterFirstExecution: .completed("Continued"))
         let channel = FakeHostComputerUseChannel(), url = temporaryLedgerURL(), ledger = ComputerUseTaskLedger(fileURL: url)
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
-        let manager = HostComputerUseManager(injector: InputInjector(), executor: executor, taskLedger: ledger,
+        let manager = HostComputerUseManager(experimentalEnabled: { true }, injector: InputInjector(), executor: executor, taskLedger: ledger,
             allowsExternalServices: false, channelFactory: { _ in channel })
         defer { manager.stop() }
         var receipt: ComputerUseActionGate.InputIntervention?
@@ -8562,7 +8600,7 @@ final class ComputerUseTests: XCTestCase {
         let channel = FakeHostComputerUseChannel(), url = temporaryLedgerURL()
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
         let ledger = ComputerUseTaskLedger(fileURL: url)
-        let manager = HostComputerUseManager(injector: InputInjector(), executor: routed,
+        let manager = HostComputerUseManager(experimentalEnabled: { true }, injector: InputInjector(), executor: routed,
             taskLedger: ledger, allowsExternalServices: false, channelFactory: { _ in channel })
         defer { manager.stop() }
         let prompt = makeEnvelope(id: taskID, kind: .prompt, body: "Draft the fixture message")
@@ -8639,7 +8677,7 @@ final class ComputerUseTests: XCTestCase {
         let channel = FakeHostComputerUseChannel(), url = temporaryLedgerURL()
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
         let ledger = ComputerUseTaskLedger(fileURL: url)
-        let manager = HostComputerUseManager(injector: InputInjector(), executor: routed,
+        let manager = HostComputerUseManager(experimentalEnabled: { true }, injector: InputInjector(), executor: routed,
             taskLedger: ledger, allowsExternalServices: false, channelFactory: { _ in channel })
         defer { manager.stop() }
         let prompt = makeEnvelope(id: taskID, kind: .prompt, body: "Draft the fixture message")
@@ -8679,7 +8717,7 @@ final class ComputerUseTests: XCTestCase {
         let channel = FakeHostComputerUseChannel(), url = temporaryLedgerURL()
         defer { gate.finish(false); try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
         let ledger = ComputerUseTaskLedger(fileURL: url)
-        let manager = HostComputerUseManager(injector: InputInjector(), executor: executor,
+        let manager = HostComputerUseManager(experimentalEnabled: { true }, injector: InputInjector(), executor: executor,
             taskLedger: ledger, allowsExternalServices: false, channelFactory: { _ in channel })
         defer { manager.stop() }
         let prompt = makeEnvelope(id: taskID, kind: .prompt, body: "Draft the fixture message")
@@ -8716,7 +8754,7 @@ final class ComputerUseTests: XCTestCase {
         let executor = ApprovalHoldingMCPComputerUseExecutor(prepared: prepared)
         let channel = FakeHostComputerUseChannel(), url = temporaryLedgerURL()
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
-        let manager = HostComputerUseManager(injector: InputInjector(), executor: executor,
+        let manager = HostComputerUseManager(experimentalEnabled: { true }, injector: InputInjector(), executor: executor,
             taskLedger: ComputerUseTaskLedger(fileURL: url), allowsExternalServices: false,
             channelFactory: { _ in channel })
         let prompt = makeEnvelope(id: taskID, kind: .prompt, body: "Send the fixture message")
@@ -8854,7 +8892,7 @@ final class ComputerUseTests: XCTestCase {
         let executor = ReadinessHookComputerUseExecutor(results: [.completed("First execution")])
         let url = temporaryLedgerURL(), channel = FakeHostComputerUseChannel(), ledger = ComputerUseTaskLedger(fileURL: url)
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
-        let manager = HostComputerUseManager(injector: InputInjector(), executor: executor, taskLedger: ledger,
+        let manager = HostComputerUseManager(experimentalEnabled: { true }, injector: InputInjector(), executor: executor, taskLedger: ledger,
             allowsExternalServices: false, channelFactory: { _ in channel })
         defer { manager.stop() }
         let prompt = makeEnvelope(id: "legacy-paused-input", kind: .prompt, body: "Find concert tickets")
@@ -8953,7 +8991,7 @@ final class ComputerUseTests: XCTestCase {
         let executor = ReadinessHookComputerUseExecutor(results: [.completed("First execution")])
         let url = temporaryLedgerURL(), channel = FakeHostComputerUseChannel(), ledger = ComputerUseTaskLedger(fileURL: url)
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
-        let manager = HostComputerUseManager(injector: InputInjector(), executor: executor, taskLedger: ledger,
+        let manager = HostComputerUseManager(experimentalEnabled: { true }, injector: InputInjector(), executor: executor, taskLedger: ledger,
             allowsExternalServices: false, channelFactory: { _ in channel })
         defer { manager.stop() }
         let prompt = makeEnvelope(id: "preprompt-admission", kind: .prompt, body: "Find movie tickets")
@@ -9009,6 +9047,7 @@ final class ComputerUseTests: XCTestCase {
                 at: ledgerURL.deletingLastPathComponent())
         }
         let manager = HostComputerUseManager(
+            experimentalEnabled: { true },
             injector: InputInjector(),
             executor: executor,
             taskLedger: ComputerUseTaskLedger(fileURL: ledgerURL),
@@ -9051,6 +9090,7 @@ final class ComputerUseTests: XCTestCase {
                 at: ledgerURL.deletingLastPathComponent())
         }
         let manager = HostComputerUseManager(
+            experimentalEnabled: { true },
             injector: InputInjector(),
             executor: executor,
             taskLedger: ComputerUseTaskLedger(fileURL: ledgerURL),
@@ -9113,6 +9153,7 @@ final class ComputerUseTests: XCTestCase {
                 at: ledgerURL.deletingLastPathComponent())
         }
         let manager = HostComputerUseManager(
+            experimentalEnabled: { true },
             injector: InputInjector(),
             executor: executor,
             taskLedger: ComputerUseTaskLedger(fileURL: ledgerURL),
@@ -9168,6 +9209,7 @@ final class ComputerUseTests: XCTestCase {
             let ledgerDirectory = ledgerURL.deletingLastPathComponent()
             defer { try? FileManager.default.removeItem(at: ledgerDirectory) }
             let manager = HostComputerUseManager(
+                experimentalEnabled: { true },
                 injector: InputInjector(),
                 executor: executor,
                 taskLedger: ComputerUseTaskLedger(fileURL: ledgerURL),
@@ -9209,6 +9251,7 @@ final class ComputerUseTests: XCTestCase {
         let ledgerDirectory = ledgerURL.deletingLastPathComponent()
         defer { try? FileManager.default.removeItem(at: ledgerDirectory) }
         let manager = HostComputerUseManager(
+            experimentalEnabled: { true },
             injector: InputInjector(),
             executor: executor,
             taskLedger: ComputerUseTaskLedger(fileURL: ledgerURL),
@@ -9257,6 +9300,7 @@ final class ComputerUseTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: ledgerDirectory) }
         let ledger = ComputerUseTaskLedger(fileURL: ledgerURL)
         let manager = HostComputerUseManager(
+            experimentalEnabled: { true },
             injector: InputInjector(),
             executor: executor,
             taskLedger: ledger,
@@ -9333,6 +9377,7 @@ final class ComputerUseTests: XCTestCase {
             let ledgerDirectory = ledgerURL.deletingLastPathComponent()
             defer { try? FileManager.default.removeItem(at: ledgerDirectory) }
             let manager = HostComputerUseManager(
+                experimentalEnabled: { true },
                 injector: InputInjector(),
                 executor: executor,
                 taskLedger: ComputerUseTaskLedger(fileURL: ledgerURL),
@@ -9389,6 +9434,7 @@ final class ComputerUseTests: XCTestCase {
                 at: ledgerURL.deletingLastPathComponent())
         }
         let manager = HostComputerUseManager(
+            experimentalEnabled: { true },
             injector: InputInjector(),
             executor: executor,
             taskLedger: ComputerUseTaskLedger(fileURL: ledgerURL),
@@ -9453,6 +9499,7 @@ final class ComputerUseTests: XCTestCase {
                 at: ledgerURL.deletingLastPathComponent())
         }
         let manager = HostComputerUseManager(
+            experimentalEnabled: { true },
             injector: InputInjector(),
             executor: executor,
             taskLedger: ComputerUseTaskLedger(fileURL: ledgerURL),
@@ -9539,6 +9586,7 @@ final class ComputerUseTests: XCTestCase {
         }
         var manager: HostComputerUseManager!
         manager = HostComputerUseManager(
+            experimentalEnabled: { true },
             injector: InputInjector(),
             executor: executor,
             taskLedger: ComputerUseTaskLedger(fileURL: ledgerURL),
@@ -9646,6 +9694,7 @@ final class ComputerUseTests: XCTestCase {
                 at: ledgerURL.deletingLastPathComponent())
         }
         let manager = HostComputerUseManager(
+            experimentalEnabled: { true },
             injector: InputInjector(),
             executor: executor,
             taskLedger: ComputerUseTaskLedger(fileURL: ledgerURL),
@@ -9726,6 +9775,7 @@ final class ComputerUseTests: XCTestCase {
         let ledgerURL = temporaryLedgerURL()
         defer { try? FileManager.default.removeItem(at: ledgerURL.deletingLastPathComponent()) }
         let manager = HostComputerUseManager(
+            experimentalEnabled: { true },
             injector: InputInjector(),
             executor: executor,
             taskLedger: ComputerUseTaskLedger(fileURL: ledgerURL),
@@ -9795,6 +9845,7 @@ final class ComputerUseTests: XCTestCase {
         let ledgerURL = temporaryLedgerURL()
         defer { try? FileManager.default.removeItem(at: ledgerURL.deletingLastPathComponent()) }
         let manager = HostComputerUseManager(
+            experimentalEnabled: { true },
             injector: InputInjector(),
             executor: executor,
             taskLedger: ComputerUseTaskLedger(fileURL: ledgerURL),
@@ -9861,6 +9912,7 @@ final class ComputerUseTests: XCTestCase {
                 at: ledgerURL.deletingLastPathComponent())
         }
         let manager = HostComputerUseManager(
+            experimentalEnabled: { true },
             injector: InputInjector(),
             executor: executor,
             taskLedger: ComputerUseTaskLedger(fileURL: ledgerURL),
@@ -9998,6 +10050,7 @@ final class ComputerUseTests: XCTestCase {
                 at: ledgerURL.deletingLastPathComponent())
         }
         let manager = HostComputerUseManager(
+            experimentalEnabled: { true },
             injector: InputInjector(),
             executor: executor,
             taskLedger: ComputerUseTaskLedger(fileURL: ledgerURL),
@@ -10221,6 +10274,7 @@ final class ComputerUseTests: XCTestCase {
         ])
         let channel = FakeHostComputerUseChannel()
         let manager = HostComputerUseManager(
+            experimentalEnabled: { true },
             injector: InputInjector(),
             executor: executor,
             taskLedger: ComputerUseTaskLedger(fileURL: ledgerURL),

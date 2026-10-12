@@ -98,7 +98,7 @@ final class ComputerUseClarificationCompositionTests: XCTestCase {
         let deferred = ComputerUseDeferredVisualExecutor(loader: { _ in loads += 1; return fara })
         let executor = ComputerUseCapabilityExecutor(nativeExecution: { _, _, _ in nativeAdmissions += 1; return nil }, desktopFactory: { _ in deferred })
         var browser: ComputerUseOwnedBrowser?
-        let manager = HostComputerUseManager(injector: InputInjector(), executor: executor,
+        let manager = HostComputerUseManager(experimentalEnabled: { true }, injector: InputInjector(), executor: executor,
             taskLedger: .init(fileURL: directory.appendingPathComponent("ledger.json")), browserNavigationFactory: { mayAct in
                 let owned = ComputerUseOwnedBrowser(mayAct: mayAct); browser = owned
                 return .init(browser: owned, journalDirectory: directory.appendingPathComponent("browser"))
@@ -212,7 +212,7 @@ final class ComputerUseClarificationCompositionTests: XCTestCase {
         let hostID = UUID().uuidString, clientID = UUID().uuidString, sessionID = UUID().uuidString, pairingCode = "842193"
         let channel = LocalHostComputerUseChannel(hostID: hostID, pairingCode: pairingCode)
         var browser: ComputerUseOwnedBrowser?
-        let manager = HostComputerUseManager(injector: InputInjector(), executor: executor,
+        let manager = HostComputerUseManager(experimentalEnabled: { true }, injector: InputInjector(), executor: executor,
             taskLedger: .init(fileURL: directory.appendingPathComponent("ledger.json")), browserNavigationFactory: { mayAct in
                 let owned = ComputerUseOwnedBrowser(mayAct: mayAct); browser = owned
                 return .init(browser: owned, journalDirectory: directory.appendingPathComponent("browser"))
@@ -358,7 +358,7 @@ final class ComputerUseClarificationCompositionTests: XCTestCase {
         let hostID = UUID().uuidString, clientID = UUID().uuidString, sessionID = UUID().uuidString, pairingCode = "842193"
         let channel = LocalHostComputerUseChannel(hostID: hostID, pairingCode: pairingCode)
         var ownedBrowser: ComputerUseOwnedBrowser?
-        let manager = HostComputerUseManager(injector: InputInjector(), installer: visualInstaller,
+        let manager = HostComputerUseManager(experimentalEnabled: { true }, injector: InputInjector(), installer: visualInstaller,
             nativeTextInstaller: nativeInstaller, nativeTextLoader: { receipt, tools, progress in
                 try await ComputerUseNativeTextExecutorLoader.load(receipt: receipt, tools: tools, runtime: runtime,
                     journalDirectory: directory.appendingPathComponent("text"), progress: progress)
@@ -548,7 +548,7 @@ final class ComputerUseClarificationCompositionTests: XCTestCase {
             faraCalls += 1
             return try .init(response: response, action: ComputerUseFaraAction.decodeNativeMessage(response))
         }, finishRun: { await runtime.shutdown() }) : nil
-        let manager = HostComputerUseManager(injector: InputInjector(), executor: faraExecutor, nativeTextInstaller: nativeInstaller,
+        let manager = HostComputerUseManager(experimentalEnabled: { true }, injector: InputInjector(), executor: faraExecutor, nativeTextInstaller: nativeInstaller,
             nativeTextLoader: { receipt, tools, progress in
                 try await ComputerUseNativeTextExecutorLoader.load(receipt: receipt, tools: tools, runtime: runtime,
                     journalDirectory: directory.appendingPathComponent("text"), progress: progress)
@@ -749,7 +749,7 @@ final class ComputerUseClarificationCompositionTests: XCTestCase {
         let trace = CompositionManagedLoginTrace()
         var ownedBrowser: ComputerUseOwnedBrowser?
         let visualInstaller = CompositionUnavailableVisualInstaller()
-        let manager = HostComputerUseManager(injector: InputInjector(),
+        let manager = HostComputerUseManager(experimentalEnabled: { true }, injector: InputInjector(),
             installer: visualInstaller, nativeTextInstaller: nativeInstaller,
             macControlInstaller: helperInstaller, visualExecutorLoader: visualLoader,
             mcpBrowserStepPlanner: ComputerUseMCPBrowserStepPlanner(inspectExchange: { request, response, _ in
@@ -956,7 +956,7 @@ final class ComputerUseClarificationCompositionTests: XCTestCase {
             return .unableToComplete("Unexpected fallback")
         })
         var ownedBrowser: ComputerUseOwnedBrowser?
-        let manager = HostComputerUseManager(injector: InputInjector(), executor: executor,
+        let manager = HostComputerUseManager(experimentalEnabled: { true }, injector: InputInjector(), executor: executor,
             taskLedger: .init(fileURL: directory.appendingPathComponent("ledger.json")), browserNavigationFactory: { mayAct in
                 let browser = ComputerUseOwnedBrowser(presentsWindow: false, mayAct: mayAct)
                 ownedBrowser = browser
@@ -1085,7 +1085,7 @@ final class ComputerUseClarificationCompositionTests: XCTestCase {
         let bridge = SerializedClarificationClientChannel(mailbox: mailbox, hostID: hostID, clientID: clientID,
             sessionID: sessionID, pairingCode: pairingCode)
         let executor = BrowserQuestionLifecycleExecutor()
-        let manager = HostComputerUseManager(injector: InputInjector(), executor: executor,
+        let manager = HostComputerUseManager(experimentalEnabled: { true }, injector: InputInjector(), executor: executor,
             taskLedger: .init(fileURL: directory.appendingPathComponent("ledger.json")), browserNavigationFactory: { mayAct in
                 .init(browser: ComputerUseOwnedBrowser(presentsWindow: false, mayAct: mayAct), journalDirectory: directory.appendingPathComponent("browser"))
             }, allowsExternalServices: false, channelFactory: { _ in mailbox })
@@ -1134,7 +1134,7 @@ final class ComputerUseClarificationCompositionTests: XCTestCase {
         let bridge = SerializedClarificationClientChannel(mailbox: mailbox, hostID: hostID, clientID: clientID,
             sessionID: sessionID, pairingCode: pairingCode)
         let executor = BrowserQuestionLifecycleExecutor()
-        let manager = HostComputerUseManager(injector: InputInjector(), executor: executor,
+        let manager = HostComputerUseManager(experimentalEnabled: { true }, injector: InputInjector(), executor: executor,
             taskLedger: .init(fileURL: directory.appendingPathComponent("ledger.json")), browserNavigationFactory: { mayAct in
                 .init(browser: ComputerUseOwnedBrowser(presentsWindow: false, mayAct: mayAct),
                     journalDirectory: directory.appendingPathComponent("browser"))
@@ -1193,7 +1193,7 @@ final class ComputerUseClarificationCompositionTests: XCTestCase {
         let bridge = SerializedClarificationClientChannel(mailbox: mailbox, hostID: hostID, clientID: clientID,
             sessionID: sessionID, pairingCode: pairingCode)
         let executor = ScopedClarificationTestExecutor()
-        let manager = HostComputerUseManager(injector: InputInjector(), executor: executor,
+        let manager = HostComputerUseManager(experimentalEnabled: { true }, injector: InputInjector(), executor: executor,
             taskLedger: .init(fileURL: directory.appendingPathComponent("ledger.json")), allowsExternalServices: false,
             channelFactory: { _ in mailbox })
         let client = ClientModel(hostName: "Fixture Mac", pairingCode: pairingCode, hostID: hostID, sessionID: sessionID,
@@ -1255,7 +1255,7 @@ final class ComputerUseClarificationCompositionTests: XCTestCase {
         var browserGate: (() -> Bool)?
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
-        let manager = HostComputerUseManager(injector: InputInjector(),
+        let manager = HostComputerUseManager(experimentalEnabled: { true }, injector: InputInjector(),
             taskLedger: .init(fileURL: directory.appendingPathComponent("ledger.json")),
             browserNavigationFactory: { mayAct in
                 browserGate = mayAct
@@ -1318,7 +1318,7 @@ final class ComputerUseClarificationCompositionTests: XCTestCase {
         let mailbox = LocalHostComputerUseChannel(hostID: hostID, pairingCode: pairingCode)
         let bridge = SerializedClarificationClientChannel(mailbox: mailbox, hostID: hostID, clientID: clientID,
             sessionID: sessionID, pairingCode: pairingCode)
-        let manager = HostComputerUseManager(injector: InputInjector(), nativeTextInstaller: nativeInstaller,
+        let manager = HostComputerUseManager(experimentalEnabled: { true }, injector: InputInjector(), nativeTextInstaller: nativeInstaller,
             nativeTextLoader: { loadedReceipt, tools, progress in
                 progress("Loading local form editing…")
                 let inputs = try OSAtlasRuntimeInputResolver(manifest: .nativeTextV2).resolveNativeText(receipt: loadedReceipt,
