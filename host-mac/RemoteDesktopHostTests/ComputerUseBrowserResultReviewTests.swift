@@ -280,25 +280,6 @@ final class ComputerUseBrowserResultReviewTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(reviewer.inputs.count, 2)
     }
 
-    func testInvalidReviewRetainsTheNativeOwnerAndResumeDoesNotRepeatTheSearch() async throws {
-        let reviewer = ResultReviewReply(); reviewer.price = "notPrice"
-        let fixture = try await ResearchDriverFixture.make(resultPlanner: ComputerUseReviewedBrowserResultPlanner(reader: NativeReviewReading(), reviewer: reviewer), candidateBodyHTML: "<p>USD 40</p>")
-        defer { fixture.close() }
-        var nativeFallbacks = 0
-        let executor = ComputerUseCapabilityExecutor(nativeExecution: { _, _, _ in nativeFallbacks += 1; return nil }, browserResearch: fixture.driver)
-        let result = try await executor.execute(taskID: ResearchDriverFixture.root, modelPrompt: "Old assistant history", currentUserPrompt: ResearchDriverFixture.prompt,
-            conversation: [], tools: fixture.tools, progress: { _ in })
-        guard case .userInterventionRequired = result else { return XCTFail("Invalid review cannot finish or replace the task") }
-        let owner = try fixture.owner(), original = owner.input
-        XCTAssertEqual(nativeFallbacks, 0); XCTAssertTrue(fixture.policy.goals.isEmpty)
-        XCTAssertEqual(fixture.server.count("/details"), 0)
-        reviewer.price = "exact"
-        _ = try await fixture.resume()
-        XCTAssertTrue(try fixture.owner() === owner); XCTAssertEqual(owner.input, original)
-        XCTAssertEqual(fixture.server.count("/search?q=concerts"), 1)
-        XCTAssertEqual(fixture.policy.goals, [original])
-    }
-
     func testPageChangeWhileReviewingCannotPublishOrNavigateTheOldReading() async throws {
         let gate = BrowserResearchGate(), reviewer = ResultReviewReply()
         reviewer.beforeReply = { await gate.suspend() }

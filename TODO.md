@@ -28,3 +28,7 @@ Known limitations:
 
 - R6 clarification/form-query repair compiled/tested: focused RED reproduced4/4 failures; GREEN21/21 host and3/3 iOS, zero skips. Raw invisible format controls are rejected before trimming; invalid iPhone answers retain exact drafts and stay unsent.
 - Corrected test-only HTML form query interpretation and sequential journal fixtures; production encoding, continuation authority and no-replay checks remain intact.
+
+- ≤1day R6 research-route deletion slice: the old WK research driver is never constructed by production composition; Safari bridge jobs replace that route.
+- Remove only CapabilityExecutor research injection/routing and its dedicated route tests; keep manager compatibility, shared DOM/Fara/form code, and existing unrouted-response validation.
+- Compiled/tested: native/desktop routing and all migrated manager clarification/lifecycle callers pass30/30 with zero skips; broader research helpers remain pending and are not counted finished. Test fixtures retain exact Resume owners and use the existing navigation tool.

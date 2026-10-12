@@ -1085,7 +1085,7 @@ final class ComputerUseClarificationCompositionTests: XCTestCase {
         let bridge = SerializedClarificationClientChannel(mailbox: mailbox, hostID: hostID, clientID: clientID,
             sessionID: sessionID, pairingCode: pairingCode)
         let executor = BrowserQuestionLifecycleExecutor()
-        let manager = HostComputerUseManager(injector: InputInjector(), executor: executor.capabilityExecutor(),
+        let manager = HostComputerUseManager(injector: InputInjector(), executor: executor,
             taskLedger: .init(fileURL: directory.appendingPathComponent("ledger.json")), browserNavigationFactory: { mayAct in
                 .init(browser: ComputerUseOwnedBrowser(presentsWindow: false, mayAct: mayAct), journalDirectory: directory.appendingPathComponent("browser"))
             }, allowsExternalServices: false, channelFactory: { _ in mailbox })
@@ -1134,7 +1134,7 @@ final class ComputerUseClarificationCompositionTests: XCTestCase {
         let bridge = SerializedClarificationClientChannel(mailbox: mailbox, hostID: hostID, clientID: clientID,
             sessionID: sessionID, pairingCode: pairingCode)
         let executor = BrowserQuestionLifecycleExecutor()
-        let manager = HostComputerUseManager(injector: InputInjector(), executor: executor.capabilityExecutor(),
+        let manager = HostComputerUseManager(injector: InputInjector(), executor: executor,
             taskLedger: .init(fileURL: directory.appendingPathComponent("ledger.json")), browserNavigationFactory: { mayAct in
                 .init(browser: ComputerUseOwnedBrowser(presentsWindow: false, mayAct: mayAct),
                     journalDirectory: directory.appendingPathComponent("browser"))

@@ -1098,7 +1098,7 @@ final class ComputerUseTests: XCTestCase {
         for useBrowser in [false, true] {
             let url = temporaryLedgerURL(), browserExecutor = BrowserQuestionLifecycleExecutor(), textExecutor = ScopedClarificationTestExecutor()
             defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
-            let executor: any ComputerUseExecuting = useBrowser ? browserExecutor.capabilityExecutor() : textExecutor
+            let executor: any ComputerUseExecuting = useBrowser ? browserExecutor : textExecutor
             let fixture = try browserControlFixture(executor: executor, ledgerURL: url)
             defer { fixture.manager.stop(); fixture.browser.close() }
             let root = makeEnvelope(id: "probe-question", kind: .prompt, body: useBrowser ? "Find tickets." : "Put blue in a field.")
@@ -1260,7 +1260,7 @@ final class ComputerUseTests: XCTestCase {
         for revoke in [false, true] {
             let url = temporaryLedgerURL(), executor = BrowserQuestionLifecycleExecutor()
             defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
-            let fixture = try browserControlFixture(executor: executor.capabilityExecutor(), ledgerURL: url)
+            let fixture = try browserControlFixture(executor: executor, ledgerURL: url)
             defer { fixture.manager.stop(); fixture.browser.close() }
             let root = makeEnvelope(id: "queued-probe-question", kind: .prompt, body: "Find tickets.")
             fixture.manager.authorizePeer(senderID: root.senderID)
@@ -1346,7 +1346,7 @@ final class ComputerUseTests: XCTestCase {
         for change in ["retired", "accepted-answer", "new-request", "restart"] {
             let url = temporaryLedgerURL(), executor = BrowserQuestionLifecycleExecutor()
             defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
-            let fixture = try browserControlFixture(executor: executor.capabilityExecutor(), ledgerURL: url)
+            let fixture = try browserControlFixture(executor: executor, ledgerURL: url)
             defer { fixture.manager.stop(); fixture.browser.close() }
             let root = makeEnvelope(id: "question-replay-root", kind: .prompt, body: "Find concert tickets.")
             fixture.manager.authorizePeer(senderID: root.senderID)
@@ -1372,7 +1372,7 @@ final class ComputerUseTests: XCTestCase {
             let calls = executor.planner.inputs.count
             if change == "restart" {
                 let newExecutor = BrowserQuestionLifecycleExecutor()
-                let recovered = try browserControlFixture(executor: newExecutor.capabilityExecutor(), ledgerURL: url)
+                let recovered = try browserControlFixture(executor: newExecutor, ledgerURL: url)
                 defer { recovered.manager.stop(); recovered.browser.close() }
                 recovered.manager.authorizePeer(senderID: root.senderID)
                 XCTAssertTrue(recovered.manager.handle(root, channel: recovered.channel))
@@ -1403,7 +1403,7 @@ final class ComputerUseTests: XCTestCase {
             for retirement in ["retire", "cancel", "revoke"] {
                 let url = temporaryLedgerURL(), executor = BrowserQuestionLifecycleExecutor()
                 defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
-                let fixture = try browserControlFixture(executor: executor.capabilityExecutor(), ledgerURL: url)
+                let fixture = try browserControlFixture(executor: executor, ledgerURL: url)
                 defer { fixture.manager.stop(); fixture.browser.close() }
                 let gate = ComputerUsePlanningTestGate<Bool>(started: expectation(description: "Question delivery held"),
                     returned: expectation(description: "Question delivery released"))
@@ -1476,7 +1476,7 @@ final class ComputerUseTests: XCTestCase {
                 ["source":"Find concerts. ", "turn":0, "role":"outcome", "field":"category", "relation":"unspecified", "values":[]],
                 ["source":"2 adults and 1 child.", "turn":0, "role":"condition", "field":"quantity", "relation":"unspecified", "values":[]]]
             defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
-            let fixture = try browserControlFixture(executor: executor.capabilityExecutor(), ledgerURL: url)
+            let fixture = try browserControlFixture(executor: executor, ledgerURL: url)
             defer { fixture.manager.stop(); fixture.browser.close() }
             let root = makeEnvelope(id: "format-root", kind: .prompt,
                 body: try ComputerUsePromptRequest(prompt: "Find concerts. 2 adults and 1 child.").encodedBody())
@@ -1518,7 +1518,7 @@ final class ComputerUseTests: XCTestCase {
     func test_managerRetriesRejectedBrowserAnswersWithoutAcceptingThemAndRetiresStaleRetryReplays() async throws {
         let url = temporaryLedgerURL(), executor = BrowserQuestionLifecycleExecutor()
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
-        let fixture = try browserControlFixture(executor: executor.capabilityExecutor(), ledgerURL: url)
+        let fixture = try browserControlFixture(executor: executor, ledgerURL: url)
         defer { fixture.manager.stop(); fixture.browser.close() }
         let root = makeEnvelope(id: "retry-root", kind: .prompt, body: try ComputerUsePromptRequest(prompt: "Find concert tickets.").encodedBody())
         fixture.manager.authorizePeer(senderID: root.senderID)
@@ -1570,7 +1570,7 @@ final class ComputerUseTests: XCTestCase {
         for cancelFirst in [true, false] {
             let url = temporaryLedgerURL(), executor = BrowserQuestionLifecycleExecutor()
             defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
-            let fixture = try browserControlFixture(executor: executor.capabilityExecutor(), ledgerURL: url)
+            let fixture = try browserControlFixture(executor: executor, ledgerURL: url)
             defer { fixture.manager.stop(); fixture.browser.close() }
             let root = makeEnvelope(id: "cancel-retry-root", kind: .prompt, body: try ComputerUsePromptRequest(prompt: "Find tickets.").encodedBody())
             fixture.manager.authorizePeer(senderID: root.senderID)
@@ -1602,7 +1602,7 @@ final class ComputerUseTests: XCTestCase {
         for foreign in [true, false] {
             let url = temporaryLedgerURL(), executor = BrowserQuestionLifecycleExecutor()
             defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
-            let fixture = try browserControlFixture(executor: executor.capabilityExecutor(), ledgerURL: url)
+            let fixture = try browserControlFixture(executor: executor, ledgerURL: url)
             defer { fixture.manager.stop(); fixture.browser.close() }
             let root = makeEnvelope(id: "retry-scope-root", kind: .prompt, body: try ComputerUsePromptRequest(prompt: "Find tickets.").encodedBody())
             fixture.manager.authorizePeer(senderID: root.senderID)
@@ -1633,7 +1633,7 @@ final class ComputerUseTests: XCTestCase {
         let url = temporaryLedgerURL(), executor = BrowserQuestionLifecycleExecutor()
         executor.planner.useSourceReferences = true
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
-        let fixture = try browserControlFixture(executor: executor.capabilityExecutor(), ledgerURL: url)
+        let fixture = try browserControlFixture(executor: executor, ledgerURL: url)
         defer { fixture.manager.stop(); fixture.browser.close() }
         let beginning = "Find concert tickets. "
         let original = beginning + String(repeating: "x", count: ComputerUsePromptRequest.maximumPromptLength - beginning.count)
@@ -1662,7 +1662,7 @@ final class ComputerUseTests: XCTestCase {
     func test_managerBrowserQuestionsPreserveRootAcrossExactAnswersLocalPauseAndDurableReplay() async throws {
         let url = temporaryLedgerURL(), executor = BrowserQuestionLifecycleExecutor()
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
-        let fixture = try browserControlFixture(executor: executor.capabilityExecutor(), ledgerURL: url)
+        let fixture = try browserControlFixture(executor: executor, ledgerURL: url)
         defer { fixture.manager.stop(); fixture.browser.close() }
         let prompt = makeEnvelope(id: "browser-question-root", kind: .prompt,
             body: try ComputerUsePromptRequest(prompt: "Find concert tickets tomorrow. Do not buy anything.", supportsApprovedActionEvidence: true).encodedBody())
@@ -1712,7 +1712,7 @@ final class ComputerUseTests: XCTestCase {
         let url = temporaryLedgerURL(), executor = BrowserQuestionLifecycleExecutor()
         executor.repeatLocationQuestions = true
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
-        let fixture = try browserControlFixture(executor: executor.capabilityExecutor(), ledgerURL: url)
+        let fixture = try browserControlFixture(executor: executor, ledgerURL: url)
         defer { fixture.manager.stop(); fixture.browser.close() }
         let prompt = makeEnvelope(id: "extended-browser-root", kind: .prompt,
             body: try ComputerUsePromptRequest(prompt: "Find concerts. Do not buy.", supportsApprovedActionEvidence: true).encodedBody())
@@ -1752,7 +1752,7 @@ final class ComputerUseTests: XCTestCase {
         for retirement in ["cancel", "disconnect", "controller-change", "new-request"] {
             let url = temporaryLedgerURL(), executor = BrowserQuestionLifecycleExecutor()
             defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
-            let fixture = try browserControlFixture(executor: executor.capabilityExecutor(), ledgerURL: url)
+            let fixture = try browserControlFixture(executor: executor, ledgerURL: url)
             defer { fixture.manager.stop(); fixture.browser.close() }
             let prompt = makeEnvelope(id: "browser-\(retirement)", kind: .prompt, body: "Find movie tickets.")
             fixture.manager.authorizePeer(senderID: prompt.senderID)
@@ -1801,7 +1801,7 @@ final class ComputerUseTests: XCTestCase {
         let url = temporaryLedgerURL(), executor = BrowserQuestionLifecycleExecutor()
         let directory = url.deletingLastPathComponent()
         defer { try? FileManager.default.removeItem(at: directory) }
-        let fixture = try browserControlFixture(executor: executor.capabilityExecutor(), ledgerURL: url)
+        let fixture = try browserControlFixture(executor: executor, ledgerURL: url)
         defer { fixture.manager.stop(); fixture.browser.close() }
         executor.beforeQuestion = {
             try FileManager.default.removeItem(at: directory)
@@ -1823,7 +1823,7 @@ final class ComputerUseTests: XCTestCase {
         let url = temporaryLedgerURL(), executor = BrowserQuestionLifecycleExecutor()
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
         var domCalls = 0, preparations = 0
-        let fixture = try browserControlFixture(executor: executor.capabilityExecutor(), ledgerURL: url,
+        let fixture = try browserControlFixture(executor: executor, ledgerURL: url,
             domScriptDidDispatch: { _ in domCalls += 1 })
         defer { executor.preparePage = nil; fixture.manager.stop(); fixture.browser.close() }
         var session: ComputerUseBrowserHandbackRequirement?
@@ -1863,7 +1863,7 @@ final class ComputerUseTests: XCTestCase {
         defer { server.stop() }
         let url = temporaryLedgerURL(), executor = BrowserQuestionLifecycleExecutor()
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
-        let fixture = try browserControlFixture(executor: executor.capabilityExecutor(), ledgerURL: url)
+        let fixture = try browserControlFixture(executor: executor, ledgerURL: url)
         var loading: Task<ComputerUseBrowserDocument, Error>?
         defer { executor.preparePage = nil; loading?.cancel(); fixture.manager.stop(); fixture.browser.close() }
         executor.preparePage = { _ in
@@ -1900,7 +1900,7 @@ final class ComputerUseTests: XCTestCase {
         defer { server.stop() }
         let url = temporaryLedgerURL(), executor = BrowserQuestionLifecycleExecutor()
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
-        let fixture = try browserControlFixture(executor: executor.capabilityExecutor(), ledgerURL: url)
+        let fixture = try browserControlFixture(executor: executor, ledgerURL: url)
         defer { fixture.manager.stop(); fixture.browser.close() }
         let previous = makeEnvelope(id: "previous-native", kind: .prompt, body: "Open \(base.appendingPathComponent("login").absoluteString)")
         fixture.manager.authorizePeer(senderID: previous.senderID)
@@ -1952,7 +1952,7 @@ final class ComputerUseTests: XCTestCase {
         defer { server.stop() }
         let url = temporaryLedgerURL(), executor = BrowserQuestionLifecycleExecutor()
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
-        let fixture = try browserControlFixture(executor: executor.capabilityExecutor(), ledgerURL: url)
+        let fixture = try browserControlFixture(executor: executor, ledgerURL: url)
         defer { executor.preparePage = nil; fixture.manager.stop(); fixture.browser.close() }
         executor.preparePage = { root in
             try fixture.browser.claim(taskID: root)
@@ -6408,124 +6408,6 @@ final class ComputerUseTests: XCTestCase {
             ["Organize the desktop", "Organize the desktop"])
         XCTAssertFalse(executor.trustedUserPrompts[1].contains("do not repeat"))
         manager.stop()
-    }
-
-    func test_managerResearchReportUsesResumableStatusAndReplaysWithoutAnotherReadOrSearch() async throws {
-        try await verifyManagerResearchReport(navigationLimit: 8)
-    }
-
-    func test_managerNavigationLimitReportKeepsItsReasonThroughReplayAndExplicitHandback() async throws {
-        try await verifyManagerResearchReport(navigationLimit: 1)
-    }
-
-    private func verifyManagerResearchReport(navigationLimit: Int) async throws {
-        let source = try await ResearchDriverFixture.make(navigationLimit: navigationLimit, candidateBodyHTML: "<p>" + String(repeating: "Observed passage. ", count: 45) + "</p>")
-        defer { source.close() }
-        let executor = ComputerUseCapabilityExecutor(nativeExecution: { _, _, _ in nil },
-            desktopFactory: { _ in throw ComputerUseBrowserResearchDriver.Failure.invalidContinuation }, browserResearch: source.driver)
-        let url = temporaryLedgerURL()
-        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
-        let fixture = try browserControlFixture(executor: executor, ledgerURL: url)
-        defer { fixture.manager.stop(); fixture.browser.close() }
-        let prompt = makeEnvelope(id: ResearchDriverFixture.root, kind: .prompt, body: ResearchDriverFixture.prompt)
-        fixture.manager.authorizePeer(senderID: prompt.senderID)
-        XCTAssertTrue(fixture.manager.handle(prompt, channel: fixture.channel))
-        func reports(_ minimum: Int) async throws -> [ComputerUseTaskUpdate] {
-            for _ in 0..<200 {
-                let sent = await fixture.channel.sentMessages()
-                let updates = sent.filter { $0.kind == .status }.compactMap { try? ComputerUseTaskUpdate.decodeBody($0.body) }
-                    .filter { $0.researchProgress != nil }
-                if updates.count >= minimum { return updates }
-                try await Task.sleep(for: .milliseconds(10))
-            }
-            let sent = await fixture.channel.sentMessages()
-            let deliveryState = sent.map { message in
-                let update = try? ComputerUseTaskUpdate.decodeBody(message.body)
-                return "\(message.kind):outcome=\(String(describing: update?.outcome)),progressBytes=\(update?.researchProgress?.text.utf8.count ?? 0)"
-            }
-            let owner = source.tools.ownedBrowserResearch(taskID: prompt.id)
-            XCTFail("The host did not deliver the expected research status; activity=\(fixture.manager.activity), owner=\(owner != nil), goals=\(source.goal.inputs.count), searches=\(source.search.inputs.count), results=\(source.results.inputs.count), providerCalls=\(source.policy.providerCalls), requests=\(source.server.count("/search?q=concerts")), sent=\(deliveryState)")
-            return []
-        }
-        let delivered = try await reports(1)
-        let first = try XCTUnwrap(delivered.first)
-        let progress = try XCTUnwrap(first.researchProgress)
-        XCTAssertGreaterThan(progress.text.count, 500)
-        XCTAssertEqual(first.outcome, .userInterventionRequired)
-        let guidance = try XCTUnwrap(ComputerUseStatusSignal.userInterventionMessage(from: first.text))
-        if navigationLimit == 1 {
-            XCTAssertTrue(guidance.contains("navigation limit")); XCTAssertTrue(guidance.contains("Resume does not allow additional navigation"))
-            XCTAssertTrue(progress.text.contains(guidance))
-        } else { XCTAssertEqual(guidance, ComputerUseBrowserResearchReport.guidance) }
-        XCTAssertEqual(fixture.manager.activity, .paused)
-        XCTAssertNil(fixture.ledger.terminalOutcome(taskID: prompt.id))
-        let original = try XCTUnwrap(source.goal.inputs.first)
-        let reads = source.results.inputs.count
-        XCTAssertTrue(fixture.manager.handle(prompt, channel: fixture.channel))
-        let repeated = try await reports(2)
-        XCTAssertEqual(repeated.last?.researchProgress, progress)
-        XCTAssertEqual(repeated.last.flatMap { ComputerUseStatusSignal.userInterventionMessage(from: $0.text) }, guidance)
-        XCTAssertEqual(source.results.inputs.count, reads)
-        let resume = try makeControlEnvelope(kind: .resume, taskID: prompt.id, revision: 1, hostEpoch: first.hostControlEpoch)
-        XCTAssertTrue(fixture.manager.handle(resume, channel: fixture.channel))
-        _ = try await reports(3)
-        XCTAssertTrue(source.policy.goals.allSatisfy { $0 == original })
-        XCTAssertEqual(source.server.count("/search?q=concerts"), 1)
-        XCTAssertEqual(source.results.inputs.count, reads + 1)
-        XCTAssertNil(fixture.ledger.terminalOutcome(taskID: prompt.id))
-        let sent = await fixture.channel.sentMessages()
-        XCTAssertFalse(sent.contains { $0.kind == .assistant })
-    }
-
-    func test_managerResearchAnswerDeliversAndReplaysWholeSourceTextWithoutRepeatingWork() async throws {
-        for multiPage in [false, true] {
-            let source = try await ResearchAnswerFixture.make(count: multiPage ? 1 : 2, requested: 2, multiPage: multiPage)
-            defer { source.source.close() }
-            let executor = ComputerUseCapabilityExecutor(nativeExecution: { _, _, _ in nil },
-                desktopFactory: { _ in throw ComputerUseBrowserResearchDriver.Failure.invalidContinuation }, browserResearch: source.source.driver)
-            let url = temporaryLedgerURL()
-            defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
-            let fixture = try browserControlFixture(executor: executor, ledgerURL: url)
-            defer { fixture.manager.stop(); fixture.browser.close() }
-            let prompt = makeEnvelope(id: ResearchDriverFixture.root, kind: .prompt, body: source.source.request)
-            fixture.manager.authorizePeer(senderID: prompt.senderID)
-            XCTAssertTrue(fixture.manager.handle(prompt, channel: fixture.channel))
-            func answers(_ minimum: Int) async throws -> [ComputerUseTaskUpdate] {
-                for _ in 0..<200 {
-                    let sent = await fixture.channel.sentMessages()
-                    let updates = sent.filter { $0.kind == .assistant }.compactMap { try? ComputerUseTaskUpdate.decodeBody($0.body) }
-                        .filter { $0.taskID == prompt.id && $0.outcome == .taskCompleted }
-                    if updates.count >= minimum { return updates }
-                    try await Task.sleep(for: .milliseconds(10))
-                }
-                XCTFail("The host did not deliver the admitted research answer")
-                return []
-            }
-            let delivered = try await answers(1), first = try XCTUnwrap(delivered.first)
-            for text in ["Concert Alpha", "Concert Beta", "USD 40", "2 options.", "Do not buy.", "│ Read the conditions"] {
-                XCTAssertTrue(first.text.contains(text), text)
-            }
-            XCTAssertTrue(first.text.contains(source.source.base.appendingPathComponent("details").absoluteString))
-            XCTAssertTrue(first.text.contains("Observed: "))
-            if multiPage {
-                XCTAssertTrue(first.text.contains(source.source.base.appendingPathComponent("offers").absoluteString))
-                XCTAssertTrue(first.text.contains("USD 45")); XCTAssertTrue(first.text.contains("│ Beta conditions apply"))
-            }
-            XCTAssertEqual(fixture.ledger.terminalOutcome(taskID: prompt.id), .taskCompleted)
-            XCTAssertEqual(fixture.manager.activity, .idle)
-            let reloaded = ComputerUseTaskLedger(fileURL: url)
-            XCTAssertEqual(try reloaded.claim(taskID: prompt.id, senderID: prompt.senderID,
-                sessionID: prompt.sessionID, promptBody: prompt.body), .completed(first.text))
-            let calls = await source.modelCalls()
-            XCTAssertTrue(fixture.manager.handle(prompt, channel: fixture.channel))
-            let repeated = try await answers(2)
-            XCTAssertEqual(repeated.last?.text, first.text)
-            let replayCalls = await source.modelCalls()
-            XCTAssertEqual(replayCalls.counts.count, calls.counts.count)
-            XCTAssertEqual(replayCalls.completions.count, calls.completions.count)
-            XCTAssertEqual(source.source.server.count("/search?q=concerts"), 1)
-            XCTAssertEqual(source.source.server.count("/details"), 1); XCTAssertEqual(source.source.server.count("/offers"), multiPage ? 1 : 0)
-        }
     }
 
     func test_executorRequestedUserInterventionPausesWithoutCompletingAndResumesTask() async throws {

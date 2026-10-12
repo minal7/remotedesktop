@@ -152,22 +152,6 @@ final class ComputerUseBrowserLinkPlannerTests: XCTestCase {
         XCTAssertEqual(calls.counts, 0); XCTAssertEqual(calls.completions, 0)
     }
 
-    func testModelLinkAdapterDrivesTheSelectedResultThroughCapabilityRouting() async throws {
-        let transport = LinkFixtureTransport(selectedIndices: [1, -1]), local = try local(transport)
-        let fixture = try await multiFixture(linkPlanner: local)
-        defer { fixture.close() }
-        let executor = ComputerUseCapabilityExecutor(nativeExecution: { _, _, _ in nil }, browserResearch: fixture.driver)
-        let result = try await executor.execute(taskID: ResearchDriverFixture.root, modelPrompt: "Unrelated assistant history",
-            currentUserPrompt: ResearchDriverFixture.prompt, conversation: [], tools: fixture.tools, progress: { _ in })
-        guard case .browserResearchProgress = result else { return XCTFail("A selected page is not a verified research answer") }
-        XCTAssertEqual(fixture.server.count("/search?q=concerts"), 1); XCTAssertEqual(fixture.server.count("/beta"), 1)
-        XCTAssertEqual(fixture.server.count("/details"), 0)
-        XCTAssertTrue(fixture.policy.goals.isEmpty, "The model adapter, not the earlier fixed-choice policy, supplies this proposal")
-        let calls = await transport.calls
-        XCTAssertEqual(calls.counts, 2); XCTAssertEqual(calls.completions, 2)
-        XCTAssertEqual(try fixture.owner().confirmedNavigationHistory.map(\.kind), [.search, .resultLink])
-    }
-
     func testModelLinkAdapterRejectsStaleRepliesAndJoinsSelectionCancellation() async throws {
         let fixture = try await ResearchDriverFixture.make()
         defer { fixture.close() }

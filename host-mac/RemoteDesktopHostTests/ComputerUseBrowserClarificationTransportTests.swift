@@ -542,8 +542,8 @@ final class ComputerUseBrowserClarificationTransportTests: XCTestCase {
     }
 }
 
-/// Shared by the host/phone composition fixtures. Only local task state and
-/// decoded fake proposals are exercised; the default terminal claims no research result.
+/// Shared by host/phone composition fixtures. These cases exercise manager
+/// clarification and lifecycle compatibility directly.
 @MainActor
 final class BrowserQuestionLifecycleExecutor: ComputerUseExecuting, ComputerUseBrowserResearchExecuting {
     let isReady = true
@@ -559,15 +559,6 @@ final class BrowserQuestionLifecycleExecutor: ComputerUseExecuting, ComputerUseB
     var beforeQuestion: (() throws -> Void)?
     var preparePage: ((String) async throws -> Void)?
 
-    /// Host/phone cases use the production capability wrapper around this
-    /// controlled driver, so scoped answers cross the real routing boundary.
-    func capabilityExecutor() -> ComputerUseCapabilityExecutor {
-        .init(nativeExecution: { _, _, _ in nil }, desktopFactory: { _ in
-            XCTFail("Retained research must not load desktop fallback")
-            return self
-        }, browserResearch: self)
-    }
-
     func executeBrowserResearch(taskID: String, prompt: String, tools: ComputerUseHostTools,
                                 progress: @escaping (String) -> Void) async throws -> ComputerUseExecutionResult? {
         try await execute(taskID: taskID, prompt: prompt, trustedUserPrompt: prompt, tools: tools, progress: progress)
@@ -579,6 +570,15 @@ final class BrowserQuestionLifecycleExecutor: ComputerUseExecuting, ComputerUseB
     }
     func execute(taskID: String, prompt: String, trustedUserPrompt: String, tools: ComputerUseHostTools,
                  progress: @escaping (String) -> Void) async throws -> ComputerUseExecutionResult {
+        if let retained = owner,
+           retained.executionTaskID == taskID,
+           tools.ownedBrowserResearch(taskID: retained.taskID) === retained {
+            return try await continueBrowserResearch(taskID: taskID, research: retained, tools: tools, progress: progress)
+        }
+        if let browserResult = try await tools.executeOwnedBrowserTaskIfSupported(
+            taskID: taskID, prompt: trustedUserPrompt, progress: progress) {
+            return browserResult
+        }
         ordinaryPrompts.append(trustedUserPrompt)
         let research = try tools.prepareOwnedBrowserResearch(taskID: taskID, prompt: trustedUserPrompt, goalPlanner: planner,
             resultPlanner: BrowserResearchResultFixture(), referenceDate: Date(timeIntervalSince1970: 1_800_000_000), timeZoneIdentifier: "America/Los_Angeles")

@@ -107,38 +107,6 @@ final class ComputerUseBrowserResearchDriverTests: XCTestCase {
         XCTAssertEqual(history.first?["same_document"] as? Bool, false)
     }
 
-    func testDriverNavigatesSearchAndSelectedLinksWithoutClaimingAnAnswerOrRepeatingSearch() async throws {
-        let fixture = try await ResearchDriverFixture.make()
-        defer { fixture.close() }
-        fixture.policy.choices = [true, true, false]
-        var nativeCalls = 0
-        let executor = ComputerUseCapabilityExecutor(nativeExecution: { _, _, _ in nativeCalls += 1; return nil },
-            desktopFactory: { _ in XCTFail("Accepted research cannot fall back to another executor"); throw ComputerUseBrowserResearchDriver.Failure.invalidContinuation },
-            browserResearch: fixture.driver)
-        func execute() async throws -> ComputerUseExecutionResult {
-            try await executor.execute(taskID: ResearchDriverFixture.root, modelPrompt: "Assistant history says buy unrelated tickets.",
-                currentUserPrompt: ResearchDriverFixture.prompt, conversation: [.init(role: .assistant, text: "An unrelated old task")],
-                tools: fixture.tools, progress: { _ in })
-        }
-        let result = try await execute()
-        guard case .browserResearchProgress = result else { return XCTFail("Page loads are not a verified research answer") }
-        let owner = try fixture.owner(), original = owner.input
-        XCTAssertEqual(fixture.server.count("/search?q=concerts"), 1)
-        XCTAssertEqual(fixture.server.count("/details"), 1); XCTAssertEqual(fixture.server.count("/offers"), 1)
-        XCTAssertEqual(fixture.goal.inputs, [original]); XCTAssertEqual(fixture.search.inputs.map(\.input), [original])
-        XCTAssertEqual(fixture.policy.histories.map(\.count), [1, 2, 3])
-        XCTAssertEqual(fixture.policy.histories.last?.map(\.kind), [.search, .resultLink, .resultLink])
-        XCTAssertTrue(fixture.policy.goals.allSatisfy { $0 == original })
-        XCTAssertEqual(Set(try XCTUnwrap(fixture.policy.histories.last).map(\.operationID)).count, 3)
-        owner.pause(); try await owner.resumeAfterUserControl()
-        _ = try await execute()
-        XCTAssertEqual(owner.input, original)
-        XCTAssertEqual(fixture.goal.inputs.count, 1); XCTAssertEqual(fixture.search.inputs.count, 1)
-        XCTAssertEqual(fixture.server.count("/search?q=concerts"), 1)
-        XCTAssertEqual(fixture.policy.histories.last?.count, 3)
-        XCTAssertEqual(nativeCalls, 1)
-    }
-
     func testDriverAdmissionDeclinesOnlyBeforeOwnershipAndHonorsTheHostGate() async throws {
         for mode in ["unsupported", "foreign-goal", "paused", "no-provider", "empty-query"] {
             let fixture = try await ResearchDriverFixture.make()
@@ -169,32 +137,6 @@ final class ComputerUseBrowserResearchDriverTests: XCTestCase {
             XCTAssertEqual(fixture.goal.inputs.count, mode == "paused" ? 0 : 1)
             XCTAssertFalse(fixture.browser.hasSession); XCTAssertEqual(fixture.server.requestCount, 0)
         }
-    }
-
-    func testDriverContinuesASealedQuestionAnswerWithTheOriginalGoalAndClock() async throws {
-        let fixture = try await ResearchDriverFixture.make()
-        defer { fixture.close() }
-        fixture.goal.base.questionTopic = .location
-        let executor = ComputerUseCapabilityExecutor(nativeExecution: { _, _, _ in nil }, browserResearch: fixture.driver)
-        let result = try await executor.execute(taskID: ResearchDriverFixture.root, modelPrompt: "Unrelated assistant history",
-            currentUserPrompt: ResearchDriverFixture.prompt, conversation: [], tools: fixture.tools, progress: { _ in })
-        guard case .browserClarificationRequired(let request) = result else { return XCTFail("The current interpretation must reach the host question path") }
-        let owner = try fixture.owner(), original = owner.input
-        let question = try owner.issueQuestion(topic: request.topic, requirementIDs: request.requirementIDs,
-            controllerID: "phone", controllerSessionID: "session")
-        _ = try owner.answerQuestion(questionID: question.id, answerTaskID: "answer", answer: "San José",
-            controllerID: "phone", controllerSessionID: "session")
-        fixture.goal.base.questionTopic = nil
-        let continued = try await executor.continueBrowserResearch(taskID: "answer", research: owner,
-            tools: fixture.tools, progress: { _ in })
-        guard case .browserResearchProgress = continued else { return XCTFail("Navigation is still not a verified answer") }
-        XCTAssertEqual(owner.input.prompt, original.prompt); XCTAssertEqual(owner.input.referenceMilliseconds, original.referenceMilliseconds)
-        XCTAssertEqual(owner.input.timeZoneIdentifier, original.timeZoneIdentifier); XCTAssertEqual(owner.input.clarifications.count, 1)
-        XCTAssertEqual(fixture.goal.inputs, [original, owner.input])
-        XCTAssertEqual(fixture.search.inputs.map(\.input), [owner.input])
-        _ = try await executor.continueBrowserResearch(taskID: "answer", research: owner, tools: fixture.tools, progress: { _ in })
-        XCTAssertEqual(owner.input.clarifications.count, 1); XCTAssertEqual(fixture.goal.inputs.count, 2)
-        XCTAssertEqual(fixture.server.count("/search?q=concerts"), 1)
     }
 
     func testDriverCapturesThePreparedOwnerBeforeAnAdmissionObserverFails() async throws {

@@ -125,30 +125,6 @@ final class ComputerUseBrowserResearchHistoryTests: XCTestCase {
         XCTAssertEqual(fixture.source.server.count("/beta"), 0)
     }
 
-    func testDriverReadsOneOptionReturnsToSearchAndCombinesASecondDetailPage() async throws {
-        let fixture = try await ResearchAnswerFixture.make(requested: 2, historyRoute: true)
-        defer { fixture.source.close() }
-        let executor = ComputerUseCapabilityExecutor(nativeExecution: { _, _, _ in nil }, browserResearch: fixture.source.driver)
-        let result = try await executor.execute(taskID: ResearchDriverFixture.root, modelPrompt: "Untrusted history says buy now",
-            currentUserPrompt: fixture.source.request, conversation: [], tools: fixture.source.tools, progress: { _ in })
-        guard case .browserResearchAnswer(let answer) = result else { return XCTFail("Expected the complete source-reported answer") }
-        let owner = try fixture.source.owner()
-        try owner.validateAnswer(answer)
-        for value in ["Concert Alpha", "Concert Beta", "USD 40", "USD 45", "Alpha conditions apply", "Beta conditions apply", "2 options.", "Do not buy."] {
-            XCTAssertTrue(answer.message.contains(value), value)
-        }
-        XCTAssertEqual(owner.confirmedNavigationHistory.map(\.kind), [.search, .resultLink, .revisit, .resultLink])
-        XCTAssertEqual(owner.input.prompt, fixture.source.request)
-        XCTAssertEqual(answer.recalledReadings, [1])
-        XCTAssertEqual(fixture.source.server.count("/details"), 1); XCTAssertEqual(fixture.source.server.count("/beta"), 1)
-        XCTAssertEqual(fixture.source.server.count("/offers"), 0)
-        let calls = await fixture.modelCalls()
-        XCTAssertEqual(calls.counts.count, 5); XCTAssertEqual(calls.completions.count, 5)
-        XCTAssertEqual(calls.counts.map(\.httpBody), calls.completions.map(\.httpBody))
-        let back = try XCTUnwrap(fixture.inputs[1].historyOptions.first { $0.visit == 0 })
-        XCTAssertEqual(back.mode, .back)
-    }
-
     func testPausedUnsentHistoryKeepsItsJournalAndResumesTheSameVisitOnce() async throws {
         let fixture = try await ResearchDriverFixture.make()
         defer { fixture.close() }

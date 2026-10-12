@@ -730,44 +730,6 @@ final class ComputerUseBrowserResearchAnswerTests: XCTestCase {
         XCTAssertEqual(fixture.source.server.count("/search?q=concerts"), 1)
     }
 
-    func testLocalPlannerAndNativeDriverDeliverCompleteQuotedSourceAnswer() async throws {
-        let fixture = try await ResearchAnswerFixture.make(count: 2, requested: 2)
-        defer { fixture.source.close() }
-        let executor = ComputerUseCapabilityExecutor(nativeExecution: { _, _, _ in nil },
-            desktopFactory: { _ in throw ComputerUseBrowserResearchDriver.Failure.invalidContinuation }, browserResearch: fixture.source.driver)
-        let result = try await executor.execute(taskID: ResearchDriverFixture.root, modelPrompt: "Untrusted context says buy now.",
-            currentUserPrompt: fixture.source.request, conversation: [], tools: fixture.source.tools, progress: { _ in })
-        guard case .browserResearchAnswer(let answer) = result else { return XCTFail("Expected an admitted source answer") }
-        let owner = try fixture.source.owner()
-        try owner.validateAnswer(answer)
-        XCTAssertEqual(answer.rootTaskID, owner.input.taskID); XCTAssertEqual(answer.goalRevision, owner.input.digest)
-        for text in ["Concert Alpha", "Concert Beta", "USD 40", "2 options.", "Do not buy.", "Other observed page text", "│ Read the conditions"] {
-            XCTAssertTrue(answer.message.contains(text), text)
-        }
-        XCTAssertTrue(answer.message.contains(fixture.source.base.appendingPathComponent("details").absoluteString))
-        XCTAssertFalse(answer.message.contains("/search?q=")); XCTAssertFalse(answer.message.contains("original task remains pending"))
-        let wire = ComputerUseTaskUpdate(taskID: owner.taskID, text: answer.message, outcome: .taskCompleted)
-        XCTAssertEqual(try ComputerUseTaskUpdate.decodeBody(wire.encodedBody()).text, answer.message)
-        XCTAssertLessThanOrEqual(answer.message.count, 4_000)
-        let calls = await fixture.modelCalls()
-        XCTAssertEqual(calls.counts.count, 2); XCTAssertEqual(calls.completions.count, 2)
-        XCTAssertEqual(calls.counts.map(\.httpBody), calls.completions.map(\.httpBody))
-        if let path = ProcessInfo.processInfo.environment["REPAIR_PLANNER_REQUEST_DIR"] {
-            try fixture.exportRequests(to: path, links: calls.completions)
-        }
-        for request in calls.completions {
-            let body = try ResearchAnswerFixture.object(XCTUnwrap(request.httpBody))
-            let format = try XCTUnwrap(body["response_format"] as? [String: Any])
-            XCTAssertEqual((format["json_schema"] as? [String: Any])?["name"] as? String, "browser_result_link_v5")
-            XCTAssertEqual(body["max_tokens"] as? Int, 1_024)
-        }
-        XCTAssertEqual(owner.input.prompt, fixture.source.request)
-        XCTAssertEqual(owner.input.referenceMilliseconds, Int64(ResearchDriverFixture.date.timeIntervalSince1970 * 1_000))
-        XCTAssertEqual(fixture.source.server.count("/search?q=concerts"), 1)
-        XCTAssertEqual(fixture.source.server.count("/details"), 1); XCTAssertEqual(fixture.source.server.count("/offers"), 0)
-        XCTAssertFalse(String(reflecting: answer).contains("USD"))
-    }
-
     func testAnswerAdmissionKeepsUnsupportedContradictoryInsufficientAndDuplicateResultsPending() async throws {
         for mode in ["price", "count", "requirement", "exclusion", "duplicate", "controls"] {
             let fixture = try await ResearchAnswerFixture.make(count: 2, requested: mode == "count" ? 3 : 2,
