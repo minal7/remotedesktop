@@ -1482,8 +1482,8 @@ actor OSAtlasLlamaRuntime {
         }
     }
 
-    /// Runs one schema-constrained Agent action through the already active Fara
-    /// worker. It holds the shared model lease through token counting and decode.
+    /// Runs one tool-schema-constrained Agent action through the active Fara
+    /// worker. It holds the shared model lease through token counting and completion.
     func completeAgentAction(endpoint: OSAtlasLlamaEndpoint, input: AgentVLMRequestInput) async throws -> String {
         let lease = try await acquireModelAccessLease()
         defer { releaseModelAccessLease(lease) }
@@ -1508,7 +1508,11 @@ actor OSAtlasLlamaRuntime {
                 let data = try await server.transport.complete(request: request)
                 try Task.checkCancellation()
                 guard active?.endpoint == endpoint else { throw OSAtlasLlamaRuntimeError.inactiveSession }
-                return try ComputerUseFaraModel.decodePageAnswer(data)
+                guard data.count <= FaraPolicyAdapter.maximumCompletionBytes,
+                      let completion = String(data: data, encoding: .utf8), !completion.isEmpty else {
+                    throw OSAtlasLlamaRuntimeError.invalidResponse
+                }
+                return completion
             } onCancel: {
                 Task { await self.cancel(endpoint: endpoint) }
             }
@@ -2696,10 +2700,15 @@ enum OSAtlasLlamaHTTPClient {
             ["type": "text", "text": "Observation JSON (screenshot attached separately):\n" + input.observationJSON],
             ["type": "image_url", "image_url": ["url": "data:image/png;base64," + input.screenshotPNG.base64EncodedString()]],
         ]
+        let tool = ["type": "function", "function": [
+            "name": "computer_use",
+            "description": "Invoke this native computer_use function exactly once. Its arguments must be the flat JSON action matching the supplied schema; do not return the action as bare assistant content. Point coordinates use the attached screenshot's pixel space, with origin at its top left. Type actions state replace or append explicitly. The host checks scope and approvals.",
+            "parameters": schema,
+        ]] as [String: Any]
         request.httpBody = try JSONSerialization.data(withJSONObject: [
             "model": ComputerUseFaraRuntimeInputs.modelAlias,
             "messages": [["role": "system", "content": input.prompt], ["role": "user", "content": userContent]],
-            "response_format": ["type": "json_schema", "json_schema": ["name": "agent_action", "strict": true, "schema": schema]],
+            "tools": [tool], "tool_choice": "required", "parallel_tool_calls": false,
             "temperature": 0, "max_tokens": agentMaximumCompletionTokens, "stream": false,
             "reasoning_format": "none",
         ], options: [.sortedKeys, .withoutEscapingSlashes])

@@ -24,7 +24,9 @@ final class LlamaVLMPolicy: AgentPolicy {
     init(transport: any AgentVLMTransport, prompt: String, actionSchema: Data) throws {
         guard !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               let schema = try? JSONSerialization.jsonObject(with: actionSchema) as? [String: Any],
-              schema["$schema"] as? String == "https://json-schema.org/draft/2020-12/schema" else {
+              schema["$schema"] as? String == "https://json-schema.org/draft/2020-12/schema",
+              schema["$ref"] as? String == "#/$defs/action",
+              schema["$defs"] as? [String: Any] != nil else {
             throw OSAtlasLlamaRuntimeError.invalidResponse
         }
         self.transport = transport
@@ -60,10 +62,11 @@ final class LlamaVLMPolicy: AgentPolicy {
         } onCancel: {
             Task { @MainActor in await transport.stop() }
         }
-        guard raw.utf8.count <= 32_768,
-              let data = raw.data(using: .utf8),
+        guard let actionJSON = try? FaraPolicyAdapter.actionJSON(fromCompletion: raw),
+              actionJSON.utf8.count <= 32_768,
+              let data = actionJSON.data(using: .utf8),
               let action = try? JSONDecoder().decode(AgentAction.self, from: data) else {
-            return .init(rawOutput: raw, action: nil, rejectionReason: "Model output was not one valid JSON action.")
+            return .init(rawOutput: raw, action: nil, rejectionReason: "Model output was not one valid computer-use action.")
         }
         return .init(rawOutput: raw, action: action, rejectionReason: nil)
     }

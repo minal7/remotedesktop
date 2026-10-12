@@ -6,13 +6,15 @@ import XCTest
 @MainActor
 final class AgentLlamaVLMPolicyTests: XCTestCase {
     func testPolicyIncludesPromptSchemaElementsAndOneAttachedPNG() async throws {
-        let transport = RecordingAgentVLMTransport(response: #"{"type":"click","target":{"id":1}}"#)
+        let raw = try completion(arguments: #"{"type":"click","target":{"id":1}}"#,
+                                 content: "I will continue with the visible control.")
+        let transport = RecordingAgentVLMTransport(response: raw)
         let (policy, observation, png, schema) = try fixture(transport: transport)
 
         let output = try await policy.propose(observation)
 
         XCTAssertEqual(policy.promptVersion, "v1")
-        XCTAssertEqual(output.rawOutput, #"{"type":"click","target":{"id":1}}"#)
+        XCTAssertEqual(output.rawOutput, raw)
         XCTAssertEqual(output.action, .click(target: .element(id: 1), button: nil, count: nil))
         let input = try XCTUnwrap(transport.inputs.first)
         XCTAssertEqual(input.prompt, try promptText())
@@ -25,8 +27,12 @@ final class AgentLlamaVLMPolicyTests: XCTestCase {
     }
 
     func testMalformedJSONAndExtraActionFieldsAreRejectedWithoutRetry() async throws {
+        let validArguments = #"{"type":"done","answer":"ok"}"#
         for raw in ["Here is the action: {\"type\":\"done\",\"answer\":\"ok\"}",
-                    #"{"type":"done","answer":"ok","tool":"extra"}"#] {
+                    try completionWithoutToolCall(content: #"<tool_call>{"name":"computer_use","arguments":{"type":"done","answer":"ok"}}</tool_call>"#),
+                    try completion(arguments: #"{"type":"done","answer":"ok","tool":"extra"}"#),
+                    try completion(arguments: validArguments, extraCalls: true),
+                    try completion(arguments: validArguments, toolName: "other")] {
             let transport = RecordingAgentVLMTransport(response: raw)
             let (policy, observation, _, _) = try fixture(transport: transport)
             let output = try await policy.propose(observation)
@@ -34,6 +40,31 @@ final class AgentLlamaVLMPolicyTests: XCTestCase {
             XCTAssertEqual(output.rawOutput, raw)
             XCTAssertNotNil(output.rejectionReason)
             XCTAssertEqual(transport.callCount, 1)
+        }
+    }
+
+    func testNativeToolEnvelopeRepresentsEveryCanonicalActionExactly() throws {
+        let actions = [
+            #"{"type":"click","target":{"x":120,"y":45},"button":"right","count":2}"#,
+            #"{"type":"type","text":"sample","mode":"append"}"#,
+            #"{"type":"key","chord":"cmd+l"}"#,
+            #"{"type":"scroll","direction":"down","amount":40}"#,
+            #"{"type":"select","target":{"id":2},"option":"Choice"}"#,
+            #"{"type":"drag","from":{"x":1,"y":2},"to":{"x":8,"y":9}}"#,
+            #"{"type":"open_url","url":"https://example.test/"}"#,
+            #"{"type":"open_app","name":"Example Editor"}"#,
+            #"{"type":"find_files","query":"sample","kind":"text"}"#,
+            #"{"type":"set_files","target":{"id":3},"file_ids":["file-1"]}"#,
+            #"{"type":"wait","seconds":1}"#,
+            #"{"type":"ask_user","question":"Choose one","choices":["A","B"]}"#,
+            #"{"type":"done","answer":"Complete"}"#,
+            #"{"type":"fail","reason":"Unavailable"}"#,
+        ]
+        for source in actions {
+            let raw = try completion(arguments: source)
+            let decoded = try FaraPolicyAdapter.actionJSON(fromCompletion: raw)
+            XCTAssertEqual(decoded, source)
+            XCTAssertNoThrow(try JSONDecoder().decode(AgentAction.self, from: Data(decoded.utf8)))
         }
     }
 
@@ -52,7 +83,7 @@ final class AgentLlamaVLMPolicyTests: XCTestCase {
         XCTAssertEqual(transport.stopCount, 1)
     }
 
-    func testRequestUsesStrictSchemaGrammarAndAuthenticatedLoopbackOnly() throws {
+    func testRequestUsesNativeRequiredToolGrammarAndAuthenticatedLoopbackOnly() throws {
         let (_, observation, png, schema) = try fixture(transport: RecordingAgentVLMTransport(response: ""))
         let input = AgentVLMRequestInput(prompt: try promptText(),
             observationJSON: try LlamaVLMPolicy.observationJSON(observation),
@@ -64,11 +95,15 @@ final class AgentLlamaVLMPolicyTests: XCTestCase {
         XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer unit-test-token")
         let body = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(request.httpBody)) as? [String: Any])
         XCTAssertEqual(body["model"] as? String, ComputerUseFaraRuntimeInputs.modelAlias)
-        let responseFormat = try XCTUnwrap(body["response_format"] as? [String: Any])
-        XCTAssertEqual(responseFormat["type"] as? String, "json_schema")
-        let declaration = try XCTUnwrap(responseFormat["json_schema"] as? [String: Any])
-        XCTAssertEqual(declaration["strict"] as? Bool, true)
-        XCTAssertEqual(try JSONSerialization.jsonObject(with: JSONSerialization.data(withJSONObject: declaration["schema"]!)) as? NSDictionary,
+        XCTAssertEqual(body["tool_choice"] as? String, "required")
+        XCTAssertEqual(body["parallel_tool_calls"] as? Bool, false)
+        XCTAssertNil(body["response_format"])
+        let tools = try XCTUnwrap(body["tools"] as? [[String: Any]])
+        XCTAssertEqual(tools.count, 1)
+        let function = try XCTUnwrap(tools[0]["function"] as? [String: Any])
+        XCTAssertEqual(function["name"] as? String, "computer_use")
+        let parameters = try XCTUnwrap(function["parameters"])
+        XCTAssertEqual(try JSONSerialization.jsonObject(with: JSONSerialization.data(withJSONObject: parameters)) as? NSDictionary,
                        try JSONSerialization.jsonObject(with: schema) as? NSDictionary)
         let messages = try XCTUnwrap(body["messages"] as? [[String: Any]])
         let content = try XCTUnwrap(messages[1]["content"] as? [[String: Any]])
@@ -76,6 +111,9 @@ final class AgentLlamaVLMPolicyTests: XCTestCase {
         XCTAssertFalse((content[0]["text"] as? String ?? "").contains(png.base64EncodedString()))
         XCTAssertEqual((content[1]["image_url"] as? [String: String])?["url"],
                        "data:image/png;base64," + png.base64EncodedString())
+        let templateRequest = try OSAtlasLlamaHTTPClient.makeSemanticTemplateRequest(from: request)
+        XCTAssertEqual(templateRequest.url?.absoluteString, "http://127.0.0.1:43123/apply-template")
+        XCTAssertEqual(templateRequest.httpBody, request.httpBody)
         for url in ["https://example.test/", "http://user:secret@127.0.0.1:43123"] {
             let rejected = OSAtlasLlamaEndpoint(generation: 2, variant: nil,
                 baseURL: URL(string: url)!, bearerToken: "token")
@@ -113,6 +151,26 @@ final class AgentLlamaVLMPolicyTests: XCTestCase {
         let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
             .deletingLastPathComponent().deletingLastPathComponent()
         return try String(contentsOf: root.appendingPathComponent("policy/prompts/v1.txt"), encoding: .utf8)
+    }
+
+    private func completion(arguments: String, toolName: String = "computer_use", extraCalls: Bool = false,
+                            content: String = "") throws -> String {
+        let function: [String: Any] = ["name": toolName, "arguments": arguments]
+        let call: [String: Any] = ["id": "call-1", "type": "function", "function": function]
+        var toolCalls: [[String: Any]] = [call]
+        if extraCalls { toolCalls.append(call) }
+        let message: [String: Any] = ["role": "assistant", "content": content, "tool_calls": toolCalls]
+        let body: [String: Any] = ["model": ComputerUseFaraRuntimeInputs.modelAlias,
+            "choices": [["finish_reason": "tool_calls", "message": message]]]
+        let data = try JSONSerialization.data(withJSONObject: body, options: [.sortedKeys, .withoutEscapingSlashes])
+        return try XCTUnwrap(String(data: data, encoding: .utf8))
+    }
+
+    private func completionWithoutToolCall(content: String) throws -> String {
+        let body: [String: Any] = ["model": ComputerUseFaraRuntimeInputs.modelAlias,
+            "choices": [["finish_reason": "stop", "message": ["role": "assistant", "content": content]]]]
+        let data = try JSONSerialization.data(withJSONObject: body, options: [.sortedKeys, .withoutEscapingSlashes])
+        return try XCTUnwrap(String(data: data, encoding: .utf8))
     }
 
     private func makeJPEG() -> Data {
