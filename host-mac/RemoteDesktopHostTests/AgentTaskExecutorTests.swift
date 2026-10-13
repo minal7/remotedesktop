@@ -99,20 +99,23 @@ final class AgentTaskExecutorTests: XCTestCase {
         let execution = Task { try await executor.execute(taskID: "task-cancel", prompt: "Click") }
         while !fixture.environment.executionStarted { await Task.yield() }
         executor.requestCancellation()
+        XCTAssertEqual(executor.activeTaskID, "task-cancel")
         do {
             _ = try await executor.execute(taskID: "replacement", prompt: "Do something else")
             XCTFail("The synchronous cancellation fence must reject new work")
         } catch { XCTAssertEqual(error as? AgentTaskExecutorError, .cancellationInProgress) }
         let cancel = Task { try await executor.cancel() }
         await Task.yield()
+        XCTAssertEqual(executor.activeTaskID, "task-cancel")
         do {
             _ = try await executor.execute(taskID: "replacement", prompt: "Do something else")
             XCTFail("Ownership cannot move while cancellation is unwinding")
         } catch { XCTAssertEqual(error as? AgentTaskExecutorError, .cancellationInProgress) }
         try await cancel.value
 
-        guard case .cancelled = try await execution.value else { return XCTFail("Expected cancelled execution") }
         XCTAssertNil(executor.activeTaskID)
+        let result = try await execution.value
+        XCTAssertEqual(result, .failed(reason: "An interrupted input attempt may have taken effect."))
         XCTAssertEqual(fixture.journal.uncertain.count, 1)
         XCTAssertEqual(fixture.environment.executed.count, 1)
     }
