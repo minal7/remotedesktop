@@ -131,6 +131,14 @@ final class PixelEnvironmentTests: XCTestCase {
         XCTAssertEqual(rewritten.note, "snapped to mark 1 \"Save\"")
     }
 
+    func testPointSnapRecognizesLiftedAXRowTargets() {
+        let row = mark(id: 5, role: "AXRow", name: "Invoice 42",
+            rect: CGRect(x: 100, y: 100, width: 2, height: 2))
+        let result = PixelTargetSnapping.resolve(CGPoint(x: 108, y: 101), in: [row])
+        XCTAssertEqual(result.mark?.id, row.id)
+        XCTAssertEqual(result.point, CGPoint(x: 101, y: 101))
+    }
+
     func testPointSnapRejectsTiesAndCoordinatesInsidePassiveMarks() {
         let left = mark(id: 1, role: "AXButton", name: "Same", rect: CGRect(x: 0, y: 0, width: 10, height: 10))
         let right = mark(id: 2, role: "AXButton", name: "Same", rect: CGRect(x: 20, y: 0, width: 10, height: 10))
@@ -240,6 +248,214 @@ final class PixelEnvironmentTests: XCTestCase {
         XCTAssertNil(unavailableFreshLabel)
     }
 
+    func testElementMarksLiftsChildTextAndDeduplicatesOverlappingLabelsInFavorOfInteractiveNode() throws {
+        let text = TestPixelAXNode(identity: "child", role: "AXStaticText", title: "Save",
+            rect: CGRect(x: 104, y: 103, width: 38, height: 14))
+        let button = TestPixelAXNode(identity: "button", role: "AXButton", title: nil,
+            rect: CGRect(x: 100, y: 100, width: 48, height: 24), children: [text])
+        let overlappingGroup = TestPixelAXNode(identity: "group", role: "AXGroup", title: "Save",
+            rect: CGRect(x: 101, y: 100, width: 47, height: 24))
+
+        let result = ElementMarks.project(root: TestPixelAXNode.root([button, overlappingGroup]),
+            windowBounds: CGRect(x: 0, y: 0, width: 500, height: 500))
+
+        XCTAssertEqual(result.marks.count, 1)
+        XCTAssertEqual(result.marks.first?.role, "AXButton")
+        XCTAssertEqual(result.marks.first?.name, "Save")
+        let projected = try XCTUnwrap(result.marks.first)
+        let target = AgentElement(id: projected.id, role: projected.role, name: projected.name, value: nil,
+            state: projected.state, bbox: .init(x: 0, y: 0, width: 1, height: 1), inView: true)
+        let reference = try XCTUnwrap(projected.reference)
+        let centre = try PixelElementReferenceResolver.currentCentre(target, reference: reference,
+            windowBounds: CGRect(x: 0, y: 0, width: 500, height: 500))
+        XCTAssertEqual(centre, CGPoint(x: 124, y: 112))
+
+        let row = TestPixelAXNode(identity: "row", role: "AXRow", title: nil,
+            rect: CGRect(x: 10, y: 50, width: 200, height: 24), children: [
+                TestPixelAXNode(identity: "row-text", role: "AXStaticText", title: "Invoice 42",
+                    rect: CGRect(x: 20, y: 55, width: 80, height: 14))
+            ])
+        let rowMarks = ElementMarks.project(root: TestPixelAXNode.root([row]),
+            windowBounds: CGRect(x: 0, y: 0, width: 500, height: 500))
+        XCTAssertEqual(rowMarks.marks.first?.name, "Invoice 42")
+    }
+
+    func testLiftedTextReferenceRejectsChangedOrUnavailableChildLabelButKeepsDirectLabel() throws {
+        let child = TestPixelAXNode(identity: "child", role: "AXStaticText", title: "Submit",
+            rect: CGRect(x: 20, y: 20, width: 60, height: 16))
+        let button = TestPixelAXNode(identity: "button", role: "AXButton", title: nil,
+            rect: CGRect(x: 10, y: 10, width: 100, height: 40), children: [child])
+        let marks = ElementMarks.project(root: TestPixelAXNode.root([button]),
+            windowBounds: CGRect(x: 0, y: 0, width: 500, height: 500))
+        let lifted = try XCTUnwrap(marks.marks.first)
+        let liftedTarget = AgentElement(id: lifted.id, role: lifted.role, name: lifted.name, value: nil,
+            state: lifted.state, bbox: .init(x: 0, y: 0, width: 1, height: 1), inView: true)
+        let liftedReference = try XCTUnwrap(lifted.reference as? TestPixelElementReference)
+        XCTAssertNoThrow(try PixelElementReferenceResolver.currentCentre(liftedTarget, reference: liftedReference,
+            windowBounds: CGRect(x: 0, y: 0, width: 500, height: 500)))
+
+        child.title = "Continue"
+        XCTAssertThrowsError(try PixelElementReferenceResolver.currentCentre(liftedTarget, reference: liftedReference,
+            windowBounds: CGRect(x: 0, y: 0, width: 500, height: 500))) { error in
+            XCTAssertEqual(error as? AgentEnvironmentError, .targetGone)
+        }
+        child.title = nil
+        XCTAssertThrowsError(try PixelElementReferenceResolver.currentCentre(liftedTarget, reference: liftedReference,
+            windowBounds: CGRect(x: 0, y: 0, width: 500, height: 500))) { error in
+            XCTAssertEqual(error as? AgentEnvironmentError, .targetGone)
+        }
+
+        let directlyLabeled = TestPixelAXNode(identity: "direct", role: "AXButton", title: "Save",
+            rect: CGRect(x: 120, y: 10, width: 80, height: 40))
+        let directMarks = ElementMarks.project(root: TestPixelAXNode.root([directlyLabeled]),
+            windowBounds: CGRect(x: 0, y: 0, width: 500, height: 500))
+        let direct = try XCTUnwrap(directMarks.marks.first)
+        let directTarget = AgentElement(id: direct.id, role: direct.role, name: direct.name, value: nil,
+            state: direct.state, bbox: .init(x: 0, y: 0, width: 1, height: 1), inView: true)
+        XCTAssertNoThrow(try PixelElementReferenceResolver.currentCentre(directTarget,
+            reference: try XCTUnwrap(direct.reference), windowBounds: CGRect(x: 0, y: 0, width: 500, height: 500)))
+    }
+
+    func testElementMarksDeduplicateInteractiveCandidatesAtIoU85ButKeepThoseBelowThreshold() {
+        let window = CGRect(x: 0, y: 0, width: 500, height: 300)
+        let atThreshold = ElementMarks.project(root: TestPixelAXNode.root([
+            TestPixelAXNode(identity: "button", role: "AXButton", title: "Open",
+                rect: CGRect(x: 0, y: 0, width: 100, height: 100)),
+            TestPixelAXNode(identity: "field", role: "AXTextField", title: "Open",
+                rect: CGRect(x: 8.108108, y: 0, width: 100, height: 100))
+        ]), windowBounds: window)
+        XCTAssertEqual(atThreshold.marks.count, 1)
+        XCTAssertEqual(atThreshold.marks.first?.role, "AXButton")
+
+        let belowThreshold = ElementMarks.project(root: TestPixelAXNode.root([
+            TestPixelAXNode(identity: "button", role: "AXButton", title: "Open",
+                rect: CGRect(x: 0, y: 0, width: 100, height: 100)),
+            TestPixelAXNode(identity: "field", role: "AXTextField", title: "Open",
+                rect: CGRect(x: 8.2, y: 0, width: 100, height: 100))
+        ]), windowBounds: window)
+        XCTAssertEqual(belowThreshold.marks.count, 2)
+    }
+
+    func testElementMarksDropScrollbarsAndStructuralWindowContainersButRetainFullWindowEditors() {
+        let window = CGRect(x: 0, y: 0, width: 800, height: 600)
+        let scrollbar = TestPixelAXNode(identity: "scroll", role: "AXScrollBar", title: "",
+            rect: CGRect(x: 780, y: 0, width: 20, height: 600))
+        let container = TestPixelAXNode(identity: "container", role: "AXGroup", title: "Document",
+            rect: window)
+        let editor = TestPixelAXNode(identity: "editor", role: "AXTextArea", title: "Document",
+            rect: window)
+
+        let result = ElementMarks.project(root: TestPixelAXNode.root([scrollbar, container, editor]), windowBounds: window)
+
+        XCTAssertEqual(result.marks.map(\.role), ["AXTextArea"])
+    }
+
+    func testElementMarksPruneProtectedSubtreeBeforeReadingValuesOrChildrenAndKeepSecureRect() {
+        let secretChild = TestPixelAXNode(identity: "secret-child", role: "AXStaticText", title: "private",
+            rect: CGRect(x: 15, y: 15, width: 40, height: 10))
+        let protected = TestPixelAXNode(identity: "password", role: "AXTextField", title: "Password",
+            value: "sensitive-value", rect: CGRect(x: 10, y: 10, width: 100, height: 24),
+            protected: true, secure: true, children: [secretChild])
+        let duplicateProtected = TestPixelAXNode(identity: "password-copy", role: "AXTextField", title: "Password",
+            value: "second-secret", rect: CGRect(x: 10, y: 10, width: 100, height: 24), protected: true, secure: true)
+
+        let result = ElementMarks.project(root: TestPixelAXNode.root([protected, duplicateProtected]),
+            windowBounds: CGRect(x: 0, y: 0, width: 400, height: 300))
+
+        XCTAssertEqual(result.secureScreenRects.count, 2, "secure areas survive candidate deduplication")
+        XCTAssertEqual(protected.valueReads, 0)
+        XCTAssertEqual(protected.childrenReads, 0)
+        XCTAssertEqual(secretChild.valueReads, 0)
+    }
+
+    func testAccessibilityDiffUsesOpaqueIdentityCapsChangesAndNeverRendersValues() {
+        let before = (0..<12).map { index in
+            PixelAXElementState(identity: index, role: "AXButton", title: "Old \(index)",
+                value: "private-before-\(index)", isEnabled: true)
+        }
+        let after = (0..<12).map { index in
+            PixelAXElementState(identity: index, role: "AXButton", title: "New \(index)",
+                value: "private-after-\(index)", isEnabled: false)
+        }
+
+        let changes = PixelAXDiff.describe(before: before, after: after, sameApplication: true, windowChanged: false)
+
+        XCTAssertEqual(changes.count, 10)
+        XCTAssertTrue(changes.contains { $0.contains("title changed") })
+        XCTAssertTrue(changes.contains { $0.contains("value changed") })
+        XCTAssertTrue(changes.contains { $0.contains("enabled changed") })
+        XCTAssertFalse(changes.joined(separator: " ").contains("private-before"))
+        XCTAssertFalse(changes.joined(separator: " ").contains("private-after"))
+
+        let renamed = PixelAXDiff.describe(
+            before: [PixelAXElementState(identity: "same-AX", role: "AXButton", title: "Submit", value: nil, isEnabled: true)],
+            after: [PixelAXElementState(identity: "same-AX", role: "AXButton", title: "Continue", value: nil, isEnabled: true)],
+            sameApplication: true, windowChanged: false)
+        XCTAssertFalse(renamed.contains { $0.hasPrefix("+") || $0.hasPrefix("-") })
+        XCTAssertTrue(renamed.contains { $0.contains("title changed") })
+    }
+
+    func testAccessibilityDiffFallsBackToWindowChangedWhenAXIsUnavailable() {
+        XCTAssertEqual(PixelAXDiff.describe(before: nil, after: nil, sameApplication: true, windowChanged: true), ["window changed: yes"])
+        XCTAssertEqual(PixelAXDiff.describe(before: nil, after: nil, sameApplication: true, windowChanged: false), ["window changed: no"])
+    }
+
+    func testEmptyAccessibilityProjectionIsUnavailableRatherThanAllElementsRemoved() {
+        let empty = ElementMarks.project(root: TestPixelAXNode.root([]),
+            windowBounds: CGRect(x: 0, y: 0, width: 400, height: 300))
+        let previous = [PixelAXElementState(identity: "button", role: "AXButton", title: "Save", value: nil, isEnabled: true)]
+
+        XCTAssertNil(empty.axState)
+        XCTAssertEqual(PixelAXDiff.describe(before: previous, after: empty.axState,
+            sameApplication: true, windowChanged: false), ["window changed: no"])
+    }
+
+    func testAccessibilityDiffFallsBackToWindowChangeAcrossApplications() {
+        let prior = [PixelAXElementState(identity: "same", role: "AXButton", title: "Save", value: nil, isEnabled: true)]
+        let next = [PixelAXElementState(identity: "same", role: "AXButton", title: "Save", value: nil, isEnabled: true)]
+
+        XCTAssertEqual(PixelAXDiff.describe(before: prior, after: next, sameApplication: false, windowChanged: true),
+            ["window changed: yes"])
+    }
+
+    func testAXValueTextPreservesNumericControlValues() {
+        XCTAssertEqual(ElementMarks.normalizedAXValue(NSNumber(value: 0)), "0")
+        XCTAssertEqual(ElementMarks.normalizedAXValue(NSNumber(value: 1)), "1")
+        XCTAssertEqual(ElementMarks.normalizedAXValue("enabled" as CFTypeRef), "enabled")
+        XCTAssertNil(ElementMarks.normalizedAXValue(nil))
+    }
+
+    func testAccessibilityDiffReportsAddedAndRemovedByOpaqueIdentityAndSuppressesSecureValues() {
+        let before = [
+            PixelAXElementState(identity: "removed", role: "AXTextField", title: "Account", value: "old-secret", isEnabled: true, isSecure: true),
+            PixelAXElementState(identity: "kept", role: "AXButton", title: "Save", value: nil, isEnabled: true)
+        ]
+        let after = [
+            PixelAXElementState(identity: "added", role: "AXButton", title: "Continue", value: nil, isEnabled: true),
+            PixelAXElementState(identity: "kept", role: "AXButton", title: "Save", value: nil, isEnabled: true)
+        ]
+
+        let changes = PixelAXDiff.describe(before: before, after: after, sameApplication: true, windowChanged: true)
+
+        XCTAssertTrue(changes.contains { $0.hasPrefix("+") })
+        XCTAssertTrue(changes.contains { $0.hasPrefix("-") })
+        XCTAssertFalse(changes.joined(separator: " ").contains("old-secret"))
+    }
+
+    func testExecutionDescriptionUsesResolvedTargetWhenFreshFrameReusesMarkID() {
+        func item(_ id: Int, _ name: String, _ x: Double) -> AgentElement {
+            AgentElement(id: id, role: "AXButton", name: name, value: nil, state: ["visible"],
+                bbox: .init(x: x, y: 10, width: 30, height: 20), inView: true)
+        }
+        let oldResolvedTarget = item(1, "Submit", 10)
+        let freshFrameReusedID = item(1, "Cancel", 300)
+
+        let description = PixelExecutionDescription.targetLabel(.element(id: 1),
+            resolvedTargets: [oldResolvedTarget], frameElements: [freshFrameReusedID])
+
+        XCTAssertEqual(description, "mark 1 \"Submit\"")
+    }
+
     private func mark(id: Int, role: String, name: String, rect: CGRect,
                       reference: (any PixelElementReference)? = nil) -> PixelElementMark {
         PixelElementMark(id: id, role: role, name: name, screenRect: rect, state: ["visible"], inView: true, reference: reference)
@@ -253,16 +469,57 @@ final class PixelEnvironmentTests: XCTestCase {
 @MainActor
 private final class TestPixelElementReference: PixelElementReference {
     let role: String
-    let name: String
+    private let fixedName: String
+    private let currentName: (() -> String)?
     var rect: CGRect?
     var secure: Bool
     var enabled: Bool?
 
-    init(role: String, name: String, rect: CGRect?, secure: Bool = false, enabled: Bool? = true) {
-        self.role = role; self.name = name; self.rect = rect; self.secure = secure; self.enabled = enabled
+    init(role: String, name: String, rect: CGRect?, secure: Bool = false, enabled: Bool? = true,
+         currentName: (() -> String)? = nil) {
+        self.role = role; fixedName = name; self.currentName = currentName
+        self.rect = rect; self.secure = secure; self.enabled = enabled
     }
 
+    var name: String { currentName?() ?? fixedName }
     var isEnabled: Bool? { enabled }
     func currentScreenRect() -> CGRect? { rect }
     func isSecure() -> Bool { secure }
+}
+
+@MainActor
+private final class TestPixelAXNode: PixelAXNode {
+    let identity: AnyHashable
+    let role: String
+    var title: String?
+    private let storedValue: String?
+    let screenRect: CGRect?
+    let isEnabled: Bool?
+    let isProtected: Bool
+    let isSecure: Bool
+    let documentURL: String? = nil
+    private let childNodes: [any PixelAXNode]
+    private(set) var valueReads = 0
+    private(set) var childrenReads = 0
+
+    init(identity: AnyHashable, role: String, title: String?, value: String? = nil, rect: CGRect?,
+         enabled: Bool? = true, protected: Bool = false, secure: Bool = false, children: [any PixelAXNode] = []) {
+        self.identity = identity; self.role = role; self.title = title; storedValue = value
+        screenRect = rect; isEnabled = enabled; isProtected = protected; isSecure = secure; childNodes = children
+    }
+
+    static func root(_ children: [any PixelAXNode]) -> TestPixelAXNode {
+        TestPixelAXNode(identity: "root", role: "AXWindow", title: nil, rect: nil, children: children)
+    }
+
+    var value: String? { valueReads += 1; return storedValue }
+    func children() -> [any PixelAXNode] { childrenReads += 1; return childNodes }
+    func makeReference(observedName: String) -> (any PixelElementReference)? {
+        TestPixelElementReference(role: role, name: observedName, rect: screenRect,
+            secure: isSecure, enabled: isEnabled, currentName: { [weak self] in
+                guard let self else { return "" }
+                let deadline = ContinuousClock.now + .milliseconds(40)
+                return ElementMarks.semanticLabel(for: self, deadline: deadline)
+            })
+    }
 }

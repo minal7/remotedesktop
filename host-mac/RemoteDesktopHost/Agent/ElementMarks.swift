@@ -19,11 +19,12 @@ struct PixelElementMark {
     let state: [String]
     let inView: Bool
     let reference: (any PixelElementReference)?
+    let identity: AnyHashable?
 
     init(id: Int, role: String, name: String, screenRect: CGRect, state: [String], inView: Bool,
-         reference: (any PixelElementReference)? = nil) {
+         reference: (any PixelElementReference)? = nil, identity: AnyHashable? = nil) {
         self.id = id; self.role = role; self.name = name; self.screenRect = screenRect
-        self.state = state; self.inView = inView; self.reference = reference
+        self.state = state; self.inView = inView; self.reference = reference; self.identity = identity
     }
 }
 
@@ -33,7 +34,9 @@ struct PixelElementMarks {
     let secureScreenRects: [CGRect]
     let contentRect: CGRect?
     let browserURL: String?
+    let axState: [PixelAXElementState]?
 }
+
 
 enum PixelTargetRebinding {
     static func find(_ expected: AgentElement, in current: [PixelElementMark]) -> PixelElementMark? {
@@ -79,66 +82,185 @@ enum PixelElementReferenceResolver {
 @MainActor
 enum ElementMarks {
     private struct Candidate {
+        let identity: AnyHashable
         let role: String
         let name: String
         let rect: CGRect
         let state: [String]
         let inWindow: Bool
-        let element: AXUIElement
+        let enabled: Bool
+        let value: String?
+        let node: any PixelAXNode
     }
 
-    private static let interactiveRoles: Set<String> = [
-        "AXButton", "AXLink", "AXTextField", "AXTextArea", "AXTextView", "AXSearchField",
-        "AXCheckBox", "AXRadioButton", "AXPopUpButton", "AXComboBox", "AXTab", "AXMenuItem",
-        "AXMenuBarItem", "AXSlider", "AXIncrementor", "AXSwitch", "AXDisclosureTriangle"
+    private static let structuralRoles: Set<String> = [
+        "AXApplication", "AXWindow", "AXGroup", "AXContainer", "AXScrollArea", "AXWebArea", "AXList", "AXTable", "AXOutline"
     ]
+
+    static func project(root: any PixelAXNode, windowBounds: CGRect, focusedIdentity: AnyHashable? = nil,
+                        browserURL: String? = nil, readOnly: Bool = false, limit: Int = 60,
+                        maxNodes: Int = 160) -> PixelElementMarks {
+        var candidates: [Candidate] = [], secureRects: [CGRect] = []
+        var childText: [AnyHashable: [String]] = [:]
+        var contentRect: CGRect?
+        var resolvedURL = browserURL
+        var visited = 0
+
+        func walk(_ node: any PixelAXNode, interactiveAncestors: [AnyHashable]) {
+            guard visited < maxNodes, candidates.count < limit else { return }
+            visited += 1
+            let role = node.role
+            let rect = node.screenRect
+            let protected = node.isProtected
+            let secure = protected || node.isSecure
+            if secure {
+                if let rect, valid(rect) { secureRects.append(rect) }
+                return
+            }
+
+            let fullWindowContainer = structuralRoles.contains(role) && rect.map {
+                intersectionOverUnion($0, windowBounds) >= 0.9
+            } == true
+            let interactive = PixelTargetSnapping.interactiveRoles.contains(role) && !fullWindowContainer && role != "AXScrollBar"
+            let title = normalized((interactive || role == "AXStaticText" || role == "AXWebArea") ? node.title : nil)
+            if role == "AXWebArea" {
+                contentRect = rect
+                if resolvedURL == nil { resolvedURL = node.documentURL }
+            }
+            if !title.isEmpty, role == "AXStaticText", let parent = interactiveAncestors.last {
+                childText[parent, default: []].append(title)
+            }
+            if interactive {
+                let enabledValue = node.isEnabled
+                let enabled = enabledValue != false
+                var state = ["visible"]
+                if !enabled { state.append("disabled") }
+                if readOnly { state.append("read_only") }
+                guard let rect, valid(rect) else {
+                    walkChildren(node, ancestors: interactiveAncestors + [node.identity], walk: walk)
+                    return
+                }
+                let inWindow = rect.intersects(windowBounds)
+                guard inWindow || role == "AXMenuBarItem" else {
+                    walkChildren(node, ancestors: interactiveAncestors + [node.identity], walk: walk)
+                    return
+                }
+                candidates.append(Candidate(identity: node.identity, role: role, name: title, rect: rect,
+                    state: state, inWindow: inWindow, enabled: enabled, value: node.value, node: node))
+            }
+            walkChildren(node, ancestors: interactive ? interactiveAncestors + [node.identity] : interactiveAncestors, walk: walk)
+        }
+
+        walk(root, interactiveAncestors: [])
+        let named = candidates.map { candidate -> Candidate in
+            guard candidate.name.isEmpty, let lifted = childText[candidate.identity], !lifted.isEmpty else { return candidate }
+            return Candidate(identity: candidate.identity, role: candidate.role, name: lifted.joined(separator: " "),
+                rect: candidate.rect, state: candidate.state, inWindow: candidate.inWindow,
+                enabled: candidate.enabled, value: candidate.value, node: candidate.node)
+        }
+        let sorted = named.sorted {
+            let left = preference($0.role), right = preference($1.role)
+            return left == right ? ($0.rect.minY, $0.rect.minX) < ($1.rect.minY, $1.rect.minX) : left > right
+        }
+        var deduplicated: [Candidate] = []
+        for candidate in sorted {
+            let duplicate = deduplicated.contains { existing in
+                intersectionOverUnion(existing.rect, candidate.rect) >= 0.85
+            }
+            if !duplicate { deduplicated.append(candidate) }
+        }
+        let ordered = deduplicated.sorted { ($0.rect.minY, $0.rect.minX) < ($1.rect.minY, $1.rect.minX) }
+        let marks = ordered.enumerated().map { index, candidate in
+            PixelElementMark(id: index + 1, role: candidate.role, name: candidate.name, screenRect: candidate.rect,
+                state: candidate.inWindow ? candidate.state : candidate.state + ["read_only", "offscreen"],
+                inView: candidate.inWindow, reference: candidate.node.makeReference(observedName: candidate.name),
+                identity: candidate.identity)
+        }
+        let axState = ordered.isEmpty ? nil : ordered.map { PixelAXElementState(identity: $0.identity, role: $0.role, title: $0.name,
+            value: $0.value, isEnabled: $0.enabled) }
+        let focusID = focusedIdentity.flatMap { identity in ordered.firstIndex(where: { $0.identity == identity }).map { $0 + 1 } }
+        return PixelElementMarks(marks: marks, focusedID: focusID, secureScreenRects: secureRects,
+            contentRect: contentRect, browserURL: resolvedURL, axState: axState)
+    }
 
     static func read(window: AgentMacAccessibility.Window, budget: Duration = .milliseconds(300), limit: Int = 60) -> PixelElementMarks {
         let deadline = ContinuousClock.now + budget
         let appRoot = AXUIElementCreateApplication(window.application.processIdentifier)
         let focused = ax(read(appRoot, kAXFocusedUIElementAttribute, deadline: deadline))
-        var browserURL = safeURL(read(window.element, kAXDocumentAttribute, deadline: deadline))
-        var queue = [window.element]
-        if let menu = ax(read(appRoot, kAXMenuBarAttribute, deadline: deadline)) { queue.append(menu) }
-        var candidates: [Candidate] = [], secureRects: [CGRect] = [], contentRect: CGRect?
-        var cursor = 0
-        while cursor < queue.count && cursor < 160 && candidates.count < limit && ContinuousClock.now < deadline {
-            let element = queue[cursor]; cursor += 1
-            queue.append(contentsOf: children(read(element, kAXChildrenAttribute, deadline: deadline)))
-            let role = read(element, kAXRoleAttribute, deadline: deadline) as? String ?? "unknown"
-            guard let rect = rect(element, deadline: deadline), !rect.isEmpty else { continue }
-            if role == "AXWebArea" {
-                contentRect = rect
-                if browserURL == nil { browserURL = safeURL(read(element, kAXDocumentAttribute, deadline: deadline)) }
-            }
-            let inWindow = rect.intersects(window.bounds)
-            guard inWindow || role == "AXMenuBarItem" else { continue }
-            guard interactiveRoles.contains(role) else { continue }
-            let name = label(element, deadline: deadline)
-            let subrole = read(element, kAXSubroleAttribute, deadline: deadline) as? String ?? ""
-            let placeholder = read(element, "AXPlaceholderValue", deadline: deadline) as? String ?? ""
-            let protected = read(element, "AXProtectedContent", deadline: deadline) as? Bool == true
-            let secure = protected || AgentCredentialRule.isSensitive(role: role, name: name + " " + placeholder, state: [subrole])
-            let enabled = read(element, kAXEnabledAttribute, deadline: deadline) as? Bool != false
-            var state = ["visible"]
-            if !enabled { state.append("disabled") }
-            if secure { state.append("secure"); secureRects.append(rect) }
-            if AgentSafetyBoundary.readOnly(bundleID: window.application.bundleIdentifier, appName: window.application.localizedName) {
-                state.append("read_only")
-            }
-            candidates.append(Candidate(role: role, name: name, rect: rect, state: state, inWindow: inWindow, element: element))
+        var nodes: [any PixelAXNode] = [AXPixelNode(element: window.element, deadline: deadline)]
+        if let menu = ax(read(appRoot, kAXMenuBarAttribute, deadline: deadline)) {
+            nodes.append(AXPixelNode(element: menu, deadline: deadline))
         }
-        let timedOut = ContinuousClock.now >= deadline
-        let sorted = candidates.sorted { ($0.rect.minY, $0.rect.minX) < ($1.rect.minY, $1.rect.minX) }
-        let marks = timedOut ? [] : sorted.enumerated().map { index, value in
-            PixelElementMark(id: index + 1, role: value.role, name: value.name, screenRect: value.rect,
-                             state: value.inWindow ? value.state : value.state + ["read_only", "offscreen"],
-                             inView: value.inWindow,
-                             reference: AXPixelElementReference(element: value.element, observedName: value.name))
+        let root = PixelAXCompositeNode(nodes: nodes)
+        let browserURL = safeURL(read(window.element, kAXDocumentAttribute, deadline: deadline))
+        let projected = project(root: root, windowBounds: window.bounds,
+            focusedIdentity: focused.map { AnyHashable(PixelAXIdentity(element: $0)) }, browserURL: browserURL,
+            readOnly: AgentSafetyBoundary.readOnly(bundleID: window.application.bundleIdentifier, appName: window.application.localizedName),
+            limit: limit)
+        guard ContinuousClock.now < deadline else {
+            return PixelElementMarks(marks: [], focusedID: nil, secureScreenRects: projected.secureScreenRects,
+                contentRect: projected.contentRect, browserURL: browserURL, axState: nil)
         }
-        let focusID = timedOut ? nil : sorted.firstIndex(where: { candidate in focused.map { CFEqual($0, candidate.element) } == true }).map { $0 + 1 }
-        return PixelElementMarks(marks: marks, focusedID: focusID, secureScreenRects: secureRects,
-                                 contentRect: contentRect, browserURL: browserURL)
+        return projected
+    }
+
+    static func semanticLabel(for node: any PixelAXNode, deadline: ContinuousClock.Instant,
+                              maxDepth: Int = 6, maxNodes: Int = 32) -> String {
+        guard !node.isProtected, !node.isSecure else { return "" }
+        let direct = normalized(node.title)
+        if !direct.isEmpty { return direct }
+
+        var visited = 1
+        var labels: [String] = []
+        func collect(_ parent: any PixelAXNode, depth: Int) {
+            guard depth < maxDepth, ContinuousClock.now < deadline, visited < maxNodes else { return }
+            for child in parent.children() {
+                guard ContinuousClock.now < deadline, visited < maxNodes else { return }
+                visited += 1
+                guard !child.isProtected, !child.isSecure else { continue }
+                let role = child.role
+                if PixelTargetSnapping.interactiveRoles.contains(role) { continue }
+                if role == "AXStaticText" {
+                    let label = normalized(child.title)
+                    if !label.isEmpty { labels.append(label) }
+                } else {
+                    collect(child, depth: depth + 1)
+                }
+            }
+        }
+        collect(node, depth: 0)
+        return normalized(labels.joined(separator: " "))
+    }
+
+    private static func walkChildren(_ node: any PixelAXNode, ancestors: [AnyHashable],
+                                     walk: (any PixelAXNode, [AnyHashable]) -> Void) {
+        for child in node.children() { walk(child, ancestors) }
+    }
+
+    private static func normalized(_ value: String?) -> String {
+        guard let value else { return "" }
+        return String(value.trimmingCharacters(in: .whitespacesAndNewlines).prefix(256))
+    }
+
+    private static func valid(_ rect: CGRect) -> Bool {
+        !rect.isNull && !rect.isEmpty && rect.minX.isFinite && rect.minY.isFinite &&
+            rect.width.isFinite && rect.height.isFinite
+    }
+
+    private static func preference(_ role: String) -> Int {
+        switch role {
+        case "AXButton", "AXLink", "AXMenuItem", "AXMenuBarItem": 3
+        case "AXTextField", "AXTextArea", "AXTextView", "AXSearchField": 2
+        default: 1
+        }
+    }
+
+    private static func intersectionOverUnion(_ lhs: CGRect, _ rhs: CGRect) -> CGFloat {
+        let intersection = lhs.intersection(rhs)
+        guard !intersection.isNull, !intersection.isEmpty else { return 0 }
+        let overlap = intersection.width * intersection.height
+        let union = lhs.width * lhs.height + rhs.width * rhs.height - overlap
+        return union > 0 ? overlap / union : 0
     }
 
     static func focusedWindow(_ app: AXUIElement) -> AXUIElement? {
@@ -155,6 +277,12 @@ enum ElementMarks {
 
     static func string(_ element: AXUIElement, _ attribute: String) -> String? {
         read(element, attribute, deadline: ContinuousClock.now + .milliseconds(10)) as? String
+    }
+
+    static func normalizedAXValue(_ value: CFTypeRef?) -> String? {
+        guard let value else { return nil }
+        if let string = value as? String { return string }
+        return (value as? NSNumber)?.stringValue
     }
 
     static func bool(_ element: AXUIElement, _ attribute: String) -> Bool? {
@@ -176,7 +304,7 @@ enum ElementMarks {
         rect(element, deadline: ContinuousClock.now + .milliseconds(10))
     }
 
-    private static func read(_ element: AXUIElement, _ attribute: String, deadline: ContinuousClock.Instant) -> CFTypeRef? {
+    fileprivate static func read(_ element: AXUIElement, _ attribute: String, deadline: ContinuousClock.Instant) -> CFTypeRef? {
         let remaining = deadline - ContinuousClock.now
         guard remaining > .zero else { return nil }
         let seconds = min(0.01, max(0.001, Double(remaining.components.seconds) + Double(remaining.components.attoseconds) / 1e18))
@@ -186,7 +314,7 @@ enum ElementMarks {
         return value
     }
 
-    private static func label(_ element: AXUIElement, deadline: ContinuousClock.Instant) -> String {
+    fileprivate static func label(_ element: AXUIElement, deadline: ContinuousClock.Instant) -> String {
         for attribute in [kAXTitleAttribute, kAXDescriptionAttribute, "AXPlaceholderValue", kAXHelpAttribute] {
             guard let value = read(element, attribute, deadline: deadline) as? String else { continue }
             let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -195,7 +323,7 @@ enum ElementMarks {
         return ""
     }
 
-    private static func rect(_ element: AXUIElement, deadline: ContinuousClock.Instant) -> CGRect? {
+    fileprivate static func rect(_ element: AXUIElement, deadline: ContinuousClock.Instant) -> CGRect? {
         guard let position = read(element, kAXPositionAttribute, deadline: deadline), CFGetTypeID(position) == AXValueGetTypeID(),
               let size = read(element, kAXSizeAttribute, deadline: deadline), CFGetTypeID(size) == AXValueGetTypeID() else { return nil }
         var point = CGPoint.zero, dimensions = CGSize.zero
@@ -204,7 +332,7 @@ enum ElementMarks {
         return CGRect(origin: point, size: dimensions)
     }
 
-    private static func children(_ value: CFTypeRef?) -> [AXUIElement] {
+    fileprivate static func children(_ value: CFTypeRef?) -> [AXUIElement] {
         guard let value, CFGetTypeID(value) == CFArrayGetTypeID() else { return [] }
         let array = unsafeBitCast(value, to: CFArray.self)
         return (0..<CFArrayGetCount(array)).compactMap { index in
@@ -218,7 +346,7 @@ enum ElementMarks {
         return unsafeBitCast(value, to: AXUIElement.self)
     }
 
-    private static func safeURL(_ value: CFTypeRef?) -> String? {
+    fileprivate static func safeURL(_ value: CFTypeRef?) -> String? {
         let raw: String?
         if let value = value as? String { raw = value }
         else if let value, CFGetTypeID(value) == CFURLGetTypeID() {
@@ -232,16 +360,59 @@ enum ElementMarks {
 }
 
 @MainActor
+private struct AXPixelNode: PixelAXNode {
+    let element: AXUIElement
+    let deadline: ContinuousClock.Instant
+
+    var identity: AnyHashable { AnyHashable(PixelAXIdentity(element: element)) }
+    var role: String { ElementMarks.read(element, kAXRoleAttribute, deadline: deadline) as? String ?? "unknown" }
+    var title: String? { ElementMarks.label(element, deadline: deadline) }
+    var value: String? { ElementMarks.normalizedAXValue(ElementMarks.read(element, kAXValueAttribute, deadline: deadline)) }
+    var screenRect: CGRect? { ElementMarks.rect(element, deadline: deadline) }
+    var isEnabled: Bool? { ElementMarks.read(element, kAXEnabledAttribute, deadline: deadline) as? Bool }
+    var isProtected: Bool { ElementMarks.read(element, "AXProtectedContent", deadline: deadline) as? Bool == true }
+    var isSecure: Bool {
+        let currentRole = role
+        let subrole = ElementMarks.read(element, kAXSubroleAttribute, deadline: deadline) as? String ?? ""
+        let placeholder = ElementMarks.read(element, "AXPlaceholderValue", deadline: deadline) as? String ?? ""
+        return AgentCredentialRule.isSensitive(role: currentRole, name: (title ?? "") + " " + placeholder, state: [subrole])
+    }
+    var documentURL: String? { ElementMarks.safeURL(ElementMarks.read(element, kAXDocumentAttribute, deadline: deadline)) }
+    func children() -> [any PixelAXNode] {
+        ElementMarks.children(ElementMarks.read(element, kAXChildrenAttribute, deadline: deadline))
+            .map { AXPixelNode(element: $0, deadline: deadline) }
+    }
+    func makeReference(observedName: String) -> (any PixelElementReference)? {
+        AXPixelElementReference(element: element)
+    }
+}
+
+@MainActor
+private struct PixelAXCompositeNode: PixelAXNode {
+    let nodes: [any PixelAXNode]
+    var identity: AnyHashable { "pixel-ax-root" }
+    var role: String { "AXApplication" }
+    var title: String? { nil }
+    var value: String? { nil }
+    var screenRect: CGRect? { nil }
+    var isEnabled: Bool? { nil }
+    var isProtected: Bool { false }
+    var isSecure: Bool { false }
+    var documentURL: String? { nil }
+    func children() -> [any PixelAXNode] { nodes }
+    func makeReference(observedName: String) -> (any PixelElementReference)? { nil }
+}
+
+@MainActor
 private final class AXPixelElementReference: PixelElementReference {
     private let element: AXUIElement
-    private let observedName: String
 
-    init(element: AXUIElement, observedName: String) { self.element = element; self.observedName = observedName }
+    init(element: AXUIElement) { self.element = element }
 
     var role: String { ElementMarks.string(element, kAXRoleAttribute) ?? "unknown" }
     var name: String {
-        let current = ElementMarks.label(element)
-        return current.isEmpty ? observedName : current
+        let deadline = ContinuousClock.now + .milliseconds(40)
+        return ElementMarks.semanticLabel(for: AXPixelNode(element: element, deadline: deadline), deadline: deadline)
     }
     var isEnabled: Bool? { ElementMarks.bool(element, kAXEnabledAttribute) }
     func currentScreenRect() -> CGRect? { ElementMarks.currentScreenRect(element) }

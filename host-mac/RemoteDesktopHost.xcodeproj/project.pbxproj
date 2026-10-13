@@ -34,6 +34,7 @@
 		18A1BC70ECAA283CF2368B53 /* HostSessionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9B1DAF90A32ED728B525762F /* HostSessionTests.swift */; };
 		1A38B1E2A1107DA3781D3D0D /* ComputerUseTextClarificationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 22E0B1015DEC570F8CC3A9B1 /* ComputerUseTextClarificationTests.swift */; };
 		1A496BC903A0BF2B45BB40E6 /* MacEnvironment.swift in Sources */ = {isa = PBXBuildFile; fileRef = B99FD50544DBFBC9680B3A19 /* MacEnvironment.swift */; };
+		1AD83D4DAFED0195AE108172 /* PixelAXSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A02D8959C4761259CBA9FB6 /* PixelAXSupport.swift */; };
 		1C64C60F1FCE343C4A33DC6A /* ComputerUseDefaultBrowserSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = 59A7BF8A70D02385227E187F /* ComputerUseDefaultBrowserSession.swift */; };
 		1CB25B11BEA7DB6AF2BE20E9 /* ComputerUseSignInNavigation.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA444AE41530A4BE4AC5A759 /* ComputerUseSignInNavigation.swift */; };
 		1EC3C7DE1D0106B9C418FF0E /* ComputerUseTaskControls.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4280AA9E9EA51BA56F4BF420 /* ComputerUseTaskControls.swift */; };
@@ -317,6 +318,7 @@
 		572E7AF17E9DB259F9CC53A1 /* ComputerUseHoloModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseHoloModel.swift; sourceTree = "<group>"; };
 		58D7883901A9405EE8BA009B /* files */ = {isa = PBXFileReference; lastKnownFileType = folder; name = files; path = ../eval/fixtures/files; sourceTree = SOURCE_ROOT; };
 		59A7BF8A70D02385227E187F /* ComputerUseDefaultBrowserSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseDefaultBrowserSession.swift; sourceTree = "<group>"; };
+		5A02D8959C4761259CBA9FB6 /* PixelAXSupport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PixelAXSupport.swift; sourceTree = "<group>"; };
 		5AEEF525524B99DFE1BEBFDC /* PermissionsProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PermissionsProvider.swift; sourceTree = "<group>"; };
 		5B684FE1C3F3FD58E65648EA /* RemoteDesktopReleaseScopeGateTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteDesktopReleaseScopeGateTests.swift; sourceTree = "<group>"; };
 		5FCB3255850270CBF08A86D0 /* OSAtlasLlamaRuntime.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OSAtlasLlamaRuntime.swift; sourceTree = "<group>"; };
@@ -564,6 +566,7 @@
 				6F12BBBDC3DD6CC2C150029A /* LlamaVLMPolicy.swift */,
 				B99FD50544DBFBC9680B3A19 /* MacEnvironment.swift */,
 				DF83554D8682A264C5B7DBC1 /* Observation.swift */,
+				5A02D8959C4761259CBA9FB6 /* PixelAXSupport.swift */,
 				05DE94E98B7329186B2A4358 /* PixelEnvironment.swift */,
 				C040D901B005B41F7650386A /* PixelGeometry.swift */,
 				EE7828280588F412AB1E434A /* Policy.swift */,
@@ -1153,6 +1156,7 @@
 				B9E3A137D7B18F63AE4AC4E2 /* OSAtlasRuntimeInstallation.swift in Sources */,
 				FB9A305AE3AE3F664D231E26 /* Observation.swift in Sources */,
 				329C35890F366BD995FDF8A7 /* PermissionsProvider.swift in Sources */,
+				1AD83D4DAFED0195AE108172 /* PixelAXSupport.swift in Sources */,
 				3A103AE01DDA33D31C2962B5 /* PixelEnvironment.swift in Sources */,
 				7339EA831E83A670978EBBC0 /* PixelGeometry.swift in Sources */,
 				AB32B0F200A56F0787BA3FE0 /* Policy.swift in Sources */,

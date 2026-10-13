@@ -198,10 +198,10 @@ final class PixelEnvironment: AgentEnvironment {
         switch resolved.action {
         case let .click(target, button, count):
             try click(try screenPoint(target, frame: resolved.frame, targets: resolved.targets, bindings: bindings), button: button ?? .left, count: count ?? 1)
-            detail = "clicked \(targetLabel(target, frame: resolved.frame))"
+            detail = "clicked \(targetLabel(target, resolved: resolved))"
         case let .drag(from, to):
             try drag(try screenPoint(from, frame: resolved.frame, targets: resolved.targets, bindings: bindings), to: screenPoint(to, frame: resolved.frame, targets: resolved.targets, bindings: bindings))
-            detail = "dragged \(targetLabel(from, frame: resolved.frame)) to \(targetLabel(to, frame: resolved.frame))"
+            detail = "dragged \(targetLabel(from, resolved: resolved)) to \(targetLabel(to, resolved: resolved))"
         case let .scroll(target, direction, amount):
             let point = target.map { try? screenPoint($0, frame: resolved.frame, targets: resolved.targets, bindings: bindings) } ?? nil
             let origin = try point ?? screenPoint(.point(x: Double(lastSnapshot?.image.width ?? 0) / 2,
@@ -210,7 +210,7 @@ final class PixelEnvironment: AgentEnvironment {
             let dx = direction == .right ? distance : direction == .left ? -distance : 0
             let dy = direction == .down ? -distance : direction == .up ? distance : 0
             try post(.scroll(x: Int(origin.x), y: Int(origin.y), dx: dx, dy: dy, phase: .changed))
-            detail = "scrolled \(direction.rawValue) at \(target.map { targetLabel($0, frame: resolved.frame) } ?? "window center")"
+            detail = "scrolled \(direction.rawValue) at \(target.map { targetLabel($0, resolved: resolved) } ?? "window center")"
         case let .type(target, text, mode):
             let result = try await type(text, mode: mode, target: target, frame: resolved.frame, targets: resolved.targets, bindings: bindings)
             detail = result
@@ -231,6 +231,8 @@ final class PixelEnvironment: AgentEnvironment {
         case let .findFiles(query, kind, modifiedAfter):
             guard let finder else { throw AgentEnvironmentError.unavailable("Local file search is unavailable.") }
             let candidates = try await finder(query, kind, modifiedAfter).prefix(8)
+            try await Task.sleep(for: .milliseconds(300))
+            try checkActive()
             return .init(status: .ok, result: try AgentFileResults.render(Array(candidates)))
         case let .setFiles(target, ids):
             try click(try screenPoint(target, frame: resolved.frame, targets: resolved.targets, bindings: bindings), button: .left, count: 1)
@@ -241,10 +243,19 @@ final class PixelEnvironment: AgentEnvironment {
         case .askUser, .done, .fail: throw AgentEnvironmentError.unsupportedAction
         }
         try checkActive()
+        try await Task.sleep(for: .milliseconds(300))
+        try checkActive()
+        let currentApplication = NSWorkspace.shared.frontmostApplication
+        let sameApplication = snapshots[resolved.frame.scope.identity]?.window?.application.processIdentifier
+            == currentApplication?.processIdentifier
+        let afterAXState = currentAXState(for: snapshots[resolved.frame.scope.identity], sameApplication: sameApplication)
         let endWindow = await frontWindowIdentity()
         let changed = startWindow != endWindow ? "yes" : "no"
         if let note = bindings?.resolutionNote { detail = "\(note); \(detail)" }
-        return .init(status: .ok, result: "\(detail) → window changed: \(changed)")
+        let diff = PixelAXDiff.describe(before: snapshots[resolved.frame.scope.identity]?.marks?.axState,
+            after: afterAXState, sameApplication: sameApplication, windowChanged: changed == "yes")
+        let summary = diff.isEmpty ? "window changed: \(changed)" : diff.joined(separator: "; ")
+        return .init(status: .ok, result: "\(detail) → \(summary)")
     }
 
     func suspend() async { suspended = true; injector.releaseHeldInput() }
@@ -457,15 +468,18 @@ final class PixelEnvironment: AgentEnvironment {
         } catch { injector.releaseHeldInput(); throw error }
     }
 
-    private func targetLabel(_ target: AgentTarget, frame: AgentFrame) -> String {
-        switch target {
-        case let .element(id):
-            guard let mark = frame.observation.elements.first(where: { $0.id == id }) else { return "mark \(id)" }
-            return "mark \(id) \"\(mark.name)\""
-        case let .point(x, y):
-            if let mark = AgentTargetBinding.hit(x: x, y: y, elements: frame.observation.elements) { return "point (\(Int(x)),\(Int(y)) over \"\(mark.name)\")" }
-            return "point (\(Int(x)),\(Int(y)))"
-        }
+    private func targetLabel(_ target: AgentTarget, resolved: AgentResolvedAction) -> String {
+        PixelExecutionDescription.targetLabel(target, resolvedTargets: resolved.targets,
+            frameElements: resolved.frame.observation.elements)
+    }
+
+    private func currentAXState(for snapshot: Snapshot?, sameApplication: Bool) -> [PixelAXElementState]? {
+        guard sameApplication, let snapshot, snapshot.marks != nil, AXIsProcessTrusted(),
+              let window = snapshot.window else { return nil }
+        let appRoot = AXUIElementCreateApplication(window.application.processIdentifier)
+        guard let element = ElementMarks.focusedWindow(appRoot), let bounds = ElementMarks.bounds(element) else { return nil }
+        return ElementMarks.read(window: .init(application: window.application, element: element, bounds: bounds,
+            number: window.number, title: window.title)).axState
     }
 
     private func ensureNonSecureFocus() throws {

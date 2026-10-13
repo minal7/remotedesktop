@@ -6,9 +6,9 @@ struct PixelPointSnap {
 }
 
 enum PixelTargetSnapping {
-    private static let interactiveRoles: Set<String> = [
+    static let interactiveRoles: Set<String> = [
         "AXButton", "AXLink", "AXTextField", "AXTextArea", "AXTextView", "AXSearchField",
-        "AXCheckBox", "AXRadioButton", "AXPopUpButton", "AXComboBox", "AXTab", "AXMenuItem",
+        "AXCheckBox", "AXRadioButton", "AXPopUpButton", "AXComboBox", "AXTab", "AXRow", "AXMenuItem",
         "AXMenuBarItem", "AXSlider", "AXIncrementor", "AXSwitch", "AXDisclosureTriangle"
     ]
 

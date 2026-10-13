@@ -316,7 +316,6 @@ final class AgentLoop {
             return try await finish(.failed(reason: "High-risk action outcome is uncertain."), outcome: "uncertain")
         }
         if begins {
-            if environment.followsFrontmostSurface { try await Task.sleep(for: .milliseconds(300)) }
             try journal.verify(step: stepIndex, fingerprint: fingerprint)
         }
         if result.status == .ok, case .openURL = action { expectedTransition = action }
