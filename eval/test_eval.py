@@ -418,6 +418,8 @@ class TaskAndCheckerTests(unittest.TestCase):
         row = {"suite": "basics", "task_id": "one", "status": "PASS", "success": True,
                "steps": 2, "wall_seconds": 1.0, "mean_step_latency_ms": 25.0,
                "median_total_step_latency_ms": 9.0, "total_step_latencies_ms": [5, 9, 13],
+               "observe_step_latencies_ms": [4], "model_step_latencies_ms": [25],
+               "execute_step_latencies_ms": [3],
                "approvals": 0, "approval_requests": 0, "gate_rejections": {},
                "median_observe_latency_ms": 4.0, "median_model_latency_ms": 25.0,
                "median_execute_latency_ms": 3.0, "failure_class": None, "crop_mode": "unknown",
@@ -428,6 +430,47 @@ class TaskAndCheckerTests(unittest.TestCase):
             self.assertIn("click", (Path(directory) / "by_skill.json").read_text())
             summary = json.loads((Path(directory) / "by_skill.json").read_text())["click"]
             self.assertEqual(summary["median_total_step_latency_ms"], 9)
+        self.assertEqual(summary["median_model_latency_ms"], 25)
+        self.assertEqual(summary["latency_aggregation"], "pooled_step_samples")
+
+    def test_report_pools_step_samples_across_unequal_task_lengths(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        rows = [
+            {"suite": "smoke", "policy": "fara15-4b", "environment": "pixel",
+             "task_id": "short", "status": "PASS", "success": True, "tags": ["latency"],
+             "steps": 1, "approvals": 1, "approval_requests": 2, "gate_rejections": {},
+             "total_step_latencies_ms": [100], "observe_step_latencies_ms": [50],
+             "model_step_latencies_ms": [80], "execute_step_latencies_ms": [30]},
+            {"suite": "smoke", "policy": "fara15-4b", "environment": "pixel",
+             "task_id": "long", "status": "FAIL", "success": False, "tags": ["latency"],
+             "steps": 5, "approvals": 2, "approval_requests": 3, "gate_rejections": {},
+             "total_step_latencies_ms": [1] * 5, "observe_step_latencies_ms": [5] * 5,
+             "model_step_latencies_ms": [8] * 5, "execute_step_latencies_ms": [3] * 5},
+            {"suite": "smoke", "policy": "fara15-4b", "environment": "pixel",
+             "task_id": "infra", "status": "INFRA-BLOCKED", "success": False, "tags": ["latency"],
+             "approvals": 99, "approval_requests": 99, "gate_rejections": {},
+             "total_step_latencies_ms": [999], "observe_step_latencies_ms": [999],
+             "model_step_latencies_ms": [999], "execute_step_latencies_ms": [999]},
+        ]
+        with TemporaryDirectory() as directory:
+            run_suite._write_report(Path(directory), rows, "real-host")
+            summary = json.loads((Path(directory) / "by_skill.json").read_text())["latency"]
+            suite_summary = json.loads((Path(directory) / "by_suite.json").read_text())["smoke"]
+            policy_summary = json.loads((Path(directory) / "by_policy.json").read_text())["fara15-4b"]
+            environment_summary = json.loads((Path(directory) / "by_environment.json").read_text())["pixel"]
+        self.assertEqual(summary["median_total_step_latency_ms"], 1)
+        self.assertEqual(summary["median_observe_latency_ms"], 5)
+        self.assertEqual(summary["median_model_latency_ms"], 8)
+        self.assertEqual(summary["median_execute_latency_ms"], 3)
+        self.assertEqual(summary["latency_aggregation"], "pooled_step_samples")
+        self.assertEqual(summary["approvals"], 3)
+        self.assertEqual(summary["approval_requests"], 5)
+        self.assertEqual(summary["tasks"], 2)
+        self.assertEqual(summary["infra_blocked"], 1)
+        self.assertEqual(suite_summary["median_total_step_latency_ms"], 1)
+        self.assertEqual(policy_summary["median_model_latency_ms"], 8)
+        self.assertEqual(environment_summary["median_observe_latency_ms"], 5)
 
     def test_preflight_rejects_missing_or_incomplete_real_host_proof(self) -> None:
         from preflight import evaluate
@@ -498,6 +541,9 @@ class TaskAndCheckerTests(unittest.TestCase):
         self.assertEqual(failed_row["median_observe_latency_ms"], 2)
         self.assertEqual(failed_row["median_model_latency_ms"], 7)
         self.assertEqual(failed_row["median_execute_latency_ms"], 3)
+        self.assertEqual(failed_row["observe_step_latencies_ms"], [2])
+        self.assertEqual(failed_row["model_step_latencies_ms"], [7])
+        self.assertEqual(failed_row["execute_step_latencies_ms"], [3])
 
     def test_observed_pending_and_clarification_outcomes_keep_failure_classes(self) -> None:
         task = run_suite.load_tasks("native")[0]
@@ -514,6 +560,69 @@ class TaskAndCheckerTests(unittest.TestCase):
                 row, _ = run_suite._evaluate_response(task, response, "a" * 32, task_id, 1, "real-host")
             self.assertEqual(row["status"], "BLOCKED")
             self.assertEqual(row["failure_class"], expected)
+
+    def test_cleanup_cancelled_boundary_preserves_pending_metrics(self) -> None:
+        task = run_suite.load_tasks("native")[0]
+        task_id = str(uuid.uuid4())
+        cases = (
+            ("pending_approval", "gate-blocked", "needs_approval", 1,
+             {"type": "click", "target": {"id": 2}}, "Waiting for approval"),
+            ("ask_user", "asked-unnecessarily", "allowed", 0,
+             {"type": "ask_user", "question": "Which one?"}, "Waiting for clarification"),
+            ("handoff", "didnt-finish", "rejected", 0,
+             {"type": "type", "text": "blocked"}, "Credentials require owner"),
+        )
+        for outcome, failure, decision, approval_requests, action, answer in cases:
+            records = [{"type": "step", "step": 0, "action": action,
+                        "observation": {"elements": [{"id": 2, "role": "button", "name": "Submit"}]},
+                        "gate": {"decision": decision, "reason": "boundary", "fingerprint": "a" * 64,
+                                 "risk_tier": "high"},
+                        "execution": {"status": "not_executed", "result": "not run"},
+                        "timings": {"observation_ms": 10, "policy_ms": 20, "execution_ms": 3,
+                                    "total_ms": 35}},
+                       {"type": "footer", "outcome": "cancelled", "approvals": []}]
+            response = {"task_id": task_id, "outcome": outcome, "answer": answer,
+                        "episode_path": "/tmp/unused.jsonl", "wall_seconds": 1.5,
+                        "real_host_app": True, "environment": "pixel", "policy": "ui-tars15-7b",
+                        "crop_mode": "full-display", "requested_crop_mode": "full-display"}
+            with patch.object(run_suite, "_episode_records", return_value=records), \
+                 patch.object(run_suite, "_match_expectation", return_value=(False, "not completed")):
+                row, _ = run_suite._evaluate_response(task, response, "a" * 32, task_id, 1, "real-host")
+            self.assertEqual(row["status"], "BLOCKED")
+            self.assertEqual(row["failure_class"], failure)
+            self.assertEqual(row["steps"], 1)
+            self.assertEqual(row["median_observe_latency_ms"], 10)
+            self.assertEqual(row["median_model_latency_ms"], 20)
+            self.assertEqual(row["median_execute_latency_ms"], 3)
+            self.assertEqual(row["environment"], "pixel")
+            self.assertEqual(row["policy"], "ui-tars15-7b")
+            self.assertEqual(row["crop_mode"], "full-display")
+            self.assertEqual(row["approval_requests"], approval_requests)
+
+    def test_terminal_footer_mismatch_stays_blocked_and_failed_output_is_gave_up(self) -> None:
+        task = run_suite.load_tasks("native")[0]
+        task_id = str(uuid.uuid4())
+        response = {"task_id": task_id, "outcome": "completed", "answer": "done",
+                    "episode_path": "/tmp/unused.jsonl", "wall_seconds": 1,
+                    "real_host_app": True, "environment": "pixel", "policy": "fara15-4b"}
+        cancelled = [{"type": "step", "step": 0, "timings": {}},
+                     {"type": "footer", "outcome": "cancelled", "approvals": []}]
+        with patch.object(run_suite, "_episode_records", return_value=cancelled):
+            blocked, _ = run_suite._evaluate_response(task, response, "a" * 32, task_id, 1, "real-host")
+        self.assertEqual(blocked["status"], "BLOCKED")
+        self.assertIn("outcomes differ", blocked["checker"])
+
+        response["outcome"] = "failed"
+        response["answer"] = "Malformed model output"
+        failed_records = [{"type": "step", "step": 0,
+                           "gate": {"decision": "rejected", "reason": "target was not visible"},
+                           "execution": {"status": "not_executed"}, "timings": {}},
+                          {"type": "footer", "outcome": "failed", "approvals": []}]
+        with patch.object(run_suite, "_episode_records", return_value=failed_records), \
+             patch.object(run_suite, "_match_expectation", return_value=(False, "expected visible folder")):
+            failed, _ = run_suite._evaluate_response(task, response, "a" * 32, task_id, 1, "real-host")
+        self.assertEqual(failed["status"], "FAIL")
+        self.assertEqual(failed["failure_class"], "gave-up")
 
     def test_infra_rows_are_excluded_from_skill_denominators(self) -> None:
         from tempfile import TemporaryDirectory
@@ -533,7 +642,8 @@ class TaskAndCheckerTests(unittest.TestCase):
         self.assertEqual(summary["tasks"], 1)
         self.assertEqual(summary["infra_blocked"], 1)
         self.assertEqual(summary["success_rate"], 1.0)
-        self.assertEqual(summary["median_total_step_latency_ms"], 8)
+        self.assertIsNone(summary["median_total_step_latency_ms"])
+        self.assertEqual(summary["latency_aggregation"], "unavailable_no_raw_step_samples")
 
 
 if __name__ == "__main__":

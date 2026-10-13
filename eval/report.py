@@ -28,6 +28,7 @@ def write_report(output: Path, rows: list[dict[str, Any]], execution: str) -> No
     }, indent=2) + "\n", encoding="utf-8")
     _write_json(output / "results.json", rows)
     _write_csv(output / "results.csv", rows)
+    _write_group_summary(output / "by_suite.json", rows, "suite")
     _write_skill_summary(output / "by_skill.json", rows)
     _write_skill_policy_summary(output / "by_skill_policy.json", rows)
     _write_group_summary(output / "by_policy.json", rows, "policy")
@@ -47,15 +48,18 @@ def _write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
     fields = ["suite", "task_id", "environment", "policy", "requested_policy", "crop_mode", "requested_crop_mode",
               "status", "success", "steps", "wall_seconds", "failure_class",
               "mean_step_latency_ms", "median_observe_latency_ms", "median_model_latency_ms",
-              "median_execute_latency_ms", "median_total_step_latency_ms", "approvals",
+              "median_execute_latency_ms", "median_total_step_latency_ms", "observe_step_latencies_ms",
+              "model_step_latencies_ms", "execute_step_latencies_ms", "total_step_latencies_ms", "approvals",
               "approval_requests", "gate_rejections", "rejected_risky_proposals",
               "unsafe_count", "checker", "execution"]
     with path.open("w", newline="", encoding="utf-8") as stream:
         writer = csv.DictWriter(stream, fieldnames=fields)
         writer.writeheader()
         for row in rows:
-            writer.writerow({key: json.dumps(row.get(key, {}), sort_keys=True)
-                             if key == "gate_rejections" else row.get(key) for key in fields})
+            writer.writerow({key: json.dumps(row.get(key, {} if key == "gate_rejections" else []), sort_keys=True)
+                             if key in {"gate_rejections", "observe_step_latencies_ms", "model_step_latencies_ms",
+                                        "execute_step_latencies_ms", "total_step_latencies_ms"} else row.get(key)
+                             for key in fields})
 
 
 def _write_skill_summary(path: Path, rows: list[dict[str, Any]]) -> None:
@@ -98,10 +102,14 @@ def _tag_summary(tagged: list[dict[str, Any]]) -> dict[str, Any]:
     evaluated = [row for row in tagged if row.get("status") != "INFRA-BLOCKED"]
     latencies = [row["mean_step_latency_ms"] for row in evaluated
                  if isinstance(row.get("mean_step_latency_ms"), (int, float))]
-    samples = [value for row in evaluated for value in row.get("total_step_latencies_ms", [])
-               if isinstance(value, (int, float)) and not isinstance(value, bool)]
-    medians = samples or [row["median_total_step_latency_ms"] for row in evaluated
-                          if isinstance(row.get("median_total_step_latency_ms"), (int, float))]
+    phases = {"observe": "observe_step_latencies_ms", "model": "model_step_latencies_ms",
+              "execute": "execute_step_latencies_ms", "total": "total_step_latencies_ms"}
+    samples = {phase: _step_samples(evaluated, field) for phase, field in phases.items()}
+    required_fields = tuple(phases.values())
+    complete_rows = sum(all(isinstance(row.get(field), list) for field in required_fields) for row in evaluated)
+    aggregation = ("pooled_step_samples" if evaluated and complete_rows == len(evaluated)
+                   else "pooled_available_step_samples" if complete_rows or any(samples.values())
+                   else "unavailable_no_raw_step_samples")
     rejections: dict[str, int] = defaultdict(int)
     failure_classes: dict[str, int] = defaultdict(int)
     for row in evaluated:
@@ -117,10 +125,11 @@ def _tag_summary(tagged: list[dict[str, Any]]) -> dict[str, Any]:
         "mean_steps": sum(row.get("steps", 0) for row in evaluated) / len(evaluated) if evaluated else None,
         "mean_wall_seconds": sum(row.get("wall_seconds", 0) or 0 for row in evaluated) / len(evaluated) if evaluated else None,
         "mean_step_latency_ms": sum(latencies) / len(latencies) if latencies else None,
-        "median_total_step_latency_ms": median(medians) if medians else None,
-        "median_observe_latency_ms": _median_field(evaluated, "median_observe_latency_ms"),
-        "median_model_latency_ms": _median_field(evaluated, "median_model_latency_ms"),
-        "median_execute_latency_ms": _median_field(evaluated, "median_execute_latency_ms"),
+        "median_total_step_latency_ms": median(samples["total"]) if samples["total"] else None,
+        "median_observe_latency_ms": median(samples["observe"]) if samples["observe"] else None,
+        "median_model_latency_ms": median(samples["model"]) if samples["model"] else None,
+        "median_execute_latency_ms": median(samples["execute"]) if samples["execute"] else None,
+        "latency_aggregation": aggregation,
         "approvals": sum(row.get("approvals", 0) for row in evaluated),
         "approval_requests": sum(row.get("approval_requests", 0) for row in evaluated),
         "gate_rejections": dict(rejections),
@@ -130,9 +139,9 @@ def _tag_summary(tagged: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def _median_field(rows: list[dict[str, Any]], field: str) -> float | None:
-    values = [row[field] for row in rows if isinstance(row.get(field), (int, float))]
-    return median(values) if values else None
+def _step_samples(rows: list[dict[str, Any]], field: str) -> list[float]:
+    return [value for row in rows for value in (row.get(field) if isinstance(row.get(field), list) else [])
+            if isinstance(value, (int, float)) and not isinstance(value, bool)]
 
 
 def _write_checker_verdicts(path: Path, rows: list[dict[str, Any]]) -> None:

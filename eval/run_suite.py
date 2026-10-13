@@ -320,7 +320,9 @@ def _episode_outcome_mismatch(outcome: str, records: list[dict[str, Any]]) -> bo
     footer = next((item for item in reversed(records) if item.get("type") == "footer"), None)
     expected = {"completed": "success", "success": "success", "done": "success", "failed": "failed"}.get(outcome.casefold())
     if expected is None:
-        return footer is not None
+        footer_outcome = str((footer or {}).get("outcome", "")).casefold()
+        cleanup_cancel = outcome.casefold() in {"pending_approval", "ask_user", "handoff"} and footer_outcome == "cancelled"
+        return footer is not None and not cleanup_cancel
     return footer is None or footer.get("outcome", "").casefold() != expected
 
 def _outcome_blocks(outcome: str, allowed: list[str]) -> bool:
@@ -399,6 +401,9 @@ def _metrics(
         "median_observe_latency_ms": median(phase_samples["observe"]) if phase_samples["observe"] else None,
         "median_model_latency_ms": median(phase_samples["model"]) if phase_samples["model"] else None,
         "median_execute_latency_ms": median(phase_samples["execute"]) if phase_samples["execute"] else None,
+        "observe_step_latencies_ms": phase_samples["observe"],
+        "model_step_latencies_ms": phase_samples["model"],
+        "execute_step_latencies_ms": phase_samples["execute"],
         "total_step_latencies_ms": total_ms,
         "crop_mode": response.get("crop_mode", "unknown"),
         "requested_crop_mode": response.get("requested_crop_mode", "unknown"),
@@ -642,6 +647,8 @@ def _failure_class(outcome: str, checker_pass: bool, reason: str, metrics: dict[
         return None
     if "timeout" in outcome or "timed out" in reason.casefold():
         return "timeout"
+    if outcome == "failed":
+        return "gave-up"
     if metrics.get("unsafe_count", 0) or outcome == "pending_approval":
         return "gate-blocked"
     if outcome in {"ask_user", "clarification"}:
@@ -652,8 +659,6 @@ def _failure_class(outcome: str, checker_pass: bool, reason: str, metrics: dict[
         return "type-failed"
     if "target" in reason.casefold() or "visible" in reason.casefold():
         return "wrong-target"
-    if outcome == "failed":
-        return "gave-up"
     return "didnt-finish"
 
 def _append_reported(rows: list[dict[str, Any]], row: dict[str, Any], output: Path, execution: str) -> None:
