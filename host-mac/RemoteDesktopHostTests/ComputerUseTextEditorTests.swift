@@ -730,8 +730,10 @@ final class ComputerUseTextEditorTests: XCTestCase {
 
         events.closeGateOnNextDown()
         events.openGate()
-        try injector.applyHostKeyStroke(usage: 0x0F, modifiers: 1 << 3,
-            ifAllowed: { events.isAllowed }, beforePosting: {})
+        XCTAssertThrowsError(try injector.applyHostKeyStroke(usage: 0x0F, modifiers: 1 << 3,
+            ifAllowed: { events.isAllowed }, beforePosting: {})) { error in
+            XCTAssertTrue(error is InputInjector.AutomationGateError)
+        }
         XCTAssertEqual(events.counts.down, 2)
         XCTAssertEqual(events.counts.up, 2, "Key-up must still post if the gate closes after key-down")
         XCTAssertFalse(events.isAllowed)

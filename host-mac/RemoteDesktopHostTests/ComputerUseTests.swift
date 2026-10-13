@@ -3765,7 +3765,7 @@ final class ComputerUseTests: XCTestCase {
         XCTAssertEqual(manifest.modelVariant, .pro4B)
         XCTAssertEqual(
             ComputerUseArtifactManifest.ModelVariant.allCases,
-            [.pro4B, .base4B, .nativeText4B, .fara15_4B, .holo31_4B])
+            [.pro4B, .base4B, .nativeText4B, .fara15_4B, .uiTars15_7B, .holo31_4B])
         XCTAssertEqual(manifest.modelRepository, "OS-Copilot/OS-Atlas-Pro-4B")
         XCTAssertEqual(
             manifest.modelRevision,
@@ -4809,6 +4809,100 @@ final class ComputerUseTests: XCTestCase {
         XCTAssertTrue(keys.allSatisfy {
             $0.syntheticTag == InputInjector.syntheticEventTag
         })
+    }
+
+    func test_hostCommandVPasteReleasesExplicitCommandModifier() throws {
+        let events = CapturedCGEventStore()
+        let injector = InputInjector(eventPoster: { events.append($0) })
+
+        try injector.applyHostKeyStroke(usage: 0x19, modifiers: 1 << 3,
+            ifAllowed: { true }, beforePosting: {})
+
+        let keys = events.values().filter {
+            $0.type == .keyDown || $0.type == .keyUp || $0.type == .flagsChanged
+        }
+        XCTAssertEqual(keys.map(\.type), [.flagsChanged, .keyDown, .keyUp, .flagsChanged])
+        XCTAssertEqual(keys.map(\.keyCode), [0x37, 0x09, 0x09, 0x37])
+        XCTAssertEqual(keys.map(\.modifierFlags), [
+            [.maskCommand], [.maskCommand], [.maskCommand], [],
+        ])
+        XCTAssertTrue(keys.allSatisfy { $0.syntheticTag == InputInjector.syntheticEventTag })
+    }
+
+    func test_hostMultiModifierStrokeReleasesModifiersInReverseOrder() throws {
+        let events = CapturedCGEventStore()
+        let injector = InputInjector(eventPoster: { events.append($0) })
+        let commandShift: UInt16 = (1 << 3) | (1 << 0)
+
+        try injector.applyHostKeyStroke(usage: 0x16, modifiers: commandShift,
+            ifAllowed: { true }, beforePosting: {})
+
+        let keys = events.values().filter {
+            $0.type == .keyDown || $0.type == .keyUp || $0.type == .flagsChanged
+        }
+        XCTAssertEqual(keys.map(\.type), [.flagsChanged, .flagsChanged, .keyDown, .keyUp,
+                                           .flagsChanged, .flagsChanged])
+        XCTAssertEqual(keys.map(\.keyCode), [0x38, 0x37, 0x01, 0x01, 0x37, 0x38])
+        XCTAssertEqual(keys.map(\.modifierFlags), [
+            [.maskShift], [.maskShift, .maskCommand], [.maskShift, .maskCommand],
+            [.maskShift, .maskCommand], [.maskShift], [],
+        ])
+    }
+
+    func test_hostStrokeCancellationReleasesModifiersAlreadyPressed() throws {
+        let events = CapturedCGEventStore()
+        let cancellation = TestBooleanProbe(true)
+        let injector = InputInjector(eventPoster: { event in
+            events.append(event)
+            if event.type == .flagsChanged, event.flags.contains(.maskCommand) { cancellation.set(false) }
+        }, physicalInputState: { .released })
+
+        XCTAssertThrowsError(try injector.applyHostKeyStroke(usage: 0x19, modifiers: 1 << 3,
+            ifAllowed: { cancellation.read() }, beforePosting: {})) { error in
+            XCTAssertTrue(error is InputInjector.AutomationGateError)
+        }
+        let keys = events.values().filter { $0.type == .flagsChanged || $0.type == .keyDown || $0.type == .keyUp }
+        XCTAssertEqual(keys.map(\.type), [.flagsChanged, .flagsChanged])
+        XCTAssertEqual(keys.map(\.keyCode), [0x37, 0x37])
+        XCTAssertEqual(keys.map(\.modifierFlags), [[.maskCommand], []])
+        XCTAssertEqual(injector.admitAutomation { true }, .admitted)
+    }
+
+    func test_hostStrokeCancellationAfterTargetDownReleasesTargetAndModifiers() throws {
+        let events = CapturedCGEventStore()
+        let cancellation = TestBooleanProbe(true)
+        let injector = InputInjector(eventPoster: { event in
+            events.append(event)
+            if event.type == .keyDown, event.getIntegerValueField(.keyboardEventKeycode) == 0x09 {
+                cancellation.set(false)
+            }
+        }, physicalInputState: { .released })
+
+        XCTAssertThrowsError(try injector.applyHostKeyStroke(usage: 0x19, modifiers: 1 << 3,
+            ifAllowed: { cancellation.read() }, beforePosting: {}))
+        let keys = events.values().filter { $0.type == .flagsChanged || $0.type == .keyDown || $0.type == .keyUp }
+        XCTAssertEqual(keys.map(\.type), [.flagsChanged, .keyDown, .keyUp, .flagsChanged])
+        XCTAssertEqual(keys.map(\.keyCode), [0x37, 0x09, 0x09, 0x37])
+        XCTAssertEqual(keys.map(\.modifierFlags), [
+            [.maskCommand], [.maskCommand], [.maskCommand], [],
+        ])
+        XCTAssertEqual(injector.admitAutomation { true }, .admitted)
+    }
+
+    func test_hostStrokeEventCreationFailurePostsNothing() throws {
+        let events = CapturedCGEventStore()
+        let injector = InputInjector(eventPoster: { events.append($0) },
+            physicalInputState: { .released }, hostKeyEventFactory: { keyCode, keyDown in
+                guard keyCode != 0x37 else { return nil }
+                return CGEvent(keyboardEventSource: nil, virtualKey: keyCode, keyDown: keyDown)
+            })
+
+        XCTAssertThrowsError(try injector.applyHostKeyStroke(usage: 0x19, modifiers: 1 << 3,
+            ifAllowed: { true }, beforePosting: {})) { error in
+            XCTAssertTrue(error is InputInjector.HostKeyStrokeError)
+        }
+        XCTAssertTrue(events.values().isEmpty)
+        XCTAssertEqual(injector.admitAutomation { true }, .admitted)
     }
 
     func test_computerUseScrollPostsRequestedDeltaExactlyOnce() throws {
@@ -13498,6 +13592,14 @@ private final class PhysicalInputStateProbe: @unchecked Sendable {
     init(_ state: InputInjector.PhysicalInputState) { self.state = state }
     func set(_ state: InputInjector.PhysicalInputState) { lock.withLock { self.state = state } }
     func read() -> InputInjector.PhysicalInputState { lock.withLock { state } }
+}
+
+private final class TestBooleanProbe: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: Bool
+    init(_ value: Bool) { self.value = value }
+    func set(_ value: Bool) { lock.withLock { self.value = value } }
+    func read() -> Bool { lock.withLock { value } }
 }
 
 private final class CaptureDisplayStateProbe: @unchecked Sendable {

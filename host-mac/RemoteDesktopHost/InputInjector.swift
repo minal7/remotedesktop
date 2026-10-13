@@ -24,6 +24,7 @@ final class InputInjector: @unchecked Sendable {
     private let lock = NSLock()
     private let log = Logger(subsystem: "com.threadmark.remotedesktop.host", category: "inject")
     private let eventPoster: @Sendable (CGEvent) -> Void
+    private let hostKeyEventFactory: (CGKeyCode, Bool) -> CGEvent?
     private let uptime: @Sendable () -> TimeInterval
     private let physicalInputState: @Sendable () -> PhysicalInputState
     private let displayState: @Sendable (CGDirectDisplayID) -> CaptureDisplayState?
@@ -56,11 +57,16 @@ final class InputInjector: @unchecked Sendable {
             ProcessInfo.processInfo.systemUptime
         },
         physicalInputState: (@Sendable () -> PhysicalInputState)? = nil,
-        displayState: @escaping @Sendable (CGDirectDisplayID) -> CaptureDisplayState? = { CaptureDisplayState.read($0) }
+        displayState: @escaping @Sendable (CGDirectDisplayID) -> CaptureDisplayState? = { CaptureDisplayState.read($0) },
+        hostKeyEventFactory: ((CGKeyCode, Bool) -> CGEvent?)? = nil
     ) {
         self.eventPoster = eventPoster
         self.uptime = uptime
         self.displayState = displayState
+        let eventSource = source
+        self.hostKeyEventFactory = hostKeyEventFactory ?? { keyCode, keyDown in
+            CGEvent(keyboardEventSource: eventSource, virtualKey: keyCode, keyDown: keyDown)
+        }
         // Ordinary deterministic XCTest fixtures must not depend on whatever
         // the person is pressing on the test Mac. Native qualification must
         // explicitly inject readCurrentPhysicalInputState instead.
@@ -246,17 +252,94 @@ final class InputInjector: @unchecked Sendable {
             throw AutomationGateError.interrupted
         }
         guard let keyCode = HIDUsage.toMacKeyCode(usage),
-              let down = CGEvent(keyboardEventSource: source, virtualKey: keyCode, keyDown: true),
-              let up = CGEvent(keyboardEventSource: source, virtualKey: keyCode, keyDown: false) else {
+              let down = hostKeyEventFactory(keyCode, true),
+              let up = hostKeyEventFactory(keyCode, false) else {
             throw HostKeyStrokeError.unavailable
         }
         down.flags = flags(from: modifiers)
         up.flags = flags(from: modifiers)
+
+        let modifierEvents = try makeHostModifierEvents(for: modifiers)
+
+        // Modifier state belongs to this host stroke. Release the target key
+        // first, then release modifiers in reverse order even if cancellation
+        // closes the action gate between posted transitions.
+        var heldModifiers: [HostModifierKey] = []
+        var targetKeyHeld = false
+        func releaseOwnedKeys() {
+            var active = heldModifiers
+            if targetKeyHeld {
+                up.flags = flags(from: active.reduce(UInt16(0)) { $0 | $1.mask })
+                post(up)
+                targetKeyHeld = false
+            }
+            while let modifier = active.popLast() {
+                guard let release = modifierEvents.ups[modifier.usage] else { continue }
+                release.flags = flags(from: active.reduce(UInt16(0)) { $0 | $1.mask })
+                post(release)
+                heldModifiers.removeLast()
+            }
+        }
+
+        for (modifier, event) in modifierEvents.downs {
+            guard ifAllowed() else {
+                releaseOwnedKeys()
+                throw AutomationGateError.interrupted
+            }
+            post(event)
+            heldModifiers.append(modifier)
+        }
+        guard ifAllowed() else {
+            releaseOwnedKeys()
+            throw AutomationGateError.interrupted
+        }
         post(down)
-        pressedKeys[usage] = modifiers
+        targetKeyHeld = true
+        guard ifAllowed() else {
+            releaseOwnedKeys()
+            throw AutomationGateError.interrupted
+        }
         post(up)
-        pressedKeys.removeValue(forKey: usage)
+        targetKeyHeld = false
+        releaseOwnedKeys()
     }
+
+    private struct HostModifierKey {
+        let usage: Int
+        let mask: UInt16
+    }
+
+    private func makeHostModifierEvents(for modifiers: UInt16) throws ->
+        (downs: [(HostModifierKey, CGEvent)], ups: [Int: CGEvent]) {
+        var downs: [(HostModifierKey, CGEvent)] = []
+        var ups: [Int: CGEvent] = [:]
+        var activeMask: UInt16 = 0
+        for modifier in Self.hostModifierKeys where modifiers & modifier.mask != 0 {
+            guard let keyCode = HIDUsage.toMacKeyCode(modifier.usage),
+                  let down = hostKeyEventFactory(keyCode, true),
+                  let up = hostKeyEventFactory(keyCode, false) else {
+                throw HostKeyStrokeError.unavailable
+            }
+            activeMask |= modifier.mask
+            down.type = .flagsChanged
+            down.flags = flags(from: activeMask)
+            up.type = .flagsChanged
+            downs.append((modifier, down))
+            ups[modifier.usage] = up
+        }
+        return (downs, ups)
+    }
+
+    private static let hostModifierKeys = [
+        HostModifierKey(usage: 0xE1, mask: 1 << 0), // left Shift
+        HostModifierKey(usage: 0xE5, mask: 1 << 4), // right Shift
+        HostModifierKey(usage: 0xE0, mask: 1 << 1), // left Control
+        HostModifierKey(usage: 0xE4, mask: 1 << 5), // right Control
+        HostModifierKey(usage: 0xE2, mask: 1 << 2), // left Option
+        HostModifierKey(usage: 0xE6, mask: 1 << 6), // right Option
+        HostModifierKey(usage: 0xE3, mask: 1 << 3), // left Command
+        HostModifierKey(usage: 0xE7, mask: 1 << 7), // right Command
+    ]
 
     enum HostKeyStrokeError: Error { case unavailable }
 
