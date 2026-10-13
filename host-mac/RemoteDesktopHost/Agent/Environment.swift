@@ -31,6 +31,8 @@ struct AgentResolvedAction {
     var targetContextLabel: String? = nil
     /// True when the current surface is deliberately read-only, even without AX marks.
     var surfaceReadOnly: Bool = false
+    /// Opaque environment-local state needed to execute the resolved targets safely.
+    var hostBinding: AnyObject? = nil
 }
 
 @MainActor

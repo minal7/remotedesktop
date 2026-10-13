@@ -62,6 +62,17 @@ final class PixelEnvironment: AgentEnvironment {
         let elements: [AgentElement]
         let focus: AgentFocus?
         let screenBounds: CGRect
+        let marks: PixelElementMarks?
+    }
+
+    private final class ResolvedPixelTargets {
+        let references: [Int: any PixelElementReference]
+        let resolutionNote: String?
+
+        init(references: [Int: any PixelElementReference], resolutionNote: String? = nil) {
+            self.references = references
+            self.resolutionNote = resolutionNote
+        }
     }
 
     private let taskID: String
@@ -124,7 +135,20 @@ final class PixelEnvironment: AgentEnvironment {
 
     func resolve(_ action: AgentAction, in frame: AgentFrame) async throws -> AgentResolvedAction {
         try checkScope(frame.scope)
-        let targets = try AgentTargetBinding.targets(action).compactMap { target -> AgentElement? in
+        let snapshot = snapshots[frame.scope.identity]
+        var resolvedAction = action
+        var resolutionNote: String?
+        if case let .click(.point(x, y), _, _) = action,
+           let snapshot,
+           let screenPoint = Self.mapPoint(CGPoint(x: x, y: y),
+                imageSize: CGSize(width: snapshot.image.width, height: snapshot.image.height),
+                screenBounds: snapshot.screenBounds),
+           let marks = snapshot.marks {
+            let snap = PixelTargetSnapping.resolve(screenPoint, in: marks.marks)
+            let rewritten = PixelTargetSnapping.resolveClick(action, snappedMark: snap.mark)
+            resolvedAction = rewritten.action; resolutionNote = rewritten.note
+        }
+        let targets = try AgentTargetBinding.targets(resolvedAction).compactMap { target -> AgentElement? in
             switch target {
             case let .element(id):
                 guard let mark = frame.observation.elements.first(where: { $0.id == id }) else { throw AgentEnvironmentError.targetGone }
@@ -137,47 +161,58 @@ final class PixelEnvironment: AgentEnvironment {
                 return nil
             }
         }
-        let label: String?
-        if case let .click(.point(x, y), _, _) = action, targets.first?.name.isEmpty != false {
-            label = SystemBarriers.targetLabel(screenshot: frame.observation.screenshot, x: x, y: y)
-        } else { label = nil }
-        let snapshot = snapshots[frame.scope.identity]
-        return .init(action: action, frame: frame, targets: targets, targetContextLabel: label,
-            surfaceReadOnly: snapshot.map { AgentSafetyBoundary.readOnly(bundleID: $0.bundleID, appName: $0.appName) } ?? false)
+        let label = PixelTargetContextLabel.resolve(resolvedAction, targets: targets) { x, y in
+            SystemBarriers.targetLabel(screenshot: frame.observation.screenshot, x: x, y: y)
+        }
+        let references = try Self.references(for: targets, marks: snapshot?.marks?.marks ?? [])
+        return .init(action: resolvedAction, frame: frame, targets: targets, targetContextLabel: label,
+            surfaceReadOnly: snapshot.map { AgentSafetyBoundary.readOnly(bundleID: $0.bundleID, appName: $0.appName) } ?? false,
+            hostBinding: ResolvedPixelTargets(references: references, resolutionNote: resolutionNote))
     }
 
     func rebind(_ resolved: AgentResolvedAction, in frame: AgentFrame) async throws -> AgentResolvedAction {
         try checkScope(frame.scope)
         let current = try resolved.targets.map { try PixelActionRebinding.rebind($0, in: frame.observation.elements) }
         let snapshot = snapshots[frame.scope.identity]
+        var references: [Int: any PixelElementReference] = [:]
+        for (expected, _) in zip(resolved.targets, current) {
+            references[expected.id] = try PixelElementReferenceResolver.rebound(expected, in: snapshot?.marks?.marks ?? [])
+        }
+        let targetContextLabel = PixelTargetContextLabel.rebound(resolved.action, targets: current,
+            previous: resolved.targetContextLabel) { x, y in
+            SystemBarriers.targetLabel(screenshot: frame.observation.screenshot, x: x, y: y)
+        }
+        let oldBindings = resolved.hostBinding as? ResolvedPixelTargets
         return .init(action: resolved.action, frame: frame, targets: current,
-            targetContextLabel: resolved.targetContextLabel,
-            surfaceReadOnly: snapshot.map { AgentSafetyBoundary.readOnly(bundleID: $0.bundleID, appName: $0.appName) } ?? resolved.surfaceReadOnly)
+            targetContextLabel: targetContextLabel,
+            surfaceReadOnly: snapshot.map { AgentSafetyBoundary.readOnly(bundleID: $0.bundleID, appName: $0.appName) } ?? resolved.surfaceReadOnly,
+            hostBinding: ResolvedPixelTargets(references: references, resolutionNote: oldBindings?.resolutionNote))
     }
 
     func execute(_ resolved: AgentResolvedAction) async throws -> AgentExecutionResult {
         try checkScope(resolved.frame.scope)
         let startWindow = await frontWindowIdentity()
         if let snapshot = snapshots[resolved.frame.scope.identity] { lastSnapshot = snapshot }
+        let bindings = resolved.hostBinding as? ResolvedPixelTargets
         var detail: String
         switch resolved.action {
         case let .click(target, button, count):
-            try click(try screenPoint(target, frame: resolved.frame, targets: resolved.targets), button: button ?? .left, count: count ?? 1)
+            try click(try screenPoint(target, frame: resolved.frame, targets: resolved.targets, bindings: bindings), button: button ?? .left, count: count ?? 1)
             detail = "clicked \(targetLabel(target, frame: resolved.frame))"
         case let .drag(from, to):
-            try drag(try screenPoint(from, frame: resolved.frame, targets: resolved.targets), to: screenPoint(to, frame: resolved.frame, targets: resolved.targets))
+            try drag(try screenPoint(from, frame: resolved.frame, targets: resolved.targets, bindings: bindings), to: screenPoint(to, frame: resolved.frame, targets: resolved.targets, bindings: bindings))
             detail = "dragged \(targetLabel(from, frame: resolved.frame)) to \(targetLabel(to, frame: resolved.frame))"
         case let .scroll(target, direction, amount):
-            let point = target.map { try? screenPoint($0, frame: resolved.frame, targets: resolved.targets) } ?? nil
+            let point = target.map { try? screenPoint($0, frame: resolved.frame, targets: resolved.targets, bindings: bindings) } ?? nil
             let origin = try point ?? screenPoint(.point(x: Double(lastSnapshot?.image.width ?? 0) / 2,
-                y: Double(lastSnapshot?.image.height ?? 0) / 2), frame: resolved.frame, targets: resolved.targets)
+                y: Double(lastSnapshot?.image.height ?? 0) / 2), frame: resolved.frame, targets: resolved.targets, bindings: bindings)
             let distance = Int(min(amount, 10_000).rounded())
             let dx = direction == .right ? distance : direction == .left ? -distance : 0
             let dy = direction == .down ? -distance : direction == .up ? distance : 0
             try post(.scroll(x: Int(origin.x), y: Int(origin.y), dx: dx, dy: dy, phase: .changed))
             detail = "scrolled \(direction.rawValue) at \(target.map { targetLabel($0, frame: resolved.frame) } ?? "window center")"
         case let .type(target, text, mode):
-            let result = try await type(text, mode: mode, target: target, frame: resolved.frame, targets: resolved.targets)
+            let result = try await type(text, mode: mode, target: target, frame: resolved.frame, targets: resolved.targets, bindings: bindings)
             detail = result
         case let .key(chord):
             try ensureNonSecureFocus()
@@ -186,7 +221,7 @@ final class PixelEnvironment: AgentEnvironment {
                 ifAllowed: inputAllowed, beforePosting: {})
             detail = "pressed \(chord)"
         case let .select(target, option):
-            detail = try await select(option, target: target, frame: resolved.frame, targets: resolved.targets)
+            detail = try await select(option, target: target, frame: resolved.frame, targets: resolved.targets, bindings: bindings)
         case let .openURL(url):
             guard HostAgentAllowPolicy.isAllowedURL(url), let parsed = URL(string: url) else { throw AgentEnvironmentError.unsupportedAction }
             try hostEffect { _ = NSWorkspace.shared.open(parsed) }
@@ -198,7 +233,7 @@ final class PixelEnvironment: AgentEnvironment {
             let candidates = try await finder(query, kind, modifiedAfter).prefix(8)
             return .init(status: .ok, result: try AgentFileResults.render(Array(candidates)))
         case let .setFiles(target, ids):
-            try click(try screenPoint(target, frame: resolved.frame, targets: resolved.targets), button: .left, count: 1)
+            try click(try screenPoint(target, frame: resolved.frame, targets: resolved.targets, bindings: bindings), button: .left, count: 1)
             guard let picker else { throw AgentEnvironmentError.unavailable("The native file picker is unavailable.") }
             detail = try await picker(ids)
         case let .wait(seconds):
@@ -208,6 +243,7 @@ final class PixelEnvironment: AgentEnvironment {
         try checkActive()
         let endWindow = await frontWindowIdentity()
         let changed = startWindow != endWindow ? "yes" : "no"
+        if let note = bindings?.resolutionNote { detail = "\(note); \(detail)" }
         return .init(status: .ok, result: "\(detail) → window changed: \(changed)")
     }
 
@@ -299,7 +335,7 @@ final class PixelEnvironment: AgentEnvironment {
         return .init(window: axWindow, identity: identity, bundleID: app?.bundleIdentifier ?? "unknown",
             appName: app?.localizedName ?? "",
             title: target?.title ?? "Visible desktop", url: marks?.browserURL, image: image, screenshot: png,
-            elements: elements, focus: focus, screenBounds: screenshotBounds)
+            elements: elements, focus: focus, screenBounds: screenshotBounds, marks: marks)
     }
 
     private func capture(_ display: SCDisplay, excluding windows: [SCWindow]) async throws -> CGImage {
@@ -309,9 +345,9 @@ final class PixelEnvironment: AgentEnvironment {
     }
 
     private func type(_ text: String, mode: AgentTextMode, target: AgentTarget?, frame: AgentFrame,
-                      targets: [AgentElement]) async throws -> String {
+                      targets: [AgentElement], bindings: ResolvedPixelTargets?) async throws -> String {
         guard let snapshot = snapshots[frame.scope.identity] else { throw AgentEnvironmentError.targetGone }
-        if let target { try click(screenPoint(target, frame: frame, targets: targets), button: .left, count: 1) }
+        if let target { try click(screenPoint(target, frame: frame, targets: targets, bindings: bindings), button: .left, count: 1) }
         let app = snapshot.window.map { AXUIElementCreateApplication($0.application.processIdentifier) }
         let focused = app.flatMap(ElementMarks.focusedElement)
         let role = focused.flatMap { ElementMarks.string($0, kAXRoleAttribute) } ?? "unknown"
@@ -362,22 +398,24 @@ final class PixelEnvironment: AgentEnvironment {
             ifAllowed: inputAllowed, beforePosting: {})
     }
 
-    private func select(_ option: String, target: AgentTarget, frame: AgentFrame, targets: [AgentElement]) async throws -> String {
+    private func select(_ option: String, target: AgentTarget, frame: AgentFrame, targets: [AgentElement],
+                        bindings: ResolvedPixelTargets?) async throws -> String {
         guard let snapshot = snapshots[frame.scope.identity] else { throw AgentEnvironmentError.targetGone }
         let window = snapshot.window
-        try click(screenPoint(target, frame: frame, targets: targets), button: .left, count: 1)
+        try click(screenPoint(target, frame: frame, targets: targets, bindings: bindings), button: .left, count: 1)
         let menu = window.map { ElementMarks.read(window: $0) }
         if let mark = menu?.marks.first(where: { $0.role == "AXMenuItem" && $0.name == option }),
            !mark.screenRect.isEmpty {
             try click(CGPoint(x: mark.screenRect.midX, y: mark.screenRect.midY), button: .left, count: 1); return "selected \"\(option)\""
         }
-        let result = try await type(option, mode: .replace, target: nil, frame: frame, targets: [])
+        let result = try await type(option, mode: .replace, target: nil, frame: frame, targets: [], bindings: bindings)
         try ensureNonSecureFocus()
         try postClipboardKey("enter")
         return "\(result); pressed Return"
     }
 
-    private func screenPoint(_ target: AgentTarget, frame: AgentFrame, targets: [AgentElement]) throws -> CGPoint {
+    private func screenPoint(_ target: AgentTarget, frame: AgentFrame, targets: [AgentElement],
+                             bindings: ResolvedPixelTargets?) throws -> CGPoint {
         guard let snapshot = snapshots[frame.scope.identity] else { throw AgentEnvironmentError.targetGone }
         let size = CGSize(width: snapshot.image.width, height: snapshot.image.height)
         let pixel: CGPoint
@@ -389,8 +427,8 @@ final class PixelEnvironment: AgentEnvironment {
                   NSWorkspace.shared.frontmostApplication?.processIdentifier == window.application.processIdentifier else {
                 throw AgentEnvironmentError.targetGone
             }
-            let current = ElementMarks.read(window: window)
-            return try PixelScreenTargetResolver.point(for: element, in: current.marks)
+            guard let reference = bindings?.references[id] else { throw AgentEnvironmentError.targetGone }
+            return try PixelElementReferenceResolver.currentCentre(element, reference: reference, windowBounds: window.bounds)
         case let .point(x, y): pixel = CGPoint(x: x, y: y)
         }
         guard let mapped = Self.mapPoint(pixel, imageSize: size, screenBounds: snapshot.screenBounds) else {
@@ -496,6 +534,14 @@ final class PixelEnvironment: AgentEnvironment {
     private static func requireSecure(_ element: AgentElement) throws {
         guard !AgentContractValidation.isSecureRoleOrState(role: element.role, state: element.state) else { throw AgentEnvironmentError.credentialHandoff }
     }
+
+    private static func references(for targets: [AgentElement], marks: [PixelElementMark]) throws -> [Int: any PixelElementReference] {
+        var references: [Int: any PixelElementReference] = [:]
+        for target in targets {
+            references[target.id] = try PixelElementReferenceResolver.observed(target, in: marks)
+        }
+        return references
+    }
     private static func requireSecure(role: String, name: String, state: [String]) throws {
         guard !AgentContractValidation.isSecureRoleOrState(role: role, state: state),
               !AgentCredentialRule.isSensitive(role: role, name: name, state: state) else {
@@ -526,7 +572,8 @@ final class PixelEnvironment: AgentEnvironment {
 
 enum PixelActionRebinding {
     static func rebind(_ expected: AgentElement, in current: [AgentElement]) throws -> AgentElement {
-        guard let fresh = current.first(where: { $0.role == expected.role && $0.name == expected.name }) else {
+        let matches = current.filter { $0.role == expected.role && $0.name == expected.name }
+        guard matches.count == 1, let fresh = matches.first else {
             throw AgentEnvironmentError.targetGone
         }
         guard !AgentContractValidation.isSecureRoleOrState(role: fresh.role, state: fresh.state),

@@ -178,7 +178,7 @@ final class AgentLoop {
             }
             let policyMS = ms(policyStart)
             try checkBoundary()
-            guard let action = output.action else {
+            guard let proposedAction = output.action else {
                 if let result = try recordRejection(frame, raw: output.rawOutput, action: nil,
                     reason: output.rejectionReason ?? "Malformed action output.", start: start,
                     observeMS: observeMS, policyMS: policyMS) { return result }
@@ -186,30 +186,31 @@ final class AgentLoop {
             }
             let resolved: AgentResolvedAction
             do {
-                switch action {
-                case .done, .fail, .askUser: resolved = AgentResolvedAction(action: action, frame: frame, targets: [])
-                default: resolved = try await environment.resolve(action, in: frame)
+                switch proposedAction {
+                case .done, .fail, .askUser: resolved = AgentResolvedAction(action: proposedAction, frame: frame, targets: [])
+                default: resolved = try await environment.resolve(proposedAction, in: frame)
                 }
             }
             catch let error as AgentEnvironmentError {
                 if case .systemHandoff(let reason) = error { return .handoff(reason: reason) }
                 if error == .credentialHandoff {
-                    try recordRejection(frame, raw: output.rawOutput, action: action,
+                    try recordRejection(frame, raw: output.rawOutput, action: proposedAction,
                         reason: "Credential entry requires the owner.", start: start,
                         observeMS: observeMS, policyMS: policyMS)
                     return .handoff(reason: "Credential entry requires the owner.")
                 }
-                if let result = try recordRejection(frame, raw: output.rawOutput, action: action,
+                if let result = try recordRejection(frame, raw: output.rawOutput, action: proposedAction,
                     reason: "Target resolution rejected: \(error)", start: start,
                     observeMS: observeMS, policyMS: policyMS) { return result }
                 continue
             }
             catch {
-                if let result = try recordRejection(frame, raw: output.rawOutput, action: action,
+                if let result = try recordRejection(frame, raw: output.rawOutput, action: proposedAction,
                     reason: "Target resolution rejected: \(error)", start: start,
                     observeMS: observeMS, policyMS: policyMS) { return result }
                 continue
             }
+            let action = resolved.action
             let gateStart = Date()
             let evaluation: AgentGateEvaluation
             do { evaluation = try gate.evaluate(resolved, expectedScope: try expectedScope()) }
