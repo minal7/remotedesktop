@@ -67,7 +67,10 @@ final class AgentEvalApprovalPolicyTests: XCTestCase {
     }
 
     func testOnlyExactIPv4LoopbackFixtureOriginCanBeAutoApproved() throws {
-        for url in ["http://localhost:8765/page", "http://[::1]:8765/page", "https://127.0.0.1:8765/page", "https://example.org/page"] {
+        XCTAssertThrowsError(try makeRequest(start: "http://[::1]:8765/page", flags: [
+            "allow_fixture_interaction": true, "allow_fixture_commit": true,
+        ]))
+        for url in ["http://localhost:8765/page", "https://127.0.0.1:8765/page", "https://example.org/page"] {
             let request = try makeRequest(start: url, flags: ["allow_fixture_interaction": true, "allow_fixture_commit": true])
             for risk in ["low", "medium", "high"] {
                 XCTAssertFalse(AgentEvalApprovalPolicy.permits(candidate(request: request, riskTier: risk), request: request), "\(url) \(risk)")
