@@ -13,10 +13,6 @@ enum ComputerUseGUIOwlModel {
     struct Proposal: Equatable, Sendable {
         let response: String
         let decision: Decision
-        func compatibleBrowserProposal() throws -> ComputerUseFaraModel.Proposal {
-            guard case .browser(let action) = decision else { throw ComputerUseFaraBrowserExecutor.Failure.unsupportedAction }
-            return ComputerUseFaraModel.Proposal(response: response, action: action).compatibleBrowserProposal()
-        }
         func compatibleDesktopProposal() -> ComputerUseDesktopProposal {
             switch decision {
             case .browser(let action): return .init(response: response, action: action)
@@ -104,7 +100,7 @@ enum ComputerUseGUIOwlModel {
             var fields:[String:Any]=[:]
             if input.surface == .desktop { fields = ComputerUseFaraModel.nativeFocusObject(editor, state: state) }
             if let url {
-                guard ComputerUseOwnedBrowser.validatedURL(url)==url,url.absoluteString.utf8.count<=8192 else { throw invalid }
+                guard ComputerUseValidatedWebURL.validatedURL(url)==url,url.absoluteString.utf8.count<=8192 else { throw invalid }
                 fields["observed_url"]=url.absoluteString
             }
             for (key,value,maximum) in [("error",error,16384),("user_response",reply,8192)] {

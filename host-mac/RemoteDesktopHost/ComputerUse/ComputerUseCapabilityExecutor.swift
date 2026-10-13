@@ -181,7 +181,6 @@ final class ComputerUseCapabilityExecutor: ComputerUseTaskAwareExecuting,
         }
         let result = try await clarified.execute(taskID: taskID, goal: goal, tools: tools, progress: progress)
         try Task.checkCancellation()
-        try rejectUnroutedResearchQuestion(result)
         return result
     }
 
@@ -224,18 +223,11 @@ final class ComputerUseCapabilityExecutor: ComputerUseTaskAwareExecuting,
             routedClarifiedGoal = nil
         }
         if route == .native {
-            if let browserResult = try await tools.executeOwnedBrowserTaskIfSupported(
-                taskID: taskID, prompt: currentUserPrompt, progress: progress) {
-                try Task.checkCancellation()
-                try rejectUnroutedResearchQuestion(browserResult)
-                return browserResult
-            }
             // This receives only the current user request. Conversation and
             // assistant prose cannot supply additional native edit authority.
             let nativeResult = try await nativeExecution(taskID, currentUserPrompt, progress)
             try Task.checkCancellation()
             if let result = nativeResult {
-                try rejectUnroutedResearchQuestion(result)
                 return result
             }
             try Task.checkCancellation()
@@ -260,14 +252,7 @@ final class ComputerUseCapabilityExecutor: ComputerUseTaskAwareExecuting,
         let result = try await desktop.execute(taskID: taskID, modelPrompt: modelPrompt,
             currentUserPrompt: currentUserPrompt, conversation: conversation, tools: tools, progress: progress)
         try Task.checkCancellation()
-        try rejectUnroutedResearchQuestion(result)
         return result
-    }
-
-    private func rejectUnroutedResearchQuestion(_ result: ComputerUseExecutionResult) throws {
-        if case .browserClarificationRequired = result { throw RoutingError.missingContinuation }
-        if case .browserResearchProgress = result { throw RoutingError.missingContinuation }
-        if case .browserResearchAnswer = result { throw RoutingError.missingContinuation }
     }
 
     func clarification(taskID: String) throws -> ComputerUseNativeTextExecutor.Clarification? {
@@ -314,7 +299,6 @@ final class ComputerUseCapabilityExecutor: ComputerUseTaskAwareExecuting,
             result = try await continuing.continueClarification(taskID: taskID, originatingTaskID: originatingTaskID, goal: goal, progress: progress)
         } else { throw RoutingError.missingContinuation }
         if route == .desktop { routedClarifiedGoal = goal }
-        try rejectUnroutedResearchQuestion(result)
         return result
     }
 
@@ -352,7 +336,6 @@ final class ComputerUseCapabilityExecutor: ComputerUseTaskAwareExecuting,
         let result = try await continuing.continueClarification(taskID: taskID, originatingTaskID: originatingTaskID,
             goal: goal, selectedChoice: selectedChoice, progress: progress)
         routedClarifiedGoal = goal
-        try rejectUnroutedResearchQuestion(result)
         return result
     }
 
@@ -429,7 +412,6 @@ final class ComputerUseCapabilityExecutor: ComputerUseTaskAwareExecuting,
         let result = try await continuing.continueAfterApprovedVisualAction(continuation,
             action: action, tools: tools, progress: progress)
         try Task.checkCancellation()
-        try rejectUnroutedResearchQuestion(result)
         return result
     }
 
@@ -609,10 +591,6 @@ enum ComputerUseNativeTextExecutorLoader {
             planner: ComputerUseRuntimeTextGoalPlanner(inputs: inputs, runtime: runtime),
             journalDirectory: journalDirectory)
         return ComputerUseCapabilityExecutor(nativeExecution: { taskID, prompt, progress in
-            // The owned browser uses the trained Fara path composed by setup.
-            // Its task admission and manual login controls stay on that path
-            // instead of treating the browser as a global AX form.
-            if try tools.shouldRouteToOwnedBrowserAgent() { return nil }
             return try await native.execute(taskID: taskID, prompt: prompt, progress: progress)
         }, nativeClarification: native)
     }

@@ -76,26 +76,6 @@ private final class GmailAcceptanceVisualExecutorLoader: ComputerUseVisualExecut
         return executor
     }
 
-    func prepareBrowser(receipt: ComputerUseInstallationReceipt?) throws -> ComputerUseFaraBrowserExecutor {
-        try base.prepareBrowser(receipt: receipt)
-    }
-
-    func prepareDefaultBrowser(receipt: ComputerUseInstallationReceipt?) throws -> any ComputerUseExecuting {
-        retain(try base.prepareDefaultBrowser(receipt: receipt))
-    }
-
-    func prepareDefaultBrowser(receipt: ComputerUseInstallationReceipt?,
-        nativeFilePlanner: ComputerUseDefaultBrowserExecutor.NativeFilePlanner?) throws -> any ComputerUseExecuting {
-        retain(try base.prepareDefaultBrowser(receipt: receipt, nativeFilePlanner: nativeFilePlanner))
-    }
-
-    func prepareDefaultBrowser(receipt: ComputerUseInstallationReceipt?,
-        nativeFilePlanner: ComputerUseDefaultBrowserExecutor.NativeFilePlanner?,
-        nativeControlInputs: ComputerUseDefaultBrowserExecutor.NativeControlInputs?) throws -> any ComputerUseExecuting {
-        retain(try base.prepareDefaultBrowser(receipt: receipt, nativeFilePlanner: nativeFilePlanner,
-            nativeControlInputs: nativeControlInputs))
-    }
-
     func load(receipt: ComputerUseInstallationReceipt,
         progress: @escaping @MainActor (String) -> Void) async throws -> any ComputerUseExecuting {
         retain(try await base.load(receipt: receipt, progress: progress))
@@ -1415,14 +1395,6 @@ final class CoreJobAcceptanceTests: XCTestCase {
             let host = HostComputerUseManager(injector: InputInjector(),
                 nativeTextInstaller: nativeInstaller, macControlInstaller: helperInstaller,
                 visualExecutorLoader: visualLoader,
-                mcpPlanner: AppleFoundationMCPPlanner(inspectFailure: { message in
-                    diagnosticLock.withLock {
-                        let path = trace.appendingPathComponent("planner-failure.txt")
-                        var data = (try? Data(contentsOf: path)) ?? Data()
-                        data.append(contentsOf: (message + "\n").utf8)
-                        try? Data(data.suffix(65_536)).write(to: path, options: .atomic)
-                    }
-                }),
                 taskLedger: ComputerUseTaskLedger(fileURL: trace.appendingPathComponent("ledger.json")),
                 allowsExternalServices: true,
                 nativeTextTargetDiagnosticObserver: { event in

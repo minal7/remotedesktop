@@ -37,7 +37,7 @@ enum ComputerUseHoloModel {
         }
         func source(_ url: URL?) throws -> String? {
             guard let url else { return nil }
-            guard ComputerUseOwnedBrowser.validatedURL(url) == url else { throw invalid }
+            guard ComputerUseValidatedWebURL.validatedURL(url) == url else { throw invalid }
             return try checkedText(url.absoluteString, maximum: 8_192)
         }
         var observations: [(url: String?, error: String?, reply: String?, editor: String?, state: ComputerUseNativeTextState?)] = []
@@ -238,7 +238,7 @@ enum ComputerUseHoloModel {
         case "web_search": try keys("query"); action = try .webSearch(text("query"))
         case "visit_url":
             try keys("url")
-            guard let url = URL(string: try text("url")), ComputerUseOwnedBrowser.validatedURL(url) == url else { throw invalid }
+            guard let url = URL(string: try text("url")), ComputerUseValidatedWebURL.validatedURL(url) == url else { throw invalid }
             action = .visitURL(url)
         case "history_back": try keys(); action = .historyBack
         case "wait":

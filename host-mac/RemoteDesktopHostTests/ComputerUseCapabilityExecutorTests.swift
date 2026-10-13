@@ -133,7 +133,7 @@ final class ComputerUseCapabilityExecutorTests: XCTestCase {
         // An error with this name can also originate in response decoding,
         // snapshot validation or preflight. It is not a no-effect decline.
         let failures: [any Error] = [ComputerUseTextEditError.deliveryUncertain,
-            ComputerUseBrowserError.unsupportedDocument, ComputerUseBrowserError.pageChanged]
+            ComputerUseDesktopExecutor.Failure.unsupportedAction, ComputerUseDesktopExecutor.Failure.changedScreen]
         for failure in failures {
             nativeFailure = failure
             do {
@@ -142,7 +142,7 @@ final class ComputerUseCapabilityExecutorTests: XCTestCase {
                 XCTFail("A native error must not fall back")
             } catch {
                 if let expected = failure as? ComputerUseTextEditError { XCTAssertEqual(error as? ComputerUseTextEditError, expected) }
-                else { XCTAssertEqual(error as? ComputerUseBrowserError, failure as? ComputerUseBrowserError) }
+                else { XCTAssertEqual(error as? ComputerUseDesktopExecutor.Failure, failure as? ComputerUseDesktopExecutor.Failure) }
             }
         }
         do {

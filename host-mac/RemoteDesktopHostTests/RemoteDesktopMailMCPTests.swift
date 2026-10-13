@@ -886,105 +886,6 @@ final class RemoteDesktopMailMCPTests: XCTestCase {
         await pool.cancelAll()
     }
 
-    func testOptInNativeMailAttachmentDraftUsesExactApprovedPlannerProposal() async throws {
-        guard ProcessInfo.processInfo.environment["RUN_NATIVE_MAIL_ATTACHMENT_SKILL_E2E"] == "1" else {
-            throw XCTSkip("Set RUN_NATIVE_MAIL_ATTACHMENT_SKILL_E2E=1 to create one unsent draft for review.")
-        }
-        let plannerTrace = MailPlannerDiagnosticTrace()
-        let planner = AppleFoundationMCPPlanner(inspectFailure: { plannerTrace.append($0) })
-        if case .unavailable(let reason) = planner.availability() {
-            throw XCTSkip("Apple's on-device planner is unavailable: \(reason)")
-        }
-        let root = canonicalTemporaryDirectory
-            .appendingPathComponent("MailAttachmentNativeE2E-\(UUID().uuidString)", isDirectory: true)
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
-        defer { try? FileManager.default.removeItem(at: root) }
-        let file = root.appendingPathComponent("Native Mail fixture \(UUID().uuidString).txt")
-        let fixture = Data("Approved local Mail attachment fixture: \(UUID().uuidString)".utf8)
-        try fixture.write(to: file)
-        let subject = "Remote Desktop Mail attachment draft \(UUID().uuidString)"
-        let body = "Please review the attached fixture."
-        let recipient = "draft-recipient@example.invalid"
-        let pool = MCPClientPool(
-            binaryValidator: MailTestBinaryValidator(),
-            mutationLedger: MCPFileMutationCallLedger(fileURL: root.appendingPathComponent("ledger.json")),
-            sessionFactory: { binary, generation in
-                MailTestSidecarSession(binary: binary, generation: generation, tools: [])
-            })
-        _ = try await pool.start(binaryURL: fakeBinaryURL)
-        do {
-            let availableTools = try await pool.allowedTools()
-            let tool = try XCTUnwrap(availableTools.first(where: {
-                $0.toolName == RemoteDesktopMailMCP.toolName
-            }))
-            let goal = "In Apple Mail, create a visible unsent draft to \(recipient) with subject \"\(subject)\" and body \"\(body)\". Attach the exact local file at \"\(file.path)\" and leave the draft open for review. Do not send it."
-            let evidence: [String: Any] = [
-                "subject": subject, "recipient": recipient, "body": body,
-                "original_path": file.path, "attachment_name": file.lastPathComponent,
-                "fixture_text": String(decoding: fixture, as: UTF8.self),
-                "fixture_sha256": MCPDigest.sha256(fixture),
-            ]
-            let attachment = XCTAttachment(data: try JSONSerialization.data(
-                withJSONObject: evidence, options: [.prettyPrinted, .sortedKeys]),
-                uniformTypeIdentifier: "public.json")
-            attachment.name = "owned-mail-draft-evidence.json"
-            attachment.lifetime = .keepAlways
-            add(attachment)
-            let proposal = try await ComputerUsePlanningWorker().perform(timeout: 30) {
-                try await planner.propose(MCPProposalPlanningRequest(
-                    taskID: "native-mail-attachment-e2e",
-                    prompt: goal,
-                    tools: [tool]))
-            }
-            guard case .proposedCall(let proposed) = proposal else {
-                throw AppleFoundationMCPPlannerError.noProposal
-            }
-            let exactArguments = proposed.arguments
-            let proposalAttachment = XCTAttachment(string: proposed.canonicalArguments)
-            proposalAttachment.name = "owned-mail-planner-proposal.json"
-            proposalAttachment.lifetime = .keepAlways
-            add(proposalAttachment)
-            guard proposed.toolName == RemoteDesktopMailMCP.toolName,
-                  proposed.serverID == RemoteDesktopMailMCP.serverID,
-                  exactArguments["to"] == .string(recipient),
-                  exactArguments["subject"] == .string(subject),
-                  exactArguments["body"] == .string(body),
-                  exactArguments["send_now"] == .bool(false),
-                  (exactArguments["cc"] == nil || exactArguments["cc"] == .string("")),
-                  (exactArguments["bcc"] == nil || exactArguments["bcc"] == .string("")),
-                  exactArguments["attachment_paths"] == .array([.string(file.path)]) else {
-                throw MCPClientError.approvalMismatch
-            }
-            let call = try tool.makeCall(taskID: "native-mail-attachment-e2e", arguments: exactArguments)
-            guard call.risk == .approvalRequired, call.toolName == RemoteDesktopMailMCP.toolName else {
-                throw MCPClientError.approvalMismatch
-            }
-            let prepared = try await pool.prepareApproval(call)
-            guard prepared.call == call,
-                  prepared.display.details.contains(file.lastPathComponent) else {
-                throw MCPClientError.approvalMismatch
-            }
-            let result = try await pool.performApproved(call, fingerprint: prepared.fingerprint)
-            XCTAssertFalse(result.isError)
-            XCTAssertFalse(result.wasTruncated)
-            guard case .object(let receipt)? = result.structuredContent else {
-                throw MCPClientError.toolFailed("Mail returned no attachment receipt.")
-            }
-            XCTAssertEqual(receipt["status"], .string("draft_opened"))
-            XCTAssertEqual(receipt["attachment_count"], .integer(1))
-            XCTAssertEqual(receipt["attachment_names"], .array([.string(file.lastPathComponent)]))
-            XCTAssertEqual(receipt["attachment_digest"], .string(try XCTUnwrap(prepared.fingerprint.mailAttachmentDigest)))
-            await pool.cancelAll()
-        } catch {
-            let failure = XCTAttachment(string: plannerTrace.text + "\n" + String(reflecting: error))
-            failure.name = "owned-mail-planner-failure.txt"
-            failure.lifetime = .keepAlways
-            add(failure)
-            await pool.cancelAll()
-            throw error
-        }
-    }
-
     func testPoolDoesNotRunMailBeforeExactApprovalAndRunsOnceAfter() async throws {
         let runner = RecordingMailAutomationRunner()
         let preflight = RecordingMailAutomationPreflight(isAllowed: true)
@@ -1584,11 +1485,4 @@ private actor MailTestSidecarSession: MCPClientSessioning {
     }
 
     func stop() async {}
-}
-
-final class MailPlannerDiagnosticTrace: @unchecked Sendable {
-    private let lock = NSLock()
-    private var values: [String] = []
-    func append(_ value: String) { lock.withLock { values.append(String(value.prefix(8_192))) } }
-    var text: String { lock.withLock { values.joined(separator: "\n") } }
 }

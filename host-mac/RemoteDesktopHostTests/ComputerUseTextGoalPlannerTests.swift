@@ -7,7 +7,6 @@ final class ComputerUseTextGoalPlannerTests: XCTestCase {
         guard ProcessInfo.processInfo.environment["RUN_NATIVE_TEXT_GOALS_MODEL_ACCEPTANCE"] == "1" else {
             throw XCTSkip("Set RUN_NATIVE_TEXT_GOALS_MODEL_ACCEPTANCE=1 for the actual local model corpus")
         }
-        XCTAssertEqual(AppleFoundationMCPPlanner().availability(), .available)
         let url = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
             .appendingPathComponent("AcceptanceFixtures/native-text-goals-v1.json")
         let document = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any])

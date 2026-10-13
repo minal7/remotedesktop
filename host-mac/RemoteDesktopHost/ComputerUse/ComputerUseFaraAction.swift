@@ -33,9 +33,8 @@ enum ComputerUseFaraAction: Equatable, Sendable {
     case readPageQuestion(String)
     case remember(String)
     case askUser(String)
-    /// A typed request against the host-retained, bounded local file catalog.
-    /// Candidate IDs are proposals only; the host must revalidate them.
-    case localFileOperation(ComputerUseMCPBrowserStepPlanner.Plan.LocalFileOperation)
+    /// Typed request against the existing host-bounded local file catalog.
+    case localFileOperation(ComputerUseLocalFileOperation)
     case wait(Double)
     case reportCompletion(String)
     enum Failure: Error, Equatable { case invalidResponse }

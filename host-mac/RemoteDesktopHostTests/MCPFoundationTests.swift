@@ -292,7 +292,7 @@ final class MCPFoundationTests: XCTestCase {
         XCTAssertEqual(MCPToolSafetyPolicy.risk(for: "future_unreviewed_tool"), .blocked)
     }
 
-    func testRealStdioAcceptanceGateDefinesTheExactExposedAndPlannerSurfaces() {
+    func testRealStdioAcceptanceGateDefinesExactExposedAndBlockedSurfaces() {
         let expectedExposed: Set<String> = [
             "ax_snapshot_capture", "ax_snapshot_diff", "ax_tree_augmented",
             "click", "click_menu_path", "contacts_search", "find_element",
@@ -326,17 +326,6 @@ final class MCPFoundationTests: XCTestCase {
             XCTAssertEqual(MCPToolSafetyPolicy.risk(for: tool), .blocked)
             XCTAssertFalse(MCPToolSafetyPolicy.isAllowed(tool))
         }
-
-        let expectedPlannerTools: Set<String> = [
-            "contacts_search", "focused_app", "list_apps", "list_shortcuts",
-            "list_windows", "permissions_status", RemoteDesktopMailMCP.toolName,
-            RemoteDesktopCloudStorageMCP.toolName, "reminders_list",
-        ]
-        XCTAssertEqual(
-            MCPFirstComputerUseExecutor.structuredToolNames,
-            expectedPlannerTools)
-        XCTAssertTrue(MCPFirstComputerUseExecutor.structuredToolNames
-            .isSubset(of: expectedExposed))
     }
 
     func testDynamicApprovalCopyDoesNotRevealTypedTextOrEmailBody() throws {

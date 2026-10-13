@@ -194,7 +194,6 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
     typealias CompletionCheck = @MainActor @Sendable (String) async throws -> Bool
     typealias OutcomeCheck = ComputerUseDesktopExecutor.OutcomeCheck
     typealias RevalidationFailureObserver = ComputerUseDesktopExecutor.RevalidationFailureObserver
-    typealias NativeFilePlanner = @MainActor @Sendable (ComputerUseFaraModel.Input) async throws -> ComputerUseMCPBrowserStepPlanner.Plan?
     typealias NativeControlPlanner = @MainActor @Sendable (ComputerUseFaraModel.Input,
         ComputerUseDefaultBrowserPageReader.Observation) async throws -> ComputerUseDefaultBrowserControlPlan
     typealias NativeBootstrapPlanner = @MainActor @Sendable
@@ -241,7 +240,7 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
         var continuingClarification = false
         let localFileCatalogFactory: ComputerUseDefaultBrowserFileCatalogFactory
         var fileCatalog: ComputerUseLocalFileCatalog?
-        var fileContext: ComputerUseMCPBrowserStepPlanner.LocalFileContext?
+        var fileContext: ComputerUseLocalFileContext?
         var selectedCandidate: ComputerUseLocalFileCatalog.Candidate?
         var userSelectedCandidateID: String?
         var pendingClarification: ComputerUseNativeTextExecutor.Clarification?
@@ -870,7 +869,7 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
             return enriched
         }
 
-        func apply(_ operation: ComputerUseMCPBrowserStepPlanner.Plan.LocalFileOperation) async throws
+        func apply(_ operation: ComputerUseLocalFileOperation) async throws
             -> ComputerUseExecutionResult? {
             guard let taskID, let goal, let tools else { throw Failure.noRetainedWindow }
             guard nativeFileOperationReady else { throw ComputerUseDesktopExecutor.Failure.unsupportedAction }
@@ -1139,7 +1138,7 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
             webUploadCheckpointObserver?(.preUploadProgressClean)
         }
 
-        static var notQueriedFileContext: ComputerUseMCPBrowserStepPlanner.LocalFileContext {
+        static var notQueriedFileContext: ComputerUseLocalFileContext {
             .init(query: .init(), page: .init(candidates: [], isComplete: false, nextCursor: nil,
                 hasTiedSortValues: false, hasMissingSortValues: false), inventoryState: .notQueried)
         }
@@ -1314,7 +1313,6 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
 
     init(journalDirectory: URL, session suppliedSession: ComputerUseDefaultBrowserSession? = nil,
          propose: @escaping ComputerUseDesktopExecutor.Propose,
-         nativeFilePlanner: NativeFilePlanner? = nil,
          nativeControlPlanner: NativeControlPlanner? = nil,
          nativeBootstrapPlanner: NativeBootstrapPlanner? = nil,
          pageReader: ComputerUseDefaultBrowserPageReader? = nil,
@@ -1431,32 +1429,7 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
                 scope.webUpload = upload
             }
             if scope.session.currentFileOpenPanel != nil && scope.selectedCandidate == nil {
-                guard let nativeFilePlanner else {
-                    return .init(response: "", decision: .handoff("Choose a file in the native picker before continuing."),
-                        includeInModelHistory: false)
-                }
-                let nativeInput = try scope.modelInput(input, includeUnselectedCatalog: true)
-                guard let plan = try await nativeFilePlanner(nativeInput) else {
-                    return .init(response: "", decision: .handoff("The native file chooser needs your input before continuing."),
-                        includeInModelHistory: false)
-                }
-                if plan.kind == .localFileOperation, let operation = plan.localFileOperation {
-                    switch operation {
-                    case .listFiles, .selectFile, .askFile:
-                        scope.nativeFileOperationReady = true
-                        return .init(response: plan.text, action: .localFileOperation(operation))
-                    case .selectLocalFile:
-                        return .init(response: plan.text, decision: .handoff("Select the listed file in the native picker to continue."),
-                            includeInModelHistory: false)
-                    }
-                }
-                if plan.kind == .askUser || plan.kind == .incomplete {
-                    let message = plan.text.trimmingCharacters(in: .whitespacesAndNewlines)
-                    return .init(response: plan.text, decision: .handoff(message.isEmpty
-                        ? "Choose a file in the native picker before continuing." : message), includeInModelHistory: false)
-                }
-                return .init(response: plan.text,
-                    decision: .handoff("The native file chooser did not return a supported file choice."),
+                return .init(response: "", decision: .handoff("Choose a file in the native picker before continuing."),
                     includeInModelHistory: false)
             }
             if let panel = scope.session.currentFileOpenPanel, let candidate = scope.selectedCandidate,
@@ -1526,7 +1499,7 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
                 return .init(response: "Signed-in account: \(accountLabel)", action: binding.proposalAction,
                     includeInModelHistory: false)
             }
-            let enriched = try scope.modelInput(input, advertiseFilePicker: nativeFilePlanner != nil)
+            let enriched = try scope.modelInput(input)
             if let panel = scope.session.currentFileOpenPanel,
                let selectedURL = try scope.selectedFileURL(),
                let native = ComputerUseDefaultBrowserActionScope.nativeSelectionProposal(panel: panel, selectedURL: selectedURL) {

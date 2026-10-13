@@ -282,18 +282,6 @@ struct ComputerUsePreparedVisualExecutor {
 
 @MainActor
 protocol ComputerUseVisualExecutorLoading: AnyObject {
-    /// Construct the native browser workflow without resolving or warming a
-    /// model. Only a later visual proposal may require its package.
-    func prepareBrowser(receipt: ComputerUseInstallationReceipt?) throws -> ComputerUseFaraBrowserExecutor
-
-    /// Prepare the default-browser route without resolving or warming Fara until a visual proposal is needed.
-    func prepareDefaultBrowser(receipt: ComputerUseInstallationReceipt?) throws -> any ComputerUseExecuting
-    func prepareDefaultBrowser(receipt: ComputerUseInstallationReceipt?,
-        nativeFilePlanner: ComputerUseDefaultBrowserExecutor.NativeFilePlanner?) throws -> any ComputerUseExecuting
-    func prepareDefaultBrowser(receipt: ComputerUseInstallationReceipt?,
-        nativeFilePlanner: ComputerUseDefaultBrowserExecutor.NativeFilePlanner?,
-        nativeControlInputs: ComputerUseDefaultBrowserExecutor.NativeControlInputs?) throws -> any ComputerUseExecuting
-
     func load(
         receipt: ComputerUseInstallationReceipt,
         progress: @escaping @MainActor (String) -> Void
@@ -308,28 +296,6 @@ protocol ComputerUseVisualExecutorLoading: AnyObject {
 }
 
 extension ComputerUseVisualExecutorLoading {
-    func prepareDefaultBrowser(receipt: ComputerUseInstallationReceipt?,
-        nativeFilePlanner: ComputerUseDefaultBrowserExecutor.NativeFilePlanner?,
-        nativeControlInputs: ComputerUseDefaultBrowserExecutor.NativeControlInputs?) throws -> any ComputerUseExecuting {
-        try prepareDefaultBrowser(receipt: receipt, nativeFilePlanner: nativeFilePlanner)
-    }
-
-    func prepareDefaultBrowser(receipt: ComputerUseInstallationReceipt?,
-        nativeFilePlanner: ComputerUseDefaultBrowserExecutor.NativeFilePlanner?) throws -> any ComputerUseExecuting {
-        try prepareDefaultBrowser(receipt: receipt)
-    }
-
-    func prepareDefaultBrowser(receipt: ComputerUseInstallationReceipt?) throws -> any ComputerUseExecuting {
-        try prepareBrowser(receipt: receipt)
-    }
-
-    func prepareBrowser(receipt: ComputerUseInstallationReceipt?) throws -> ComputerUseFaraBrowserExecutor {
-        try ComputerUseFaraBrowserExecutor(journalDirectory: ComputerUseTaskJournalStore.defaultDirectory
-            .deletingLastPathComponent().appendingPathComponent("Fara", isDirectory: true), propose: { _ in
-                throw ComputerUseFaraBrowserExecutor.Failure.visualModelUnavailable
-            })
-    }
-
     func prepare(receipt: ComputerUseInstallationReceipt,
                  progress: @escaping @MainActor (String) -> Void) async throws -> ComputerUsePreparedVisualExecutor {
         .init(executor: try await load(receipt: receipt, progress: progress), runtimeWasActivated: true)
@@ -352,9 +318,6 @@ final class OSAtlasVisualExecutorLoader: ComputerUseVisualExecutorLoading {
     private let gmailExistingDraftURL: URL?
     private let faraJournalDirectory: URL
     private let nativeJournalDirectory: URL
-    private let localFileCatalogFactory: ComputerUseFaraBrowserExecutor.LocalFileCatalogFactory?
-    private let browserActionAttestationLedger:
-        ComputerUseBrowserActionAttestationLedger
 
     init(
         resolver: OSAtlasRuntimeInputResolver = OSAtlasRuntimeInputResolver(),
@@ -371,10 +334,6 @@ final class OSAtlasVisualExecutorLoader: ComputerUseVisualExecutorLoading {
             .deletingLastPathComponent().appendingPathComponent("Fara", isDirectory: true),
         nativeJournalDirectory: URL = ComputerUseTaskJournalStore.defaultDirectory
             .deletingLastPathComponent().appendingPathComponent("NativeDesktop", isDirectory: true),
-        localFileCatalogFactory: ComputerUseFaraBrowserExecutor.LocalFileCatalogFactory? = nil,
-        browserActionAttestationLedger:
-            ComputerUseBrowserActionAttestationLedger =
-                ComputerUseBrowserActionAttestationLedger()
     ) {
         self.resolver = resolver
         self.bundle = bundle
@@ -386,9 +345,6 @@ final class OSAtlasVisualExecutorLoader: ComputerUseVisualExecutorLoading {
         self.gmailExistingDraftURL = gmailExistingDraftURL
         self.faraJournalDirectory = faraJournalDirectory
         self.nativeJournalDirectory = nativeJournalDirectory
-        self.localFileCatalogFactory = localFileCatalogFactory
-        self.browserActionAttestationLedger =
-            browserActionAttestationLedger
     }
 
     func prepare(receipt: ComputerUseInstallationReceipt,
@@ -403,58 +359,12 @@ final class OSAtlasVisualExecutorLoader: ComputerUseVisualExecutorLoading {
         return .init(executor: try await load(receipt: receipt, progress: progress), runtimeWasActivated: true)
     }
 
-    @MainActor private final class BrowserInputs {
-        var value: ComputerUseFaraRuntimeInputs?
-    }
-
     @MainActor private final class NativeControlInputsCache {
         var value: ComputerUseNativeTextRuntimeInputs?
     }
 
-    func prepareBrowser(receipt: ComputerUseInstallationReceipt?) throws -> ComputerUseFaraBrowserExecutor {
-        let inputs = BrowserInputs()
-        return try makeFaraExecutor(resolveInputs: { [self] in try resolveFaraInputs(receipt: receipt, cached: inputs) })
-    }
-
-    func prepareDefaultBrowser(receipt: ComputerUseInstallationReceipt?) throws -> any ComputerUseExecuting {
-        let inputs = BrowserInputs()
-        return try makeDefaultBrowserExecutor(resolveInputs: { [self] in try resolveFaraInputs(receipt: receipt, cached: inputs) })
-    }
-
-    func prepareDefaultBrowser(receipt: ComputerUseInstallationReceipt?,
-        nativeFilePlanner: ComputerUseDefaultBrowserExecutor.NativeFilePlanner?) throws -> any ComputerUseExecuting {
-        let inputs = BrowserInputs()
-        return try makeDefaultBrowserExecutor(
-            resolveInputs: { [self] in try resolveFaraInputs(receipt: receipt, cached: inputs) },
-            nativeFilePlanner: nativeFilePlanner)
-    }
-
-    func prepareDefaultBrowser(receipt: ComputerUseInstallationReceipt?,
-        nativeFilePlanner: ComputerUseDefaultBrowserExecutor.NativeFilePlanner?,
-        nativeControlInputs: ComputerUseDefaultBrowserExecutor.NativeControlInputs?) throws -> any ComputerUseExecuting {
-        let inputs = BrowserInputs()
-        return try makeDefaultBrowserExecutor(
-            resolveInputs: { [self] in try resolveFaraInputs(receipt: receipt, cached: inputs) },
-            nativeFilePlanner: nativeFilePlanner, nativeControlInputs: nativeControlInputs)
-    }
-
-    private func resolveFaraInputs(receipt: ComputerUseInstallationReceipt?, cached: BrowserInputs) throws -> ComputerUseFaraRuntimeInputs {
-        try Task.checkCancellation()
-        if let value = cached.value { return value }
-        guard let receipt, receipt.modelVariant == .fara15_4B else {
-            throw ComputerUseFaraBrowserExecutor.Failure.visualModelUnavailable
-        }
-        let package = try resolver.resolveAvailablePackage(receipt: receipt,
-            runtimeDirectoryURL: Self.bundledRuntimeDirectoryURL(in: bundle), enclosingBundleURL: bundle.bundleURL)
-        guard case .fara(let value) = package else { throw ComputerUseFaraBrowserExecutor.Failure.visualModelUnavailable }
-        try Task.checkCancellation()
-        cached.value = value
-        return value
-    }
-
     private func makeDefaultBrowserExecutor(
         resolveInputs: @escaping @MainActor @Sendable () throws -> ComputerUseFaraRuntimeInputs,
-        nativeFilePlanner: ComputerUseDefaultBrowserExecutor.NativeFilePlanner? = nil,
         nativeControlInputs: ComputerUseDefaultBrowserExecutor.NativeControlInputs? = nil
     ) throws -> ComputerUseDefaultBrowserExecutor {
         let runtime = self.runtime
@@ -521,7 +431,7 @@ final class OSAtlasVisualExecutorLoader: ComputerUseVisualExecutorLoading {
             webUploadContentExtractor = nil
         }
         return try ComputerUseDefaultBrowserExecutor(journalDirectory: faraJournalDirectory,
-            propose: propose, nativeFilePlanner: nativeFilePlanner, nativeControlPlanner: nativeControlPlanner,
+            propose: propose, nativeControlPlanner: nativeControlPlanner,
             nativeBootstrapPlanner: nativeBootstrapPlanner,
             finishRun: { await runtime.shutdown() }, outcomeCheck: outcomeCheck,
             revalidationFailureObserver: browserRevalidationFailureObserver,
@@ -529,29 +439,6 @@ final class OSAtlasVisualExecutorLoader: ComputerUseVisualExecutorLoading {
             webUploadContentExtractor: webUploadContentExtractor,
             webUploadCheckpointObserver: webUploadCheckpointObserver,
             gmailExistingDraftURL: gmailExistingDraftURL)
-    }
-
-    private func makeFaraExecutor(_ inputs: ComputerUseFaraRuntimeInputs) throws -> ComputerUseFaraBrowserExecutor {
-        try makeFaraExecutor(resolveInputs: { inputs })
-    }
-
-    private func makeFaraExecutor(resolveInputs: @escaping @MainActor @Sendable () throws -> ComputerUseFaraRuntimeInputs) throws -> ComputerUseFaraBrowserExecutor {
-        let runtime = self.runtime
-        let propose: ComputerUseFaraBrowserExecutor.Propose = { input in
-            let endpoint = try await runtime.activateFara(resolveInputs())
-            return try await runtime.proposeFaraBrowser(endpoint: endpoint, input: input)
-        }
-        let readPage: ComputerUseFaraBrowserExecutor.ReadPage = { reading in
-            let endpoint = try await runtime.activateFara(resolveInputs())
-            return try await runtime.readFaraPage(endpoint: endpoint, reading: reading)
-        }
-        if let localFileCatalogFactory {
-            return try ComputerUseFaraBrowserExecutor(journalDirectory: faraJournalDirectory,
-                propose: propose, localFileCatalogFactory: localFileCatalogFactory,
-                readPage: readPage, finishRun: { await runtime.shutdown() })
-        }
-        return try ComputerUseFaraBrowserExecutor(journalDirectory: faraJournalDirectory,
-            propose: propose, readPage: readPage, finishRun: { await runtime.shutdown() })
     }
 
     func load(

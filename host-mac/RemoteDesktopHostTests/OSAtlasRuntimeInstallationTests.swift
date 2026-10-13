@@ -13,69 +13,7 @@ actor PreparationRejectingLauncher: OSAtlasLlamaServerLaunching {
 
 final class OSAtlasRuntimeInstallationTests: XCTestCase {
     @MainActor
-    func testOptInBrowserPackageResolutionWaitsForMCPGap() async throws {
-        guard ProcessInfo.processInfo.environment["RUN_FARA_NATIVE_BROWSER_INPUT"] == "1" else {
-            throw XCTSkip("Opt-in: native browser continuation through deferred production package resolution")
-        }
-        for scenario in ["absent", "broken", "available"] {
-            let fixture = try makeFaraFixture()
-            defer { try? FileManager.default.removeItem(at: fixture.root) }
-            let info: [String: Any] = ["CFBundleIdentifier": "test.fara.demand", "CFBundlePackageType": "APPL"]
-            try PropertyListSerialization.data(fromPropertyList: info, format: .xml, options: 0)
-                .write(to: fixture.bundleDirectory.appendingPathComponent("Contents/Info.plist"))
-            if scenario == "broken" {
-                try FileManager.default.removeItem(at: fixture.modelDirectory.appendingPathComponent(ComputerUseFaraRuntimeInputs.modelFileName))
-            }
-            let launcher = PreparationRejectingLauncher(), runtime = OSAtlasLlamaRuntime(launcher: launcher)
-            let loader = OSAtlasVisualExecutorLoader(resolver: .init(manifest: fixture.manifest),
-                bundle: try XCTUnwrap(Bundle(url: fixture.bundleDirectory)), runtime: runtime,
-                faraJournalDirectory: fixture.root.appendingPathComponent("task"))
-            let executor = try loader.prepareBrowser(receipt: scenario == "absent" ? nil : fixture.receipt)
-            let browser = ComputerUseOwnedBrowser(mayAct: { true }); defer { browser.close() }
-            let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { true },
-                browserNavigationTask: .init(browser: browser, journalDirectory: fixture.root.appendingPathComponent("browser")))
-            var toolCalls = 0, identity: String?
-            let propose: ComputerUseFaraBrowserExecutor.ProposeUsingTools = { input, observation in
-                XCTAssertEqual(input.goal, "Browse documentation.")
-                XCTAssertEqual(input.history.count, toolCalls)
-                guard case .initial(let initial) = observation else { throw ComputerUseFaraBrowserExecutor.Failure.browserChanged }
-                if let identity { XCTAssertEqual(initial.sessionIdentity, identity) }
-                else { identity = initial.sessionIdentity }
-                toolCalls += 1
-                if toolCalls > 1 { return .noProposal }
-                let response = #"<tool_call>{"name":"computer_use","arguments":{"action":"ask_user_question","question":"Which project?"}}</tool_call>"#
-                return .proposal(try .init(response: response, action: ComputerUseFaraAction.decodeNativeMessage(response)))
-            }
-            let first = try await tools.withOwnedBrowserToolProposals(taskID: "task", propose: propose) {
-                try await executor.execute(taskID: "task", prompt: "Browse documentation.", trustedUserPrompt: "Browse documentation.", tools: tools, progress: { _ in })
-            }
-            XCTAssertEqual(first, .clarificationRequired("Which project?"))
-            let before = await launcher.calls
-            XCTAssertEqual(before, 0, "\(scenario) package cannot be required while tools suffice")
-            let pending = try XCTUnwrap(executor.clarification(taskID: "task"))
-            let goal = try pending.goal.answering(pending.question, with: "Swift")
-            let window = try XCTUnwrap(NSApp.keyWindow?.windowNumber)
-            do {
-                _ = try await tools.withOwnedBrowserToolProposals(taskID: "task", propose: propose) {
-                    try await executor.continueClarification(taskID: "answer", originatingTaskID: "task", goal: goal, progress: { _ in })
-                }
-                XCTFail("The deliberately unavailable model cannot produce an action")
-            } catch {
-                if scenario == "absent" { XCTAssertEqual(error as? ComputerUseFaraBrowserExecutor.Failure, .visualModelUnavailable) }
-                else if scenario == "broken" { XCTAssertTrue(error is OSAtlasRuntimeInstallationError, String(reflecting: error)) }
-                else { XCTAssertEqual(error as? OSAtlasLlamaRuntimeError, .serverFailedToStart) }
-            }
-            let after = await launcher.calls
-            XCTAssertEqual(after, scenario == "available" ? 1 : 0)
-            XCTAssertEqual(toolCalls, 2); XCTAssertEqual(NSApp.keyWindow?.windowNumber, window)
-            XCTAssertTrue(tools.matchesOwnedBrowserAgentSession(taskID: "task", identity: try XCTUnwrap(identity)))
-            XCTAssertFalse(tools.hasOwnedBrowserToolProposals)
-            await loader.deactivate()
-        }
-    }
-
-    @MainActor
-    func testPreparingFaraBrowserDoesNotActivateModelButSetupStillDoes() async throws {
+    func testPreparingFaraPackageDoesNotActivateModelButSetupStillDoes() async throws {
         let fixture = try makeFaraFixture()
         defer { try? FileManager.default.removeItem(at: fixture.root) }
         let info: [String: Any] = ["CFBundleIdentifier": "test.fara.prepare", "CFBundlePackageType": "APPL"]
@@ -90,14 +28,10 @@ final class OSAtlasRuntimeInstallationTests: XCTestCase {
         do { prepared = try await loader.prepare(receipt: fixture.receipt, progress: { _ in }) }
         catch { failure = error }
         let preparationLaunches = await launcher.calls
-        XCTAssertNil(failure, "Preparing a tool-capable browser must not warm the computer-use model")
+        XCTAssertNil(failure, "Preparing a Fara package must not warm the computer-use model")
         XCTAssertTrue(prepared?.executor is ComputerUseDefaultBrowserExecutor)
         XCTAssertEqual(prepared?.runtimeWasActivated, false)
         XCTAssertEqual(preparationLaunches, 0)
-        let defaultBrowser = try loader.prepareDefaultBrowser(receipt: fixture.receipt)
-        XCTAssertTrue(defaultBrowser is ComputerUseDefaultBrowserExecutor)
-        let defaultBrowserLaunches = await launcher.calls
-        XCTAssertEqual(defaultBrowserLaunches, 0)
         do {
             _ = try await loader.load(receipt: fixture.receipt, progress: { _ in })
             XCTFail("Setup must actually attempt model activation")

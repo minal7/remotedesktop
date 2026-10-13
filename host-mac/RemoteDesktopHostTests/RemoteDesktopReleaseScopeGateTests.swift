@@ -15,7 +15,7 @@ final class RemoteDesktopReleaseScopeGateTests: XCTestCase {
         XCTAssertTrue(ComputerUseFeatureFlags.isExperimentalEnabled(in: defaults))
     }
 
-    func testFreshOutOfScopeRequestDeclinesWithoutExecutionWhileReleaseJobsAndExperimentalPass() async throws {
+    func testHostRoutesGenericPromptsThroughExecutorRegardlessOfExperimentalPreference() async throws {
         let hostID = UUID().uuidString
         let peerID = UUID().uuidString
         let sessionID = UUID().uuidString
@@ -37,60 +37,28 @@ final class RemoteDesktopReleaseScopeGateTests: XCTestCase {
         defer { manager.stop() }
         manager.authorizePeer(senderID: peerID)
 
-        let outsideRequests = [
-            ("release-scope-website", "Open https://example.test and read the first paragraph."),
-            ("release-scope-native", "Open Apple Notes and search for the word picnic."),
+        let prompts = [
+            "Describe the yellow circle in the current view.",
+            "Count the words in this sentence.",
         ]
-        for (id, request) in outsideRequests {
-            let declined = try await submit(
-                request,
-                id: id,
-                hostID: hostID,
-                peerID: peerID,
-                sessionID: sessionID,
-                pairingCode: pairingCode,
-                manager: manager,
-                channel: channel)
-            XCTAssertEqual(declined.outcome, .unableToComplete)
-            XCTAssertEqual(declined.text,
-                "Right now I can email files (Gmail or Apple Mail), upload files to Google Drive or Dropbox, and find flights. Turn on Experimental in Settings to try other web tasks.")
+        for (index, prompt) in prompts.enumerated() {
+            let update = try await submit(prompt, id: "generic-request-off-\(index)",
+                hostID: hostID, peerID: peerID, sessionID: sessionID,
+                pairingCode: pairingCode, manager: manager, channel: channel)
+            XCTAssertEqual(update.outcome, .taskCompleted)
+            XCTAssertEqual(update.text, "Spy executor received the request.")
         }
-        XCTAssertTrue(executor.prompts.isEmpty, "Out-of-scope requests must be rejected before executor routing.")
-
-        let supportedRequests = [
-            "Draft an email in Gmail to reviewer@example.test with subject Update.",
-            "Upload the selected spreadsheet to Google Drive.",
-            "Upload the selected spreadsheet to Dropbox.",
-            "Email Jordan using Apple Mail.",
-            "Upload the file to Google Drive and Dropbox.",
-        ]
-        for (index, request) in supportedRequests.enumerated() {
-            let supported = try await submit(
-                request,
-                id: "release-scope-supported-\(index)",
-                hostID: hostID,
-                peerID: peerID,
-                sessionID: sessionID,
-                pairingCode: pairingCode,
-                manager: manager,
-                channel: channel)
-            XCTAssertEqual(supported.outcome, .taskCompleted)
-            XCTAssertEqual(supported.text, "Spy executor received the supported request.")
-        }
+        XCTAssertEqual(executor.prompts, prompts,
+            "Generic prompts must reach the injected executor without release-keyword admission.")
 
         experimentalEnabled = true
-        let experimentalRequest = "Open Apple Notes and search for the word picnic."
-        let experimental = try await submit(
-            experimentalRequest,
-            id: "release-scope-experimental",
-            hostID: hostID,
-            peerID: peerID,
-            sessionID: sessionID,
-            pairingCode: pairingCode,
-            manager: manager,
-            channel: channel)
+        let experimentalPrompt = "Summarize the visible chart in one sentence."
+        let experimental = try await submit(experimentalPrompt, id: "generic-request-on",
+            hostID: hostID, peerID: peerID, sessionID: sessionID,
+            pairingCode: pairingCode, manager: manager, channel: channel)
         XCTAssertEqual(experimental.outcome, .taskCompleted)
-        XCTAssertEqual(executor.prompts, supportedRequests + [experimentalRequest])
+        XCTAssertEqual(experimental.text, "Spy executor received the request.")
+        XCTAssertEqual(executor.prompts, prompts + [experimentalPrompt])
     }
 
     private func submit(
@@ -146,7 +114,7 @@ private final class ReleaseScopeSpyExecutor: ComputerUseExecuting {
         progress: @escaping (String) -> Void
     ) async throws -> ComputerUseExecutionResult {
         prompts.append(prompt)
-        return .completed("Spy executor received the supported request.")
+        return .completed("Spy executor received the request.")
     }
 }
 

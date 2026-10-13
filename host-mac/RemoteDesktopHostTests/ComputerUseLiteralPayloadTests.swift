@@ -30,32 +30,5 @@ final class ComputerUseLiteralPayloadTests: XCTestCase {
         XCTAssertNil(ComputerUseLiteralPayload.resolve(String(payload.id.prefix(50)), in: task))
     }
 
-    func testLongExactTextUsesHostReferenceWithoutRelaxingModelTextLimit() throws {
-        let text = String(repeating: "a", count: 2_000)
-        let task = "Type \"\(text)\" into the focused field."
-        let route = try XCTUnwrap(AppleFoundationVisualActionRouter.deterministicTextEntryRoute(
-            for: task, history: [], availableDirectives: [.type]))
-        guard case .literalTextReference(let id) = route.argument else {
-            return XCTFail("A long literal must travel by reference")
-        }
-        XCTAssertEqual(ComputerUseLiteralPayload.resolve(id, in: task), text)
-        XCTAssertFalse(SemanticNativeToolWireContract.isValidModelGeneratedText(text))
-    }
 
-    func testShortQuotedRoutePreservesLeadingAndTrailingWhitespace() throws {
-        let text = "  exact\n  "
-        let route = AppleFoundationVisualActionRouter.deterministicTextEntryRoute(
-            for: "Type \"\(text)\" into the field.", history: [], availableDirectives: [.type])
-        XCTAssertEqual(route?.argument, .text(text))
-    }
-
-    func testWhitespaceOnlyLiteralIsAHostPayload() throws {
-        let task = "Insert \"  \n\" into the field."
-        let route = try XCTUnwrap(AppleFoundationVisualActionRouter.deterministicTextEntryRoute(
-            for: task, history: [], availableDirectives: [.type]))
-        guard case .literalTextReference(let id) = route.argument else {
-            return XCTFail("Exact whitespace must not disappear")
-        }
-        XCTAssertEqual(ComputerUseLiteralPayload.resolve(id, in: task), "  \n")
-    }
 }

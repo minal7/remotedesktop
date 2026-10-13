@@ -346,7 +346,7 @@ struct ComputerUseWebJobContentExtractor: Sendable {
         if let requestBody = request.httpBody { inspectExchange?(requestBody, response) }
         try Task.checkCancellation()
         do {
-            return try Self.decode(ComputerUseBrowserModelResponse.content(response, modelAlias: connection.modelAlias),
+            return try Self.decode(ComputerUseModelResponseDecoder.content(response, modelAlias: connection.modelAlias),
                 originalRequest: originalRequest, clarifications: clarifications)
         } catch {
             throw Error.invalidResponse
@@ -366,7 +366,7 @@ struct ComputerUseWebJobContentExtractor: Sendable {
         if let requestBody = request.httpBody { inspectExchange?(requestBody, response) }
         try Task.checkCancellation()
         do {
-            return try Self.decodeUpload(ComputerUseBrowserModelResponse.content(response, modelAlias: connection.modelAlias),
+            return try Self.decodeUpload(ComputerUseModelResponseDecoder.content(response, modelAlias: connection.modelAlias),
                 originalRequest: originalRequest)
         } catch { throw Error.invalidResponse }
     }

@@ -3,26 +3,64 @@ import CoreImage
 import Foundation
 import ImageIO
 
+@MainActor
+protocol ComputerUseTaskAwareExecuting: ComputerUseExecuting {
+    func execute(
+        taskID: String,
+        prompt: String,
+        trustedUserPrompt: String,
+        tools: ComputerUseHostTools,
+        progress: @escaping (String) -> Void
+    ) async throws -> ComputerUseExecutionResult
+}
+
+@MainActor
+protocol MCPApprovalContinuing: AnyObject {
+    func preflightApprovedAction(_ prepared: MCPPreparedApproval) async throws
+    func continueAfterApproval(
+        _ prepared: MCPPreparedApproval,
+        tools: ComputerUseHostTools,
+        progress: @escaping (String) -> Void
+    ) async throws -> MCPApprovedActionResult
+
+    /// Only host-bound plans may opt into ordered, independently approved
+    /// effects. Legacy one-action executors leave this nil.
+    func approvedActionPlan(taskID: String, promptBody: String) throws -> ComputerUseTaskLedger.ApprovedActionPlan?
+    func continueApprovedActionPlan(
+        taskID: String, confirmedActions: [ComputerUseTaskLedger.ApprovedActionRecord],
+        tools: ComputerUseHostTools, progress: @escaping (String) -> Void
+    ) async throws -> ComputerUseExecutionResult
+
+    /// Invalidates the current run synchronously. The helper shutdown itself
+    /// is asynchronous, but is bound to the captured process generation so a
+    /// delayed cleanup can never stop a newer resumed run.
+    func cancelMCPWork()
+    /// Invalidates a paused run while retaining verified progress when supported.
+    func pauseMCPWork()
+}
+
+extension MCPApprovalContinuing {
+    func preflightApprovedAction(_ prepared: MCPPreparedApproval) async throws {}
+    func pauseMCPWork() { cancelMCPWork() }
+    func approvedActionPlan(taskID: String, promptBody: String) throws -> ComputerUseTaskLedger.ApprovedActionPlan? { nil }
+    func continueApprovedActionPlan(
+        taskID: String, confirmedActions: [ComputerUseTaskLedger.ApprovedActionRecord],
+        tools: ComputerUseHostTools, progress: @escaping (String) -> Void
+    ) async throws -> ComputerUseExecutionResult { throw MCPClientError.approvalMismatch }
+}
+
 /// Opaque, task-scoped authority to resume the exact visual execution that
 /// produced an approval request. The nonce prevents a delayed or duplicate
 /// approval response from being applied to a later visual session.
 struct ComputerUseVisualApprovalContinuation: Equatable, Sendable, CustomStringConvertible, CustomDebugStringConvertible {
     let taskID: String
     let nonce: UUID
-    /// Process-local evidence from the proposal, never part of the phone's
-    /// approval payload. The host must validate it before posting the action.
-    let browserPageEvidence: ComputerUseBrowserPageEvidence?
-    let nativeBrowserTarget: ComputerUseOwnedBrowser.AgentTarget?
-
-    init(taskID: String, nonce: UUID, browserPageEvidence: ComputerUseBrowserPageEvidence? = nil,
-         nativeBrowserTarget: ComputerUseOwnedBrowser.AgentTarget? = nil) {
+    init(taskID: String, nonce: UUID) {
         self.taskID = taskID
         self.nonce = nonce
-        self.browserPageEvidence = browserPageEvidence
-        self.nativeBrowserTarget = nativeBrowserTarget
     }
 
-    var description: String { "ComputerUseVisualApprovalContinuation(browserBound: \(browserPageEvidence != nil))" }
+    var description: String { "ComputerUseVisualApprovalContinuation" }
     var debugDescription: String { description }
 }
 

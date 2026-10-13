@@ -62,46 +62,6 @@ final class ComputerUseLocalTextGoalPlannerTests: XCTestCase {
         XCTAssertEqual(calls, 0)
     }
 
-    func testObservedWholeInstructionProposalAsksBeforeAnyBrowserInputOrJournal() async throws {
-        var stage = "start fixture"
-        do {
-            let server = try OwnedBrowserHTTPFixture(routes: ["/form": .init(body: """
-                <!doctype html><label>Notes<input value="keep notes"></label><label>Tag<input value="keep tag"></label>
-                <script>document.querySelectorAll('input').forEach(e => e.addEventListener('input', () => fetch('/input-event')));</script>
-                """)])
-            let base = try await server.start()
-            var dispatchedEdits = 0
-            let browser = ComputerUseOwnedBrowser(presentsWindow: false, domScriptDidDispatch: {
-                if $0 == .edit { dispatchedEdits += 1 }
-            }, mayAct: { true })
-            defer { browser.close(); server.stop() }
-            stage = "navigate to form"
-            try browser.claim(taskID: "q911")
-            let document = try await browser.navigate(taskID: "q911", operationID: "open", to: base.appendingPathComponent("form"))
-            let target = ComputerUseBrowserTextTarget(browser: browser, document: document, requiresFrontmost: false)
-            let response = try envelope(#"{"disposition":"supported","edits":[{"fieldID":"f1","mode":"replaceAll","value":"Put this exact text in Notes."}]}"#)
-            let transport = FixedTextTransport(response: response)
-            let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-            defer { try? FileManager.default.removeItem(at: directory) }
-            stage = "construct native executor"
-            let executor = ComputerUseNativeTextExecutor(injector: InputInjector(), mayAct: { true }, journalDirectory: directory,
-                planner: try planner(transport: transport, contract: .candidateV2),
-                editOverride: { _, _ in XCTFail("Clarification cannot inject AX text") }, browserTargetProvider: { _ in target })
-            stage = "execute proposal"
-            let result = try await executor.execute(taskID: "q911", prompt: "Put this exact text in Notes.",
-                verifiedStep: { _, _ in XCTFail("No text step is authorized") }, progress: { _ in })
-            guard case .clarificationRequired = result else { return XCTFail("The observed wrong plan must become a no-effect clarification") }
-            stage = "read unchanged form"
-            let observed = try await ComputerUseBrowserTextTarget(browser: browser, document: document,
-                requiresFrontmost: false).fields()
-            XCTAssertEqual(observed.map { $0.snapshot.value }, ["keep notes", "keep tag"])
-            XCTAssertEqual(dispatchedEdits, 0); XCTAssertEqual(server.count("/input-event"), 0)
-            XCTAssertFalse(FileManager.default.fileExists(atPath: directory.path))
-            let completions = await transport.completions
-            XCTAssertEqual(completions, 1)
-        } catch { XCTFail("Whole-request guard fixture failed during \(stage): \(error)") }
-    }
-
     func testWholeInitialInstructionRequiresASeparateLiteralInsteadOfBecomingInput() async throws {
         for prompt in ["Put this exact text in Notes.", "  Put this exact text in Notes.\n", "把这段文字放入 Notes。", "Notes"] {
             let value = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -418,86 +378,6 @@ final class ComputerUseLocalTextGoalPlannerTests: XCTestCase {
                 let body = String(decoding: request.body, as: UTF8.self)
                 XCTAssertFalse(body.contains("東京")); XCTAssertFalse(body.contains("private existing value"))
             }
-        }
-    }
-
-    func testHTTPPlannedBrowserEditsPauseResumeAndReplayWithoutAnotherRequest() async throws {
-        let pages = try OwnedBrowserHTTPFixture(routes: ["/form": .init(body: """
-            <label>Origin<input value="A"></label><label>Destination<input value="B"></label>
-            <label>Reference<input value="keep"></label>
-            """)])
-        let base = try await pages.start()
-        var edits = 0, allowed = true
-        let browser = ComputerUseOwnedBrowser(presentsWindow: false, domScriptDidDispatch: {
-            if $0 == .edit { edits += 1 }
-        }, mayAct: { true })
-        defer { browser.close(); pages.stop() }
-        var stage = "claim browser"
-        do {
-            let taskID = "http-planned-browser"
-            try browser.claim(taskID: taskID)
-            stage = "navigate hidden form"
-            let document = try await browser.navigate(taskID: taskID, operationID: "open", to: base.appendingPathComponent("form"))
-            let target = ComputerUseBrowserTextTarget(browser: browser, document: document, requiresFrontmost: false)
-            let alias = ComputerUseNativeTextRuntimeInputs.modelAlias
-            let completion = try envelope(#"{"disposition":"supported","edits":[{"fieldID":"f1","mode":"append","value":"p1"},{"fieldID":"f2","mode":"append","value":"p1"}]}"#, model: alias)
-            let replies = ["/apply-template": Data(#"{"prompt":"fixture rendered prompt"}"#.utf8),
-                "/tokenize": Data(#"{"tokens":[1,2,3]}"#.utf8), "/v1/chat/completions": completion]
-            let model = try LocalHTTPFixture(respond: { request in LocalHTTPFixture.jsonResponse(replies[request.path] ?? Data()) })
-            defer { model.stop() }
-            stage = "start model HTTP fixture"
-            let port = try await model.start()
-            let transport = URLSessionOSAtlasTransport()
-            let planner = RecordingHTTPTextPlanner(wrapped: ComputerUseLocalTextGoalPlanner(connection: try .init(
-                baseURL: XCTUnwrap(URL(string: "http://127.0.0.1:\(port)")), bearerToken: "fictional-test-token", modelAlias: alias),
-                transport: transport))
-            func values() async throws -> [String] {
-                var values: [String] = []
-                for id in await planner.fieldIDs {
-                    let snapshot = try await target.read(targetID: id)
-                    values.append(try XCTUnwrap(snapshot).value)
-                }
-                return values
-            }
-            let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-            defer { try? FileManager.default.removeItem(at: directory) }
-            let executor = ComputerUseNativeTextExecutor(injector: InputInjector(), mayAct: { allowed }, journalDirectory: directory,
-                planner: planner, editOverride: { _, _ in XCTFail("Browser edits must use their owned DOM target") },
-                browserTargetProvider: { _ in target })
-            stage = "plan and execute first edit"
-            let prompt = "Append \"!\" to both Origin and Destination."
-            do {
-                _ = try await executor.execute(taskID: taskID, prompt: prompt, verifiedStep: { complete, total in
-                    XCTAssertEqual(total, 2)
-                    if complete == 1 { allowed = false }
-                }, progress: { _ in })
-                XCTFail("Revoking execution after the first verified edit must pause the task")
-            } catch { XCTAssertEqual(error as? ComputerUseTextEditError, .interrupted) }
-            stage = "observe paused fields"
-            let paused = try await values()
-            XCTAssertEqual(paused, ["A!", "B", "keep"])
-            XCTAssertEqual(edits, 1)
-            XCTAssertTrue(try ComputerUseTextStepStore.hasJournal(taskID: taskID, directory: directory))
-            allowed = true
-            stage = "resume retained task"
-            let resumed = try await executor.execute(taskID: taskID, prompt: prompt, progress: { _ in })
-            guard case .completed? = resumed else { await transport.cancelAll(); return XCTFail("Resume must finish the retained task") }
-            stage = "replay completed task"
-            let replayed = try await executor.execute(taskID: taskID, prompt: prompt, progress: { _ in })
-            guard case .completed? = replayed else { await transport.cancelAll(); return XCTFail("Replay must retain completion") }
-            await transport.cancelAll()
-            stage = "observe final fields"
-            let finished = try await values()
-            XCTAssertEqual(finished, ["A!", "B!", "keep"])
-            XCTAssertEqual(edits, 2)
-            let requests = model.requests
-            XCTAssertEqual(requests.map(\.path), ["/apply-template", "/tokenize", "/v1/chat/completions"],
-                "Resume and completed replay cannot replan or repeat an HTTP request")
-            XCTAssertEqual(requests.first?.body, requests.last?.body)
-            XCTAssertEqual(pages.count("/form"), 1)
-        } catch {
-            print("HTTP_BROWSER_FAILURE stage=\(stage) error=\(String(reflecting: error))")
-            throw error
         }
     }
 

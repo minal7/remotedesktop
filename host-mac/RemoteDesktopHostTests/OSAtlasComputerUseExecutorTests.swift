@@ -551,6 +551,10 @@ final class OSAtlasLlamaRuntimeTests: XCTestCase {
             XCTAssertEqual(proposal.action, .scrollAt(horizontal: false, pixels: -240, point: .init(x: 250, y: 500)))
             do { _ = try await runtime.proposeFara(endpoint: endpoint, input: input); XCTFail("Fara protocol reached Holo") }
             catch { XCTAssertEqual(error as? OSAtlasLlamaRuntimeError, .inactiveSession) }
+            let stillActive = try await runtime.activateHolo(holoInputs)
+            XCTAssertEqual(stillActive, endpoint)
+            let stillActiveConfigurations = await launcher.configurations()
+            XCTAssertEqual(stillActiveConfigurations.count, 2)
             let request = try XCTUnwrap(transport.recordedCompletionRequests().first)
             let body = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(request.httpBody)) as? [String: Any])
             XCTAssertEqual(body["model"] as? String, ComputerUseHoloModel.modelAlias)
@@ -693,7 +697,7 @@ final class OSAtlasLlamaRuntimeTests: XCTestCase {
             displayName: "Selected Presentation.pptx", contentTypeIdentifier: "org.openxmlformats.presentationml.presentation",
             fileExtension: "pptx", byteCount: 1_024, modifiedAt: Date(timeIntervalSince1970: 10),
             createdAt: nil, addedToDirectoryAt: nil)
-        let catalog = ComputerUseMCPBrowserStepPlanner.LocalFileContext(query: .init(fileKind: .presentation),
+        let catalog = ComputerUseLocalFileContext(query: .init(fileKind: .presentation),
             page: .init(candidates: [candidate], isComplete: true, nextCursor: nil,
                 hasTiedSortValues: false, hasMissingSortValues: false), selectedCandidate: candidate)
         let directive = ComputerUseFaraModel.WorkerDirective(objective: "Continue the upload task",
@@ -2876,31 +2880,27 @@ final class OSAtlasLlamaRuntimeTests: XCTestCase {
 }
 
 extension OSAtlasLlamaRuntimeTests {
-    func testAgentActionUsesNativeRequiredToolGrammarAndImageRequest() async throws {
+    func testAgentActionUsesFaraPlainChatAndImageRequest() async throws {
         let events = RuntimeEventLog(), launcher = FakeLlamaLauncher(events: events)
-        let response = Data(#"{"model":"fara-browser-v1","choices":[{"finish_reason":"tool_calls","message":{"role":"assistant","content":"","tool_calls":[{"id":"call-1","type":"function","function":{"name":"computer_use","arguments":"{\"type\":\"done\",\"answer\":\"Completed.\"}"}}]}}]}"#.utf8)
+        let nativeCompletion = #"<tool_call>{"name":"computer_use","arguments":{"action":"wait","time":0}}</tool_call>"#
+        let response = try JSONSerialization.data(withJSONObject: ["model": ComputerUseFaraRuntimeInputs.modelAlias,
+            "choices": [["finish_reason": "stop", "message": ["role": "assistant", "content": nativeCompletion]]]])
         let transport = FakeTransportMaker(events: events, completionDataResponses: [response])
         let runtime = textRuntime(launcher, transports: transport)
         do {
             let endpoint = try await runtime.activateFara(faraInputs)
             let input = try agentRuntimeRequestInput()
             let completion = try await runtime.completeAgentAction(endpoint: endpoint, input: input)
-            XCTAssertEqual(completion, String(decoding: response, as: UTF8.self))
+            XCTAssertEqual(completion, nativeCompletion)
             let request = try XCTUnwrap(transport.recordedCompletionRequests().first)
             XCTAssertEqual(transport.recordedTokenCountRequests(), [request])
             XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer \(endpoint.bearerToken)")
             let body = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(request.httpBody)) as? [String: Any])
             XCTAssertEqual(body["model"] as? String, ComputerUseFaraRuntimeInputs.modelAlias)
-            XCTAssertEqual(body["tool_choice"] as? String, "required")
-            XCTAssertEqual(body["parallel_tool_calls"] as? Bool, false)
+            XCTAssertNil(body["tool_choice"])
+            XCTAssertNil(body["parallel_tool_calls"])
             XCTAssertNil(body["response_format"])
-            let tools = try XCTUnwrap(body["tools"] as? [[String: Any]])
-            XCTAssertEqual(tools.count, 1)
-            let function = try XCTUnwrap(tools[0]["function"] as? [String: Any])
-            XCTAssertEqual(function["name"] as? String, "computer_use")
-            let parameters = try XCTUnwrap(function["parameters"])
-            XCTAssertEqual(try JSONSerialization.jsonObject(with: JSONSerialization.data(withJSONObject: parameters)) as? NSDictionary,
-                           try JSONSerialization.jsonObject(with: input.actionSchema) as? NSDictionary)
+            XCTAssertNil(body["tools"])
             let user = try XCTUnwrap((body["messages"] as? [[String: Any]])?[1]["content"] as? [[String: Any]])
             XCTAssertEqual(user.map { $0["type"] as? String ?? "" }, ["text", "image_url"])
             let launchConfigurations = await launcher.configurations()

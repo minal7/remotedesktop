@@ -79,18 +79,17 @@ final class ComputerUseNativeTextRecoveryTests: XCTestCase {
         }
     }
 
-    func testReplacementExecutorRejectsExistingHistoryBeforeDiscoveryProviderOrPlanning() async throws {
+    func testReplacementExecutorRejectsExistingHistoryBeforeDiscoveryOrPlanning() async throws {
         let fixture = RecoveryFixture()
         defer { fixture.close() }
         _ = try await fixture.run(fixture.executor())
-        var providerCalls = 0
         for corrupt in [false, true] {
             if corrupt { try Data("invalid journal".utf8).write(to: fixture.file) }
-            let replacement = fixture.executor(browserProvider: { _ in providerCalls += 1; return nil })
+            let replacement = fixture.executor()
             do { _ = try await fixture.run(replacement); XCTFail("Journal presence requires retained authority") }
             catch { XCTAssertEqual(error as? ComputerUseTextTaskError, .journalMismatch) }
         }
-        XCTAssertEqual(providerCalls, 0); XCTAssertEqual(fixture.fields.discoveries, 1)
+        XCTAssertEqual(fixture.fields.discoveries, 1)
         XCTAssertEqual(fixture.planner.goals.count, 1); XCTAssertEqual(fixture.edits, ["Paris"])
     }
 
@@ -175,12 +174,12 @@ private final class RecoveryFixture {
     let fields = RecoveryFields(), planner = RecoveryPlanner()
     var edits: [String] = [], stores = 0, writes = 0, failStore: Int?, failWrite: Int?
     var file: URL { directory.appendingPathComponent(ComputerUseTextTaskContract.digest(taskID) + ".json") }
-    func executor(browserProvider: (@MainActor (String) async throws -> ComputerUseBrowserTextTarget?)? = nil) -> ComputerUseNativeTextExecutor {
+    func executor() -> ComputerUseNativeTextExecutor {
         ComputerUseNativeTextExecutor(injector: InputInjector(), mayAct: { true }, journalDirectory: directory,
             planner: planner, editOverride: { [self] edit, expected in
                 XCTAssertEqual(fields.snapshot(targetID: edit.targetID), expected)
                 edits.append(edit.text); fields.value = edit.text
-            }, browserTargetProvider: browserProvider, nativeTarget: fields, planningWorker: ComputerUsePlanningWorker(),
+            }, nativeTarget: fields, planningWorker: ComputerUsePlanningWorker(),
             makeJournalStore: { [self] directory in
                 stores += 1
                 if stores == failStore { throw ComputerUseTaskJournalStore.StoreError.unavailable }

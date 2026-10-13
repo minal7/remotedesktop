@@ -453,152 +453,12 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
         return result
     }
 
-    @MainActor private final class DefaultBrowserFixtureState {
-        let app: ComputerUseApplicationIdentity
-        var windows: [ComputerUseDefaultBrowserSession.Window]
-        var focusedID = "existing"
-        var inputCount = 0
-        var fileOpenPanel: ComputerUseDefaultBrowserSession.FileOpenPanel?
-        init() {
-            let path = "/fixture/Browser.app"
-            let code = ComputerUseApplicationCodeIdentity(authority: .runningCode, bundleIdentifier: "org.example.Browser",
-                canonicalBundlePath: path, canonicalExecutablePath: "\(path)/Contents/MacOS/Browser",
-                designatedRequirement: "fixture", teamIdentifier: "TEST", platformIdentifier: nil)
-            app = try! XCTUnwrap(ComputerUseApplicationIdentity(bundleIdentifier: "org.example.Browser",
-                processIdentifier: 91, launchGeneration: 1, codeIdentity: code))
-            windows = [Self.window("existing", pid: 91, hash: 1, app: app)]
-        }
-        static func window(_ id: String, pid: pid_t, hash: CFHashCode,
-            app: ComputerUseApplicationIdentity) -> ComputerUseDefaultBrowserSession.Window {
-            .init(id: id, application: app, accessibilityElement: AXUIElementCreateApplication(pid + pid_t(hash)),
-                identity: .init(applicationProcessIdentifier: pid, accessibilityWindowHash: hash,
-                    bounds: CGRect(x: 0, y: 0, width: 640, height: 480)))
-        }
-        func session(_ journal: URL) throws -> ComputerUseDefaultBrowserSession {
-            let handler = ComputerUseDefaultBrowserTarget.Handler(bundleURL: URL(fileURLWithPath: "/fixture/Browser.app"),
-                bundleIdentifier: "org.example.Browser")
-            return try .init(journalDirectory: journal, resolveHandler: { handler },
-                launchApplication: { _, beforeOpen in try beforeOpen(); return self.app },
-                captureWindows: { app in
-                    guard app == self.app else { throw ComputerUseDefaultBrowserSession.Failure.targetLost }
-                    return .init(application: app, windows: self.windows, focusedWindowID: self.focusedID,
-                        hasSheets: self.fileOpenPanel != nil, fileOpenPanel: self.fileOpenPanel)
-                })
-        }
-    }
-
-    func testDefaultBrowserFileChoicesStayTaskBoundAndMetadataSurvivesScreenChanges() async throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
-        let downloads = root.appendingPathComponent("Downloads", isDirectory: true)
-        try FileManager.default.createDirectory(at: downloads, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: root) }
-        try Data("alpha".utf8).write(to: downloads.appendingPathComponent("Alpha.pdf"))
-        try Data("bravo".utf8).write(to: downloads.appendingPathComponent("Bravo.pdf"))
-
-        let state = DefaultBrowserFixtureState()
-        var captures = 0, screenColors: [Bool] = []
-        let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { true },
-            approvalTargetProvider: { _ in .init(context: "fixture", applicationID: state.app.bundleIdentifier,
-                accessibilityIdentity: "fixture-window") },
-            actionPerformer: { action in
-                guard case .key(let usage, let modifiers) = action, usage == 0x11, modifiers == 8 else {
-                    throw ComputerUseDefaultBrowserSession.Failure.interrupted
-                }
-                state.inputCount += 1
-                let created = DefaultBrowserFixtureState.window("created", pid: 91, hash: 2, app: state.app)
-                state.windows.append(created); state.focusedID = created.id
-            }, screenProvider: {
-                captures += 1
-                let isBlack = captures.isMultiple(of: 2)
-                screenColors.append(isBlack)
-                let color = isBlack ? CIColor.black : CIColor.white
-                return .init(image: CIImage(color: color).cropped(to: CGRect(x: 0, y: 0, width: 640, height: 480)),
-                    displayBounds: CGRect(x: 0, y: 0, width: 640, height: 480),
-                    frontmostWindowBounds: CGRect(x: 0, y: 0, width: 640, height: 480))
-            }, authenticationContextProvider: { nil }, screenCaptureConsentContextProvider: { nil },
-            frontmostApplicationIdentityProvider: { state.app }, frontmostApplicationProvider: { "Browser" })
-        let session = try state.session(root.appendingPathComponent("session"))
-        let taskID = "file-choice-\(UUID().uuidString)", goal = "Ask me which PDF to supply to the current page."
-        let window = try await session.ensure(taskID: taskID, goal: goal, tools: tools)
-        let panelElement = AXUIElementCreateApplication(201)
-        state.fileOpenPanel = .init(parentWindowID: window.id, parentWindowElement: window.accessibilityElement,
-            accessibilityElement: panelElement, bounds: CGRect(x: 20, y: 20, width: 600, height: 400),
-            isFocused: true, goToFolderBounds: nil, pathTextFieldElement: nil, selectedFileURLs: [],
-            primaryActionElement: panelElement, primaryActionBounds: CGRect(x: 500, y: 360, width: 80, height: 30),
-            primaryActionEnabled: false)
-        var calls = 0, nativeCalls = 0, candidateIDs: [String] = [], sawOriginalGoal = false
-        let executor = try ComputerUseDefaultBrowserExecutor(journalDirectory: root.appendingPathComponent("executor"),
-            session: session, propose: { input in
-                calls += 1
-                XCTAssertEqual(input.goal, goal)
-                XCTAssertTrue(input.history.isEmpty, "Native catalog plans must not enter Fara's action history")
-                let endpoint = OSAtlasLlamaEndpoint(generation: 1, variant: nil,
-                    baseURL: URL(string: "http://127.0.0.1:43123")!, bearerToken: "fixture")
-                let request = try ComputerUseFaraModel.makeRequest(endpoint: endpoint, input: input)
-                let body = try XCTUnwrap(request.httpBody)
-                let payload = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])
-                let messages = try XCTUnwrap(payload["messages"] as? [[String: Any]])
-                let userContent = try XCTUnwrap(messages.last?["content"] as? [[String: Any]])
-                let observation = try XCTUnwrap(userContent.compactMap { $0["text"] as? String }
-                    .first(where: { $0.contains("\"localFiles\"") }))
-                let fileLine = try XCTUnwrap(observation.components(separatedBy: "\n")
-                    .first(where: { $0.contains("\"localFiles\"") }))
-                let filePayload = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(fileLine.utf8)) as? [String: Any])
-                let localFiles = try XCTUnwrap(filePayload["localFiles"] as? [String: Any])
-                let panel = try XCTUnwrap(localFiles["nativeOpenPanelSelection"] as? [String: Any],
-                    "Current native picker state must be in the current user observation, separate from the catalog choice")
-                XCTAssertEqual(panel["candidateSelected"] as? Bool, true)
-                XCTAssertEqual(panel["primaryActionEnabled"] as? Bool, true)
-                sawOriginalGoal = input.goal == goal && input.localFileCatalog?.selectedCandidate?.id == candidateIDs.first
-                return .init(response: "handoff", decision: .handoff("Ready for the next step."))
-            }, nativeFilePlanner: { input in
-                nativeCalls += 1
-                XCTAssertEqual(input.goal, goal)
-                XCTAssertEqual(input.surface, .desktop)
-                XCTAssertNil(input.selectedLocalFilePath)
-                if nativeCalls == 1 {
-                    return .init(kind: .localFileOperation, reference: "", text: "", localFileOperation: .listFiles(query: .init(), cursor: nil))
-                }
-                candidateIDs = try XCTUnwrap(input.localFileCatalog?.page.candidates.map(\.id))
-                return .init(kind: .localFileOperation, reference: "", text: "", localFileOperation: .askFile(question: "Which PDF?", candidateIDs: candidateIDs))
-            }, localFileCatalogFactory: { id in
-                try ComputerUseLocalFileCatalog(taskID: id, approvedDirectory: downloads)
-            })
-        let first = try await executor.execute(taskID: taskID, prompt: goal, trustedUserPrompt: goal, tools: tools, progress: { _ in })
-        guard case .clarificationRequired = first else { return XCTFail("Expected a typed file choice") }
-        XCTAssertEqual(nativeCalls, 2)
-        let resumed = try await executor.execute(taskID: taskID, prompt: goal, trustedUserPrompt: goal, tools: tools, progress: { _ in })
-        guard case .clarificationRequired = resumed else { return XCTFail("Resume must preserve the pending choice") }
-        XCTAssertEqual(calls, 0)
-        let clarification = try XCTUnwrap(executor.clarification(taskID: taskID))
-        let choice = try XCTUnwrap(clarification.choices?.first)
-        // The user has also selected that row in the native chooser.
-        state.fileOpenPanel = .init(parentWindowID: window.id, parentWindowElement: window.accessibilityElement,
-            accessibilityElement: panelElement, bounds: CGRect(x: 20, y: 20, width: 600, height: 400),
-            isFocused: true, goToFolderBounds: nil, pathTextFieldElement: nil,
-            selectedFileURLs: [downloads.appendingPathComponent(choice.label)],
-            primaryActionElement: panelElement, primaryActionBounds: CGRect(x: 500, y: 360, width: 80, height: 30),
-            primaryActionEnabled: true)
-        let result = try await executor.continueClarification(taskID: taskID + "-choice", originatingTaskID: taskID,
-            goal: clarification.goal, selectedChoice: choice, progress: { _ in })
-        XCTAssertTrue(sawOriginalGoal)
-        XCTAssertEqual(state.inputCount, 1, "Only session creation inputs; metadata and choice dispatch no native effects")
-        XCTAssertEqual(calls, 1)
-        XCTAssertEqual(Set(screenColors).count, 2, "Fresh captures changed while metadata-only operations continued")
-        if case .completed = result { XCTFail("File selection cannot establish remote completion") }
-        try FileManager.default.removeItem(at: downloads.appendingPathComponent(choice.label))
-        let staleReplay = try await executor.continueClarification(taskID: taskID + "-choice", originatingTaskID: taskID,
-            goal: clarification.goal, selectedChoice: choice, progress: { _ in })
-        XCTAssertEqual(calls, 1, "Replaying after the catalog file changes must fail before another proposal")
-        guard case .userInterventionRequired = staleReplay else { XCTFail("A stale candidate must stop the task"); return }
-    }
-
     func testCancellingAsyncLocalFileOperationDoesNotRequestAnotherProposal() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
         let enteredHandler = expectation(description: "async file handler entered")
         var proposals = 0
-        let operation = ComputerUseMCPBrowserStepPlanner.Plan.LocalFileOperation.listFiles(query: .init(), cursor: nil)
+        let operation = ComputerUseLocalFileOperation.listFiles(query: .init(), cursor: nil)
         let executor = try ComputerUseDesktopExecutor(journalDirectory: directory, propose: { _ in
             proposals += 1
             return .init(response: "list files", action: .localFileOperation(operation))
@@ -800,77 +660,6 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
             panel: panel(selected: [candidate]), candidateURL: nil))
     }
 
-    func testNativeFilePlannerTakesOverOnlyForAnObservedUnselectedPicker() async throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
-        let downloads = root.appendingPathComponent("Downloads", isDirectory: true)
-        try FileManager.default.createDirectory(at: downloads, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: root) }
-        try Data("alpha".utf8).write(to: downloads.appendingPathComponent("Alpha.pdf"))
-        try Data("bravo".utf8).write(to: downloads.appendingPathComponent("Bravo.pdf"))
-        let state = DefaultBrowserFixtureState()
-        let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { true },
-            approvalTargetProvider: { _ in .init(context: "fixture", applicationID: state.app.bundleIdentifier,
-                accessibilityIdentity: "fixture-window") },
-            actionPerformer: { action in
-                guard case .key(let usage, let modifiers) = action, usage == 0x11, modifiers == 8 else {
-                    throw ComputerUseDefaultBrowserSession.Failure.interrupted
-                }
-                state.inputCount += 1
-                let created = DefaultBrowserFixtureState.window("created", pid: 91, hash: 2, app: state.app)
-                state.windows.append(created); state.focusedID = created.id
-            }, screenProvider: {
-                .init(image: CIImage(color: .black).cropped(to: CGRect(x: 0, y: 0, width: 640, height: 480)),
-                    displayBounds: CGRect(x: 0, y: 0, width: 640, height: 480),
-                    frontmostWindowBounds: CGRect(x: 0, y: 0, width: 640, height: 480))
-            }, authenticationContextProvider: { nil }, screenCaptureConsentContextProvider: { nil },
-            frontmostApplicationIdentityProvider: { state.app }, frontmostApplicationProvider: { "Browser" })
-        let session = try state.session(root.appendingPathComponent("session"))
-        let taskID = "native-file-choice-\(UUID().uuidString)", goal = "Supply one of these files to the open page."
-        let window = try await session.ensure(taskID: taskID, goal: goal, tools: tools)
-        let panelElement = AXUIElementCreateApplication(201)
-        state.fileOpenPanel = .init(parentWindowID: window.id, parentWindowElement: window.accessibilityElement,
-            accessibilityElement: panelElement, bounds: CGRect(x: 20, y: 20, width: 600, height: 400),
-            isFocused: true, goToFolderBounds: nil, pathTextFieldElement: nil, selectedFileURLs: [],
-            primaryActionElement: panelElement, primaryActionBounds: CGRect(x: 500, y: 360, width: 80, height: 30),
-            primaryActionEnabled: false)
-        var visualCalls = 0, nativeCalls = 0
-        let preparedPicker = state.fileOpenPanel
-        state.fileOpenPanel = nil
-        let executor = try ComputerUseDefaultBrowserExecutor(journalDirectory: root.appendingPathComponent("executor"),
-            session: session, propose: { input in
-                visualCalls += 1
-                XCTAssertNil(state.fileOpenPanel, "Native planner takes over once the picker opens")
-                XCTAssertEqual(input.goal, goal)
-                XCTAssertEqual(input.localFileCatalog?.inventoryState, .notQueried,
-                    "Advertise host file selection before the browser model chooses its next step")
-                XCTAssertNil(input.selectedLocalFilePath)
-                XCTAssertNil(input.nativeOpenPanelSelection, "No current panel means no current chooser-selection observation")
-                return .init(response: "", decision: .handoff("Open the website's file chooser."))
-            }, nativeFilePlanner: { input in
-                nativeCalls += 1
-                XCTAssertEqual(input.goal, goal)
-                XCTAssertEqual(input.surface, .desktop)
-                XCTAssertNil(input.selectedLocalFilePath)
-                if nativeCalls == 1 {
-                    return .init(kind: .localFileOperation, reference: "", text: "", localFileOperation: .listFiles(query: .init(), cursor: nil))
-                }
-                let ids = try XCTUnwrap(input.localFileCatalog?.page.candidates.map(\.id))
-                return .init(kind: .localFileOperation, reference: "", text: "", localFileOperation: .askFile(question: "Which file?", candidateIDs: ids))
-            }, localFileCatalogFactory: { id in
-                try ComputerUseLocalFileCatalog(taskID: id, approvedDirectory: downloads)
-            })
-        _ = try await executor.execute(taskID: taskID, prompt: goal, trustedUserPrompt: goal,
-            tools: tools, progress: { _ in })
-        XCTAssertEqual(nativeCalls, 0)
-        state.fileOpenPanel = preparedPicker
-        let result = try await executor.execute(taskID: taskID, prompt: goal, trustedUserPrompt: goal,
-            tools: tools, progress: { _ in })
-        guard case .clarificationRequired = result else { return XCTFail("Expected host-owned file choices") }
-        XCTAssertEqual(nativeCalls, 2)
-        XCTAssertEqual(visualCalls, 1)
-        XCTAssertEqual(state.inputCount, 1, "File catalog and clarification require no native input")
-    }
-
     func testNativeFilePickerUsesResolvedPathAndStopsBeforeUpload() {
         let element = AXUIElementCreateSystemWide()
         let candidate = URL(fileURLWithPath: "/tmp/Chosen résumé.pdf")
@@ -1027,59 +816,6 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
             .init(expected: "A, B and C.", save: false))
     }
 
-    func testSignedHostMacToolsStartAndPrepareApprovalWithoutModels() async throws {
-        guard ProcessInfo.processInfo.environment["RUN_SIGNED_INDEPENDENT_MAC_TOOLS_ACCEPTANCE"] == "1" else {
-            throw XCTSkip("Opt-in signed helper installation and real MCP protocol; no desktop or Mail effects")
-        }
-        guard Bundle.main.bundleURL.pathExtension == "app" else {
-            throw NativeTextFixtureFailure.unexpectedOutcome("Signed app-hosted test required")
-        }
-        // Install the real pinned helper in an isolated root, using the actual
-        // download, checksum, signature and notarization checks. Neither model
-        // package or inference runtime is present in this composition.
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("MacToolsIntegration-\(UUID().uuidString)")
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false,
-            attributes: [.posixPermissions: 0o700])
-        defer { try? FileManager.default.removeItem(at: directory) }
-        let installer = MacControlMCPInstaller(rootDirectory: directory.appendingPathComponent("helper"))
-        let receipt = try await installer.install { update in
-            FileHandle.standardError.write(Data("Signed Mac tools: \(update.phase.rawValue)\n".utf8))
-        }
-        let installed = await installer.currentInstallation()
-        XCTAssertEqual(installed, receipt)
-        let pool = MCPClientPool(mutationLedger: MCPFileMutationCallLedger(fileURL: directory.appendingPathComponent("ledger.json")),
-            sessionFactory: { binary, generation in
-                MCPClientSession(validatedBinary: binary, processGeneration: generation,
-                    stateDirectory: directory.appendingPathComponent("state"))
-            })
-        do {
-            let executor = try await MCPFirstComputerUseExecutor.load(binaryURL: URL(fileURLWithPath: receipt.binaryPath),
-                visualFallback: ComputerUseDeferredVisualExecutor(), planner: IntegrationUnavailableMCPPlanner(), clientPool: pool)
-            XCTAssertTrue(executor.isReady)
-            XCTAssertTrue(executor.hasAdditionalSetup)
-            let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { false })
-            let prompt = "Draft an email to codex-acceptance@example.invalid with subject \"Status\" saying Everything is on schedule."
-            let result = try await executor.execute(taskID: "signed-no-models", modelPrompt: prompt,
-                currentUserPrompt: prompt, conversation: [], tools: tools, progress: { _ in })
-            guard case .mcpApprovalRequired(let prepared) = result else {
-                throw NativeTextFixtureFailure.unexpectedOutcome("The exact draft must stop at approval without effects")
-            }
-            XCTAssertEqual(prepared.call.toolName, RemoteDesktopMailMCP.toolName)
-            XCTAssertEqual(prepared.call.arguments["to"], .string("codex-acceptance@example.invalid"))
-            XCTAssertEqual(prepared.call.arguments["subject"], .string("Status"))
-            XCTAssertEqual(prepared.call.arguments["body"], .string("Everything is on schedule."))
-            XCTAssertEqual(prepared.call.arguments["send_now"], .bool(false))
-            // Never approve or call the Mail tool. Pool teardown also discards
-            // the prepared fingerprint and awaits the real sidecar's exit.
-            await pool.cancelAll()
-            do { _ = try await pool.allowedTools(); XCTFail("The sidecar must be stopped") }
-            catch MCPClientError.notRunning { }
-        } catch {
-            await pool.cancelAll()
-            throw error
-        }
-    }
-
     func testOptInNativeDesktopCaptureContainsTheFrontmostFixture() async throws {
         try await runFixture(browser: false, captureOnly: true)
     }
@@ -1111,24 +847,6 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
         try await runRealTextEditTask(actualModel: false, captureOnly: true)
     }
 
-    func testOptInRealTextEditReadUsesMCPBeforeModelFallback() async throws {
-        try await runRealTextEditTask(actualModel: false, mcpReadOnly: true)
-    }
-
-    func testOptInRealTextEditMCPReadPreservesLongUnicodeAndSelection() async throws {
-        let content = "Unicode notes\n" + String(repeating: "Zürich → 東京 👩🏽‍💻 e\u{301}\n", count: 70) + "End of document.\n"
-        try await runRealTextEditTask(actualModel: false, mcpReadOnly: true, mcpReadText: content,
-            mcpReadPrompt: "Show me all the contents in the current document.", mcpReadSelection: NSRange(location: 0, length: 7))
-    }
-
-    func testOptInRealTextEditMCPEditAndSaveCapability() async throws {
-        try await runRealTextEditTask(actualModel: false, mcpWriteProbe: true)
-    }
-
-    func testOptInRealTextEditNaturalLanguageTaskUsesMCPThroughHostManager() async throws {
-        try await runRealTextEditTask(actualModel: false, mcpHostTask: true)
-    }
-
     func testOptInRealTextEditNaturalLanguageTaskUsesManagedHostSession() async throws {
         try await runRealTextEditTask(actualModel: false, managedHostSession: true)
     }
@@ -1137,44 +855,13 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
         try await runRealTextEditTask(actualModel: false, managedHostSession: true, managedMenuHandoff: true)
     }
 
-    func testOptInRealTextEditMCPAppendAndSaveUsesCurrentDocument() async throws {
-        try await runRealTextEditTask(actualModel: false, mcpHostTask: true, mcpTask: (
-            prompt: "Append \"Approved by the team.\" to the current document, save it, and leave it open.",
-            original: "Release notes\n\n", expected: "Release notes\n\nApproved by the team."))
-    }
-
-    func testOptInRealTextEditMCPRejectsAnEditChangedDuringApproval() async throws {
-        try await runRealTextEditTask(actualModel: false, mcpHostTask: true, rejectStaleMCPEdit: true)
-    }
-
-    func testOptInRealTextEditMCPResumesBeforeFirstApproval() async throws {
-        try await runRealTextEditTask(actualModel: false, mcpHostTask: true, mcpHandoffBeforeTool: "set_element_attribute")
-    }
-
-    func testOptInRealTextEditMCPResumesBetweenEditAndSave() async throws {
-        try await runRealTextEditTask(actualModel: false, mcpHostTask: true, mcpHandoffBeforeTool: "press_key")
-    }
-
-    func testOptInRealTextEditMCPPreservesChangesDuringHandoffBeforeEdit() async throws {
-        try await runRealTextEditTask(actualModel: false, mcpHostTask: true,
-            mcpHandoffBeforeTool: "set_element_attribute", mcpChangeDuringHandoff: true)
-    }
-
-    func testOptInRealTextEditMCPPreservesChangesDuringHandoffBeforeSave() async throws {
-        try await runRealTextEditTask(actualModel: false, mcpHostTask: true,
-            mcpHandoffBeforeTool: "press_key", mcpChangeDuringHandoff: true)
-    }
-
     func testOptInHoloEditsAndSavesUnicodeInRealTextEdit() async throws {
         guard ProcessInfo.processInfo.environment["RUN_HOLO_TEXTEDIT_ACCEPTANCE"] == "1" else { throw XCTSkip("Opt-in Holo in real TextEdit") }
         try await runRealTextEditTask(actualModel: true)
     }
 
-    private func runRealTextEditTask(actualModel: Bool, captureOnly: Bool = false, mcpReadOnly: Bool = false,
-        mcpReadText: String? = nil, mcpReadPrompt: String? = nil, mcpReadSelection: NSRange? = nil,
-        mcpWriteProbe: Bool = false, mcpHostTask: Bool = false, managedHostSession: Bool = false, managedMenuHandoff: Bool = false,
-        mcpTask: (prompt: String, original: String, expected: String)? = nil, rejectStaleMCPEdit: Bool = false,
-        mcpHandoffBeforeTool: String? = nil, mcpChangeDuringHandoff: Bool = false) async throws {
+    private func runRealTextEditTask(actualModel: Bool, captureOnly: Bool = false,
+        managedHostSession: Bool = false, managedMenuHandoff: Bool = false) async throws {
         let environment = ProcessInfo.processInfo.environment
         guard environment["RUN_REAL_TEXTEDIT_ACCEPTANCE"] == "1" else { throw XCTSkip("Opt-in real TextEdit with a disposable document") }
         guard AXIsProcessTrusted() else { return XCTFail("Accessibility permission is required") }
@@ -1185,9 +872,9 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("NativeTextEdit-" + UUID().uuidString)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
         let document = directory.appendingPathComponent("Travel notes.txt")
-        let original = mcpTask?.original ?? mcpReadText ?? "Meeting notes\nRoute: Seattle\nStatus: draft\n"
-        let expected = mcpTask?.expected ?? "Meeting notes\nRoute: Zürich → 東京\nStatus: draft\n"
-        let goal = mcpTask?.prompt ?? "In the open TextEdit document, replace Seattle with Zürich → 東京. Keep all other text and line breaks unchanged, save the document, and leave its window open."
+        let original = "Meeting notes\nRoute: Seattle\nStatus: draft\n"
+        let expected = "Meeting notes\nRoute: Zürich → 東京\nStatus: draft\n"
+        let goal = "In the open TextEdit document, replace Seattle with Zürich → 東京. Keep all other text and line breaks unchanged, save the document, and leave its window open."
         try Data(original.utf8).write(to: document, options: .withoutOverwriting)
         let previousApp = NSWorkspace.shared.frontmostApplication
         let previousInstances = Set(NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.TextEdit").map(\.processIdentifier))
@@ -1230,29 +917,6 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
             if managedHostSession {
                 try await runManagedTextEditHostSession(tools: tools, app: app, goal: goal,
                     expected: expected, document: document, output: output, menuHandoff: managedMenuHandoff)
-                return
-            }
-            if mcpHostTask {
-                try await runTextEditMCPHostTask(tools: tools, app: app, goal: goal, expected: expected,
-                    document: document, output: output, rejectStaleEdit: rejectStaleMCPEdit, handoffBeforeTool: mcpHandoffBeforeTool,
-                    changeDuringHandoff: mcpChangeDuringHandoff)
-                return
-            }
-            if mcpWriteProbe {
-                try await probeTextEditMCPWrite(tools: tools, app: app, original: original, expected: expected,
-                    document: document, output: output)
-                return
-            }
-            if mcpReadOnly {
-                if let mcpReadSelection {
-                    var focused: CFTypeRef?
-                    guard AXUIElementCopyAttributeValue(root, kAXFocusedUIElementAttribute as CFString, &focused) == .success,
-                          let focused, CFGetTypeID(focused) == AXUIElementGetTypeID() else { throw NativeTextFixtureFailure.unexpectedOutcome("Missing owned editor") }
-                    var range = CFRange(location: mcpReadSelection.location, length: mcpReadSelection.length)
-                    let axRange = try XCTUnwrap(AXValueCreate(.cfRange, &range))
-                    XCTAssertEqual(AXUIElementSetAttributeValue(unsafeBitCast(focused, to: AXUIElement.self), kAXSelectedTextRangeAttribute as CFString, axRange), .success)
-                }
-                try await readTextEditUsingMacTools(tools: tools, app: app, original: original, document: document, output: output, prompt: mcpReadPrompt)
                 return
             }
             let initialEditor = try XCTUnwrap(tools.nativeFocusedEditorObservation())
@@ -1515,364 +1179,6 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
         XCTAssertTrue(try inspector.matchingProcesses(for: runtime).isEmpty)
     }
 
-    private func runTextEditMCPHostTask(tools: ComputerUseHostTools, app: NSRunningApplication,
-        goal: String, expected: String, document: URL, output: URL, rejectStaleEdit: Bool = false,
-        handoffBeforeTool: String? = nil, changeDuringHandoff: Bool = false) async throws {
-        let started = Date(), taskID = "real-textedit-mcp-task"
-        let helper = URL(fileURLWithPath: try XCTUnwrap(ProcessInfo.processInfo.environment["MAC_CONTROL_HELPER_PATH"]))
-        let base = MCPClientPool(mutationLedger: MCPFileMutationCallLedger(fileURL: output.appendingPathComponent("mcp-mutations.json")),
-            sessionFactory: { binary, generation in MCPClientSession(validatedBinary: binary, processGeneration: generation,
-                stateDirectory: output.appendingPathComponent("helper-state")) })
-        let pool = NativeMCPTaskObservedPool(base: base)
-        let proposals = NativeMCPDocumentProposalLog()
-        let channel = NativeMCPTaskChannel()
-        let ledger = ComputerUseTaskLedger(fileURL: output.appendingPathComponent("host-ledger.json"))
-        var fallbackCalls = 0, failure: Error?, terminal: ComputerUseTaskUpdate?
-        var approvals = Set<String>(), manager: HostComputerUseManager?
-        var savedExact = false, editorExact = false
-        let externalEdit = "Edited independently during approval.\n"
-        var externalEditPreserved = false
-        var didHandoff = false, helperJoinedBeforeResume = false, staleApprovalIgnored = false
-        var invalidatedResponse: ComputerUseEnvelope?, invalidatedCall: MCPToolCall?
-        var staleApprovalAfterResumeIgnored = false
-        var selectionChangedDuringHandoff = false
-        do {
-            let fallback = ComputerUseCapabilityExecutor(nativeExecution: { _, _, _ in
-                fallbackCalls += 1
-                return .unableToComplete("Native document task reached model fallback")
-            })
-            let executor = try await MCPFirstComputerUseExecutor.load(binaryURL: helper, visualFallback: fallback,
-                clientPool: pool, planningTimeout: 15, documentPlanner: .init(inspectProposal: { proposals.append($0) }))
-            let host = HostComputerUseManager(experimentalEnabled: { true }, injector: InputInjector(), executor: executor, taskLedger: ledger,
-                allowsExternalServices: false, channelFactory: { _ in channel })
-            manager = host
-            host.authorizePeer(senderID: "TEXTEDIT-TEST")
-            let request = ComputerUseEnvelope(id: taskID, senderID: "TEXTEDIT-TEST", targetID: "HOST-ID",
-                pairingCode: "123456", sessionID: "TEXTEDIT-SESSION", kind: .prompt,
-                body: try ComputerUsePromptRequest(prompt: goal, supportsApprovedActionEvidence: true).encodedBody())
-            XCTAssertTrue(host.handle(request, channel: channel))
-            let deadline = ContinuousClock.now.advanced(by: .seconds(25))
-            while ContinuousClock.now < deadline {
-                let messages = await channel.messages()
-                if let message = messages.last(where: { $0.kind == .assistant }) {
-                    terminal = try ComputerUseTaskUpdate.decodeBody(message.body)
-                    break
-                }
-                for message in messages where message.kind == .approvalRequest {
-                    let approval = try ComputerUseApprovalRequest.decodeBody(message.body)
-                    guard approvals.insert(approval.requestID).inserted else { continue }
-                    let pendingCall = await pool.latestPrepared()
-                    let call = try XCTUnwrap(pendingCall)
-                    let snapshot = try XCTUnwrap(tools.mcpFocusedTextSnapshot())
-                    guard snapshot.window.applicationProcessIdentifier == app.processIdentifier,
-                          snapshot.documentIdentity.flatMap(URL.init(string:))?.standardizedFileURL == document.standardizedFileURL else {
-                        throw NativeTextFixtureFailure.unexpectedOutcome("Approval no longer targets the owned document")
-                    }
-                    let qualifiedEdit = call.toolName == "set_element_attribute" && call.arguments["name"] == .string("AXValue")
-                        && call.arguments["value"] == .string(expected)
-                    let qualifiedSave = call.toolName == "press_key" && call.arguments["key"] == .string("s")
-                        && call.arguments["modifiers"] == .array([.string("command")])
-                        && snapshot.text.value.utf8.elementsEqual(expected.utf8)
-                    guard call.taskID == taskID, qualifiedEdit || qualifiedSave else {
-                        throw NativeTextFixtureFailure.unexpectedOutcome("The proposed action is outside the qualified edit/save experiment")
-                    }
-                    if let oldResponse = invalidatedResponse, let oldCall = invalidatedCall {
-                        let priorCalls = await pool.approvedCalls()
-                        XCTAssertTrue(host.handle(oldResponse, channel: channel))
-                        try await Task.sleep(for: .milliseconds(100))
-                        let afterCalls = await pool.approvedCalls()
-                        let current = try tools.mcpFocusedTextSnapshot()
-                        staleApprovalAfterResumeIgnored = priorCalls == afterCalls && current == snapshot
-                        guard staleApprovalAfterResumeIgnored, call.processGeneration != oldCall.processGeneration else {
-                            throw NativeTextFixtureFailure.unexpectedOutcome("Resume reused an old approval or helper generation")
-                        }
-                        if oldCall.toolName == "press_key" {
-                            XCTAssertEqual(call.canonicalDigest, oldCall.canonicalDigest)
-                            XCTAssertEqual(call.stepEffectID, oldCall.stepEffectID)
-                        }
-                        invalidatedResponse = nil
-                    }
-                    if rejectStaleEdit {
-                        guard qualifiedEdit, approvals.count == 1 else {
-                            throw NativeTextFixtureFailure.unexpectedOutcome("A changed document must not receive another action")
-                        }
-                        guard AXUIElementSetAttributeValue(snapshot.focusedElement, kAXValueAttribute as CFString,
-                            externalEdit as CFString) == .success else {
-                            throw NativeTextFixtureFailure.unexpectedOutcome("The owned interference could not be installed")
-                        }
-                    }
-                    let response = ComputerUseEnvelope(senderID: request.senderID, targetID: request.targetID,
-                        pairingCode: request.pairingCode, sessionID: request.sessionID, kind: .approvalResponse,
-                        body: try ComputerUseApprovalResponse(requestID: approval.requestID, approved: true,
-                            taskID: approval.taskID, appliedControlRevision: approval.appliedControlRevision,
-                            hostControlEpoch: approval.hostControlEpoch).encodedBody())
-                    if call.toolName == handoffBeforeTool, !didHandoff {
-                        didHandoff = true
-                        let callsBefore = await pool.approvedCalls()
-                        let cancellationsBefore = await pool.cancelledGenerations()
-                        func control(_ kind: ComputerUseEnvelope.Kind, revision: UInt64) throws -> ComputerUseEnvelope {
-                            .init(senderID: request.senderID, targetID: request.targetID,
-                                pairingCode: request.pairingCode, sessionID: request.sessionID, kind: kind,
-                                body: try ComputerUseControlRequest(taskID: taskID, revision: revision,
-                                    observedHostControlEpoch: ledger.hostControlEpoch(taskID: taskID)).encodedBody())
-                        }
-                        XCTAssertTrue(host.handle(try control(.pause, revision: 1), channel: channel))
-                        XCTAssertEqual(host.activity, .paused)
-                        let joinDeadline = ContinuousClock.now.advanced(by: .seconds(3))
-                        while ContinuousClock.now < joinDeadline {
-                            if await pool.cancelledGenerations().count > cancellationsBefore.count { break }
-                            try await Task.sleep(for: .milliseconds(25))
-                        }
-                        do { _ = try await pool.allowedTools() }
-                        catch MCPClientError.notRunning { helperJoinedBeforeResume = true }
-                        guard helperJoinedBeforeResume else {
-                            throw NativeTextFixtureFailure.unexpectedOutcome("Take Control did not join the old helper")
-                        }
-                        if changeDuringHandoff {
-                            guard AXUIElementSetAttributeValue(snapshot.focusedElement, kAXValueAttribute as CFString,
-                                externalEdit as CFString) == .success else {
-                                throw NativeTextFixtureFailure.unexpectedOutcome("The owned handoff edit could not be installed")
-                            }
-                        } else {
-                            // Literal document edits and Save do not depend on
-                            // the caret. Exercise a normal user selection change.
-                            let selection = snapshot.text.selection == NSRange(location: 0, length: 3)
-                                ? NSRange(location: 1, length: 2) : NSRange(location: 0, length: 3)
-                            var range = CFRange(location: selection.location, length: selection.length)
-                            guard let selected = AXValueCreate(.cfRange, &range),
-                                  AXUIElementSetAttributeValue(snapshot.focusedElement,
-                                    kAXSelectedTextRangeAttribute as CFString, selected) == .success else {
-                                throw NativeTextFixtureFailure.unexpectedOutcome("The owned handoff selection could not be installed")
-                            }
-                            selectionChangedDuringHandoff = try tools.mcpFocusedTextSnapshot()?.text.selection == selection
-                            guard selectionChangedDuringHandoff else {
-                                throw NativeTextFixtureFailure.unexpectedOutcome("The owned handoff selection was not observed")
-                            }
-                        }
-                        let ownedPausedSnapshot = try tools.mcpFocusedTextSnapshot()
-                        // A late response to the invalidated approval cannot
-                        // act while the user owns the document.
-                        XCTAssertTrue(host.handle(response, channel: channel))
-                        try await Task.sleep(for: .milliseconds(100))
-                        let callsWhilePaused = await pool.approvedCalls()
-                        let pausedSnapshot = try tools.mcpFocusedTextSnapshot()
-                        staleApprovalIgnored = callsWhilePaused == callsBefore
-                            && pausedSnapshot == ownedPausedSnapshot
-                        guard staleApprovalIgnored else {
-                            throw NativeTextFixtureFailure.unexpectedOutcome("The stale approval changed the owned document")
-                        }
-                        invalidatedResponse = response; invalidatedCall = call
-                        XCTAssertTrue(host.handle(try control(.resume, revision: 2), channel: channel))
-                        continue
-                    }
-                    XCTAssertTrue(host.handle(response, channel: channel))
-                }
-                try await Task.sleep(for: .milliseconds(25))
-            }
-            editorExact = try tools.mcpFocusedTextSnapshot()?.text.value.utf8.elementsEqual(expected.utf8) == true
-            savedExact = try Data(contentsOf: document) == Data(expected.utf8)
-            externalEditPreserved = try tools.mcpFocusedTextSnapshot()?.text.value.utf8.elementsEqual(externalEdit.utf8) == true
-        } catch { failure = error }
-        if let manager { await manager.stop().value }
-        await pool.cancelAll()
-        let calls = await pool.approvedCalls()
-        let effects = try JSONSerialization.jsonObject(with: JSONEncoder().encode(calls))
-        let history = try? ledger.approvedActionHistory(taskID: taskID, senderID: "TEXTEDIT-TEST", sessionID: "TEXTEDIT-SESSION")
-        let sentMessages = await channel.messages()
-        let messages = try JSONSerialization.jsonObject(with: JSONEncoder().encode(sentMessages))
-        app.forceTerminate()
-        for _ in 0..<60 { if app.isTerminated { break }; try await Task.sleep(for: .milliseconds(50)) }
-        let report: [String: Any] = ["scope": "real-TextEdit-default-MCP-and-host-manager-natural-language-task",
-            "goal": goal, "elapsedSeconds": Date().timeIntervalSince(started), "failure": String(reflecting: failure),
-            "terminalOutcome": terminal?.outcome?.rawValue as Any? ?? NSNull(), "terminalText": terminal?.text as Any? ?? NSNull(),
-            "fallbackCalls": fallbackCalls, "approvalCount": approvals.count, "approvedCalls": effects, "messages": messages,
-            "documentProposals": proposals.values(),
-            "staleEditExperiment": rejectStaleEdit, "externalEditPreserved": externalEditPreserved,
-            "handoffBeforeTool": handoffBeforeTool as Any? ?? NSNull(), "didHandoff": didHandoff,
-            "helperJoinedBeforeResume": helperJoinedBeforeResume, "staleApprovalIgnored": staleApprovalIgnored,
-            "changeDuringHandoff": changeDuringHandoff, "staleApprovalAfterResumeIgnored": staleApprovalAfterResumeIgnored,
-            "selectionChangedDuringHandoff": selectionChangedDuringHandoff,
-            "confirmedActionCount": history?.filter { $0.response != nil }.count as Any? ?? NSNull(),
-            "editorExact": editorExact, "savedFileExact": savedExact, "ownedTextEditExited": app.isTerminated]
-        try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys])
-            .write(to: output.appendingPathComponent("mcp-host-task-result.json"), options: .withoutOverwriting)
-        XCTAssertTrue(app.isTerminated)
-        if let failure { throw failure }
-        if changeDuringHandoff {
-            let priorEffects = handoffBeforeTool == "press_key" ? 1 : 0
-            XCTAssertEqual(terminal?.outcome, .unableToComplete)
-            XCTAssertTrue(externalEditPreserved); XCTAssertFalse(editorExact)
-            XCTAssertTrue(didHandoff); XCTAssertTrue(helperJoinedBeforeResume); XCTAssertTrue(staleApprovalIgnored)
-            XCTAssertEqual(approvals.count, priorEffects + 1); XCTAssertEqual(calls.count, priorEffects)
-            XCTAssertEqual(history?.filter { $0.response != nil }.count, priorEffects)
-            XCTAssertEqual(fallbackCalls, 0); XCTAssertEqual(proposals.values().count, 1)
-            XCTAssertFalse(calls.contains { $0.toolName == "press_key" })
-            return
-        }
-        if rejectStaleEdit {
-            XCTAssertEqual(terminal?.outcome, .unableToComplete)
-            XCTAssertTrue(externalEditPreserved); XCTAssertFalse(editorExact); XCTAssertFalse(savedExact)
-            XCTAssertEqual(approvals.count, 1); XCTAssertEqual(calls.count, 0); XCTAssertEqual(fallbackCalls, 0)
-            XCTAssertEqual(history?.filter { $0.response != nil }.count, 0)
-            return
-        }
-        XCTAssertEqual(terminal?.outcome, .taskCompleted)
-        XCTAssertTrue(editorExact); XCTAssertTrue(savedExact)
-        XCTAssertEqual(fallbackCalls, 0); XCTAssertEqual(calls.count, 2)
-        XCTAssertEqual(history?.filter { $0.response != nil }.count, 2)
-        if handoffBeforeTool != nil {
-            XCTAssertTrue(didHandoff); XCTAssertTrue(helperJoinedBeforeResume); XCTAssertTrue(staleApprovalIgnored)
-            XCTAssertTrue(staleApprovalAfterResumeIgnored)
-            XCTAssertTrue(selectionChangedDuringHandoff)
-            XCTAssertEqual(approvals.count, 3); XCTAssertEqual(proposals.values().count, 1, "Resume must retain the semantic task")
-        }
-    }
-
-    /// Real helper capability experiment. This owns all input and its target;
-    /// it does not claim natural-language planner or whole-product acceptance.
-    private func probeTextEditMCPWrite(tools: ComputerUseHostTools, app: NSRunningApplication,
-        original: String, expected: String, document: URL, output: URL) async throws {
-        let started = Date()
-        let helper = URL(fileURLWithPath: try XCTUnwrap(ProcessInfo.processInfo.environment["MAC_CONTROL_HELPER_PATH"]))
-        let pool = MCPClientPool(mutationLedger: MCPFileMutationCallLedger(fileURL: output.appendingPathComponent("mcp-mutations.json")),
-            sessionFactory: { binary, generation in MCPClientSession(validatedBinary: binary, processGeneration: generation,
-                stateDirectory: output.appendingPathComponent("helper-state")) })
-        var results: [String: MCPToolResult] = [:], failure: Error?
-        var beforeSave = false, editorExact = false, savedExact = false
-        do {
-            _ = try await pool.start(binaryURL: helper)
-            let available = try await pool.allowedTools()
-            func tool(_ name: String) throws -> MCPAllowedTool { try XCTUnwrap(available.first { $0.toolName == name }) }
-            let before = try XCTUnwrap(tools.mcpFocusedTextSnapshot())
-            XCTAssertTrue(before.text.value.utf8.elementsEqual(original.utf8))
-            let found = try await pool.execute(tool("find_elements").makeCall(taskID: "mcp-write-discovery", arguments: [
-                "pid": .integer(Int(app.processIdentifier)), "role": .string("AXTextArea")]))
-            results["discovery"] = found
-            let elementID = try XCTUnwrap(ComputerUseMCPFocusedTextRead.elementID(in: found, matching: before))
-            guard try tools.mcpFocusedTextSnapshot() == before else { throw NativeTextFixtureFailure.unexpectedOutcome("Target changed before the owned experiment") }
-            let edit = try tool("set_element_attribute").makeCall(taskID: "mcp-write-edit", arguments: [
-                "element_id": .string(elementID), "name": .string("AXValue"), "value": .string(expected)])
-            let approval = try await pool.prepareApproval(edit)
-            guard try tools.mcpFocusedTextSnapshot() == before else { throw NativeTextFixtureFailure.unexpectedOutcome("Target changed during preparation") }
-            let edited = try await pool.performApproved(edit, fingerprint: approval.fingerprint)
-            results["edit"] = edited
-            let after = try XCTUnwrap(tools.mcpFocusedTextSnapshot())
-            editorExact = after.text.value.utf8.elementsEqual(expected.utf8)
-            beforeSave = try Data(contentsOf: document) == Data(original.utf8)
-            guard !edited.isError, editorExact else { throw NativeTextFixtureFailure.unexpectedOutcome("The actual helper did not set the complete TextEdit value") }
-            let save = try tool("press_key").makeCall(taskID: "mcp-write-save", arguments: [
-                "key": .string("s"), "modifiers": .array([.string("command")])])
-            let saveApproval = try await pool.prepareApproval(save)
-            guard try tools.mcpFocusedTextSnapshot() == after else { throw NativeTextFixtureFailure.unexpectedOutcome("Target changed before Save") }
-            results["save"] = try await pool.performApproved(save, fingerprint: saveApproval.fingerprint)
-            for _ in 0..<40 {
-                savedExact = try Data(contentsOf: document) == Data(expected.utf8)
-                if savedExact { break }
-                try await Task.sleep(for: .milliseconds(50))
-            }
-            XCTAssertTrue(try tools.mcpFocusedTextSnapshot()?.text.value.utf8.elementsEqual(expected.utf8) == true)
-        } catch { failure = error }
-        await pool.cancelAll()
-        app.forceTerminate()
-        for _ in 0..<60 { if app.isTerminated { break }; try await Task.sleep(for: .milliseconds(50)) }
-        let jsonResults = try JSONSerialization.jsonObject(with: JSONEncoder().encode(results))
-        let report: [String: Any] = ["scope": "signed-MCP-component-experiment-in-real-TextEdit", "results": jsonResults,
-            "elapsedSeconds": Date().timeIntervalSince(started), "failure": String(reflecting: failure),
-            "fileUnchangedBeforeSave": beforeSave, "editorExactAfterEdit": editorExact, "savedFileExact": savedExact,
-            "ownedTextEditExited": app.isTerminated, "modelInference": false]
-        try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys])
-            .write(to: output.appendingPathComponent("mcp-write-result.json"), options: .withoutOverwriting)
-        XCTAssertTrue(app.isTerminated)
-        if let failure { throw failure }
-        XCTAssertTrue(beforeSave); XCTAssertTrue(editorExact); XCTAssertTrue(savedExact)
-    }
-
-    private func readTextEditUsingMacTools(tools: ComputerUseHostTools, app: NSRunningApplication,
-        original: String, document: URL, output: URL, prompt: String? = nil) async throws {
-        let initialSnapshot = try XCTUnwrap(tools.mcpFocusedTextSnapshot())
-        XCTAssertTrue(initialSnapshot.text.value.utf8.elementsEqual(original.utf8))
-        let helper = URL(fileURLWithPath: try XCTUnwrap(ProcessInfo.processInfo.environment["MAC_CONTROL_HELPER_PATH"]))
-        let mutations = output.appendingPathComponent("mcp-mutations.json")
-        let pool = MCPClientPool(mutationLedger: MCPFileMutationCallLedger(fileURL: mutations), sessionFactory: { binary, generation in
-            MCPClientSession(validatedBinary: binary, processGeneration: generation, stateDirectory: output.appendingPathComponent("helper-state"))
-        })
-        var fallbackCalls = 0, result: ComputerUseExecutionResult?, failure: Error?
-        var progress: [String] = [], diagnostic: MCPToolResult?, schemas: [String: MCPJSONValue] = [:]
-        var targeted: MCPToolResult?, attributes: MCPToolResult?
-        var scopeSamples: [String] = []
-        let observedTools = ComputerUseHostTools(injector: InputInjector(), mayAct: { true },
-            mcpFocusedTextSnapshotProvider: {
-                let snapshot = try tools.mcpFocusedTextSnapshot()
-                scopeSamples.append(String(reflecting: snapshot))
-                return snapshot
-            }, frontmostApplicationIdentityProvider: { tools.frontmostApplicationSnapshot().identity },
-            frontmostApplicationProvider: { tools.frontmostApplicationSnapshot().localizedName })
-        let started = Date()
-        do {
-            let fallback = ComputerUseCapabilityExecutor(nativeExecution: { _, _, _ in
-                fallbackCalls += 1
-                return .unableToComplete("The read task was delegated to model fallback")
-            })
-            let executor = try await MCPFirstComputerUseExecutor.load(binaryURL: helper, visualFallback: fallback,
-                clientPool: pool, planningTimeout: 5)
-            let goal = prompt ?? "Tell me the complete text of the open TextEdit document."
-            result = try await executor.execute(taskID: "textedit-mcp-read", prompt: goal, trustedUserPrompt: goal,
-                tools: observedTools, progress: { progress.append($0) })
-            // Independently inspect the same helper after the product route.
-            // Diagnostic data never supplies the planner's answer or task ID.
-            let available = try await pool.allowedTools()
-            for tool in available where ["get_ui_tree", "get_element_attributes", "read_value", "find_element", "find_elements", "query_elements"].contains(tool.toolName) {
-                schemas[tool.toolName] = tool.inputSchema
-            }
-            let tree = try XCTUnwrap(available.first { $0.toolName == "get_ui_tree" })
-            diagnostic = try await pool.execute(tree.makeCall(taskID: "independent-tree-diagnostic", arguments: [
-                "pid": .integer(Int(app.processIdentifier)), "max_depth": .integer(12)]))
-            let query = try XCTUnwrap(available.first { $0.toolName == "find_elements" })
-            targeted = try await pool.execute(query.makeCall(taskID: "independent-area-diagnostic", arguments: [
-                "pid": .integer(Int(app.processIdentifier)), "role": .string("AXTextArea")]))
-            if case .object(let root)? = targeted?.structuredContent, case .array(let elements)? = root["elements"],
-               elements.count == 1, case .object(let element) = elements[0], case .string(let identifier)? = element["id"] {
-                let read = try XCTUnwrap(available.first { $0.toolName == "get_element_attributes" })
-                attributes = try await pool.execute(read.makeCall(taskID: "independent-value-diagnostic", arguments: [
-                    "element_id": .string(identifier), "names": .array([.string("AXRole"), .string("AXValue"), .string("AXSubrole")])]))
-            }
-        } catch { failure = error }
-        await pool.cancelAll()
-        let unchanged = try Data(contentsOf: document) == Data(original.utf8)
-        let finalSnapshot = try tools.mcpFocusedTextSnapshot()
-        let editorUnchanged = finalSnapshot?.text.value.utf8.elementsEqual(original.utf8) == true
-        let selectionUnchanged = finalSnapshot?.text.selection == initialSnapshot.text.selection
-        var documentNodes: [MCPJSONValue] = []
-        if case .object(let root)? = diagnostic?.structuredContent, case .array(let nodes)? = root["nodes"] {
-            documentNodes = nodes.filter { if case .object(let node) = $0 { return node["role"] == .string("AXTextArea") }; return false }
-        }
-        let schemaJSON = try JSONSerialization.jsonObject(with: JSONEncoder().encode(schemas))
-        let nodeJSON = try JSONSerialization.jsonObject(with: JSONEncoder().encode(documentNodes))
-        let targetedJSON = try JSONSerialization.jsonObject(with: JSONEncoder().encode(targeted?.structuredContent ?? .null), options: .fragmentsAllowed)
-        let attributesJSON = try JSONSerialization.jsonObject(with: JSONEncoder().encode(attributes?.structuredContent ?? .null), options: .fragmentsAllowed)
-        app.forceTerminate()
-        for _ in 0..<60 { if app.isTerminated { break }; try await Task.sleep(for: .milliseconds(50)) }
-        let report: [String: Any] = ["scope": "real-TextEdit-default-MCP-planner-read-only",
-            "elapsedSeconds": Date().timeIntervalSince(started), "result": String(reflecting: result), "failure": String(reflecting: failure),
-            "fallbackCalls": fallbackCalls, "progress": progress, "scopeSamples": scopeSamples, "diagnosticSchemas": schemaJSON, "diagnosticDocumentNodes": nodeJSON,
-            "diagnosticError": diagnostic?.isError as Any? ?? NSNull(), "diagnosticTruncated": diagnostic?.wasTruncated as Any? ?? NSNull(),
-            "targetedResult": targetedJSON, "targetedError": targeted?.isError as Any? ?? NSNull(), "targetedTruncated": targeted?.wasTruncated as Any? ?? NSNull(),
-            "attributeResult": attributesJSON, "attributeError": attributes?.isError as Any? ?? NSNull(), "attributeTruncated": attributes?.wasTruncated as Any? ?? NSNull(),
-            "savedBytesMatchOriginal": unchanged, "editorTextUnchanged": editorUnchanged, "selectionUnchanged": selectionUnchanged,
-            "inputUTF8Bytes": original.utf8.count, "initialSelection": NSStringFromRange(initialSnapshot.text.selection), "ownedTextEditExited": app.isTerminated,
-            "mutationLedgerCreated": FileManager.default.fileExists(atPath: mutations.path)]
-        try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys])
-            .write(to: output.appendingPathComponent("mcp-read-result.json"), options: .withoutOverwriting)
-        XCTAssertTrue(unchanged); XCTAssertTrue(editorUnchanged); XCTAssertTrue(selectionUnchanged); XCTAssertTrue(app.isTerminated)
-        XCTAssertFalse(FileManager.default.fileExists(atPath: mutations.path))
-        if let failure { throw failure }
-        guard case .completed(let answer) = result else { return XCTFail("MCP did not complete the native document read") }
-        XCTAssertTrue(answer.utf8.elementsEqual(original.utf8))
-        XCTAssertEqual(fallbackCalls, 0)
-    }
-
-    /// Diagnostic only: no inference or input. A single test-owned backdrop
-    /// changes behind one real TextEdit window; both capture paths are retained.
     private func measureTextEditBackground(tools: ComputerUseHostTools, app: NSRunningApplication, editorFrame: CGRect,
         original: String, document: URL, output: URL) async throws {
         let started = Date(), screen = try tools.currentScreen()
@@ -6514,7 +5820,7 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
                 XCTAssertEqual(projectedState.valueUTF8Bytes, expectedValue.utf8.count); XCTAssertFalse(projectedState.truncated)
                 XCTAssertEqual(projectedState.selection, NSRange(location: proposals == 4 ? 0 : expectedValue.utf16.count,
                     length: proposals == 4 ? expectedValue.utf16.count : 0))
-                guard proposals < 7 else { throw ComputerUseFaraBrowserExecutor.Failure.stepLimit }
+                guard proposals < 7 else { throw ComputerUseDesktopExecutor.Failure.stepLimit }
                 let index = proposals; proposals += 1
                 XCTAssertEqual(input.history.count, min(index, 5))
                 @MainActor func clickArguments() async throws -> [String: Any] {
@@ -7101,14 +6407,6 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
 
 }
 
-private struct IntegrationUnavailableMCPPlanner: MCPProposalPlanning {
-    func availability() -> AppleFoundationMCPPlannerAvailability { .unavailable(.modelNotReady) }
-    func propose(_ request: MCPProposalPlanningRequest) async throws -> MCPProposalPlanningResult {
-        XCTFail("This qualification must not invoke Apple inference")
-        throw AppleFoundationMCPPlannerError.unavailable(.modelNotReady)
-    }
-}
-
 private enum NativeTextFixtureFailure: Error {
     case replacementTimedOut, valueDidNotMatch(String), unexpectedOutcome(String)
 }
@@ -7252,41 +6550,6 @@ private final class NativeAXProbeLog: @unchecked Sendable {
         })
         return ComputerUseAccessibilityTextTarget(access: access)
     }
-}
-
-private final class NativeMCPDocumentProposalLog: @unchecked Sendable {
-    private let lock = NSLock()
-    private var contents: [String] = []
-    func append(_ value: String) { lock.withLock { contents.append(value) } }
-    func values() -> [String] { lock.withLock { contents } }
-}
-
-private actor NativeMCPTaskObservedPool: MCPClientPooling {
-    let base: MCPClientPool
-    private var pending: MCPToolCall?
-    private var approved: [MCPToolCall] = []
-    private var cancellations: [UInt64] = []
-    init(base: MCPClientPool) { self.base = base }
-    func start(binaryURL: URL) async throws -> MCPProcessIdentity { try await base.start(binaryURL: binaryURL) }
-    func allowedTools() async throws -> [MCPAllowedTool] { try await base.allowedTools() }
-    func execute(_ call: MCPToolCall) async throws -> MCPToolResult { try await base.execute(call) }
-    func prepareApproval(_ call: MCPToolCall) async throws -> MCPPreparedApproval {
-        let result = try await base.prepareApproval(call)
-        pending = call
-        return result
-    }
-    func performApproved(_ call: MCPToolCall, fingerprint: MCPApprovalFingerprint) async throws -> MCPToolResult {
-        approved.append(call)
-        return try await base.performApproved(call, fingerprint: fingerprint)
-    }
-    func cancel(processGeneration: UInt64) async {
-        await base.cancel(processGeneration: processGeneration)
-        cancellations.append(processGeneration)
-    }
-    func cancelAll() async { await base.cancelAll() }
-    func latestPrepared() -> MCPToolCall? { pending }
-    func approvedCalls() -> [MCPToolCall] { approved }
-    func cancelledGenerations() -> [UInt64] { cancellations }
 }
 
 private actor NativeMCPTaskChannel: HostComputerUseChannel {

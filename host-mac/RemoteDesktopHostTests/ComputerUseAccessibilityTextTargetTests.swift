@@ -1955,12 +1955,9 @@ final class ComputerUseAccessibilityTextTargetTests: XCTestCase {
                 case .unableToComplete: resultSummary = "unableToComplete"
                 case .completed: resultSummary = "completed"
                 case .clarificationRequired: resultSummary = "clarificationRequired"
-                case .browserClarificationRequired: resultSummary = "browserClarificationRequired"
                 case .approvalRequired: resultSummary = "approvalRequired"
                 case .mcpApprovalRequired: resultSummary = "mcpApprovalRequired"
                 case .agentApprovalRequired: resultSummary = "agentApprovalRequired"
-                case .browserResearchProgress: resultSummary = "browserResearchProgress"
-                case .browserResearchAnswer: resultSummary = "browserResearchAnswer"
                 }
             } catch {
                 if let textError = error as? ComputerUseTextEditError {

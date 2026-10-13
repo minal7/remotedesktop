@@ -51,7 +51,7 @@ enum ComputerUseFaraModel {
 
     private static func isValidDestinationObservation(_ observation: DestinationObservation) -> Bool {
         guard observation.sourceURL.scheme?.lowercased() == "https",
-              ComputerUseOwnedBrowser.validatedURL(observation.sourceURL) == observation.sourceURL,
+              ComputerUseValidatedWebURL.validatedURL(observation.sourceURL) == observation.sourceURL,
               observation.exactTextValues.count <= 32 else { return false }
         var totalBytes = 0
         for value in observation.exactTextValues {
@@ -99,17 +99,6 @@ enum ComputerUseFaraModel {
         }
     }
 
-    static func observePageText(_ page: ComputerUseBrowserPageSnapshot, sourceURL: URL) -> PageObservation {
-        let fullText = page.texts.map(\.pageReadingText).joined(separator: "\n")
-        var text = "", bytes = 0
-        for character in fullText {
-            let part = String(character), size = part.utf8.count
-            guard bytes + size <= 4096 else { break }
-            text += part; bytes += size
-        }
-        return .init(sourceURL: sourceURL, text: text, truncated: page.truncated || text != fullText,
-            omittedEmbeddedContent: page.omittedEmbeddedContent)
-    }
 
     struct Step: Equatable, Sendable {
         struct ResultObservation: Equatable, Sendable {
@@ -200,13 +189,7 @@ enum ComputerUseFaraModel {
         var browserWorkerDirective: WorkerDirective? = nil
         /// Candidate completion returned by a specialist for native review.
         var specialistCompletion: String? = nil
-        /// Host-retained receipts for native GET submissions; serialized only
-        /// into the native planner context, never treated as semantic success.
-        var observedNativeGETSubmissions: [ComputerUseObservedNativeGETSubmission] = []
-        /// Live host receipts that the native picker supplied a selected file
-        /// to a page control; never treat these as remote upload success.
-        var observedLocalFileSupplies: [ComputerUseObservedLocalFileSupply] = []
-        var localFileCatalog: ComputerUseMCPBrowserStepPlanner.LocalFileContext? = nil
+        var localFileCatalog: ComputerUseLocalFileContext? = nil
         /// Host-resolved path for the selected candidate, disclosed only to a
         /// desktop task so it can choose that file in a native open panel.
         var selectedLocalFilePath: String? = nil
@@ -252,8 +235,7 @@ enum ComputerUseFaraModel {
             let states = [focusedTextState] + history.flatMap { [$0.focusedTextState, $0.resultObservation?.focusedTextState] }
             if surface == .desktop {
                 guard currentURL == nil, pageReading == nil, userResponse == nil, observedPage == nil,
-                      specialistCompletion == nil, observedNativeGETSubmissions.isEmpty,
-                      observedLocalFileSupplies.isEmpty,
+                      specialistCompletion == nil,
                       history.allSatisfy({ $0.currentURL == nil && $0.pageReading == nil && $0.userResponse == nil
                         && $0.resultObservation?.currentURL == nil && $0.resultObservation?.userResponse == nil }) else {
                     throw OSAtlasLlamaRuntimeError.invalidResponse
@@ -336,17 +318,6 @@ enum ComputerUseFaraModel {
         var observedControl: ObservedControl? = nil
         var scrollUnits: ComputerUseFaraAction.ScrollUnits = .nativeLogicalPoints
 
-        /// Fara's browser training uses Alt+Left for Back. Apply that alias
-        /// only when composing its browser executor. Native desktop decoding
-        /// retains the literal chord (Option+Left on macOS), and the wire
-        /// response stays unchanged for subsequent model history.
-        func compatibleBrowserProposal() -> Self {
-            guard case .key(let keys) = action, keys.count == 2,
-                  keys[0].uppercased() == "ALT",
-                  ["LEFT", "ARROWLEFT"].contains(keys[1].uppercased()) else { return self }
-            return .init(response: response, action: .historyBack, observedControl: observedControl,
-                scrollUnits: scrollUnits)
-        }
     }
     static func makeRequest(endpoint: OSAtlasLlamaEndpoint, input: Input) throws -> URLRequest {
         try OSAtlasLlamaRuntime.validateLoopbackEndpoint(endpoint.baseURL)
@@ -428,7 +399,7 @@ enum ComputerUseFaraModel {
                 readingBytes += userResponse.utf8.count
             }
             if let currentURL {
-                guard ComputerUseOwnedBrowser.validatedURL(currentURL) == currentURL else {
+                guard ComputerUseValidatedWebURL.validatedURL(currentURL) == currentURL else {
                     throw OSAtlasLlamaRuntimeError.invalidResponse
                 }
                 // Preserve the native browser observation alongside its image,
@@ -437,7 +408,7 @@ enum ComputerUseFaraModel {
             }
             if index == input.history.count, let page = input.observedPage {
                 guard page.sourceURL == input.currentURL,
-                      ComputerUseOwnedBrowser.validatedURL(page.sourceURL) == page.sourceURL,
+                      ComputerUseValidatedWebURL.validatedURL(page.sourceURL) == page.sourceURL,
                       page.text.utf8.count <= 4096 else { throw OSAtlasLlamaRuntimeError.invalidResponse }
                 let data = try JSONSerialization.data(withJSONObject: ["observed_page": [
                     "source_url": page.sourceURL.absoluteString, "text": page.text,
@@ -517,7 +488,7 @@ enum ComputerUseFaraModel {
     /// declaring only the capabilities implemented by the native Mac adapter.
     /// Each surface retains the pinned identity, critical-point rules and
     /// response protocol while replacing the tool declaration with its adapter.
-    private static func desktopSystemPrompt(localFileCatalog: ComputerUseMCPBrowserStepPlanner.LocalFileContext? = nil,
+    private static func desktopSystemPrompt(localFileCatalog: ComputerUseLocalFileContext? = nil,
                                             selectedLocalFilePath: String? = nil) throws -> String {
         try replacingDesktopToolSchema(in: officialSystemPrompt,
             with: desktopToolSchema(localFileCatalog: localFileCatalog, selectedLocalFilePath: selectedLocalFilePath))
@@ -556,7 +527,7 @@ enum ComputerUseFaraModel {
 
     static let websiteDestinationInstruction = "When the trusted user task explicitly asks you to work on a website and supplies its URL, open that URL in this browser before doing the requested work. Keep that website workflow in the browser; do not substitute another protocol or a native app. Never invent a recipient or other personal detail; use details supplied by the user or actually observed on the authorized site."
 
-    static func desktopToolSchema(localFileCatalog: ComputerUseMCPBrowserStepPlanner.LocalFileContext? = nil,
+    static func desktopToolSchema(localFileCatalog: ComputerUseLocalFileContext? = nil,
                                   selectedLocalFilePath: String? = nil) -> [String: Any] {
         let actions = ["key", "type", "left_click", "right_click", "double_click", "triple_click", "scroll", "hscroll",
             "wait", "pause_and_memorize_fact", "ask_user_question", "terminate"]
@@ -581,7 +552,7 @@ enum ComputerUseFaraModel {
             "parameters": ["type": "object", "properties": properties, "required": ["action"], "additionalProperties": false]]]
     }
 
-    private static func localFileCatalogJSON(_ files: ComputerUseMCPBrowserStepPlanner.LocalFileContext,
+    private static func localFileCatalogJSON(_ files: ComputerUseLocalFileContext,
                                              selectedPath: String?,
                                              nativeOpenPanelSelection: Input.NativeOpenPanelSelection?,
                                              dispatchedConfirmationCandidateID: String?) throws -> String {
@@ -634,7 +605,7 @@ enum ComputerUseFaraModel {
             with: String(decoding: schema, as: UTF8.self) + "\n")
     }
     static func validatePageReading(_ reading: PageReading) throws {
-        guard ComputerUseOwnedBrowser.validatedURL(reading.sourceURL) == reading.sourceURL,
+        guard ComputerUseValidatedWebURL.validatedURL(reading.sourceURL) == reading.sourceURL,
               !reading.question.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               reading.question.utf8.count <= 1024, reading.text.utf8.count <= 4096 else {
             throw OSAtlasLlamaRuntimeError.invalidResponse
@@ -687,12 +658,12 @@ enum ComputerUseFaraModel {
         }
         var currentContext: [String: Any] = ["surface": input.surface == .desktop ? "desktop" : "browser"]
         if let currentURL = input.currentURL {
-            guard ComputerUseOwnedBrowser.validatedURL(currentURL) == currentURL else { throw OSAtlasLlamaRuntimeError.invalidResponse }
+            guard ComputerUseValidatedWebURL.validatedURL(currentURL) == currentURL else { throw OSAtlasLlamaRuntimeError.invalidResponse }
             currentContext["current_url"] = currentURL.absoluteString
         }
         if let page = input.observedPage {
             guard page.text.utf8.count <= 4_096,
-                  ComputerUseOwnedBrowser.validatedURL(page.sourceURL) == page.sourceURL,
+                  ComputerUseValidatedWebURL.validatedURL(page.sourceURL) == page.sourceURL,
                   page.sourceURL == input.currentURL else { throw OSAtlasLlamaRuntimeError.invalidResponse }
             currentContext["current_page_observation_untrusted"] = [
                 "source_url": page.sourceURL.absoluteString, "text": page.text,
@@ -753,22 +724,6 @@ enum ComputerUseFaraModel {
                 currentContext["picker_confirmation_dispatched_candidate_id"] = dispatched
             }
         }
-        if !input.observedLocalFileSupplies.isEmpty {
-            currentContext["host_file_supply_progress_not_upload_proof"] = input.observedLocalFileSupplies.map { supply in
-                ["candidate_id": supply.candidateID, "display_name": supply.displayName,
-                 "file_extension": supply.fileExtension, "byte_count": supply.byteCount,
-                 "trigger_control_id": supply.triggerControlID,
-                 "committed_url": supply.document.committedURL.absoluteString] as [String: Any]
-            }
-        }
-        if !input.observedNativeGETSubmissions.isEmpty {
-            currentContext["host_GET_submission_progress_not_completion_proof"] = input.observedNativeGETSubmissions.map { receipt in
-                ["operation_id": receipt.operationID, "source_url": receipt.sourceURL,
-                 "captured_url_after_submission": receipt.capturedURLAfterSubmission,
-                 "committed_url": receipt.receipt.document.committedURL.absoluteString,
-                 "field_edit_count": receipt.edits.count] as [String: Any]
-            }
-        }
         if let actionError = input.actionError {
             guard !actionError.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
                 throw OSAtlasLlamaRuntimeError.invalidResponse
@@ -778,7 +733,7 @@ enum ComputerUseFaraModel {
         }
         var history: [[String: Any]] = []
         for step in input.history.suffix(8) {
-            if let url = step.currentURL, ComputerUseOwnedBrowser.validatedURL(url) != url {
+            if let url = step.currentURL, ComputerUseValidatedWebURL.validatedURL(url) != url {
                 throw OSAtlasLlamaRuntimeError.invalidResponse
             }
             let response = bounded(step.response, to: 4_096)

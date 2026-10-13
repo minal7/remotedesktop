@@ -63,10 +63,9 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
     /// Passive observer for an already-captured failed revalidation pair.
     typealias RevalidationFailureObserver = @MainActor
         (ComputerUseDesktopImage, ComputerUseDesktopImage, ComputerUsePredictedAction?, [String: String]) -> Void
-    /// A host-owned, non-input operation. Nil means the operation was handled
-    /// and the next loop must obtain a fresh observation before proposing again.
+    /// Existing host-owned file operation for native picker flows.
     typealias LocalFileOperationHandler = @MainActor @Sendable
-        (ComputerUseMCPBrowserStepPlanner.Plan.LocalFileOperation) async throws -> ComputerUseExecutionResult?
+        (ComputerUseLocalFileOperation) async throws -> ComputerUseExecutionResult?
     /// Host-owned preparation that must finish before a fresh observation is planned.
     typealias HostPreparation = @MainActor @Sendable () async throws -> Void
     /// Called only after native input returned and its dispatch journal was verified.
@@ -827,8 +826,8 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
                 if case .handoff = proposal.decision {
                     try checkScopedSurface()
                 } else if case .action(.localFileOperation) = proposal.decision {
-                    // Catalog operations read host metadata only. A page repaint
-                    // while the model was planning must not block that read.
+                    // Catalog operations read host metadata only. A repaint
+                    // while planning must not block that read.
                     try checkScopedSurface()
                 } else if case .action(.wait) = proposal.decision {
                     // Waiting has no native input effect. Keep task and retained
@@ -901,8 +900,6 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
                         let result = try await localFileOperationHandler(operation)
                         try Task.checkCancellation(); try lease.assertOwnership()
                         try checkScopedSurface()
-                        // Metadata-only catalog results are carried in the next
-                        // host-built input, not as synthetic Fara tool history.
                         session.turns += 1
                         session.actionError = nil; session.rejected = 0
                         if let result { session.terminal = nil; return result }

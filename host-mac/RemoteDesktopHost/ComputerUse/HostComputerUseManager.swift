@@ -1385,11 +1385,6 @@ final class ComputerUseHostTools {
     private let textEditorOverride: ComputerUseTextEditor?
     private(set) var nativeVisualTypingDiagnostic: [String: String] = [:]
     private(set) var lastScreenCaptureFailureForDiagnostics: String?
-    private var browserNavigationTask: ComputerUseBrowserNavigationTask?
-    private var browserToolProposals: (id: UUID, taskID: String, propose: ComputerUseFaraBrowserExecutor.ProposeUsingTools)?
-    private var browserResearchAdmissionObserver: (@MainActor (ComputerUseBrowserResearchTask) throws -> Void)?
-    private var browserTaskControls: ComputerUseBrowserTaskControls?
-    private var browserTaskControlHandler: ((ComputerUseBrowserTaskControls, ComputerUseBrowserTaskControls.Action) -> Void)?
     /// Deterministic seam used to exercise a gate close after one low-level
     /// event has posted but before the rest of an approved action is emitted.
     /// Production leaves this nil.
@@ -1428,7 +1423,6 @@ final class ComputerUseHostTools {
         textEditor: ComputerUseTextEditor? = nil,
         nativeTextTarget: (any ComputerUseNativeTextTarget)? = nil,
         nativeTextTargetDiagnosticObserver: (@MainActor (ComputerUseAccessibilityTextTarget.DiagnosticEvent) -> Void)? = nil,
-        browserNavigationTask: ComputerUseBrowserNavigationTask? = nil,
         approvedActionStepDidPost: (@MainActor () -> Void)? = nil,
         screenProvider: (() throws -> ComputerUseScreenObservation)? = nil,
         conservativeActionAdjustmentProvider:
@@ -1477,7 +1471,6 @@ final class ComputerUseHostTools {
         self.textTarget = nativeTextTarget ?? ComputerUseAccessibilityTextTarget(
             diagnosticObserver: nativeTextTargetDiagnosticObserver)
         self.usesDefaultNativeTextTarget = nativeTextTarget == nil
-        self.browserNavigationTask = browserNavigationTask
         self.approvedActionStepDidPost = approvedActionStepDidPost
         self.screenProvider = screenProvider
         if let conservativeActionAdjustmentProvider {
@@ -1630,345 +1623,7 @@ final class ComputerUseHostTools {
     func makeNativeTextExecutor(planner: any ComputerUseTextGoalPlanning,
         journalDirectory: URL = ComputerUseTextStepStore.defaultDirectory) -> ComputerUseNativeTextExecutor {
         ComputerUseNativeTextExecutor(injector: injector, mayAct: mayAct,
-            journalDirectory: journalDirectory, planner: planner,
-            browserTargetProvider: { [weak self] taskID in
-                try await self?.browserNavigationTask?.textTargetIfFrontmost(taskID: taskID)
-            })
-    }
-
-    func shouldRouteToOwnedBrowserAgent() throws -> Bool {
-        try Task.checkCancellation()
-        guard mayAct() else { throw ToolError.paused }
-        return browserNavigationTask?.hasFrontmostOwnedWindow == true
-    }
-
-    func executeOwnedBrowserTaskIfSupported(taskID: String, prompt: String,
-        progress: @escaping (String) -> Void) async throws -> ComputerUseExecutionResult? {
-        guard browserNavigationTask != nil else { return nil }
-        let workflow = try ComputerUseBrowserWorkflowRequest.compile(prompt)
-        guard workflow != nil || ComputerUseBrowserNavigationRequest.urls(in: prompt) != nil else { return nil }
-        try Task.checkCancellation()
-        guard mayAct() else { throw ToolError.paused }
-        if let workflow {
-            guard let browserNavigationTask else { throw ComputerUseBrowserError.closed }
-            return try await browserNavigationTask.executeWorkflow(taskID: taskID, request: workflow,
-                injector: injector, progress: progress)
-        }
-        return try await browserNavigationTask?.execute(taskID: taskID, prompt: prompt, progress: progress)
-    }
-
-    func closeOwnedBrowser() {
-        browserNavigationTask?.close()
-        browserNavigationTask = nil
-    }
-
-    var hasOwnedBrowserToolProposals: Bool { browserToolProposals != nil }
-
-    func withOwnedBrowserToolProposals(taskID: String, propose: @escaping ComputerUseFaraBrowserExecutor.ProposeUsingTools,
-        operation: () async throws -> ComputerUseExecutionResult) async throws -> ComputerUseExecutionResult {
-        guard browserToolProposals == nil else { throw ComputerUseTaskExecutionError.alreadyExecuting }
-        try Task.checkCancellation()
-        guard mayAct() else { throw ToolError.paused }
-        let id = UUID()
-        browserToolProposals = (id, taskID, propose)
-        defer { if browserToolProposals?.id == id { browserToolProposals = nil } }
-        return try await operation()
-    }
-
-    func proposeUsingOwnedBrowserTools(_ input: ComputerUseFaraModel.Input,
-        observation: ComputerUseFaraBrowserExecutor.ToolObservation) async throws -> ComputerUseFaraBrowserExecutor.ToolPlan {
-        guard let scope = browserToolProposals else { return .noProposal }
-        func check() throws {
-            try Task.checkCancellation()
-            guard mayAct() else { throw ToolError.paused }
-            guard browserToolProposals?.id == scope.id, observation.taskID == scope.taskID else {
-                throw ComputerUseBrowserError.ownershipLost
-            }
-        }
-        try check()
-        let result = try await scope.propose(input, observation)
-        try check()
-        return result
-    }
-
-    /// Read-only admission gate before text-only research planning.
-    func validateBrowserResearchAdmission() throws {
-        try Task.checkCancellation()
-        guard mayAct() else { throw ToolError.paused }
-    }
-
-    /// Capture the exact prepared owner before either scoped callback can
-    /// fail or suspend its caller. This does not navigate or invoke a planner.
-    func prepareOwnedBrowserResearch(taskID: String, prompt: String,
-        goalPlanner: any ComputerUseBrowserGoalPlanning, resultPlanner: any ComputerUseBrowserResultPlanning,
-        referenceDate: Date = Date(), timeZoneIdentifier: String = TimeZone.current.identifier,
-        planningWorker: ComputerUsePlanningWorker = .shared, planningTimeout: TimeInterval = 30,
-        workBudget: ComputerUseBrowserWorkBudget? = nil,
-        didPrepare: (@MainActor (ComputerUseBrowserResearchTask) throws -> Void)? = nil) throws -> ComputerUseBrowserResearchTask {
-        try validateBrowserResearchAdmission()
-        if browserNavigationTask == nil {
-            guard !HostRuntimeContext.isRunningUnitTests else { throw ComputerUseBrowserResearchTask.Failure.browserRequired }
-            browserNavigationTask = .init(browser: ComputerUseOwnedBrowser(mayAct: mayAct),
-                journalDirectory: ComputerUseBrowserNavigationTask.journalDirectory)
-            publishOwnedBrowserTaskControls()
-        }
-        guard let browserNavigationTask else { throw ComputerUseBrowserError.closed }
-        let owner = try browserNavigationTask.prepareResearchTask(taskID: taskID, prompt: prompt, goalPlanner: goalPlanner,
-            resultPlanner: resultPlanner, mayAct: mayAct, referenceDate: referenceDate, timeZoneIdentifier: timeZoneIdentifier,
-            planningWorker: planningWorker, planningTimeout: planningTimeout, workBudget: workBudget)
-        // Capture admission synchronously. The owner may be closed/replaced
-        // while the driver awaits, so a later lookup cannot prove no admission.
-        try didPrepare?(owner)
-        try browserResearchAdmissionObserver?(owner)
-        return owner
-    }
-
-    func withOwnedBrowserResearchAdmission(didPrepare: @escaping @MainActor (ComputerUseBrowserResearchTask) throws -> Void,
-        operation: @MainActor () async throws -> ComputerUseExecutionResult?) async throws -> ComputerUseExecutionResult? {
-        guard browserResearchAdmissionObserver == nil else { throw ComputerUseBrowserResearchTask.Failure.busy }
-        browserResearchAdmissionObserver = didPrepare
-        defer { browserResearchAdmissionObserver = nil }
-        return try await operation()
-    }
-
-    func pauseOwnedBrowserForUserControl(taskID: String) { browserNavigationTask?.pauseForUserControl(taskID: taskID) }
-    func resumeOwnedBrowserResearch(taskID: String) async throws { try await browserNavigationTask?.resumeResearchTask(taskID: taskID) }
-    func retireOwnedBrowserResearch(taskID: String) { browserNavigationTask?.retireResearchTask(taskID: taskID) }
-    func ownedBrowserResearch(taskID: String) -> ComputerUseBrowserResearchTask? { browserNavigationTask?.researchTask(taskID: taskID) }
-    func ownedBrowserTaskID(forExecution taskID: String) -> String { browserNavigationTask?.browserTaskID(forExecution: taskID) ?? taskID }
-
-    func matchesOwnedBrowserAgentSession(taskID: String, identity: String) -> Bool {
-        browserNavigationTask?.matchesAgentSession(taskID: taskID, identity: identity) == true
-    }
-
-    func bindOwnedBrowserAgentContinuation(rootTaskID: String, executionTaskID: String, previousExecutionTaskID: String, sessionIdentity: String) throws {
-        guard let browserNavigationTask else { throw ComputerUseBrowserError.closed }
-        try browserNavigationTask.bindAgentContinuation(rootTaskID: rootTaskID, executionTaskID: executionTaskID,
-            previousExecutionTaskID: previousExecutionTaskID, sessionIdentity: sessionIdentity)
-    }
-
-    /// Read-only evidence for browser capabilities. It does not open a window,
-    /// claim that a search finished, or feed raw destinations into a model.
-    func observeOwnedBrowserPage(taskID: String) async throws -> ComputerUseBrowserPageEvidence? {
-        try Task.checkCancellation()
-        guard mayAct() else { throw ToolError.paused }
-        return try await browserNavigationTask?.pageEvidenceIfFrontmost(taskID: taskID)
-    }
-
-    func validateOwnedBrowserPageEvidence(_ evidence: ComputerUseBrowserPageEvidence) async throws {
-        try Task.checkCancellation()
-        guard mayAct() else { throw ToolError.paused }
-        guard let browserNavigationTask else { throw ComputerUseBrowserError.closed }
-        try await browserNavigationTask.validatePageEvidence(evidence)
-    }
-
-    func captureOwnedBrowserAgentObservation(taskID: String, preserving session: ComputerUseOwnedBrowser.AgentObservation? = nil) async throws -> ComputerUseOwnedBrowser.AgentObservation {
-        try Task.checkCancellation()
-        guard mayAct() else { throw ToolError.paused }
-        guard let browserNavigationTask else { throw ComputerUseBrowserError.closed }
-        return try await browserNavigationTask.captureAgentObservation(taskID: taskID, preserving: session)
-    }
-
-    func captureOwnedBrowserInitialAgentObservation(taskID: String, expectedSessionIdentity: String?) async throws -> ComputerUseOwnedBrowser.InitialAgentObservation? {
-        try Task.checkCancellation()
-        guard mayAct() else { throw ToolError.paused }
-        if browserNavigationTask == nil {
-            guard expectedSessionIdentity == nil, !HostRuntimeContext.isRunningUnitTests else { throw ComputerUseBrowserError.closed }
-            browserNavigationTask = .init(browser: ComputerUseOwnedBrowser(mayAct: mayAct), journalDirectory: ComputerUseBrowserNavigationTask.journalDirectory)
-            publishOwnedBrowserTaskControls()
-        }
-        guard let browserNavigationTask else { throw ComputerUseBrowserError.closed }
-        return try await browserNavigationTask.captureInitialAgentObservation(taskID: taskID, expectedSessionIdentity: expectedSessionIdentity)
-    }
-
-    func validateOwnedBrowserInitialAgentObservation(_ observation: ComputerUseOwnedBrowser.InitialAgentObservation) throws {
-        try Task.checkCancellation()
-        guard mayAct() else { throw ToolError.paused }
-        guard let browserNavigationTask else { throw ComputerUseBrowserError.closed }
-        try browserNavigationTask.validateInitialAgentObservation(observation)
-    }
-
-    func performOwnedBrowserInitialAgentNavigation(_ url: URL, observation: ComputerUseOwnedBrowser.InitialAgentObservation,
-        operationID: String, willBeginEffect: () throws -> Void) async throws {
-        try Task.checkCancellation()
-        guard mayAct() else { throw ToolError.paused }
-        guard let browserNavigationTask else { throw ComputerUseBrowserError.closed }
-        try await browserNavigationTask.performInitialAgentNavigation(url, observation: observation, operationID: operationID, willBeginEffect: willBeginEffect)
-    }
-
-    func validateOwnedBrowserAgentObservation(_ observation: ComputerUseOwnedBrowser.AgentObservation, allowingIdenticalScreenshot: Bool = false) async throws {
-        try Task.checkCancellation()
-        guard mayAct() else { throw ToolError.paused }
-        guard let browserNavigationTask else { throw ComputerUseBrowserError.closed }
-        try await browserNavigationTask.validateAgentObservation(observation, allowingIdenticalScreenshot: allowingIdenticalScreenshot)
-    }
-
-    func validateOwnedBrowserAgentMemoryObservation(_ observation: ComputerUseOwnedBrowser.AgentObservation) throws {
-        try Task.checkCancellation()
-        guard mayAct() else { throw ToolError.paused }
-        guard let browserNavigationTask else { throw ComputerUseBrowserError.closed }
-        try browserNavigationTask.validateAgentMemoryObservation(observation)
-    }
-
-    func validateOwnedBrowserAgentReadCompletion(_ observation: ComputerUseOwnedBrowser.AgentObservation, references: [String]) async throws {
-        try Task.checkCancellation()
-        guard mayAct() else { throw ToolError.paused }
-        guard let browserNavigationTask else { throw ComputerUseBrowserError.closed }
-        try await browserNavigationTask.validateAgentReadCompletion(observation, references: references)
-        try Task.checkCancellation()
-        guard mayAct() else { throw ToolError.paused }
-    }
-
-    func predictedOwnedBrowserAgentAction(_ action: ComputerUseFaraAction, observation: ComputerUseOwnedBrowser.AgentObservation) throws -> ComputerUsePredictedAction? {
-        try Task.checkCancellation()
-        guard mayAct() else { throw ToolError.paused }
-        guard let browserNavigationTask else { throw ComputerUseBrowserError.closed }
-        return try browserNavigationTask.predictedAgentAction(action, observation: observation)
-    }
-
-    /// Invoke inside the native browser's final pre-dispatch callback, after
-    /// its asynchronous scene validation and before recording/posting input.
-    func validateApprovedFingerprint(for action: ComputerUsePredictedAction, fingerprint: ComputerUseApprovalFingerprint,
-                                     nativeTarget: ComputerUseOwnedBrowser.AgentTarget? = nil) throws {
-        try Task.checkCancellation()
-        guard mayAct() else { throw ToolError.paused }
-        guard try prepareApproval(for: action, nativeTarget: nativeTarget).fingerprint == fingerprint else { throw ToolError.approvalTargetChanged }
-    }
-
-    func inspectOwnedBrowserAgentTarget(_ action: ComputerUseFaraAction, observation: ComputerUseOwnedBrowser.AgentObservation) async throws -> ComputerUseOwnedBrowser.AgentTarget? {
-        try Task.checkCancellation()
-        guard mayAct() else { throw ToolError.paused }
-        // Explicit fixture providers retain their synthetic target contract.
-        if accessibilityContextProvider != nil || approvalTargetProvider != nil { return nil }
-        guard let browserNavigationTask else { throw ComputerUseBrowserError.closed }
-        return try await browserNavigationTask.inspectAgentTarget(action, observation: observation)
-    }
-
-    fileprivate func validateOwnedBrowserAgentTarget(_ target: ComputerUseOwnedBrowser.AgentTarget) async throws {
-        try Task.checkCancellation()
-        guard mayAct() else { throw ToolError.paused }
-        guard let browserNavigationTask else { throw ComputerUseBrowserError.closed }
-        try await browserNavigationTask.validateAgentTarget(target)
-    }
-
-    func selectOwnedBrowserLocalFile(taskID: String, triggerControlID: String,
-                                     observation: ComputerUseOwnedBrowser.AgentObservation, operationID: String? = nil,
-                                     resolve: @escaping @MainActor () throws -> URL,
-                                     willBeginEffect: () throws -> Void = {}) async throws {
-        try Task.checkCancellation()
-        guard mayAct() else { throw ToolError.paused }
-        guard let browserNavigationTask else { throw ComputerUseBrowserError.closed }
-        try await browserNavigationTask.selectLocalFile(taskID: taskID, triggerControlID: triggerControlID,
-            observation: observation, operationID: operationID, resolve: resolve, willBeginEffect: willBeginEffect)
-        try Task.checkCancellation()
-        guard mayAct() else { throw ToolError.paused }
-    }
-
-    func performOwnedBrowserAgentInput(_ action: ComputerUseFaraAction, observation: ComputerUseOwnedBrowser.AgentObservation, operationID: String? = nil,
-                                      target: ComputerUseOwnedBrowser.AgentTarget? = nil,
-                                      willBeginEffect: () throws -> Void) async throws {
-        try Task.checkCancellation()
-        guard mayAct() else { throw ToolError.paused }
-        guard let browserNavigationTask else { throw ComputerUseBrowserError.closed }
-        try await browserNavigationTask.performAgentInput(action, observation: observation, operationID: operationID, target: target, willBeginEffect: willBeginEffect)
-    }
-
-    func scrollOwnedBrowserViewport(_ direction: OSAtlasScrollDirection, evidence: ComputerUseBrowserPageEvidence,
-                                    operationID: String, willBeginEffect: () -> Void) async throws -> ComputerUseBrowserViewportScrollReceipt {
-        try Task.checkCancellation()
-        guard mayAct() else { throw ToolError.paused }
-        guard let browserNavigationTask else { throw ComputerUseBrowserError.closed }
-        return try await browserNavigationTask.scrollViewport(direction, evidence: evidence,
-            operationID: operationID, willBeginEffect: willBeginEffect)
-    }
-
-    /// Host capability surface for a task compiler. Page IDs select observed
-    /// destinations; they do not authorize a goal or bypass its effect journal.
-    func prepareOwnedBrowserLinkNavigation(linkID: String, evidence: ComputerUseBrowserPageEvidence) async throws -> ComputerUseBrowserNavigationTarget {
-        try Task.checkCancellation()
-        guard mayAct() else { throw ToolError.paused }
-        guard let browserNavigationTask else { throw ComputerUseBrowserError.closed }
-        return try await browserNavigationTask.prepareLinkNavigation(linkID: linkID, evidence: evidence)
-    }
-
-    func openOwnedBrowserDestination(_ target: ComputerUseBrowserNavigationTarget, promptDigest: String, operationID: String,
-                                        willBeginEffect: () -> Void) async throws -> ComputerUseBrowserNavigationReceipt {
-        try Task.checkCancellation()
-        guard mayAct() else { throw ToolError.paused }
-        guard let browserNavigationTask else { throw ComputerUseBrowserError.closed }
-        return try await browserNavigationTask.openObservedDestination(target, promptDigest: promptDigest,
-            operationID: operationID, willBeginEffect: willBeginEffect)
-    }
-
-    func prepareOwnedBrowserFormQuery(controlID: String, evidence: ComputerUseBrowserPageEvidence) async throws -> ComputerUseBrowserNavigationTarget {
-        try Task.checkCancellation()
-        guard mayAct() else { throw ToolError.paused }
-        guard let browserNavigationTask else { throw ComputerUseBrowserError.closed }
-        return try await browserNavigationTask.prepareFormQuery(controlID: controlID, evidence: evidence)
-    }
-
-    func performOwnedBrowserNativeFormSubmission(
-        _ plan: ComputerUseMCPBrowserStepPlanner.FormSubmission,
-        authorityDigest: String,
-        observation: ComputerUseOwnedBrowser.AgentObservation,
-        prompt: String,
-        operationID: String,
-        checkCurrent: @escaping @MainActor () throws -> Void,
-        willBeginEffect: @escaping @MainActor () throws -> Void
-    ) async throws -> ComputerUseBrowserNavigationReceipt {
-        try Task.checkCancellation()
-        guard mayAct() else { throw ToolError.paused }
-        guard authorityDigest == observation.authorityDigest else { throw ComputerUseBrowserError.pageChanged }
-        guard let browserNavigationTask else { throw ComputerUseBrowserError.closed }
-
-        let guardedCheckCurrent: @MainActor () throws -> Void = {
-            try Task.checkCancellation()
-            guard self.mayAct() else { throw ToolError.paused }
-            try checkCurrent()
-        }
-        let guardedWillBeginEffect: @MainActor () throws -> Void = {
-            try guardedCheckCurrent()
-            try willBeginEffect()
-        }
-        try guardedCheckCurrent()
-        return try await browserNavigationTask.performNativeFormSubmission(
-            plan, authorityDigest: authorityDigest, observation: observation, prompt: prompt,
-            operationID: operationID, checkCurrent: guardedCheckCurrent,
-            willBeginEffect: guardedWillBeginEffect)
-    }
-
-    func ownedBrowserHandbackRequirement(taskID: String, required: Bool = false) -> ComputerUseBrowserHandbackRequirement? {
-        guard let browserNavigationTask else { return required ? .unavailable(taskID: taskID) : nil }
-        return browserNavigationTask.handbackRequirement(taskID: ownedBrowserTaskID(forExecution: taskID), required: required)
-    }
-
-    func reacquireOwnedBrowserAfterUserControl(_ requirement: ComputerUseBrowserHandbackRequirement) async throws {
-        try Task.checkCancellation()
-        guard mayAct() else { throw ToolError.paused }
-        guard let browserNavigationTask else { throw ComputerUseBrowserError.handbackContextLost }
-        try await browserNavigationTask.reacquireAfterUserControl(requirement)
-    }
-
-    func bindOwnedBrowserTaskControls(
-        handler: @escaping (ComputerUseBrowserTaskControls, ComputerUseBrowserTaskControls.Action) -> Void) {
-        browserTaskControlHandler = handler
-        publishOwnedBrowserTaskControls()
-    }
-
-    func updateOwnedBrowserTaskControls(_ controls: ComputerUseBrowserTaskControls?) {
-        browserTaskControls = controls
-        publishOwnedBrowserTaskControls()
-    }
-
-    func stopOwnedBrowserActivity() { browserNavigationTask?.stopBrowserActivity() }
-
-    func stopOwnedBrowserActivity(taskID: String) {
-        browserNavigationTask?.stopBrowserActivity(taskID: taskID)
-    }
-
-    private func publishOwnedBrowserTaskControls() {
-        guard let browserTaskControlHandler else { return }
-        browserNavigationTask?.updateTaskControls(browserTaskControls, handler: browserTaskControlHandler)
+            journalDirectory: journalDirectory, planner: planner)
     }
 
     /// Checks whether a transient macOS notification owns the exact pointer
@@ -2611,15 +2266,7 @@ final class ComputerUseHostTools {
         return value as? String
     }
 
-    func approvalReason(for action: ComputerUsePredictedAction, nativeTarget: ComputerUseOwnedBrowser.AgentTarget? = nil) -> String? {
-        if let nativeTarget, nativeTarget.action == action {
-            // This retained target addresses the host's Find UI only. Its
-            // query never enters a website field or submits a network request.
-            // Explicit approval still uses prepareApproval and its fingerprint.
-            if nativeTarget.findAction != nil { return nil }
-            return ComputerUseActionSafetyPolicy.approvalReason(for: action, accessibilityContext: nativeTarget.context,
-                verifiedSearchSubmission: nativeTarget.isSearchSubmission, verifiedLinkNavigation: nativeTarget.navigation != nil)
-        }
+    func approvalReason(for action: ComputerUsePredictedAction) -> String? {
         if case .key(let usage, let modifiers) = action, usage == 0x28, modifiers == 0,
            usesLiveFrontmostApplicationIdentity, screenProvider == nil, accessibilityContextProvider == nil,
            mayAct(), let app = frontmostApplicationSnapshot().identity, app.codeIdentity != nil,
@@ -3007,17 +2654,8 @@ final class ComputerUseHostTools {
     }
 
     fileprivate func prepareApproval(
-        for action: ComputerUsePredictedAction,
-        nativeTarget: ComputerUseOwnedBrowser.AgentTarget? = nil
+        for action: ComputerUsePredictedAction
     ) throws -> ComputerUsePreparedApproval {
-        if let nativeTarget {
-            try Task.checkCancellation()
-            guard mayAct(), nativeTarget.action == action else { throw ToolError.approvalTargetChanged }
-            return ComputerUsePreparedApproval(message: ComputerUseActionSafetyPolicy.approvalReason(
-                for: action, accessibilityContext: nativeTarget.context, forceConfirmation: true,
-                verifiedLinkNavigation: nativeTarget.navigation != nil) ?? "Perform this exact browser action",
-                fingerprint: nativeTarget.fingerprint)
-        }
         let target = try approvalTarget(for: action)
         var accessibilityIdentity = target.accessibilityIdentity
         var keyboardEvidence: ComputerUseKeyboardCaretEvidence?
@@ -3139,7 +2777,6 @@ final class ComputerUseHostTools {
     fileprivate func performApproved(
         _ action: ComputerUsePredictedAction,
         fingerprint: ComputerUseApprovalFingerprint,
-        browserPageEvidence: ComputerUseBrowserPageEvidence?,
         nativeVisualKeyboard: Bool = false,
         nativeBrowserAddressEntryScope: ComputerUseNativeBrowserAddressEntryScope? = nil,
         nativeBrowserAddressValueWrite: (() throws -> Void)? = nil,
@@ -3156,23 +2793,8 @@ final class ComputerUseHostTools {
         }
         try Task.checkCancellation()
         guard mayAct() else { throw ToolError.paused }
-        if let browserPageEvidence {
-            do { try await validateOwnedBrowserPageEvidence(browserPageEvidence) }
-            catch {
-                try Task.checkCancellation()
-                guard mayAct() else { throw ToolError.paused }
-                switch error as? ComputerUseBrowserError {
-                case .authenticationRequired: throw ComputerUseBrowserError.authenticationRequired
-                case .pageChanged, .windowNotActive, .closed, .ownershipLost, .signInWindowOpen:
-                    throw ToolError.approvalTargetChanged
-                default: throw error
-                }
-            }
-        }
         try Task.checkCancellation()
         guard mayAct() else { throw ToolError.paused }
-        // Recheck AX/pixels after the asynchronous browser read. The approved
-        // page and the current native target must both still match.
         let current = try prepareApproval(for: action).fingerprint
         guard current.matchesForFinalDispatch(fingerprint) else {
             throw ToolError.approvalTargetChanged
@@ -3423,8 +3045,8 @@ final class ComputerUseHostTools {
 
     func performNativeAction(_ action: ComputerUsePredictedAction, fingerprint: ComputerUseApprovalFingerprint,
                             willBeginEffect: () throws -> Void) async throws {
-        try await performApproved(action, fingerprint: fingerprint, browserPageEvidence: nil,
-                                  nativeVisualKeyboard: true, willBeginEffect: willBeginEffect)
+        try await performApproved(action, fingerprint: fingerprint, nativeVisualKeyboard: true,
+                                  willBeginEffect: willBeginEffect)
     }
 
     func performNativeBrowserAddressEntry(_ payload: String,
@@ -3439,7 +3061,7 @@ final class ComputerUseHostTools {
                 throw ComputerUseTextEditError.preconditionChanged
             }
         }
-        try await performApproved(.typeText(payload), fingerprint: fingerprint, browserPageEvidence: nil,
+        try await performApproved(.typeText(payload), fingerprint: fingerprint,
                                   nativeVisualKeyboard: true,
                                   nativeBrowserAddressEntryScope: scope,
                                   willBeginEffect: willBeginEffect)
@@ -3459,7 +3081,7 @@ final class ComputerUseHostTools {
                 throw ComputerUseTextEditError.preconditionChanged
             }
         }
-        try await performApproved(.typeText(payload), fingerprint: fingerprint, browserPageEvidence: nil,
+        try await performApproved(.typeText(payload), fingerprint: fingerprint,
             nativeVisualKeyboard: true, nativeBrowserAddressEntryScope: scope,
             nativeBrowserAddressValueWrite: {
                 try self.injector.performHostEffectIfAllowed(
@@ -5115,17 +4737,10 @@ enum ComputerUseExecutionResult: Equatable {
     /// A retained native form issues a scoped reference for the answer task;
     /// other capabilities may use recent conversation as planning context.
     case clarificationRequired(String)
-    /// A browser question retains the original research owner while the
-    /// existing phone protocol correlates the next exact answer separately.
-    case browserClarificationRequired(ComputerUseBrowserQuestionRequest)
     /// The requested task is still active, but the next step must be performed
     /// by the person (for example, entering account credentials). The manager
     /// preserves the task context and pauses all automation until Resume.
     case userInterventionRequired(String)
-    /// A current reading to review while the original research remains paused.
-    case browserResearchProgress(ComputerUseBrowserResearchReport)
-    /// Complete quoted source findings admitted under the retained research goal.
-    case browserResearchAnswer(ComputerUseBrowserResearchAnswer)
     case approvalRequired(
         message: String,
         action: ComputerUsePredictedAction,
@@ -5327,7 +4942,7 @@ extension ComputerUseVisualApprovalContinuing {
         action: ComputerUsePredictedAction, fingerprint: ComputerUseApprovalFingerprint,
         tools: ComputerUseHostTools, willBeginEffect: () -> Void) async throws {
         try await tools.performApproved(action, fingerprint: fingerprint,
-            browserPageEvidence: continuation.browserPageEvidence, willBeginEffect: willBeginEffect)
+            willBeginEffect: willBeginEffect)
     }
 }
 
@@ -5535,10 +5150,9 @@ final class HostComputerUseManager: ObservableObject {
 
     @Published private(set) var modelState: ModelState = .downloadRequired
     @Published private(set) var activity: Activity = .idle {
-        didSet { refreshBrowserTaskControls() }
+        didSet { refreshLocalTaskControls() }
     }
-
-    private struct BrowserControlIdentity: Equatable {
+    private struct TaskControlIdentity: Equatable {
         let taskID: String
         let senderID: String
         let sessionID: String
@@ -5547,7 +5161,7 @@ final class HostComputerUseManager: ObservableObject {
         let transportGeneration: UInt64
         let remoteRevision: UInt64?
         let hostControlEpoch: UInt64
-        let phase: ComputerUseBrowserTaskControls.Phase
+        let phase: ComputerUseTaskControls.Phase
         let canResume: Bool
 
         func sameOwner(as other: Self) -> Bool {
@@ -5556,8 +5170,8 @@ final class HostComputerUseManager: ObservableObject {
                 && transportGeneration == other.transportGeneration
         }
     }
-    private var browserControlIdentity: BrowserControlIdentity?
-    @Published private(set) var localTaskControls: ComputerUseBrowserTaskControls?
+    private var taskControlIdentity: TaskControlIdentity?
+    @Published private(set) var localTaskControls: ComputerUseTaskControls?
     private struct PausedInputOwner: Equatable {
         let taskID: String
         let senderID: String
@@ -5658,12 +5272,10 @@ final class HostComputerUseManager: ObservableObject {
         let requestBody: String
         let supportsApprovedActionEvidence: Bool
         let textClarification: TextClarificationContinuation?
-        let browserClarification: ComputerUseBrowserClarificationTransport.Continuation?
         /// False only when a versioned Pause reached the durable ledger before
         /// its Prompt. Resume can then claim and start that Prompt exactly once
         /// instead of treating it as work that needs a continuation replan.
         let hasStarted: Bool
-        let browserHandbackRequirement: ComputerUseBrowserHandbackRequirement?
 
         init(
             envelope: ComputerUseEnvelope,
@@ -5672,9 +5284,7 @@ final class HostComputerUseManager: ObservableObject {
             conversation: [ComputerUseConversationTurn]? = nil,
             requestBody: String? = nil,
             textClarification: TextClarificationContinuation? = nil,
-            browserClarification: ComputerUseBrowserClarificationTransport.Continuation? = nil,
-            hasStarted: Bool = true,
-            browserHandbackRequirement: ComputerUseBrowserHandbackRequirement? = nil
+            hasStarted: Bool = true
         ) {
             self.envelope = envelope
             self.channel = channel
@@ -5689,16 +5299,6 @@ final class HostComputerUseManager: ObservableObject {
                 requestBody ?? envelope.body).supportsApprovedActionEvidence
             self.hasStarted = hasStarted
             self.textClarification = textClarification
-            self.browserClarification = browserClarification
-            self.browserHandbackRequirement = browserHandbackRequirement
-        }
-
-        func retainingBrowserHandback(_ requirement: ComputerUseBrowserHandbackRequirement?) -> Self {
-            .init(envelope: envelope, channel: channel, trustedUserPrompt: trustedUserPrompt,
-                conversation: conversation, requestBody: requestBody,
-                textClarification: textClarification,
-                browserClarification: browserClarification,
-                hasStarted: hasStarted, browserHandbackRequirement: requirement)
         }
 
         func belongs(to control: ComputerUseEnvelope) -> Bool {
@@ -5738,6 +5338,7 @@ final class HostComputerUseManager: ObservableObject {
 
     private var executor: (any ComputerUseExecuting)?
     private let generalAgentFactory: ((ComputerUseInstallationReceipt) throws -> ComputerUseCapabilityExecutor)?
+    private let executorComposer: ComputerUseExecutorComposer?
     private var agentLifecycleTask: Task<Void, Never>?
     var hasRetainedAgentTask: Bool { generalAgent?.hasRetainedTask == true }
     private var generalAgent: AgentCapabilityAdapter? {
@@ -5767,10 +5368,8 @@ final class HostComputerUseManager: ObservableObject {
     private let nativeTextPreparer: ComputerUseNativeTextLoader
     private let macControlInstaller: any MacControlMCPProvisioning
     private let visualExecutorLoader: any ComputerUseVisualExecutorLoading
-    private let executorComposer: ComputerUseExecutorComposer
     private let taskLedger: ComputerUseTaskLedger
     private let textClarifications: ComputerUseTextClarificationStore
-    private let browserClarifications = ComputerUseBrowserClarificationTransport()
     private let transportTeardownTimeout: Duration
     /// False only for app-hosted test sessions. Direct manager constructions
     /// keep the production default so their installer lifecycle tests retain
@@ -5822,10 +5421,10 @@ final class HostComputerUseManager: ObservableObject {
     private var currentSetupProgress: ComputerUseSetupProgress?
     private var macControlReceipt: MacControlMCPInstallationReceipt?
     private var authorizedPeerID: String? {
-        didSet { refreshBrowserTaskControls() }
+        didSet { refreshLocalTaskControls() }
     }
     private var authorizedPeerSupportsOrderedComputerUseControls = false {
-        didSet { refreshBrowserTaskControls() }
+        didSet { refreshLocalTaskControls() }
     }
     /// Authorization sources are tracked independently so expiry of the LAN
     /// lease cannot revoke an authenticated WebRTC connection (or vice versa).
@@ -5855,12 +5454,9 @@ final class HostComputerUseManager: ObservableObject {
         nativeTextPreparer: ComputerUseNativeTextLoader? = nil,
         macControlInstaller: (any MacControlMCPProvisioning)? = nil,
         visualExecutorLoader: (any ComputerUseVisualExecutorLoading)? = nil,
-        mcpPlanner: any MCPProposalPlanning = AppleFoundationMCPPlanner(),
-        mcpBrowserStepPlanner: ComputerUseMCPBrowserStepPlanner = .init(),
         executorComposer: ComputerUseExecutorComposer? = nil,
         taskLedger: ComputerUseTaskLedger = ComputerUseTaskLedger(),
         textClarifications: ComputerUseTextClarificationStore? = nil,
-        browserNavigationFactory: ((@escaping () -> Bool) -> ComputerUseBrowserNavigationTask)? = nil,
         transportTeardownTimeout: Duration = .seconds(5),
         allowsExternalServices: Bool = true,
         allowsAutomaticSetup: Bool = true,
@@ -5895,10 +5491,10 @@ final class HostComputerUseManager: ObservableObject {
             actionPerformer: actionPerformer,
             nativeTextTarget: nativeTextTarget,
             nativeTextTargetDiagnosticObserver: nativeTextTargetDiagnosticObserver,
-            browserNavigationTask: browserNavigationFactory?(mayAct),
             approvedActionStepDidPost: approvedActionStepDidPost,
             screenProvider: screenProvider,
             accessibilityContextProvider: accessibilityContextProvider)
+        self.executorComposer = executorComposer
         let modelInstaller = installer ?? ComputerUseInstaller()
         self.installer = modelInstaller
         self.nativeTextInstaller = nativeTextInstaller
@@ -5918,44 +5514,6 @@ final class HostComputerUseManager: ObservableObject {
         self.macControlInstaller = macControlInstaller ?? MacControlMCPInstaller()
         let modelLoader = visualExecutorLoader ?? OSAtlasVisualExecutorLoader()
         self.visualExecutorLoader = modelLoader
-        var configuredBrowserPlanner = mcpBrowserStepPlanner
-        if configuredBrowserPlanner.nativeTextPlanner == nil, let nativeTextInstaller {
-            let inspectExchange = configuredBrowserPlanner.inspectExchange
-            configuredBrowserPlanner.nativeTextPlanner = {
-                guard let receipt = await nativeTextInstaller.currentInstallation() else { return nil }
-                try Task.checkCancellation()
-                let directory = try OSAtlasVisualExecutorLoader.bundledRuntimeDirectoryURL(in: .main)
-                let inputs = try OSAtlasRuntimeInputResolver(manifest: .nativeTextV2).resolveNativeText(receipt: receipt,
-                    runtimeDirectoryURL: directory, enclosingBundleURL: Bundle.main.bundleURL)
-                return ComputerUseRuntimeBrowserStepPlanner(inputs: inputs, inspectExchange: inspectExchange)
-            }
-        }
-        let browserPlanner = configuredBrowserPlanner
-        let nativeFilePlanner: ComputerUseDefaultBrowserExecutor.NativeFilePlanner = { input in
-            try await browserPlanner.proposeNativeFileSelection(input: input)
-        }
-        let nativeControlInputs: ComputerUseDefaultBrowserExecutor.NativeControlInputs?
-        if let nativeTextInstaller {
-            nativeControlInputs = {
-                guard let receipt = await nativeTextInstaller.currentInstallation() else { return nil }
-                try Task.checkCancellation()
-                let directory = try OSAtlasVisualExecutorLoader.bundledRuntimeDirectoryURL(in: .main)
-                return try OSAtlasRuntimeInputResolver(manifest: .nativeTextV2).resolveNativeText(
-                    receipt: receipt, runtimeDirectoryURL: directory, enclosingBundleURL: Bundle.main.bundleURL)
-            }
-        } else { nativeControlInputs = nil }
-        self.executorComposer = executorComposer ?? { helperReceipt, visualFallback in
-            try await MCPFirstComputerUseExecutor.load(
-                binaryURL: URL(fileURLWithPath: helperReceipt.binaryPath),
-                visualFallback: visualFallback,
-                planner: mcpPlanner,
-                clientPool: MCPClientPool(), browserStepPlanner: browserPlanner, browserExecutorFactory: {
-                    let receipt = await modelInstaller.currentInstallation()
-                    try Task.checkCancellation()
-                    return try modelLoader.prepareDefaultBrowser(receipt: receipt,
-                        nativeFilePlanner: nativeFilePlanner, nativeControlInputs: nativeControlInputs)
-                })
-        }
         self.taskLedger = taskLedger
         self.textClarifications = textClarifications ?? ComputerUseTextClarificationStore()
         self.transportTeardownTimeout = transportTeardownTimeout
@@ -5966,10 +5524,7 @@ final class HostComputerUseManager: ObservableObject {
             refreshModelState()
             installLocalInterventionMonitors()
         }
-        tools.bindOwnedBrowserTaskControls { [weak self] controls, action in
-            self?.requestLocalTaskControl(action, displayed: controls)
-        }
-        refreshBrowserTaskControls()
+        refreshLocalTaskControls()
     }
 
     func refreshModelState() {
@@ -6392,7 +5947,6 @@ final class HostComputerUseManager: ObservableObject {
         // trailing ready status, or channel poll shutdown is still pending.
         await pendingTransportTeardown.value
 
-        tools.closeOwnedBrowser()
         await visualExecutorLoader.deactivate()
         executor = nil
     }
@@ -6683,7 +6237,7 @@ final class HostComputerUseManager: ObservableObject {
         }
     }
 
-    private func refreshBrowserTaskControls() {
+    private func refreshLocalTaskControls() {
         // A reconnect of this same retained task keeps unacknowledged input.
         // Leaving paused ownership or replacing the task retires that scope.
         let inputOwner: PausedInputOwner?
@@ -6695,7 +6249,7 @@ final class HostComputerUseManager: ObservableObject {
             actionGate.trackPausedInput(scopeID: pausedInputScopeID)
         }
         let context: ExecutionContext?
-        let phase: ComputerUseBrowserTaskControls.Phase
+        let phase: ComputerUseTaskControls.Phase
         switch activity {
         case .working: context = currentExecution; phase = .working
         case .paused: context = pausedExecution; phase = .paused
@@ -6703,12 +6257,11 @@ final class HostComputerUseManager: ObservableObject {
         case .idle: context = nil; phase = .paused
         }
         guard !isShuttingDown, let context else {
-            browserControlIdentity = nil
+            taskControlIdentity = nil
             localTaskControls = nil
-            tools.updateOwnedBrowserTaskControls(nil)
             return
         }
-        var identity = BrowserControlIdentity(taskID: tools.ownedBrowserTaskID(forExecution: context.envelope.id),
+        var identity = TaskControlIdentity(taskID: context.envelope.id,
             senderID: context.envelope.senderID, sessionID: context.envelope.sessionID,
             executionToken: currentExecutionToken,
             authorizationGeneration: actionEvidenceAuthorizationGeneration,
@@ -6719,39 +6272,35 @@ final class HostComputerUseManager: ObservableObject {
                 && isPeerAuthorizedForComputerUse(senderID: context.envelope.senderID)
                 && taskLedger.canResumeLocally(taskID: context.envelope.id,
                     senderID: context.envelope.senderID, sessionID: context.envelope.sessionID))
-        if identity.executionToken == nil, let previous = browserControlIdentity,
+        if identity.executionToken == nil, let previous = taskControlIdentity,
            identity.sameOwner(as: previous) {
             identity.executionToken = previous.executionToken
         }
-        guard identity != browserControlIdentity else { return }
-        let sameRun = browserControlIdentity.map {
+        guard identity != taskControlIdentity else { return }
+        let sameRun = taskControlIdentity.map {
             identity.sameOwner(as: $0) && identity.executionToken == $0.executionToken
         } ?? false
-        let snapshot = ComputerUseBrowserTaskControls(taskID: identity.taskID,
+        let snapshot = ComputerUseTaskControls(taskID: identity.taskID,
             scopeID: sameRun ? (localTaskControls?.scopeID ?? UUID()) : UUID(),
             presentationID: UUID(), phase: phase, canResume: identity.canResume,
-            ownerID: browserControlIdentity.map { identity.sameOwner(as: $0) } == true
+            ownerID: taskControlIdentity.map { identity.sameOwner(as: $0) } == true
                 ? (localTaskControls?.ownerID ?? UUID()) : UUID())
-        browserControlIdentity = identity
+        taskControlIdentity = identity
         localTaskControls = snapshot
-        tools.updateOwnedBrowserTaskControls(snapshot)
     }
 
-    func requestLocalTaskControl(_ action: ComputerUseBrowserTaskControls.Action,
-                                         displayed: ComputerUseBrowserTaskControls) {
-        refreshBrowserTaskControls()
+    func requestLocalTaskControl(_ action: ComputerUseTaskControls.Action,
+                                 displayed: ComputerUseTaskControls) {
+        refreshLocalTaskControls()
         guard let current = localTaskControls,
               current.taskID == displayed.taskID, current.scopeID == displayed.scopeID,
               let context = currentExecution ?? pausedExecution ?? pendingApproval?.context,
-              tools.ownedBrowserTaskID(forExecution: context.envelope.id) == current.taskID else { return }
+              context.envelope.id == current.taskID else { return }
         switch action {
         case .takeControl:
             guard current.phase != .paused else { return }
             pauseForLocalIntervention(context)
         case .resume:
-            // Resume uses the exact rendered state. Local input may have
-            // paused a run between mouse-down and a Stop click, so Stop below
-            // instead accepts that same run's earlier presentation.
             guard displayed == current, current.phase == .paused, current.canResume,
                   isPeerAuthorizedForComputerUse(senderID: context.envelope.senderID) else { return }
             let input = pausedInputSnapshot(for: context)
@@ -6761,9 +6310,6 @@ final class HostComputerUseManager: ObservableObject {
             }
             resumeExecution(context, afterInput: input)
         case .stop:
-            // Stop is absorbing. Its durable Cancel must be replayable with
-            // the revision of a delayed phone control; an unversioned local
-            // terminal alone could be ignored by a phone awaiting that control.
             actionGate.endAutomation(allowsActions: false)
             do {
                 let resolution = try taskLedger.cancelLocally(taskID: context.envelope.id,
@@ -6786,8 +6332,8 @@ final class HostComputerUseManager: ObservableObject {
         _ envelope: ComputerUseEnvelope,
         channel: any HostComputerUseChannel
     ) -> Bool {
-        refreshBrowserTaskControls()
-        defer { refreshBrowserTaskControls() }
+        refreshLocalTaskControls()
+        defer { refreshLocalTaskControls() }
         guard let control = ledgerControl(for: envelope.kind) else { return true }
 
         if envelope.body.isEmpty {
@@ -6847,14 +6393,12 @@ final class HostComputerUseManager: ObservableObject {
 
         if resolution.state == .cancelled {
             if let rejectedQuestion {
-                browserClarifications.invalidateAnswerQuestion(rejectedQuestion, for: replyEnvelope)
                 if taskLedger.terminalClarification(taskID: rejectedQuestion.taskID) == rejectedQuestion {
                     do { _ = try taskLedger.cancelLocally(taskID: rejectedQuestion.taskID,
                         senderID: envelope.senderID, sessionID: envelope.sessionID) }
                     catch { return false }
                 }
             }
-            browserClarifications.invalidate(for: replyEnvelope)
             textClarifications.invalidate(for: replyEnvelope)
             (executor as? any ComputerUseTextClarificationContinuing)?.invalidateClarification(taskID: request.taskID)
         }
@@ -7061,7 +6605,7 @@ final class HostComputerUseManager: ObservableObject {
     private func persistLocalControl(_ control: ComputerUseTaskLedger.Control, context: ExecutionContext,
         acknowledgingInput: ComputerUseActionGate.PausedInputSnapshot? = nil) -> Bool {
         let input = acknowledgingInput ?? pausedInputSnapshot(for: context)
-        defer { refreshBrowserTaskControls() }
+        defer { refreshLocalTaskControls() }
         do {
             try taskLedger.applyLocalControl(control, taskID: context.envelope.id,
                 senderID: context.envelope.senderID, sessionID: context.envelope.sessionID)
@@ -7074,10 +6618,7 @@ final class HostComputerUseManager: ObservableObject {
     }
 
     private func pauseForLocalIntervention(_ context: ExecutionContext, guidance: String? = nil,
-                                            requiresBrowserHandback: Bool = false,
                                             report: ComputerUseResearchProgress? = nil) {
-        let context = context.retainingBrowserHandback(context.browserHandbackRequirement
-            ?? (requiresBrowserHandback ? tools.ownedBrowserHandbackRequirement(taskID: context.envelope.id, required: true) : nil))
         actionGate.endAutomation(allowsActions: false)
         let persisted = persistLocalControl(.pause, context: context)
         pauseExecution(context, guidance: persisted ? guidance : Self.localControlPersistenceFailureGuidance,
@@ -7086,17 +6627,12 @@ final class HostComputerUseManager: ObservableObject {
 
     private func pauseExecution(_ context: ExecutionContext, guidance: String? = nil,
                                 report: ComputerUseResearchProgress? = nil) {
-        let context = context.retainingBrowserHandback(context.browserHandbackRequirement
-            ?? (context.hasStarted ? tools.ownedBrowserHandbackRequirement(taskID: context.envelope.id) : nil))
         let guidance = guidance ?? Self.userInterventionGuidance
         if postedApprovedVisualTaskID == context.envelope.id {
             terminalizePostedVisualActionForIntervention(context: context)
             return
         }
         if pausedExecution?.envelope.id == context.envelope.id {
-            if let pausedExecution, pausedExecution.browserHandbackRequirement == nil {
-                self.pausedExecution = pausedExecution.retainingBrowserHandback(context.browserHandbackRequirement)
-            }
             if guidance == Self.userInterventionGuidance {
                 sendStatus("paused", replyingTo: context.envelope, channel: context.channel)
             } else {
@@ -7109,17 +6645,16 @@ final class HostComputerUseManager: ObservableObject {
         // observe Task cancellation promptly and may still unwind through a
         // final tool call.
         actionGate.endAutomation(allowsActions: false)
-        tools.pauseOwnedBrowserForUserControl(taskID: context.envelope.id)
         let invalidatedApproval = pendingApproval
         pausedExecution = context
         currentExecution = nil
         pendingApproval = nil
-        cancelApprovalIfNeeded(invalidatedApproval, preservingBrowserProgress: true)
+        cancelApprovalIfNeeded(invalidatedApproval, preservingTaskProgress: true)
         approvalDeliveryTask?.cancel()
         approvalDeliveryTask = nil
         currentExecutionToken = nil
         cancelActiveVisualApprovalContinuation()
-        cancelActiveMCPWork(preservingBrowserProgress: true)
+        cancelActiveMCPWork(preservingTaskProgress: true)
         if generalAgent == nil { executionTask?.cancel() }
         activity = .paused
         sendUserInterventionStatus(
@@ -7204,8 +6739,6 @@ final class HostComputerUseManager: ObservableObject {
             conversation: pausedExecution.conversation,
             requestBody: pausedExecution.requestBody,
             textClarification: pausedExecution.textClarification,
-            browserClarification: pausedExecution.browserClarification,
-            browserHandbackRequirement: pausedExecution.browserHandbackRequirement,
             channel: pausedExecution.channel,
             isResuming: true, pendingAutomationID: pendingAutomationID)
     }
@@ -7215,17 +6748,12 @@ final class HostComputerUseManager: ObservableObject {
             ?? pausedExecution?.envelope.id
             ?? pendingApproval?.context.envelope.id
         guard activeTaskID == context.envelope.id else { return }
-        browserClarifications.invalidate(for: context.envelope)
         textClarifications.invalidate(for: context.envelope)
         (executor as? any ComputerUseTextClarificationContinuing)?.invalidateClarification(taskID: context.envelope.id)
         // Cancel is terminal for this execution. Keep the automation gate
         // closed until a later, separately claimed Prompt explicitly begins;
         // never let cancellation-ignoring work inject during unwind.
         actionGate.endAutomation(allowsActions: false)
-        // Phone and local Stop share browser retirement. Retiring only the
-        // research planner left explicit workflows holding their document and
-        // sign-in session after the client had already received a terminal.
-        tools.stopOwnedBrowserActivity(taskID: context.envelope.id)
         let invalidatedApproval = pendingApproval
         postedApprovedVisualTaskID = nil
         cancelActiveVisualApprovalContinuation()
@@ -7294,7 +6822,7 @@ final class HostComputerUseManager: ObservableObject {
                   agent.ownsApproval(request, hostTaskID: pendingApproval.context.envelope.id) else { return }
             let admission = admitAutomation { actionGate.beginApprovedAutomation() }
             guard admission == .admitted else {
-                cancelApprovalIfNeeded(pendingApproval, preservingBrowserProgress: true)
+                cancelApprovalIfNeeded(pendingApproval, preservingTaskProgress: true)
                 pauseForLocalIntervention(pendingApproval.context, guidance: Self.admissionGuidance(admission))
                 return
             }
@@ -7325,7 +6853,7 @@ final class HostComputerUseManager: ObservableObject {
             // Direct input can close the gate synchronously before its
             // MainActor lifecycle callback arrives. That close owns the race:
             // keep the held task resumable and never execute the approval.
-            cancelApprovalIfNeeded(pendingApproval, preservingBrowserProgress: true)
+            cancelApprovalIfNeeded(pendingApproval, preservingTaskProgress: true)
             pauseForLocalIntervention(pendingApproval.context,
                 guidance: Self.admissionGuidance(admission))
             return
@@ -7405,17 +6933,17 @@ final class HostComputerUseManager: ObservableObject {
             && response.appliedControlRevision == expectedRevision
     }
 
-    private func cancelApprovalIfNeeded(_ approval: PendingApproval?, preservingBrowserProgress: Bool = false) {
+    private func cancelApprovalIfNeeded(_ approval: PendingApproval?, preservingTaskProgress: Bool = false) {
         guard let approval else { return }
         switch approval.operation {
         case .agent:
-            cancelActiveMCPWork(preservingBrowserProgress: preservingBrowserProgress)
+            cancelActiveMCPWork(preservingTaskProgress: preservingTaskProgress)
         case .visual(let token, _, _):
             cancelVisualApprovalContinuation(token)
         case .mcp:
             guard let continuation =
                     executor as? any MCPApprovalContinuing else { return }
-            if preservingBrowserProgress { continuation.pauseMCPWork() }
+            if preservingTaskProgress { continuation.pauseMCPWork() }
             else { continuation.cancelMCPWork() }
         }
     }
@@ -7461,20 +6989,20 @@ final class HostComputerUseManager: ObservableObject {
     /// task cancellation can race an immediate Resume. MCPFirst binds the
     /// asynchronous stop to that captured generation, so stale cleanup cannot
     /// terminate the generation started by the resumed task.
-    private func cancelActiveMCPWork(preservingBrowserProgress: Bool = false) {
+    private func cancelActiveMCPWork(preservingTaskProgress: Bool = false) {
         if let agent = generalAgent {
-            if preservingBrowserProgress { agent.requestPause() }
+            if preservingTaskProgress { agent.requestPause() }
             else { agent.requestCancellation() }
             let previous = agentLifecycleTask
             agentLifecycleTask = Task {
                 await previous?.value
-                if preservingBrowserProgress { await agent.pauseAgent() }
+                if preservingTaskProgress { await agent.pauseAgent() }
                 else { await agent.cancelAgent() }
             }
             return
         }
         guard let continuation = executor as? any MCPApprovalContinuing else { return }
-        if preservingBrowserProgress { continuation.pauseMCPWork() }
+        if preservingTaskProgress { continuation.pauseMCPWork() }
         else { continuation.cancelMCPWork() }
     }
 
@@ -7664,11 +7192,11 @@ final class HostComputerUseManager: ObservableObject {
                 try Task.checkCancellation()
                 if let nativeExecutor {
                     configureVisualFactory(nativeExecutor, receipt: nil)
-                    let structured = try await executorComposer(helperReceipt, nativeExecutor)
-                    composedExecutor = structured
-                    retainedCapabilities = structured
+                    let composed = try await composeExecutor(helperReceipt: helperReceipt, fallback: nativeExecutor)
+                    composedExecutor = composed
+                    retainedCapabilities = composed
                     try Task.checkCancellation()
-                    executor = structured
+                    executor = composed
                 }
                 let receipt = try await installer.install { [weak self] update in
                     self?.consumeInstallerUpdate(update)
@@ -7698,7 +7226,7 @@ final class HostComputerUseManager: ObservableObject {
                     detail: "Starting verified local Mac tools…")
                 let hybrid: any ComputerUseExecuting
                 if let retainedCapabilities { hybrid = retainedCapabilities }
-                else { hybrid = try await executorComposer(helperReceipt, loaded) }
+                else { hybrid = try await composeExecutor(helperReceipt: helperReceipt, fallback: loaded) }
                 composedExecutor = hybrid
                 try Task.checkCancellation()
                 try await installer.recordRuntimeActivationSuccess(for: receipt)
@@ -7782,6 +7310,12 @@ final class HostComputerUseManager: ObservableObject {
         }
     }
 
+    private func composeExecutor(helperReceipt: MacControlMCPInstallationReceipt,
+                                 fallback: any ComputerUseExecuting) async throws -> any ComputerUseExecuting {
+        guard let executorComposer else { return fallback }
+        return try await executorComposer(helperReceipt, fallback)
+    }
+
     private func deferredVisualExecutor(receipt: ComputerUseInstallationReceipt?) -> ComputerUseDeferredVisualExecutor {
         guard let receipt else { return ComputerUseDeferredVisualExecutor() }
         return ComputerUseDeferredVisualExecutor(loader: { [visualExecutorLoader, installer] progress in
@@ -7813,7 +7347,8 @@ final class HostComputerUseManager: ObservableObject {
                 if finishRequestedSetup, !Task.isCancelled, !isShuttingDown { startSetupPipeline() }
             }
             do {
-                let structured = try await executorComposer(helperReceipt, deferredVisualExecutor(receipt: visualReceipt))
+                let structured = try await composeExecutor(helperReceipt: helperReceipt,
+                    fallback: deferredVisualExecutor(receipt: visualReceipt))
                 loaded = structured
                 try Task.checkCancellation()
                 let interrupted = visualReceipt == nil ? await installer.interruptedInstallationExists() : false
@@ -7869,7 +7404,8 @@ final class HostComputerUseManager: ObservableObject {
                     macControlReceipt = helper
                     let visualReceipt = await installer.currentInstallation()
                     try Task.checkCancellation()
-                    let structured = try await executorComposer(helper, deferredVisualExecutor(receipt: visualReceipt))
+                    let structured = try await composeExecutor(helperReceipt: helper,
+                        fallback: deferredVisualExecutor(receipt: visualReceipt))
                     structuredCandidate = structured
                     try Task.checkCancellation()
                     executor = structured
@@ -7886,7 +7422,7 @@ final class HostComputerUseManager: ObservableObject {
                     macControlReceipt = helper
                     let visualReceipt = await installer.currentInstallation()
                     configureVisualFactory(native, receipt: visualReceipt)
-                    let structured = try await executorComposer(helper, native)
+                    let structured = try await composeExecutor(helperReceipt: helper, fallback: native)
                     structuredCandidate = structured
                     activated = structured
                 }
@@ -7954,7 +7490,7 @@ final class HostComputerUseManager: ObservableObject {
                 modelState = .installing(
                     detail: "Starting verified local Mac tools…",
                     fraction: 0.99)
-                let hybrid = try await executorComposer(helperReceipt, loaded)
+                let hybrid = try await composeExecutor(helperReceipt: helperReceipt, fallback: loaded)
                 try Task.checkCancellation()
                 try await installer.recordRuntimeActivationSuccess(for: receipt)
                 executor = hybrid
@@ -8228,7 +7764,6 @@ final class HostComputerUseManager: ObservableObject {
             case .completed(let response):
                 if taskLedger.isCancelled(taskID: envelope.id),
                    let reference = (try? ComputerUseExecutionPromptDecoder.decode(envelope.body))?.clarification {
-                    browserClarifications.invalidateAnswerQuestion(reference, for: envelope)
                     if taskLedger.terminalClarification(taskID: reference.taskID) == reference {
                         _ = try taskLedger.cancelLocally(taskID: reference.taskID,
                             senderID: envelope.senderID, sessionID: envelope.sessionID)
@@ -8240,8 +7775,7 @@ final class HostComputerUseManager: ObservableObject {
                     replyingTo: envelope,
                     channel: channel,
                     outcome: taskLedger.terminalOutcome(taskID: envelope.id),
-                    clarification: taskLedger.terminalClarification(taskID: envelope.id),
-                    clarificationRetry: taskLedger.terminalClarificationRetry(taskID: envelope.id))
+                    clarification: taskLedger.terminalClarification(taskID: envelope.id))
                 sendStatus("ready", replyingTo: envelope, channel: channel)
                 return
             case .accepted:
@@ -8345,19 +7879,8 @@ final class HostComputerUseManager: ObservableObject {
         }
 
         let continuation: TextClarificationContinuation?
-        let browserContinuation: ComputerUseBrowserClarificationTransport.Continuation?
         do {
-            if let reference = request.clarification, browserClarifications.matches(reference) {
-                guard request.clarificationChoiceID == nil else {
-                    throw ComputerUseTextClarificationStore.Failure.invalidChoice
-                }
-                guard executor is any ComputerUseBrowserResearchContinuing else {
-                    throw ComputerUseBrowserClarificationTransport.Failure.invalidOwner
-                }
-                browserContinuation = try browserClarifications.consume(reference, answer: request.prompt, for: envelope,
-                    retainedOwner: { tools.ownedBrowserResearch(taskID: $0) })
-                continuation = nil
-            } else if let reference = request.clarification {
+            if let reference = request.clarification {
                 guard let continuing = executor as? any ComputerUseTextClarificationContinuing,
                       let pending = try continuing.clarification(taskID: reference.taskID) else {
                     throw ComputerUseTextClarificationStore.Failure.invalidReference
@@ -8370,16 +7893,9 @@ final class HostComputerUseManager: ObservableObject {
                     choiceID: request.clarificationChoiceID, scope: pending.scope, for: envelope)
                 continuation = TextClarificationContinuation(originatingTaskID: reference.taskID,
                     goal: resolution.goal, selectedChoice: resolution.selectedChoice)
-                browserContinuation = nil
             } else {
                 continuation = nil
-                browserContinuation = nil
             }
-        } catch let rejection as ComputerUseBrowserClarificationTransport.RejectedAnswer
-            where request.supportsClarificationRetry && (rejection.retry.reason != .formatMismatch || request.supportsClarificationFormatRetry) {
-            sendClarificationRetry(rejection, replyingTo: envelope, channel: channel)
-            sendStatus("ready", replyingTo: envelope, channel: channel)
-            return
         } catch {
             sendDurableTerminal("I couldn't validate this request or its clarification. Start a new request with the complete instruction.",
                 outcome: .unableToComplete, replyingTo: envelope, channel: channel)
@@ -8387,7 +7903,7 @@ final class HostComputerUseManager: ObservableObject {
             return
         }
         let clarification: String?
-        if continuation != nil || browserContinuation != nil {
+        if continuation != nil {
             clarification = nil
         } else if request.prompt.isEmpty {
             clarification = "What would you like me to do on your Mac?"
@@ -8427,7 +7943,6 @@ final class HostComputerUseManager: ObservableObject {
             conversation: request.conversation,
             requestBody: envelope.body,
             textClarification: continuation,
-            browserClarification: browserContinuation,
             channel: channel, pendingAutomationID: pendingAutomationID)
     }
 
@@ -8438,8 +7953,6 @@ final class HostComputerUseManager: ObservableObject {
         conversation: [ComputerUseConversationTurn],
         requestBody: String? = nil,
         textClarification: TextClarificationContinuation? = nil,
-        browserClarification: ComputerUseBrowserClarificationTransport.Continuation? = nil,
-        browserHandbackRequirement: ComputerUseBrowserHandbackRequirement? = nil,
         channel: any HostComputerUseChannel,
         isResuming: Bool = false,
         pendingAutomationID: UUID? = nil
@@ -8450,9 +7963,7 @@ final class HostComputerUseManager: ObservableObject {
             trustedUserPrompt: trustedUserPrompt,
             conversation: conversation,
             requestBody: requestBody,
-            textClarification: textClarification,
-            browserClarification: browserClarification,
-            browserHandbackRequirement: browserHandbackRequirement)
+            textClarification: textClarification)
         let admissionID = pendingAutomationID ?? actionGate.reservePendingAutomation()
         guard actionGate.adoptPendingAutomation(admissionID) else {
             pauseForLocalIntervention(context)
@@ -8501,43 +8012,9 @@ final class HostComputerUseManager: ObservableObject {
                     result = try await resultAfterApprovedAction(action, executor: executor,
                         context: context, token: token, progress: progress)
                 } else {
-                    if isResuming {
-                        do {
-                            if let requirement = context.browserHandbackRequirement {
-                                try await tools.reacquireOwnedBrowserAfterUserControl(requirement)
-                            }
-                            try await tools.resumeOwnedBrowserResearch(taskID: context.envelope.id)
-                        } catch {
-                            let guidance: String
-                            switch error as? ComputerUseBrowserError {
-                            case .signInWindowOpen?, .handbackContextLost?, .windowNotActive?, .sourceNotAllowed?:
-                                guidance = error.localizedDescription
-                            default:
-                                guidance = "The AI browser is not ready to continue. Finish signing in or loading the page, then choose Resume."
-                            }
-                            try await acceptExecutionResult(.userInterventionRequired(
-                                guidance),
-                                executor: executor, context: context, token: token)
-                            return
-                        }
-                    }
                     try Task.checkCancellation()
                     guard currentExecutionToken == token else { throw CancellationError() }
-                    // The requirement protects this handback only. A later
-                    // pause captures the session then owned by the same task.
-                    context = context.retainingBrowserHandback(nil)
-                    currentExecution = context
-                    if let browserClarification {
-                        guard let continuing = executor as? any ComputerUseBrowserResearchContinuing,
-                              tools.ownedBrowserResearch(taskID: browserClarification.owner.taskID) === browserClarification.owner,
-                              browserClarification.answerTaskID == envelope.id,
-                              browserClarification.owner.executionTaskID == envelope.id,
-                              browserClarification.owner.input.digest == browserClarification.inputDigest else {
-                            throw ComputerUseBrowserClarificationTransport.Failure.invalidOwner
-                        }
-                        result = try await continuing.continueBrowserResearch(taskID: envelope.id, research: browserClarification.owner,
-                            tools: tools, progress: progress)
-                    } else if let textClarification {
+                    if let textClarification {
                         guard let continuing = executor as? any ComputerUseTextClarificationContinuing else {
                             throw ComputerUseTextClarificationStore.Failure.invalidReference
                         }
@@ -8573,16 +8050,6 @@ final class HostComputerUseManager: ObservableObject {
                     context: context,
                     token: token)
                 return
-            } catch let admission as ComputerUseBrowserResearchAdmissionPause {
-                guard currentExecutionToken == token else { return }
-                // No session may belong to this root yet. Preserve the goal
-                // and let explicit Resume retry its current owner admission;
-                // an unavailable fabricated handback seal would strand it.
-                pauseForLocalIntervention(context, guidance: admission.reason.localizedDescription)
-            } catch ComputerUseBrowserError.authenticationRequired {
-                guard currentExecutionToken == token else { return }
-                pauseForLocalIntervention(context, guidance: ComputerUseBrowserError.authenticationRequired.localizedDescription,
-                    requiresBrowserHandback: true)
             } catch ComputerUseHostTools.ToolError.paused, ComputerUseTextEditError.interrupted {
                 // The injection gate can close synchronously on local input or
                 // WebRTC disconnect before its MainActor lifecycle callback.
@@ -8668,13 +8135,6 @@ final class HostComputerUseManager: ObservableObject {
                         // after those checks and immediately before dispatch.
                         self?.postedApprovedVisualTaskID = context.envelope.id
                     })
-            } catch ComputerUseBrowserError.authenticationRequired {
-                postedApprovedVisualTaskID = nil
-                guard currentExecutionToken == executionToken else { return }
-                cancelActiveVisualApprovalContinuation()
-                pauseForLocalIntervention(context, guidance: ComputerUseBrowserError.authenticationRequired.localizedDescription,
-                    requiresBrowserHandback: true)
-                return
             } catch ComputerUseHostTools.ToolError.approvalTargetChanged {
                 postedApprovedVisualTaskID = nil
                 guard currentExecutionToken == executionToken else { return }
@@ -8829,7 +8289,6 @@ final class HostComputerUseManager: ObservableObject {
             conversation: context.conversation,
             requestBody: context.requestBody,
             textClarification: context.textClarification,
-            browserClarification: context.browserClarification,
             channel: context.channel,
             isResuming: true)
     }
@@ -9079,14 +8538,6 @@ final class HostComputerUseManager: ObservableObject {
                 details: [.init(label: "Action", value: action), .init(label: "Fingerprint", value: request.fingerprint)]
                     + request.reviewFields.map { .init(label: $0.label, value: $0.value) })
             enterApproval(.init(request: presentation, context: context, operation: .agent(request)))
-        case .browserResearchAnswer(let answer):
-            guard executor is any ComputerUseBrowserResearchContinuing,
-                  let owner = tools.ownedBrowserResearch(taskID: answer.rootTaskID),
-                  owner.executionTaskID == envelope.id else { throw ComputerUseBrowserClarificationTransport.Failure.invalidOwner }
-            try owner.validateAnswer(answer)
-            // Use the existing durable terminal/first-result-wins path only
-            // after the exact retained source answer has been admitted.
-            try await acceptExecutionResult(.completed(answer.message), executor: executor, context: context, token: token)
         case .completed(let response):
             sendDurableTerminal(
                 response,
@@ -9114,7 +8565,6 @@ final class HostComputerUseManager: ObservableObject {
             sendStatus("ready", replyingTo: envelope, channel: context.channel)
 
         case .clarificationRequired(let response):
-            guard context.browserClarification == nil else { throw ComputerUseBrowserClarificationTransport.Failure.invalidOwner }
             let reference: ComputerUseClarificationReference?
             let choices: [ComputerUseClarificationChoice]?
             if let pending = try (executor as? any ComputerUseTextClarificationContinuing)?.clarification(taskID: envelope.id) {
@@ -9146,37 +8596,6 @@ final class HostComputerUseManager: ObservableObject {
             activity = .idle
             sendStatus("ready", replyingTo: envelope, channel: context.channel)
 
-        case .browserClarificationRequired(let request):
-            guard executor is any ComputerUseBrowserResearchContinuing, context.textClarification == nil,
-                  let owner = tools.ownedBrowserResearch(taskID: request.taskID), owner.executionTaskID == envelope.id else {
-                throw ComputerUseBrowserClarificationTransport.Failure.invalidOwner
-            }
-            if let guidance = owner.input.clarificationLimitMessage {
-                pauseForLocalIntervention(context, guidance: guidance)
-                return
-            }
-            textClarifications.invalidate()
-            (executor as? any ComputerUseTextClarificationContinuing)?.invalidateClarification(taskID: nil)
-            let question = try browserClarifications.issue(request, owner: owner, for: envelope)
-            try Task.checkCancellation()
-            sendDurableTerminal(question.text, outcome: .userInterventionRequired, replyingTo: envelope,
-                channel: context.channel, clarification: question.reference)
-            currentExecution = nil
-            currentExecutionToken = nil
-            executionTask = nil
-            actionGate.endAutomation(allowsActions: true)
-            activity = .idle
-            sendStatus("ready", replyingTo: envelope, channel: context.channel)
-
-        case .browserResearchProgress(let report):
-            guard executor is any ComputerUseBrowserResearchContinuing,
-                  let owner = tools.ownedBrowserResearch(taskID: report.rootTaskID),
-                  owner.executionTaskID == envelope.id, let progress = report.progress else {
-                throw ComputerUseBrowserClarificationTransport.Failure.invalidOwner
-            }
-            try owner.validateProgressReport(report)
-            pauseForLocalIntervention(context, guidance: report.interventionGuidance, report: progress)
-
         case .userInterventionRequired(let message):
             // This is not a terminal assistant response and must not complete
             // the idempotency ledger. Preserve the exact prompt so the user
@@ -9192,22 +8611,18 @@ final class HostComputerUseManager: ObservableObject {
                     executor as? any ComputerUseVisualApprovalContinuing else {
                 throw VisualApprovalContinuationError.invalidContinuation
             }
-            guard continuationToken.taskID == envelope.id,
-                  continuationToken.browserPageEvidence.map({ $0.document.taskID == envelope.id }) ?? true,
-                  continuationToken.nativeBrowserTarget.map({ $0.pageEvidence == continuationToken.browserPageEvidence && $0.action == proposedAction }) ?? true else {
+            guard continuationToken.taskID == envelope.id else {
                 continuationExecutor.cancelVisualApprovalContinuation(
                     continuationToken)
                 throw VisualApprovalContinuationError.invalidContinuation
             }
-            // The visual model's confirmation copy is untrusted. Build the
-            // user-facing description and TOCTOU fingerprint from the exact
-            // action and host-observed native browser or Accessibility target.
+            // Build the user-facing description and TOCTOU fingerprint from the
+            // exact action and host-observed Accessibility target.
             let prepared: ComputerUsePreparedApproval
             do {
-                if let target = continuationToken.nativeBrowserTarget { try await tools.validateOwnedBrowserAgentTarget(target) }
                 try Task.checkCancellation()
                 guard currentExecutionToken == token else { throw CancellationError() }
-                prepared = try tools.prepareApproval(for: proposedAction, nativeTarget: continuationToken.nativeBrowserTarget)
+                prepared = try tools.prepareApproval(for: proposedAction)
             } catch {
                 continuationExecutor.cancelVisualApprovalContinuation(
                     continuationToken)
@@ -9282,7 +8697,7 @@ final class HostComputerUseManager: ObservableObject {
             context: approval.context,
             operation: approval.operation)
         guard actionGate.beginApprovalWait() else {
-            cancelApprovalIfNeeded(approval, preservingBrowserProgress: true)
+            cancelApprovalIfNeeded(approval, preservingTaskProgress: true)
             pauseForLocalIntervention(approval.context)
             return
         }
@@ -9345,27 +8760,6 @@ final class HostComputerUseManager: ObservableObject {
     /// ledger record reaches durable storage. If that write fails, never emit
     /// the requested result (especially success); report the storage failure
     /// directly and leave the poisoned ledger to reject future retries.
-    private func sendClarificationRetry(_ rejection: ComputerUseBrowserClarificationTransport.RejectedAnswer,
-                                        replyingTo envelope: ComputerUseEnvelope, channel: any HostComputerUseChannel) {
-        guard browserClarifications.retainsRetry(rejection.retry, for: envelope,
-            retainedOwner: { tools.ownedBrowserResearch(taskID: $0) }) else {
-            sendDurableTerminal("The original question is no longer active. Start a new request with the complete instruction.",
-                outcome: .unableToComplete, replyingTo: envelope, channel: channel)
-            return
-        }
-        do {
-            let terminal = try taskLedger.complete(taskID: envelope.id, response: rejection.text,
-                outcome: .userInterventionRequired, clarificationRetry: rejection.retry)
-            send(kind: .assistant, body: terminal.response, replyingTo: envelope, channel: channel,
-                outcome: terminal.outcome, clarification: terminal.clarification, clarificationRetry: terminal.clarificationRetry)
-        } catch {
-            // No answer was accepted and no executor ran. Persistence failure
-            // cannot publish an unrecorded retry or consume the original scope.
-            send(kind: .assistant, body: Self.terminalPersistenceFailureResponse, replyingTo: envelope,
-                channel: channel, outcome: .unableToComplete)
-        }
-    }
-
     private func sendDurableTerminal(
         _ response: String,
         outcome: ComputerUseTerminalOutcome,
@@ -9374,27 +8768,14 @@ final class HostComputerUseManager: ObservableObject {
         clarification: ComputerUseClarificationReference? = nil,
         clarificationChoices: [ComputerUseClarificationChoice]? = nil
     ) {
-        // Only this host's exact retained browser question can carry its
-        // original owner across a terminal transport reply. All other results
-        // end the current execution, including failed terminal persistence.
-        // Origin classification survives a failed liveness check. Otherwise
-        // a retired browser question could be stored as an unclassified one.
-        let identifiesBrowserQuestion = clarification.map { browserClarifications.matches($0) } ?? false
         let identifiesTextQuestion = clarification.map { textClarifications.matches($0) } ?? false
-        let preservesBrowserQuestion = browserClarifications.retainsRegisteredQuestion(clarification, for: envelope,
-            retainedOwner: { tools.ownedBrowserResearch(taskID: $0) })
-        if !preservesBrowserQuestion { tools.retireOwnedBrowserResearch(taskID: envelope.id) }
         do {
             let terminal = try taskLedger.complete(
                 taskID: envelope.id,
                 response: response,
                 outcome: outcome,
                 clarification: clarification,
-                clarificationOwner: identifiesBrowserQuestion ? .browser : identifiesTextQuestion ? .text : nil)
-            if !preservesBrowserQuestion || terminal.clarification != clarification || terminal.outcome != .userInterventionRequired {
-                browserClarifications.invalidate(for: envelope)
-                tools.retireOwnedBrowserResearch(taskID: envelope.id)
-            }
+                clarificationOwner: identifiesTextQuestion ? .text : nil)
             if terminal.clarification == nil || (clarification != nil && terminal.clarification != clarification) {
                 textClarifications.invalidate(for: envelope)
                 (executor as? any ComputerUseTextClarificationContinuing)?.invalidateClarification(taskID: envelope.id)
@@ -9409,8 +8790,6 @@ final class HostComputerUseManager: ObservableObject {
                 clarificationChoices: terminal.clarification == clarification
                     && terminal.outcome == .userInterventionRequired ? clarificationChoices : nil)
         } catch {
-            browserClarifications.invalidate(for: envelope)
-            tools.retireOwnedBrowserResearch(taskID: envelope.id)
             textClarifications.invalidate(for: envelope)
             (executor as? any ComputerUseTextClarificationContinuing)?.invalidateClarification(taskID: envelope.id)
             send(
@@ -9423,7 +8802,6 @@ final class HostComputerUseManager: ObservableObject {
     }
 
     private func invalidateTextClarification() {
-        browserClarifications.invalidate()
         textClarifications.invalidate()
         (executor as? any ComputerUseTextClarificationContinuing)?.invalidateClarification(taskID: nil)
     }
@@ -9460,7 +8838,6 @@ final class HostComputerUseManager: ObservableObject {
         outcome: ComputerUseTerminalOutcome? = nil,
         clarification: ComputerUseClarificationReference? = nil,
         clarificationChoices requestedClarificationChoices: [ComputerUseClarificationChoice]? = nil,
-        clarificationRetry: ComputerUseClarificationRetry? = nil,
         researchProgress: ComputerUseResearchProgress? = nil,
         isApprovedActionEvidenceOnly: Bool = false,
         evidenceDeliveryGeneration: (transport: UInt64, authorization: UInt64)? = nil
@@ -9488,13 +8865,8 @@ final class HostComputerUseManager: ObservableObject {
             || requestedClarificationChoices == availableClarificationChoices
         let clarificationChoices = canPublishClarificationChoices ? availableClarificationChoices : nil
         let unavailableQuestion = clarification != nil && (!liveQuestion || !canPublishClarificationChoices)
-        let liveRetry = clarificationRetry.flatMap { retry in
-            !needsIdentityRecovery && !taskLedger.isCancelled(taskID: envelope.id) && browserClarifications.retainsRetry(retry, for: envelope,
-                retainedOwner: { tools.ownedBrowserResearch(taskID: $0) }) ? retry : nil
-        }
-        let unavailableRetry = clarificationRetry != nil && liveRetry == nil
         let responseBody = needsIdentityRecovery && kind == .assistant ? Self.promptIdentityRecoveryResponse
-            : unavailableRetry || unavailableQuestion ? "The original question is no longer active. Start a new request with the complete instruction." : body
+            : unavailableQuestion ? "The original question is no longer active. Start a new request with the complete instruction." : body
         let wireBody: String
         switch kind {
         case .assistant, .status:
@@ -9504,12 +8876,12 @@ final class HostComputerUseManager: ObservableObject {
                 appliedControlRevision: isApprovedActionEvidenceOnly ? nil : taskLedger.appliedControlRevision(
                     taskID: envelope.id),
                 hostControlEpoch: isApprovedActionEvidenceOnly ? nil : taskLedger.hostControlEpoch(taskID: envelope.id),
-                outcome: (needsIdentityRecovery && kind == .assistant) || unavailableRetry || unavailableQuestion ? .unableToComplete : outcome,
+                outcome: (needsIdentityRecovery && kind == .assistant) || unavailableQuestion ? .unableToComplete : outcome,
                 clarification: needsIdentityRecovery || unavailableQuestion ? nil : clarification,
-                clarificationAnswerPolicy: needsIdentityRecovery || unavailableQuestion ? nil : browserClarifications.answerPolicy(for: clarification, envelope: envelope),
-                clarificationRetry: liveRetry,
+                clarificationAnswerPolicy: nil,
+                clarificationRetry: nil,
                 clarificationChoices: needsIdentityRecovery || unavailableQuestion ? nil : clarificationChoices,
-                supportsClarificationRecovery: !needsIdentityRecovery && !unavailableQuestion && (clarification != nil || liveRetry != nil),
+                supportsClarificationRecovery: !needsIdentityRecovery && !unavailableQuestion && clarification != nil,
                 approvedActionEvidence: evidence,
                 isApprovedActionEvidenceOnly: isApprovedActionEvidenceOnly,
                 researchProgress: needsIdentityRecovery ? nil : researchProgress).encodedBody()) ?? responseBody
@@ -9517,7 +8889,7 @@ final class HostComputerUseManager: ObservableObject {
             wireBody = body
         }
         let previousDelivery = outboundDeliveryTask
-        let guardedGeneration = clarification != nil || clarificationRetry != nil
+        let guardedGeneration = clarification != nil
             ? (transport: transportGeneration, authorization: actionEvidenceAuthorizationGeneration) : evidenceDeliveryGeneration
         let delivery = Task { [weak self] in
             if let previousDelivery { await previousDelivery.value }
@@ -9527,9 +8899,9 @@ final class HostComputerUseManager: ObservableObject {
                       self.authorizedPeerID == envelope.senderID else { return }
             }
             var deliveredBody = wireBody
-            if (clarification != nil && !unavailableQuestion) || liveRetry != nil {
+            if clarification != nil && !unavailableQuestion {
                 guard let self, let freshBody = self.revalidateClarificationDelivery(wireBody, replyingTo: envelope,
-                    question: clarification, retry: liveRetry) else { return }
+                    question: clarification) else { return }
                 deliveredBody = freshBody
             }
             _ = try? await channel.send(
@@ -9545,25 +8917,19 @@ final class HostComputerUseManager: ObservableObject {
     /// Recheck after preceding deliveries finish, immediately before handing
     /// this reply to the channel. A historical question is not a live owner.
     private func revalidateClarificationDelivery(_ body: String, replyingTo envelope: ComputerUseEnvelope,
-                                                question: ComputerUseClarificationReference?,
-                                                retry: ComputerUseClarificationRetry?) -> String? {
+                                                question: ComputerUseClarificationReference?) -> String? {
         guard let original = try? ComputerUseTaskUpdate.decodeBody(body), original.taskID == envelope.id,
-              original.clarification == question, original.clarificationRetry == retry else { return nil }
+              original.clarification == question else { return nil }
         let liveQuestion = question.map {
             taskLedger.terminalClarification(taskID: envelope.id) == $0
                 && retainsNativeQuestion($0, for: envelope)
-        } ?? true
-        let liveRetry = retry.map {
-            taskLedger.terminalClarificationRetry(taskID: envelope.id) == $0
-                && browserClarifications.retainsRetry($0, for: envelope,
-                    retainedOwner: { tools.ownedBrowserResearch(taskID: $0) })
         } ?? true
         let liveChoices: [ComputerUseClarificationChoice]? = question.flatMap { reference in
             guard liveQuestion else { return nil }
             let originalRequest = controlReplyEnvelope(taskID: reference.taskID, basedOn: envelope)
             return textClarifications.retainedChoices(for: reference, request: originalRequest)
         }
-        guard !liveQuestion || !liveRetry else {
+        guard !liveQuestion else {
             guard original.clarificationChoices == liveChoices else { return nil }
             return body
         }
@@ -9574,10 +8940,8 @@ final class HostComputerUseManager: ObservableObject {
     }
 
     private func retainsNativeQuestion(_ reference: ComputerUseClarificationReference, for envelope: ComputerUseEnvelope) -> Bool {
-        let kind = taskLedger.clarificationOwner(taskID: envelope.id)
-        if kind != .text, browserClarifications.retainsRegisteredQuestion(reference, for: envelope,
-            retainedOwner: { tools.ownedBrowserResearch(taskID: $0) }) { return true }
-        guard kind != .browser, textClarifications.matches(reference),
+        guard taskLedger.clarificationOwner(taskID: envelope.id) != .browser,
+              textClarifications.matches(reference),
               let native = try? (executor as? any ComputerUseTextClarificationContinuing)?.clarification(taskID: envelope.id) else { return false }
         return textClarifications.retains(reference, native: native, for: envelope)
     }
@@ -9600,7 +8964,7 @@ final class HostComputerUseManager: ObservableObject {
             let choices = available ? self.textClarifications.retainedChoices(for: probe.reference, request: original) : nil
             guard let result = try? ComputerUseClarificationProbeResult(probeID: probe.probeID, reference: probe.reference,
                 question: available ? self.taskLedger.terminalClarificationText(taskID: probe.reference.taskID) : nil,
-                answerPolicy: available ? self.browserClarifications.answerPolicy(for: probe.reference, envelope: original) : nil,
+                answerPolicy: nil,
                 clarificationChoices: choices),
                 let body = try? result.encodedBody() else { return }
             _ = try? await channel.send(kind: .status, body: body, to: envelope.senderID, sessionID: envelope.sessionID, messageID: nil)

@@ -36,21 +36,11 @@ final class ComputerUseNativeTextExecutor {
         let expiryNonce: UUID
     }
 
-    /// Both adapters retain existing objects. Native AX has no browser lease
-    /// to transfer; the executor's exact answer-task/goal binding owns its
-    /// continuation, and each observation must still prove the same form.
     @MainActor private enum ClarificationForm {
-        case browser(ComputerUseBrowserTextTarget)
         case native(NativeClarificationForm)
-
-        var browserTarget: ComputerUseBrowserTextTarget? {
-            if case .browser(let target) = self { return target }
-            return nil
-        }
 
         func scope() throws -> String {
             switch self {
-            case .browser(let target): return try target.clarificationScope()
             case .native(let form):
                 _ = try form.reobserve()
                 return form.identity
@@ -59,14 +49,12 @@ final class ComputerUseNativeTextExecutor {
 
         func transfer(taskID: String) throws -> Self {
             switch self {
-            case .browser(let target): return .browser(try target.transferForClarification(taskID: taskID))
             case .native: return self
             }
         }
 
         func reobserve() async throws -> [ComputerUseTextField] {
             switch self {
-            case .browser(let target): return try await target.reobserveRetainedFields()
             case .native(let form): return try form.reobserve()
             }
         }
@@ -125,13 +113,10 @@ final class ComputerUseNativeTextExecutor {
     private let planningWorker: ComputerUsePlanningWorker
     private let planningTimeout: TimeInterval
     private let editOverride: ((ComputerUseTextPlanEdit, ComputerUseTextSnapshot) async throws -> Void)?
-    private let browserTargetProvider: (@MainActor (String) async throws -> ComputerUseBrowserTextTarget?)?
     private let now: () -> Date
     private let clarificationLifetime: TimeInterval
     private var retainedTask: ComputerUseTextTask?
-    private var retainedBrowserTarget: ComputerUseBrowserTextTarget?
     private var retainedJournalSession: JournalSession?
-    private var activeBrowserTarget: ComputerUseBrowserTextTarget?
     private var retainedTaskOriginID: String?
     private var pendingClarification: PendingClarification?
     private var preparedClarification: PreparedClarification?
@@ -142,7 +127,6 @@ final class ComputerUseNativeTextExecutor {
          journalDirectory: URL = ComputerUseTextStepStore.defaultDirectory,
          planner: any ComputerUseTextGoalPlanning,
          editOverride: ((ComputerUseTextPlanEdit, ComputerUseTextSnapshot) async throws -> Void)? = nil,
-         browserTargetProvider: (@MainActor (String) async throws -> ComputerUseBrowserTextTarget?)? = nil,
          now: @escaping () -> Date = Date.init, clarificationLifetime: TimeInterval = 600,
          nativeTarget: (any ComputerUseNativeTextTarget)? = nil,
          planningWorker: ComputerUsePlanningWorker = .shared,
@@ -158,7 +142,6 @@ final class ComputerUseNativeTextExecutor {
         self.planningWorker = planningWorker
         self.planningTimeout = planningTimeout
         self.editOverride = editOverride
-        self.browserTargetProvider = browserTargetProvider
         self.now = now
         self.clarificationLifetime = clarificationLifetime
     }
@@ -170,7 +153,7 @@ final class ComputerUseNativeTextExecutor {
         -> ComputerUseExecutionResult? {
         guard !isExecuting else { throw Failure.alreadyExecuting }
         isExecuting = true
-        defer { isExecuting = false; activeBrowserTarget = nil }
+        defer { isExecuting = false }
         do {
             try Task.checkCancellation()
             guard mayAct() else { throw ComputerUseTextEditError.interrupted }
@@ -194,25 +177,16 @@ final class ComputerUseNativeTextExecutor {
                 return .clarificationRequired(pending.info.question)
             }
             retainedTask = nil
-            retainedBrowserTarget = nil
             retainedJournalSession = nil
             retainedTaskOriginID = nil
             invalidateClarification()
-            let browserTarget = try await browserTargetProvider?(taskID)
-            activeBrowserTarget = browserTarget
-            let fields: [ComputerUseTextField]?
-            if let browserTarget { fields = try await browserTarget.fieldsIfSupported() }
-            else { fields = target.fields() }
+            let fields = target.fields()
             try Task.checkCancellation()
             guard mayAct() else { throw ComputerUseTextEditError.interrupted }
             // This decline precedes planning, contract persistence and input.
             // Never convert a later execution/continuation error into fallback.
-            guard let fields else { return try decline(taskID: taskID) }
             return try await planAndRun(taskID: taskID, goal: goal, originatingTaskID: nil,
-                browserTarget: browserTarget, fields: fields, verifiedStep: verifiedStep, progress: progress)
-        } catch {
-            await activeBrowserTarget?.joinCompletion()
-            throw error
+                fields: fields, verifiedStep: verifiedStep, progress: progress)
         }
     }
 
@@ -261,7 +235,7 @@ final class ComputerUseNativeTextExecutor {
         -> ComputerUseExecutionResult {
         guard !isExecuting else { throw Failure.alreadyExecuting }
         isExecuting = true
-        defer { isExecuting = false; activeBrowserTarget = nil }
+        defer { isExecuting = false }
         do {
             try Task.checkCancellation()
             guard mayAct() else { throw ComputerUseTextEditError.interrupted }
@@ -290,7 +264,6 @@ final class ComputerUseNativeTextExecutor {
                 // exact answer task may resume the observation or planning stage.
                 invalidateClarification()
                 retainedTask = nil
-                retainedBrowserTarget = nil
                 retainedJournalSession = nil
                 retainedTaskOriginID = nil
                 let next = try pending.form.transfer(taskID: taskID)
@@ -301,7 +274,6 @@ final class ComputerUseNativeTextExecutor {
             }
             guard let prepared = preparedClarification, prepared.taskID == taskID,
                   prepared.originatingTaskID == originatingTaskID, prepared.goal == goal else { throw Failure.invalidClarification }
-            activeBrowserTarget = prepared.form.browserTarget
             do {
                 guard now() < prepared.expiresAt,
                       try prepared.form.scope() == prepared.scope,
@@ -310,7 +282,7 @@ final class ComputerUseNativeTextExecutor {
                 guard preparedClarification?.expiryNonce == prepared.expiryNonce,
                       now() < prepared.expiresAt else { throw Failure.invalidClarification }
                 let result = try await planAndRun(taskID: taskID, goal: goal, originatingTaskID: originatingTaskID,
-                    browserTarget: prepared.form.browserTarget, fields: fields, verifiedStep: verifiedStep, progress: progress)
+                    fields: fields, verifiedStep: verifiedStep, progress: progress)
                     ?? .unableToComplete("I couldn't resolve this form edit from your answer. Start a new request with the field and exact text.")
                 // A newly issued question has its own expiry and must survive.
                 if preparedClarification?.expiryNonce == prepared.expiryNonce {
@@ -321,25 +293,19 @@ final class ComputerUseNativeTextExecutor {
                 let planningFailure = error as? ComputerUsePlanningWorker.Failure
                 let mayRetryPlanning = planningFailure == .busy || planningFailure == .timedOut
                 if !(error is CancellationError) && error as? ComputerUseTextEditError != .interrupted
-                    && error as? ComputerUseBrowserError != .authenticationRequired && !mayRetryPlanning {
+                    && !mayRetryPlanning {
                     invalidateClarification(taskID: taskID)
                 }
                 throw error
             }
-        } catch {
-            await activeBrowserTarget?.joinCompletion()
-            throw error
         }
     }
 
     private func planAndRun(taskID: String, goal: ComputerUseUnresolvedTextGoal, originatingTaskID: String?,
-                            browserTarget: ComputerUseBrowserTextTarget?, fields: [ComputerUseTextField],
+                            fields: [ComputerUseTextField],
                             verifiedStep: (Int, Int) -> Void, progress: (String) -> Void) async throws
         -> ComputerUseExecutionResult? {
-        let read: (String) async throws -> ComputerUseTextSnapshot? = { [target] id in
-            if let browserTarget { return try await browserTarget.joiningCompletion { try await browserTarget.read(targetID: id) } }
-            return target.snapshot(targetID: id)
-        }
+        let read: (String) async throws -> ComputerUseTextSnapshot? = { [target] id in target.snapshot(targetID: id) }
         guard !fields.isEmpty else { return try decline(taskID: taskID) }
         try Task.checkCancellation()
         guard mayAct() else { throw ComputerUseTextEditError.interrupted }
@@ -372,7 +338,6 @@ final class ComputerUseNativeTextExecutor {
             }
             let form: ClarificationForm
             if let prepared = preparedClarification, prepared.taskID == taskID { form = prepared.form }
-            else if let browserTarget { form = .browser(browserTarget) }
             else { form = .native(try NativeClarificationForm(target: target, fields: fields)) }
             let scope = try form.scope()
             if originatingTaskID != nil {
@@ -410,7 +375,6 @@ final class ComputerUseNativeTextExecutor {
         do {
             contract = try ComputerUseTextTaskContract(taskID: taskID, prompt: goal.taskIdentityText,
                 fields: fields, operations: operations, unchangedTargetIDs: unchanged)
-            if let browserTarget { try await browserTarget.validateRepresentability(of: contract) }
         } catch ComputerUseTextEditError.valueNotRepresentable {
             return .unableToComplete("A selected field cannot accept the exact requested value. Check its format, limits or available options. A choice needs one uniquely labeled available option. No fields were edited.")
         }
@@ -428,21 +392,8 @@ final class ComputerUseNativeTextExecutor {
             apply: { _, _ in throw ComputerUseTextTaskError.invalidPlan },
             applyWithIdentity: { [weak self] dispatch in
                 guard let self else { throw CancellationError() }
-                if let browserTarget { try await browserTarget.joiningCompletion { try await browserTarget.apply(dispatch) } }
-                else if let editOverride { try await editOverride(dispatch.edit, dispatch.expected) }
+                if let editOverride { try await editOverride(dispatch.edit, dispatch.expected) }
                 else { try await apply(dispatch) }
-            },
-            didDispatchInput: browserTarget.map { target in
-                { operationID in try await target.joiningCompletion { try await target.didDispatchInput(operationID: operationID) } }
-            },
-            finishPendingInput: browserTarget.map { target in
-                { step, operationID in
-                    try session.confirmPendingAttempt()
-                    let finished = try await target.finishPendingChange(operationID: operationID)
-                    if !finished {
-                        _ = try await target.continueUnsentInput(step, operationID: operationID)
-                    }
-                }
             },
             persist: { journal in
                 try session.save(journal)
@@ -450,38 +401,10 @@ final class ComputerUseNativeTextExecutor {
                 try session.acquire(taskID: taskID)
             }, reloadJournal: { try session.loadedJournal() }, mayAct: mayAct)
         retainedTask = task
-        retainedBrowserTarget = browserTarget
         retainedJournalSession = session
         retainedTaskOriginID = originatingTaskID
         invalidateClarification(taskID: taskID)
         return try await run(task, verifiedStep: verifiedStep, progress: progress)
-    }
-
-    /// Continue the exact retained form transaction without replanning or
-    /// rediscovery. This only prepares a query; a whole-browser task must
-    /// separately authorize navigation and verify its remaining outcomes.
-    func prepareFormQuery(taskID: String, promptDigest: String, controlID: String,
-                          evidence: ComputerUseBrowserPageEvidence) async throws -> ComputerUseBrowserNavigationTarget {
-        try Task.checkCancellation()
-        guard mayAct() else { throw ComputerUseTextEditError.interrupted }
-        guard !isExecuting else { throw Failure.alreadyExecuting }
-        isExecuting = true
-        defer { isExecuting = false }
-        guard let retainedTask, retainedTask.contract.taskID == taskID,
-              retainedTask.contract.promptDigest == promptDigest, let retainedBrowserTarget, let retainedJournalSession else {
-            throw ComputerUseBrowserError.formQueryUnavailable
-        }
-        let lease = try retainedJournalSession.acquire(taskID: taskID)
-        defer { lease.release() }
-        guard try retainedJournalSession.loadedJournal() == retainedTask.journal else { throw ComputerUseBrowserError.formQueryUnavailable }
-        let continuation = try retainedTask.verifiedContinuation()
-        let result = try await retainedBrowserTarget.joiningCompletion {
-            try await retainedBrowserTarget.prepareFormQuery(controlID: controlID, evidence: evidence, after: continuation)
-        }
-        try Task.checkCancellation()
-        try lease.assertOwnership()
-        guard mayAct() else { throw ComputerUseTextEditError.interrupted }
-        return result
     }
 
     private func decline(taskID: String) throws -> ComputerUseExecutionResult? {
@@ -498,7 +421,6 @@ final class ComputerUseNativeTextExecutor {
     private func run(_ task: ComputerUseTextTask, verifiedStep: (Int, Int) -> Void,
                      progress: (String) -> Void) async throws
         -> ComputerUseExecutionResult {
-        activeBrowserTarget = retainedBrowserTarget
         let includesChoice = task.contract.steps.contains(where: \.isChoiceSelection)
         try await task.run { complete, total in
             progress("Verified \(includesChoice ? "form change" : "text edit") \(complete) of \(total)…")

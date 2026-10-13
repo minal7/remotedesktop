@@ -55,7 +55,7 @@ struct ComputerUseLocalDefaultBrowserControlPlanner: Sendable {
         let response = try await transport.complete(request: request)
         try Task.checkCancellation()
         if let body = request.httpBody { inspectExchange?(body, response) }
-        let content = try ComputerUseBrowserModelResponse.content(response, modelAlias: connection.modelAlias)
+        let content = try ComputerUseModelResponseDecoder.content(response, modelAlias: connection.modelAlias)
         return try Self.decode(content: content, page: page, input: input)
     }
 
@@ -71,7 +71,7 @@ struct ComputerUseLocalDefaultBrowserControlPlanner: Sendable {
         let response = try await transport.complete(request: request)
         try Task.checkCancellation()
         if let body = request.httpBody { inspectExchange?(body, response) }
-        let content = try ComputerUseBrowserModelResponse.content(response, modelAlias: connection.modelAlias)
+        let content = try ComputerUseModelResponseDecoder.content(response, modelAlias: connection.modelAlias)
         return try Self.decodeBootstrap(content: content, input: input)
     }
 

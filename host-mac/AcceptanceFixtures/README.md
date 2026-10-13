@@ -29,20 +29,6 @@ outside every active display before they are ordered. The fixture has no Dock
 identity and is named **Remote Desktop MCP Test Fixture**; there is no Everyday
 Planner application or window.
 
-Those 29 calls are low-level component and host-policy contract coverage. They
-are not a claim that the normal-language planner exposes all 29 operations.
-The production structured planner surface is exactly seven read-only sidecar
-operations—Contacts search, Reminders list, Shortcuts list, focused app,
-running apps, windows, and permission status—plus the embedded Mail operation.
-`MCPFirstComputerUseExecutorTests` drives the production executor with ordinary
-person prompts and deterministic typed proposals for all seven read-only
-operations, then proves that each exact result reaches the next planner step.
-Its complex Contacts-to-Mail case consumes a named contact's address, proposes
-a detailed email, stops at the exact recipient/subject/message confirmation,
-and calls Mail only after approval. This tests the planner/executor contract;
-it does not substitute a scripted planner for an installed-model acceptance
-claim.
-
 The native visibility guard is compiled and its baseline/watchdog is active
 before the helper process launches, initializes, or lists tools. A 20 ms
 `CGWindowList` watchdog remains active around every accepted call and aborts on

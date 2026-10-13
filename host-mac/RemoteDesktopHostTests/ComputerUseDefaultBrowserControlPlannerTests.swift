@@ -769,7 +769,7 @@ final class ComputerUseDefaultBrowserControlPlannerTests: XCTestCase {
             id: "candidate-progress", displayName: "Quarterly Presentation.pptx",
             contentTypeIdentifier: "org.openxmlformats.presentationml.presentation", fileExtension: "pptx",
             byteCount: 28_273, modifiedAt: nil, createdAt: nil, addedToDirectoryAt: nil)
-        let localFiles = ComputerUseMCPBrowserStepPlanner.LocalFileContext(
+        let localFiles = ComputerUseLocalFileContext(
             query: .init(fileKind: .presentation),
             page: .init(candidates: [candidate], isComplete: true, nextCursor: nil,
                 hasTiedSortValues: false, hasMissingSortValues: false),
