@@ -2765,10 +2765,13 @@ extension OSAtlasLlamaRuntimeTests {
         let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
             .deletingLastPathComponent().deletingLastPathComponent()
         let prompt = try String(contentsOf: root.appendingPathComponent("policy/prompts/v1.txt"), encoding: .utf8)
-        let schema = try Data(contentsOf: root.appendingPathComponent("host-mac/RemoteDesktopHost/Agent/Schemas/action.schema.json"))
-        return AgentVLMRequestInput(prompt: prompt,
-            observationJSON: #"{"task":"Complete a generic task","screenshot":"[attached PNG image]","elements":[]}"#,
-            screenshotPNG: try faraTestPNG(), actionSchema: schema)
+        return AgentVLMRequestInput(messages: [
+            .init(role: .system, content: [.text(prompt)]),
+            .init(role: .user, content: [
+                .text(#"{"task":"Complete a generic task","screenshot":"[attached PNG image]","elements":[]}"#),
+                .imagePNG(try faraTestPNG()),
+            ]),
+        ])
     }
 }
 

@@ -1422,7 +1422,7 @@ actor OSAtlasLlamaRuntime {
                 let exactTokens = try await server.transport.exactInputTokenCount(completionRequest: request)
                 try Task.checkCancellation()
                 guard active?.endpoint == endpoint else { throw OSAtlasLlamaRuntimeError.inactiveSession }
-                let imageCount = input.priorScreenshotsPNG.count + 1
+                let imageCount = input.imageCount
                 let reservedTokens = imageCount * ComputerUseFaraModel.contextImageTokensPerScreenshot
                     + OSAtlasLlamaHTTPClient.agentMaximumCompletionTokens
                     + ComputerUseFaraModel.contextSafetyReserveTokens
@@ -2304,30 +2304,49 @@ enum OSAtlasLlamaHTTPClient {
     static func makeAgentActionRequest(endpoint: OSAtlasLlamaEndpoint,
                                        input: AgentVLMRequestInput) throws -> URLRequest {
         try OSAtlasLlamaRuntime.validateLoopbackEndpoint(endpoint.baseURL)
+        let expectedAlias = input.model == .fara15_4b
+            ? ComputerUseFaraRuntimeInputs.modelAlias : "ui-tars15-7b-v1"
         guard endpoint.variant == nil, !endpoint.bearerToken.isEmpty,
-              !input.prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-              !input.observationJSON.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-              !input.screenshotPNG.isEmpty else {
+              input.modelAlias == expectedAlias,
+              input.messages.count >= 2, input.messages.first?.role == .system,
+              input.messages.last?.role == .user else {
             throw OSAtlasLlamaRuntimeError.invalidResponse
         }
-        try ComputerUseFaraModel.validatePNG(input.screenshotPNG)
-        guard input.priorScreenshotsPNG.count <= 2 else { throw OSAtlasLlamaRuntimeError.invalidVisionInput }
-        for image in input.priorScreenshotsPNG { try ComputerUseFaraModel.validatePNG(image) }
+        guard (1...3).contains(input.imageCount) else { throw OSAtlasLlamaRuntimeError.invalidVisionInput }
         var request = URLRequest(url: endpoint.baseURL.appendingPathComponent("v1/chat/completions"))
         request.httpMethod = "POST"
         request.timeoutInterval = 60
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("Bearer " + endpoint.bearerToken, forHTTPHeaderField: "Authorization")
-        var userContent: [[String: Any]] = [["type": "text", "text":
-            "Observation JSON (current screenshot attached last):\n" + input.observationJSON +
-            (input.priorScreenshotsPNG.isEmpty ? "" : "\nEarlier screenshots follow chronologically, then the current screenshot.")]]
-        for image in input.priorScreenshotsPNG + [input.screenshotPNG] {
-            userContent.append(["type": "image_url", "image_url": ["url":
-                "data:image/png;base64," + image.base64EncodedString()]])
+        var messages: [[String: Any]] = []
+        for message in input.messages {
+            var parts: [[String: Any]] = []
+            var plainText: [String] = []
+            for part in message.content {
+                switch part {
+                case .text(let text):
+                    guard !text.isEmpty else { throw OSAtlasLlamaRuntimeError.invalidResponse }
+                    plainText.append(text)
+                    parts.append(["type": "text", "text": text])
+                case .imagePNG(let image):
+                    try ComputerUseFaraModel.validatePNG(image)
+                    parts.append(["type": "image_url", "image_url": ["url":
+                        "data:image/png;base64," + image.base64EncodedString()]])
+                }
+            }
+            guard !parts.isEmpty else { throw OSAtlasLlamaRuntimeError.invalidResponse }
+            let content: Any = message.role == .system || message.role == .assistant
+                ? plainText.joined(separator: "\n") : parts
+            if message.role == .system || message.role == .assistant {
+                guard !plainText.isEmpty, parts.count == plainText.count else {
+                    throw OSAtlasLlamaRuntimeError.invalidResponse
+                }
+            }
+            messages.append(["role": message.role.rawValue, "content": content])
         }
-        var body: [String: Any] = [
+        let body: [String: Any] = [
             "model": input.modelAlias,
-            "messages": [["role": "system", "content": input.prompt], ["role": "user", "content": userContent]],
+            "messages": messages,
             "temperature": 0, "max_tokens": agentMaximumCompletionTokens, "stream": false,
             "reasoning_format": "none",
         ]

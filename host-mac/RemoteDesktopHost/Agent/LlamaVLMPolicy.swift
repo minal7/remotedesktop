@@ -49,30 +49,63 @@ struct AgentVisionRuntimeInputs: Equatable, Sendable {
     }
 }
 
+enum AgentVLMRole: String, Sendable, Equatable {
+    case system, user, assistant
+}
+
+enum AgentVLMContentPart: Sendable, Equatable {
+    case text(String)
+    case imagePNG(Data)
+}
+
+struct AgentVLMMessage: Sendable, Equatable {
+    let role: AgentVLMRole
+    let content: [AgentVLMContentPart]
+}
+
 struct AgentVLMRequestInput: Sendable {
-    let prompt: String
-    let observationJSON: String
-    let screenshotPNG: Data
-    let priorScreenshotsPNG: [Data]
-    let actionSchema: Data
+    let messages: [AgentVLMMessage]
     let modelAlias: String
-    let toolDescription: String
     let model: AgentPolicyModel
 
-    init(prompt: String, observationJSON: String, screenshotPNG: Data, actionSchema: Data,
-         priorScreenshotsPNG: [Data] = [],
-         modelAlias: String = ComputerUseFaraRuntimeInputs.modelAlias,
-         toolDescription: String = "Call computer_use exactly once with one native action.",
+    init(messages: [AgentVLMMessage], modelAlias: String = ComputerUseFaraRuntimeInputs.modelAlias,
          model: AgentPolicyModel = .fara15_4b) {
-        self.prompt = prompt
-        self.observationJSON = observationJSON
-        self.screenshotPNG = screenshotPNG
-        self.priorScreenshotsPNG = Array(priorScreenshotsPNG.suffix(2))
-        self.actionSchema = actionSchema
+        self.messages = messages
         self.modelAlias = modelAlias
-        self.toolDescription = toolDescription
         self.model = model
     }
+
+    var imageCount: Int {
+        messages.reduce(into: 0) { count, message in
+            count += message.content.reduce(into: 0) { parts, part in
+                if case .imagePNG = part { parts += 1 }
+            }
+        }
+    }
+}
+
+private struct AgentVLMHistoryCursor {
+    let count: Int
+    let suffix: [AgentHistoryItem]
+
+    init(_ history: [AgentHistoryItem]) {
+        count = history.count
+        suffix = Array(history.suffix(8))
+    }
+
+    func additions(in history: [AgentHistoryItem]) -> ArraySlice<AgentHistoryItem>? {
+        guard history.count >= count else { return nil }
+        let start = count - suffix.count
+        guard history[start..<count].elementsEqual(suffix) else { return nil }
+        return history.dropFirst(count)
+    }
+}
+
+private struct AgentVLMHistoryEvent {
+    var observationContext: String
+    var screenshotPNG: Data?
+    var assistantOutput: String?
+    var feedback: [String]
 }
 
 @MainActor
@@ -87,22 +120,23 @@ final class LlamaVLMPolicy: AgentPolicy {
 
     private let transport: any AgentVLMTransport
     private let prompt: String
-    private let actionSchema: Data
     private let model: AgentPolicyModel
-    private var priorScreenshotsPNG: [Data] = []
+    private var transcript: [AgentVLMHistoryEvent] = []
+    private var baselineFeedback: [String] = []
+    private var historyCursor: AgentVLMHistoryCursor?
+    private var pendingObservationContext: String?
+    private var pendingAssistantOutput: String?
+    private var pendingScreenshotPNG: Data?
 
-    init(transport: any AgentVLMTransport, prompt: String, actionSchema: Data,
+    init(transport: any AgentVLMTransport, prompt: String,
          model: AgentPolicyModel = .fara15_4b) throws {
-        guard !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-              !actionSchema.isEmpty,
-              (try? JSONSerialization.jsonObject(with: actionSchema)) != nil else {
+        guard !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw OSAtlasLlamaRuntimeError.invalidResponse
         }
         self.transport = transport
         self.model = model
         self.promptVersion = model == .fara15_4b ? "v1-fara-native-content" : "v1-ui-tars-native-tool"
         self.prompt = Self.nativePrompt(prompt, model: model)
-        self.actionSchema = try Self.nativeToolSchema(model: model)
     }
 
     convenience init(
@@ -111,11 +145,9 @@ final class LlamaVLMPolicy: AgentPolicy {
         bundle: Bundle = .main
     ) throws {
         let promptURL = try Self.resourceURL(bundle: bundle, name: "v1", extension: "txt", subdirectory: "policy/prompts")
-        _ = try Self.resourceURL(bundle: bundle, name: "action.schema", extension: "json", subdirectory: "Schemas")
         let prompt = try String(contentsOf: promptURL, encoding: .utf8)
-        let schemaURL = try Self.resourceURL(bundle: bundle, name: "action.schema", extension: "json", subdirectory: "Schemas")
         try self.init(transport: RuntimeAgentVLMTransport(inputs: runtimeInputs, runtime: runtime),
-                      prompt: prompt, actionSchema: Data(contentsOf: schemaURL), model: .fara15_4b)
+                      prompt: prompt, model: .fara15_4b)
     }
 
     convenience init(runtimeInputs: AgentVisionRuntimeInputs,
@@ -123,9 +155,8 @@ final class LlamaVLMPolicy: AgentPolicy {
                      bundle: Bundle = .main) throws {
         let promptURL = try Self.resourceURL(bundle: bundle, name: "v1", extension: "txt", subdirectory: "policy/prompts")
         let prompt = try String(contentsOf: promptURL, encoding: .utf8)
-        let schemaURL = try Self.resourceURL(bundle: bundle, name: "action.schema", extension: "json", subdirectory: "Schemas")
         try self.init(transport: RuntimeAgentVLMTransport(inputs: runtimeInputs, runtime: runtime),
-            prompt: prompt, actionSchema: Data(contentsOf: schemaURL), model: runtimeInputs.model)
+            prompt: prompt, model: runtimeInputs.model)
     }
 
     func propose(_ observation: AgentObservation) async throws -> AgentPolicyOutput {
@@ -134,20 +165,37 @@ final class LlamaVLMPolicy: AgentPolicy {
             throw OSAtlasLlamaRuntimeError.invalidVisionInput
         }
         try ComputerUseFaraModel.validatePNG(screenshot)
-        let earlierScreenshots = priorScreenshotsPNG
-        let requestInput = AgentVLMRequestInput(prompt: prompt,
-            observationJSON: try Self.observationJSON(observation),
-            screenshotPNG: screenshot, actionSchema: actionSchema,
-            priorScreenshotsPNG: earlierScreenshots,
-            modelAlias: Self.modelAlias(model), toolDescription: Self.toolDescription(model), model: model)
+        advanceHistory(to: observation.history)
+        let observationContext = try Self.observationJSON(observation, includeHistory: false)
+        var messages = [AgentVLMMessage(role: .system, content: [.text(prompt)])]
+        var carriedFeedback = baselineFeedback
+        for event in transcript {
+            guard let assistantOutput = event.assistantOutput, !assistantOutput.isEmpty else {
+                carriedFeedback.append(contentsOf: event.feedback)
+                continue
+            }
+            var content: [AgentVLMContentPart] = [
+                .text(Self.observationWithFeedback(event.observationContext, feedback: carriedFeedback)),
+            ]
+            if let screenshot = event.screenshotPNG { content.append(.imagePNG(screenshot)) }
+            messages.append(.init(role: .user, content: content))
+            messages.append(.init(role: .assistant, content: [.text(assistantOutput)]))
+            carriedFeedback = event.feedback
+        }
+        let userText = Self.observationWithFeedback(observationContext, feedback: carriedFeedback)
+        messages.append(.init(role: .user, content: [.text(userText), .imagePNG(screenshot)]))
+        let requestInput = AgentVLMRequestInput(messages: messages,
+            modelAlias: Self.modelAlias(model), model: model)
         let transport = self.transport
         let raw = try await withTaskCancellationHandler {
             try await transport.complete(requestInput)
         } onCancel: {
             Task { @MainActor in await transport.stop() }
         }
-        priorScreenshotsPNG.append(screenshot)
-        priorScreenshotsPNG = Array(priorScreenshotsPNG.suffix(2))
+        try Task.checkCancellation()
+        pendingObservationContext = observationContext
+        pendingAssistantOutput = Self.assistantHistoryContent(from: raw, model: model)
+        pendingScreenshotPNG = screenshot
         guard let actionJSON = try? Self.actionJSON(from: raw, model: model, screenshot: screenshot),
               actionJSON.utf8.count <= 32_768,
               let data = actionJSON.data(using: .utf8),
@@ -158,10 +206,24 @@ final class LlamaVLMPolicy: AgentPolicy {
     }
 
     func stop() async {
+        transcript.removeAll(keepingCapacity: false)
+        baselineFeedback.removeAll(keepingCapacity: false)
+        historyCursor = nil
+        pendingObservationContext = nil
+        pendingAssistantOutput = nil
+        pendingScreenshotPNG = nil
+        await transport.stop()
+    }
+
+    func suspend() async {
         await transport.stop()
     }
 
     static func observationJSON(_ observation: AgentObservation) throws -> String {
+        try observationJSON(observation, includeHistory: true)
+    }
+
+    private static func observationJSON(_ observation: AgentObservation, includeHistory: Bool) throws -> String {
         try observation.validate()
         var surface: [String: Any]
         switch observation.surface {
@@ -184,7 +246,8 @@ final class LlamaVLMPolicy: AgentPolicy {
             focus = ["id": item.id, "role": item.role, "label": item.name, "value_prefix": item.valuePrefix,
                 "selection": [item.selection.start, item.selection.end]] as [String: Any]
         } else { focus = NSNull() }
-        let history: [[String: Any]] = try observation.history.suffix(8).map { item in
+        let historyItems = includeHistory ? Array(observation.history.suffix(8)) : []
+        let history: [[String: Any]] = try historyItems.map { item in
             let action: Any
             if let encoded = item.action {
                 action = try JSONSerialization.jsonObject(with: JSONEncoder().encode(encoded))
@@ -197,6 +260,93 @@ final class LlamaVLMPolicy: AgentPolicy {
         let data = try JSONSerialization.data(withJSONObject: object,
             options: [.sortedKeys, .withoutEscapingSlashes])
         return String(decoding: data, as: UTF8.self)
+    }
+
+    private func advanceHistory(to history: [AgentHistoryItem]) {
+        if let historyCursor, let additions = historyCursor.additions(in: history), additions.isEmpty {
+            // A duplicate observation cannot justify pairing the outstanding
+            // model output, but already aligned turns remain useful context.
+        } else if let historyCursor, let additions = historyCursor.additions(in: history),
+                  !additions.isEmpty, let pendingAssistantOutput {
+            transcript.append(AgentVLMHistoryEvent(observationContext: pendingObservationContext ?? "{}",
+                screenshotPNG: pendingScreenshotPNG, assistantOutput: pendingAssistantOutput,
+                feedback: additions.map { Self.feedbackText(for: $0, includeAction: false) }))
+        } else {
+            // A mismatched history cannot safely be paired with the prior output.
+            // Re-establish context from the canonical journal.
+            transcript.removeAll(keepingCapacity: false)
+            baselineFeedback = history.suffix(8).map { Self.feedbackText(for: $0, includeAction: true) }
+        }
+        trimHistory()
+        pendingObservationContext = nil
+        pendingAssistantOutput = nil
+        pendingScreenshotPNG = nil
+        historyCursor = AgentVLMHistoryCursor(history)
+    }
+
+    private func trimHistory() {
+        var excess = baselineFeedback.count + transcript.reduce(0) { $0 + $1.feedback.count } - 8
+        if excess > 0 {
+            let baselineDrop = min(excess, baselineFeedback.count)
+            baselineFeedback.removeFirst(baselineDrop)
+            excess -= baselineDrop
+        }
+        while excess > 0, !transcript.isEmpty {
+            let drop = min(excess, transcript[0].feedback.count)
+            transcript[0].feedback.removeFirst(drop)
+            excess -= drop
+            if transcript[0].feedback.isEmpty { transcript.removeFirst() }
+        }
+        let detailedContextStart = max(0, transcript.count - 2)
+        for index in transcript.indices where index < detailedContextStart {
+            transcript[index].observationContext = Self.compactObservationContext(transcript[index].observationContext)
+            transcript[index].screenshotPNG = nil
+        }
+    }
+
+    private static func feedbackText(for item: AgentHistoryItem, includeAction: Bool) -> String {
+        if includeAction, let action = item.action,
+           let data = try? JSONEncoder().encode(action),
+           let actionJSON = String(data: data, encoding: .utf8) {
+            return "Prior proposal \(actionJSON). Result: \(item.result)"
+        }
+        return "Result: \(item.result)"
+    }
+
+    private static func observationWithFeedback(_ observation: String, feedback: [String]) -> String {
+        guard !feedback.isEmpty else { return observation }
+        return observation + "\n\nPrior proposal results:\n" + feedback.joined(separator: "\n")
+    }
+
+    private static func compactObservationContext(_ context: String) -> String {
+        guard let data = context.data(using: .utf8),
+              let value = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return "Prior observation omitted from bounded history."
+        }
+        var compact: [String: Any] = [:]
+        compact["task"] = value["task"]
+        compact["surface"] = value["surface"]
+        compact["budget"] = value["budget"]
+        guard JSONSerialization.isValidJSONObject(compact),
+              let encoded = try? JSONSerialization.data(withJSONObject: compact,
+                    options: [.sortedKeys, .withoutEscapingSlashes]) else {
+            return "Prior observation omitted from bounded history."
+        }
+        return String(decoding: encoded, as: UTF8.self)
+    }
+
+    private static func assistantHistoryContent(from raw: String, model: AgentPolicyModel) -> String {
+        guard model == .uiTars15_7b, raw.utf8.count <= FaraPolicyAdapter.maximumCompletionBytes,
+              let data = raw.data(using: .utf8),
+              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              root["model"] as? String == "ui-tars15-7b-v1",
+              let choices = root["choices"] as? [[String: Any]], choices.count == 1,
+              let choice = choices.first, choice["finish_reason"] as? String == "stop",
+              Set(choice.keys).isSubset(of: ["index", "message", "finish_reason", "logprobs"]),
+              let message = choice["message"] as? [String: Any], message["role"] as? String == "assistant",
+              Set(message.keys).isSubset(of: ["role", "content", "reasoning_content"]),
+              let content = message["content"] as? String else { return raw }
+        return content
     }
 
     private static func resourceURL(bundle: Bundle, name: String, extension fileExtension: String,
@@ -213,19 +363,6 @@ final class LlamaVLMPolicy: AgentPolicy {
         case .fara15_4b: ComputerUseFaraRuntimeInputs.modelAlias
         case .uiTars15_7b: "ui-tars15-7b-v1"
         }
-    }
-
-    private static func toolDescription(_ model: AgentPolicyModel) -> String {
-        switch model {
-        case .fara15_4b:
-            return "Call computer_use exactly once with one native action. Coordinates use Fara's 0–1000 display space and are scaled to the attached PNG by the host adapter. The host independently checks scope and approvals."
-        case .uiTars15_7b:
-            return "One UI-TARS native action is parsed from the completion. Coordinates use the model's resized-image pixels."
-        }
-    }
-
-    private static func nativeToolSchema(model: AgentPolicyModel) throws -> Data {
-        try AgentPolicyActionSchema.schema(for: model)
     }
 
     static func nativePrompt(_ base: String, model: AgentPolicyModel) -> String {

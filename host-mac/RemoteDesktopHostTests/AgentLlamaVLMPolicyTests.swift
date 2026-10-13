@@ -5,11 +5,11 @@ import XCTest
 
 @MainActor
 final class AgentLlamaVLMPolicyTests: XCTestCase {
-    func testPolicyIncludesPromptSchemaElementsAndOneAttachedPNG() async throws {
+    func testPolicyIncludesNativePromptAndOneAttachedPNG() async throws {
         let raw = try completion(arguments: #"{"action":"left_click","coordinate":[250,500]}"#,
                                  content: "I will continue with the visible control.")
         let transport = RecordingAgentVLMTransport(response: raw)
-        let (policy, observation, png, schema) = try fixture(transport: transport)
+        let (policy, observation, png) = try fixture(transport: transport)
 
         let output = try await policy.propose(observation)
 
@@ -17,15 +17,16 @@ final class AgentLlamaVLMPolicyTests: XCTestCase {
         XCTAssertEqual(output.rawOutput, raw)
         XCTAssertEqual(output.action, .click(target: .point(x: 1, y: 2), button: nil, count: nil))
         let input = try XCTUnwrap(transport.inputs.first)
-        XCTAssertTrue(input.prompt.contains("Qwen3.5-4B"))
-        XCTAssertTrue(input.prompt.contains("A critical point is a situation"))
-        XCTAssertTrue(input.prompt.contains("<tools>"))
-        XCTAssertTrue(input.prompt.contains("<tool_call>"))
-        XCTAssertEqual(input.actionSchema, schema)
-        XCTAssertEqual(input.screenshotPNG, png)
-        XCTAssertTrue(input.observationJSON.contains(#""elements":[{"bbox":[1,2,30,12]"#))
-        XCTAssertTrue(input.observationJSON.contains("[attached PNG image]"))
-        XCTAssertFalse(input.observationJSON.contains(png.base64EncodedString()))
+        let nativePrompt = try XCTUnwrap(input.messages.first?.content.textValue)
+        XCTAssertTrue(nativePrompt.contains("Qwen3.5-4B"))
+        XCTAssertTrue(nativePrompt.contains("A critical point is a situation"))
+        XCTAssertTrue(nativePrompt.contains("<tools>"))
+        XCTAssertTrue(nativePrompt.contains("<tool_call>"))
+        XCTAssertEqual(input.messages.map(\.role), [.system, .user])
+        XCTAssertTrue(input.messages[0].content.textValue?.contains("<tools>") == true)
+        XCTAssertTrue(input.messages[1].content.textValue?.contains(#""elements":[{"bbox":[1,2,30,12]"#) == true)
+        XCTAssertEqual(input.messages[1].content.imageValues, [png])
+        XCTAssertFalse(input.messages[1].content.textValue?.contains(png.base64EncodedString()) == true)
         XCTAssertEqual(transport.callCount, 1)
     }
 
@@ -37,7 +38,7 @@ final class AgentLlamaVLMPolicyTests: XCTestCase {
                     try completion(arguments: validArguments, extraCalls: true),
                     try completion(arguments: validArguments, toolName: "other")] {
             let transport = RecordingAgentVLMTransport(response: raw)
-            let (policy, observation, _, _) = try fixture(transport: transport)
+            let (policy, observation, _) = try fixture(transport: transport)
             let output = try await policy.propose(observation)
             XCTAssertNil(output.action)
             XCTAssertEqual(output.rawOutput, raw)
@@ -161,7 +162,7 @@ final class AgentLlamaVLMPolicyTests: XCTestCase {
 
     func testPolicyCancellationStopsInjectedTransport() async throws {
         let transport = RecordingAgentVLMTransport(response: "", blocks: true)
-        let (policy, observation, _, _) = try fixture(transport: transport)
+        let (policy, observation, _) = try fixture(transport: transport)
         let proposal = Task { try await policy.propose(observation) }
         while transport.callCount == 0 { await Task.yield() }
         proposal.cancel()
@@ -174,22 +175,207 @@ final class AgentLlamaVLMPolicyTests: XCTestCase {
         XCTAssertEqual(transport.stopCount, 1)
     }
 
-    func testPolicyCarriesOnlyTwoPriorPNGs() async throws {
+    func testRequestBoundsImagesAndPreservesNativeMessageOrder() async throws {
         let raw = try completion(arguments: #"{"action":"wait","time":1}"#)
         let transport = RecordingAgentVLMTransport(response: raw)
-        let (policy, observation, png, _) = try fixture(transport: transport)
-        for _ in 0..<3 { _ = try await policy.propose(observation) }
-        XCTAssertEqual(transport.inputs.map(\.priorScreenshotsPNG.count), [0, 1, 2])
-        let request = AgentVLMRequestInput(prompt: "Prompt", observationJSON: "{}", screenshotPNG: png,
-            actionSchema: try AgentPolicyActionSchema.schema(for: .fara15_4b),
-            priorScreenshotsPNG: [png, png, png])
+        let (_, _, png) = try fixture(transport: transport)
+        let request = AgentVLMRequestInput(messages: [
+            .init(role: .system, content: [.text("Prompt")]),
+            .init(role: .user, content: [.text("first"), .imagePNG(png)]),
+            .init(role: .assistant, content: [.text("<tool_call>raw</tool_call>")]),
+            .init(role: .user, content: [.text("feedback"), .imagePNG(png), .imagePNG(png)]),
+        ])
+        XCTAssertEqual(request.imageCount, 3)
         let endpoint = OSAtlasLlamaEndpoint(generation: 1, variant: nil,
             baseURL: URL(string: "http://127.0.0.1:43123")!, bearerToken: "unit-test-token")
         let urlRequest = try OSAtlasLlamaHTTPClient.makeAgentActionRequest(endpoint: endpoint, input: request)
         let body = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(urlRequest.httpBody)) as? [String: Any])
         let messages = try XCTUnwrap(body["messages"] as? [[String: Any]])
-        let content = try XCTUnwrap(messages[1]["content"] as? [[String: Any]])
-        XCTAssertEqual(content.compactMap { $0["type"] as? String }, ["text", "image_url", "image_url", "image_url"])
+        XCTAssertEqual(messages.map { $0["role"] as? String }, ["system", "user", "assistant", "user"])
+        let content = try XCTUnwrap(messages[3]["content"] as? [[String: Any]])
+        XCTAssertEqual(content.compactMap { $0["type"] as? String }, ["text", "image_url", "image_url"])
+        let tooManyImages = AgentVLMRequestInput(messages: [
+            .init(role: .system, content: [.text("Prompt")]),
+            .init(role: .user, content: [.text("feedback"), .imagePNG(png), .imagePNG(png), .imagePNG(png), .imagePNG(png)]),
+        ])
+        XCTAssertThrowsError(try OSAtlasLlamaHTTPClient.makeAgentActionRequest(endpoint: endpoint, input: tooManyImages))
+    }
+
+    func testApprovalOutcomesKeepOneNativeAssistantProposal() async throws {
+        let proposal = try completion(arguments: #"{"action":"left_click","coordinate":[250,500]}"#)
+        let click = AgentAction.click(target: .point(x: 1, y: 2), button: nil, count: nil)
+        for result in ["approved and executed", "rejected: user declined", "rejected: approval target changed"] {
+            let transport = RecordingAgentVLMTransport(responses: [proposal, try completion(arguments: #"{"action":"wait","time":1}"#)])
+            let (policy, observation, _) = try fixture(transport: transport)
+            _ = try await policy.propose(observation)
+            let resumed = AgentObservation(task: observation.task, surface: observation.surface,
+                screenshot: observation.screenshot, elements: observation.elements, focus: observation.focus,
+                history: [.init(action: click, result: result)], budget: .init(step: 1, maxSteps: 40))
+            _ = try await policy.propose(resumed)
+            let messages = try XCTUnwrap(transport.inputs.last?.messages)
+            XCTAssertEqual(messages.map(\.role), [.system, .user, .assistant, .user])
+            XCTAssertEqual(messages.filter { $0.role == .assistant }.flatMap(\.content), [.text(proposal)])
+            XCTAssertTrue(messages[3].content.textValue?.contains(result) == true)
+            XCTAssertEqual(messages.flatMap(\.content).imageValues.count, 2)
+        }
+    }
+
+    func testClarificationFollowsNativeAskUserTurn() async throws {
+        let proposal = try completion(arguments: #"{"action":"ask_user_question","question":"Which item?"}"#)
+        let transport = RecordingAgentVLMTransport(responses: [proposal, try completion(arguments: #"{"action":"wait","time":1}"#)])
+        let (policy, observation, _) = try fixture(transport: transport)
+        _ = try await policy.propose(observation)
+        let answered = AgentObservation(task: observation.task, surface: observation.surface,
+            screenshot: observation.screenshot, elements: observation.elements, focus: observation.focus,
+            history: [.init(action: .askUser(question: "Which item?", choices: nil),
+                            result: "User clarification: the second item")], budget: .init(step: 1, maxSteps: 40))
+        _ = try await policy.propose(answered)
+        let messages = try XCTUnwrap(transport.inputs.last?.messages)
+        XCTAssertEqual(messages.filter { $0.role == .assistant }.flatMap(\.content), [.text(proposal)])
+        XCTAssertTrue(messages[3].content.textValue?.contains("User clarification: the second item") == true)
+    }
+
+    func testUiTarsHistoryKeepsAssistantNativeActionRatherThanHTTPEnvelope() async throws {
+        let nativeAction = "Thought: wait.\nAction: wait()"
+        let transport = RecordingAgentVLMTransport(responses: [try uiTarsCompletion(nativeAction), try uiTarsCompletion(nativeAction)])
+        let png = try XCTUnwrap(NSBitmapImageRep(data: makeJPEG())?.representation(using: .png, properties: [:]))
+        let observation = AgentObservation(task: "Wait for the page", surface: .app(bundleID: "example.editor", title: nil),
+            screenshot: png.base64EncodedString(), elements: [], focus: nil, history: [], budget: .init(step: 0, maxSteps: 10))
+        let policy = try LlamaVLMPolicy(transport: transport, prompt: "Native UI-TARS policy", model: .uiTars15_7b)
+        _ = try await policy.propose(observation)
+        let next = AgentObservation(task: observation.task, surface: observation.surface, screenshot: observation.screenshot,
+            elements: [], focus: nil, history: [.init(action: .wait(seconds: 5), result: "ok: waited")],
+            budget: .init(step: 1, maxSteps: 10))
+        _ = try await policy.propose(next)
+
+        let assistant = try XCTUnwrap(transport.inputs.last?.messages.first { $0.role == .assistant })
+        XCTAssertEqual(assistant.content, [.text(nativeAction)])
+    }
+
+    func testEachPriorScreenshotStaysInItsActionUserTurn() async throws {
+        let raw = try completion(arguments: #"{"action":"wait","time":1}"#)
+        let transport = RecordingAgentVLMTransport(response: raw)
+        let (policy, fixtureObservation, _) = try fixture(transport: transport)
+        let screenshots = try [
+            NSColor(calibratedRed: 1, green: 0, blue: 0, alpha: 1),
+            NSColor(calibratedRed: 0, green: 1, blue: 0, alpha: 1),
+            NSColor(calibratedRed: 0, green: 0, blue: 1, alpha: 1),
+        ].map { try makePNG(color: $0) }
+        XCTAssertEqual(Set(screenshots).count, 3)
+        let initial = AgentObservation(task: fixtureObservation.task, surface: fixtureObservation.surface,
+            screenshot: screenshots[0].base64EncodedString(), elements: fixtureObservation.elements,
+            focus: fixtureObservation.focus, history: [], budget: .init(step: 0, maxSteps: 40))
+        _ = try await policy.propose(initial)
+        let oneResult = AgentObservation(task: initial.task, surface: initial.surface,
+            screenshot: screenshots[1].base64EncodedString(), elements: initial.elements, focus: initial.focus,
+            history: [.init(action: .wait(seconds: 1), result: "result-0")], budget: .init(step: 1, maxSteps: 40))
+        _ = try await policy.propose(oneResult)
+        let twoResults = AgentObservation(task: initial.task, surface: initial.surface,
+            screenshot: screenshots[2].base64EncodedString(), elements: initial.elements, focus: initial.focus,
+            history: [
+                .init(action: .wait(seconds: 1), result: "result-0"),
+                .init(action: .wait(seconds: 1), result: "result-1"),
+            ], budget: .init(step: 2, maxSteps: 40))
+
+        _ = try await policy.propose(twoResults)
+
+        let messages = try XCTUnwrap(transport.inputs.last?.messages)
+        XCTAssertEqual(messages.map(\.role), [.system, .user, .assistant, .user, .assistant, .user])
+        XCTAssertEqual(messages[1].content.imageValues, [screenshots[0]])
+        XCTAssertEqual(messages[3].content.imageValues, [screenshots[1]])
+        XCTAssertEqual(messages[5].content.imageValues, [screenshots[2]])
+        XCTAssertEqual(transport.inputs.last?.imageCount, 3)
+    }
+
+    func testMalformedNativeOutputIsRetainedOnceBeforeRejectionFeedback() async throws {
+        let malformed = "<tool_call>{unfinished"
+        let transport = RecordingAgentVLMTransport(responses: [malformed, try completion(arguments: #"{"action":"wait","time":1}"#)])
+        let (policy, observation, _) = try fixture(transport: transport)
+        let first = try await policy.propose(observation)
+        XCTAssertNil(first.action)
+        let rejected = AgentObservation(task: observation.task, surface: observation.surface,
+            screenshot: observation.screenshot, elements: observation.elements, focus: observation.focus,
+            history: [.init(action: nil, result: "rejected: invalid completion")],
+            budget: .init(step: 1, maxSteps: 40))
+
+        _ = try await policy.propose(rejected)
+
+        let messages = try XCTUnwrap(transport.inputs.last?.messages)
+        XCTAssertEqual(messages.filter { $0.role == .assistant }.count, 1)
+        XCTAssertEqual(messages.first { $0.role == .assistant }?.content, [.text(malformed)])
+        XCTAssertTrue(messages.contains { $0.role == .user && $0.content.textValue?.contains("rejected: invalid completion") == true })
+    }
+
+    func testEmptyNativeOutputDoesNotCreateAnEmptyAssistantTurn() async throws {
+        let transport = RecordingAgentVLMTransport(responses: ["", try completion(arguments: #"{"action":"wait","time":1}"#)])
+        let (policy, observation, _) = try fixture(transport: transport)
+        _ = try await policy.propose(observation)
+        let rejected = AgentObservation(task: observation.task, surface: observation.surface,
+            screenshot: observation.screenshot, elements: observation.elements, focus: observation.focus,
+            history: [.init(action: nil, result: "rejected: empty native response")], budget: .init(step: 1, maxSteps: 40))
+        _ = try await policy.propose(rejected)
+
+        let messages = try XCTUnwrap(transport.inputs.last?.messages)
+        XCTAssertFalse(messages.contains { $0.role == .assistant })
+        XCTAssertTrue(messages.last?.content.textValue?.contains("rejected: empty native response") == true)
+    }
+
+    func testHistoryIsBoundedAndSuspendRetainsItWhileStopClearsIt() async throws {
+        let raw = try completion(arguments: #"{"action":"wait","time":1}"#)
+        let transport = RecordingAgentVLMTransport(response: raw)
+        let (policy, observation, _) = try fixture(transport: transport)
+        var history: [AgentHistoryItem] = []
+        for index in 0..<12 {
+            let input = AgentObservation(task: observation.task, surface: observation.surface,
+                screenshot: observation.screenshot, elements: observation.elements, focus: observation.focus,
+                history: history, budget: .init(step: index, maxSteps: 40))
+            _ = try await policy.propose(input)
+            let sent = try XCTUnwrap(transport.inputs.last)
+            XCTAssertLessThanOrEqual(sent.imageCount, 3)
+            XCTAssertLessThanOrEqual(sent.messages.filter { $0.role == .assistant }.count, 8)
+            XCTAssertFalse(sent.messages.flatMap(\.content).textValues.contains { $0.contains("result-0") } && index >= 9)
+            if index == 6 {
+                let approvalFeedback = try XCTUnwrap(sent.messages.first {
+                    $0.role == .user && $0.content.textValue?.contains("needs approval") == true
+                }?.content.textValue)
+                XCTAssertTrue(approvalFeedback.contains("needs approval"))
+                XCTAssertTrue(approvalFeedback.contains("approved and executed"))
+                XCTAssertEqual(sent.messages.filter { $0.role == .assistant }.count, 6)
+            }
+            if index == 11 {
+                let earliestPriorUser = try XCTUnwrap(sent.messages.first { $0.role == .user })
+                XCTAssertTrue(earliestPriorUser.content.imageValues.isEmpty)
+                XCTAssertFalse(earliestPriorUser.content.textValue?.contains("Continue") == true)
+            }
+            if index == 5 { await policy.suspend() }
+            if index == 5 {
+                history.append(.init(action: .wait(seconds: 1), result: "needs approval: confirm"))
+                history.append(.init(action: .wait(seconds: 1), result: "approved and executed"))
+            } else {
+                history.append(.init(action: .wait(seconds: 1), result: "result-\(index)"))
+            }
+        }
+        XCTAssertTrue(transport.inputs[6].messages.contains { $0.role == .assistant }, "Suspend should retain completed transcript")
+        await policy.stop()
+        let afterStop = AgentObservation(task: observation.task, surface: observation.surface,
+            screenshot: observation.screenshot, elements: observation.elements, focus: observation.focus,
+            history: history, budget: .init(step: 13, maxSteps: 40))
+        _ = try await policy.propose(afterStop)
+        XCTAssertFalse(transport.inputs.last?.messages.contains { $0.role == .assistant } ?? true)
+    }
+
+    func testDuplicateObservationKeepsLastAlignedTurnWithoutPairingPendingOutput() async throws {
+        let raw = try completion(arguments: #"{"action":"wait","time":1}"#)
+        let transport = RecordingAgentVLMTransport(responses: [raw, raw, raw])
+        let (policy, observation, _) = try fixture(transport: transport)
+        _ = try await policy.propose(observation)
+        let result = AgentObservation(task: observation.task, surface: observation.surface,
+            screenshot: observation.screenshot, elements: observation.elements, focus: observation.focus,
+            history: [.init(action: .wait(seconds: 1), result: "result-0")], budget: .init(step: 1, maxSteps: 40))
+        _ = try await policy.propose(result)
+        _ = try await policy.propose(result)
+        XCTAssertEqual(transport.inputs.last?.messages.filter { $0.role == .assistant }.count, 1)
+        XCTAssertEqual(transport.inputs.last?.messages.first { $0.role == .assistant }?.content, [.text(raw)])
     }
 
     func testObservationCarriesOnlyLastEightActionResults() throws {
@@ -218,10 +404,11 @@ final class AgentLlamaVLMPolicyTests: XCTestCase {
     }
 
     func testFaraUsesPlainCompletionContentAndAuthenticatedLoopbackOnly() throws {
-        let (_, observation, png, schema) = try fixture(transport: RecordingAgentVLMTransport(response: ""))
-        let input = AgentVLMRequestInput(prompt: LlamaVLMPolicy.nativePrompt(try promptText(), model: .fara15_4b),
-            observationJSON: try LlamaVLMPolicy.observationJSON(observation),
-            screenshotPNG: png, actionSchema: schema)
+        let (_, observation, png) = try fixture(transport: RecordingAgentVLMTransport(response: ""))
+        let input = AgentVLMRequestInput(messages: [
+            .init(role: .system, content: [.text(LlamaVLMPolicy.nativePrompt(try promptText(), model: .fara15_4b))]),
+            .init(role: .user, content: [.text(try LlamaVLMPolicy.observationJSON(observation)), .imagePNG(png)]),
+        ])
         let endpoint = OSAtlasLlamaEndpoint(generation: 1, variant: nil,
             baseURL: URL(string: "http://127.0.0.1:43123")!, bearerToken: "unit-test-token")
         let request = try OSAtlasLlamaHTTPClient.makeAgentActionRequest(endpoint: endpoint, input: input)
@@ -248,9 +435,10 @@ final class AgentLlamaVLMPolicyTests: XCTestCase {
         let templateRequest = try OSAtlasLlamaHTTPClient.makeSemanticTemplateRequest(from: request)
         XCTAssertEqual(templateRequest.url?.absoluteString, "http://127.0.0.1:43123/apply-template")
         XCTAssertEqual(templateRequest.httpBody, request.httpBody)
-        let uiInput = AgentVLMRequestInput(prompt: "UI prompt", observationJSON: "{}", screenshotPNG: png,
-            actionSchema: try AgentPolicyActionSchema.schema(for: .uiTars15_7b),
-            modelAlias: "ui-tars15-7b-v1", model: .uiTars15_7b)
+        let uiInput = AgentVLMRequestInput(messages: [
+            .init(role: .system, content: [.text("UI prompt")]),
+            .init(role: .user, content: [.text("{}"), .imagePNG(png)]),
+        ], modelAlias: "ui-tars15-7b-v1", model: .uiTars15_7b)
         let uiRequest = try OSAtlasLlamaHTTPClient.makeAgentActionRequest(endpoint: endpoint, input: uiInput)
         let uiBody = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(uiRequest.httpBody)) as? [String: Any])
         XCTAssertEqual(uiBody["model"] as? String, "ui-tars15-7b-v1")
@@ -282,7 +470,7 @@ final class AgentLlamaVLMPolicyTests: XCTestCase {
 
     func testInvalidPNGAndObservationAreRejectedBeforeTransport() async throws {
         let transport = RecordingAgentVLMTransport(response: #"{"type":"done","answer":"ok"}"#)
-        let (policy, observation, _, _) = try fixture(transport: transport)
+        let (policy, observation, _) = try fixture(transport: transport)
         let invalidPNG = AgentObservation(task: observation.task, surface: observation.surface,
             screenshot: "bm90LXBuZw==", elements: observation.elements, focus: observation.focus,
             history: observation.history, budget: observation.budget)
@@ -292,7 +480,7 @@ final class AgentLlamaVLMPolicyTests: XCTestCase {
     }
 
     private func fixture(transport: RecordingAgentVLMTransport) throws
-        -> (LlamaVLMPolicy, AgentObservation, Data, Data) {
+        -> (LlamaVLMPolicy, AgentObservation, Data) {
         let png = try XCTUnwrap(NSBitmapImageRep(data: makeJPEG())?.representation(using: .png, properties: [:]))
         let observation = AgentObservation(task: "Complete a generic task",
             surface: .web(url: "https://example.test/", title: nil), screenshot: png.base64EncodedString(),
@@ -302,8 +490,7 @@ final class AgentLlamaVLMPolicyTests: XCTestCase {
         let promptURL = try XCTUnwrap(Bundle.main.url(forResource: "v1", withExtension: "txt",
                                                       subdirectory: "policy/prompts"))
         let prompt = try String(contentsOf: promptURL, encoding: .utf8)
-        let schema = try AgentPolicyActionSchema.schema(for: .fara15_4b)
-        return (try LlamaVLMPolicy(transport: transport, prompt: prompt, actionSchema: schema), observation, png, schema)
+        return (try LlamaVLMPolicy(transport: transport, prompt: prompt), observation, png)
     }
 
     private func promptText() throws -> String {
@@ -334,11 +521,21 @@ final class AgentLlamaVLMPolicyTests: XCTestCase {
             colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
         return image.representation(using: .jpeg, properties: [:])!
     }
+
+    private func makePNG(color: NSColor) throws -> Data {
+        let image = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 4, pixelsHigh: 4,
+            bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+            colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
+        for y in 0..<4 {
+            for x in 0..<4 { image.setColor(color, atX: x, y: y) }
+        }
+        return try XCTUnwrap(image.representation(using: .png, properties: [:]))
+    }
 }
 
 @MainActor
 private final class RecordingAgentVLMTransport: AgentVLMTransport {
-    private let response: String
+    private let responses: [String]
     private let blocks: Bool
     private var continuation: CheckedContinuation<String, Error>?
     private(set) var inputs: [AgentVLMRequestInput] = []
@@ -346,7 +543,12 @@ private final class RecordingAgentVLMTransport: AgentVLMTransport {
     var callCount: Int { inputs.count }
 
     init(response: String, blocks: Bool = false) {
-        self.response = response
+        self.responses = [response]
+        self.blocks = blocks
+    }
+
+    init(responses: [String], blocks: Bool = false) {
+        self.responses = responses
         self.blocks = blocks
     }
 
@@ -355,12 +557,33 @@ private final class RecordingAgentVLMTransport: AgentVLMTransport {
         if blocks {
             return try await withCheckedThrowingContinuation { continuation = $0 }
         }
-        return response
+        return responses[min(inputs.count - 1, responses.count - 1)]
     }
 
     func stop() async {
         stopCount += 1
         continuation?.resume(throwing: CancellationError())
         continuation = nil
+    }
+}
+
+private extension Array where Element == AgentVLMContentPart {
+    var textValue: String? {
+        guard case .text(let text)? = first else { return nil }
+        return text
+    }
+
+    var imageValues: [Data] {
+        compactMap { part in
+            guard case .imagePNG(let data) = part else { return nil }
+            return data
+        }
+    }
+
+    var textValues: [String] {
+        compactMap { part in
+            guard case .text(let text) = part else { return nil }
+            return text
+        }
     }
 }
