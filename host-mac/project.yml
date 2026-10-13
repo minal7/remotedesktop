@@ -64,6 +64,10 @@ targets:
         type: folder
         buildPhase: resources
       - path: RemoteDesktopHost/WebRTCAliases.swift
+      - path: Evaluation
+      - path: ../eval/fixtures/files
+        type: folder
+        buildPhase: resources
       - path: ../protocol/Swift
       - path: RemoteDesktopHost/Resources/ComputerUseSkills
         type: folder

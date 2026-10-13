@@ -1,0 +1,8 @@
+id: "web-basic-036"
+surface: web
+start: {"url":"http://127.0.0.1:8765/read.html"}
+prompt: "Read the Coastal Atlas publisher on this page, open the profile page, and copy the publisher into Notes. Do not submit the form."
+checker: {"type":"dom","url_prefix":"http://127.0.0.1:8765/","expect":[{"selector":"#notes","value":"North Shore Press"},{"selector":"#submitted","text":"Not submitted"}]}
+max_steps: 10
+tags: ["navigation","copy-value","form","no-commit"]
+approval_policy: {"allow_fixture_interaction":true}

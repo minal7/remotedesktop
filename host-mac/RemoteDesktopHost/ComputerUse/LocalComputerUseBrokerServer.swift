@@ -38,6 +38,7 @@ final class LocalComputerUseBrokerServer {
     private let channel: LocalHostComputerUseChannel
     private let authorizePeer: (String) -> Bool
     private let revokePeer: (String) -> Void
+    private let loopbackOnly: Bool
     private var listener: NWListener?
     private var connectionTasks: [UUID: Task<Void, Never>] = [:]
     private var authorizedPeerID: String?
@@ -48,12 +49,14 @@ final class LocalComputerUseBrokerServer {
         credential: LocalComputerUseCredential,
         hostID: String,
         channel: LocalHostComputerUseChannel,
+        loopbackOnly: Bool = false,
         authorizePeer: @escaping (String) -> Bool,
         revokePeer: @escaping (String) -> Void
     ) {
         self.credential = credential
         self.hostID = hostID
         self.channel = channel
+        self.loopbackOnly = loopbackOnly
         self.authorizePeer = authorizePeer
         self.revokePeer = revokePeer
     }
@@ -63,10 +66,11 @@ final class LocalComputerUseBrokerServer {
         didFinishStarting = false
         let listener: NWListener
         do {
-            listener = try NWListener(
-                using: LocalComputerUseTLS.serverParameters(
-                    credential: credential),
-                on: .any)
+            let parameters = LocalComputerUseTLS.serverParameters(credential: credential)
+            if loopbackOnly {
+                parameters.requiredLocalEndpoint = .hostPort(host: .ipv4(.loopback), port: .any)
+            }
+            listener = try NWListener(using: parameters, on: .any)
         } catch {
             throw ServerError.listenerFailed(error.localizedDescription)
         }
@@ -139,7 +143,9 @@ final class LocalComputerUseBrokerServer {
             connection.cancel()
             return
         }
-        guard Self.isPrivateLocalEndpoint(connection.endpoint) else {
+        guard loopbackOnly
+            ? Self.isLoopbackEndpoint(connection.endpoint)
+            : Self.isPrivateLocalEndpoint(connection.endpoint) else {
             // Reject before the TLS handshake and do not reveal whether the
             // local credential, host identity, or local AI service exists.
             connection.cancel()
@@ -287,6 +293,21 @@ final class LocalComputerUseBrokerServer {
                 .trimmingCharacters(in: CharacterSet(charactersIn: "."))
             return normalized == "localhost" || normalized.hasSuffix(".local")
 
+        @unknown default:
+            return false
+        }
+    }
+
+    static func isLoopbackEndpoint(_ endpoint: NWEndpoint) -> Bool {
+        guard case .hostPort(let host, _) = endpoint else { return false }
+        switch host {
+        case .ipv4(let address):
+            return [UInt8](address.rawValue).first == 127
+        case .ipv6(let address):
+            let bytes = [UInt8](address.rawValue)
+            return bytes.count == 16 && bytes.dropLast().allSatisfy { $0 == 0 } && bytes.last == 1
+        case .name(let name, _):
+            return name.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: ".")) == "localhost"
         @unknown default:
             return false
         }

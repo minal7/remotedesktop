@@ -1,0 +1,8 @@
+id: "web-basic-021"
+surface: web
+start: {"url":"http://127.0.0.1:8765/forms.html"}
+prompt: "Set the Preferred date field to October 20, 2026. Leave the profile form unsubmitted."
+checker: {"type":"dom","url_prefix":"http://127.0.0.1:8765/","expect":[{"selector":"#visit-date","value":"2026-10-20"},{"selector":"#submitted","text":"Not submitted"}]}
+max_steps: 10
+tags: ["date-picker","form","no-commit"]
+approval_policy: {"allow_fixture_interaction":true}

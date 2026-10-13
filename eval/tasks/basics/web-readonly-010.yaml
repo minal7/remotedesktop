@@ -1,0 +1,8 @@
+id: "web-readonly-010"
+surface: web
+start: {"url":"https://en.wikipedia.org/wiki/Maple"}
+prompt: "Read the public page about Maple and report one fact stated there that includes the term Acer. Do not sign in or interact with forms."
+checker: {"type":"page_text","expect":{"contains":["Acer"],"url_prefix":"https://en.wikipedia.org/wiki/","answer_contains":["Acer"]}}
+max_steps: 12
+tags: ["read","public-web","read-only"]
+approval_policy: {"allow_start_interaction":true}

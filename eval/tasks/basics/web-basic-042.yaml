@@ -1,0 +1,8 @@
+id: "web-basic-042"
+surface: web
+start: {"url":"http://127.0.0.1:8765/controls.html"}
+prompt: "Set Display order to Price: low to high."
+checker: {"type":"dom","expect":[{"selector":"#choice","selected":"Price: low to high"}],"url_prefix":"http://127.0.0.1:8765/"}
+max_steps: 10
+tags: ["select"]
+approval_policy: {"allow_fixture_interaction":true}

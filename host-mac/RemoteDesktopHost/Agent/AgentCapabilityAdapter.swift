@@ -31,6 +31,17 @@ final class AgentCapabilityAdapter: ComputerUseTaskAwareExecuting, ComputerUseTe
     let readyDetail = "General agent is ready"
     var hasRetainedTask: Bool { executor.activeLoop.map { !$0.didFinish } ?? false }
 
+#if DEBUG
+    func debugPendingApproval(taskID: String, requestID: UUID) -> AgentLoop.PendingStep? {
+        guard hostTaskID == taskID, let rootTaskID,
+              executor.activeTaskID == rootTaskID,
+              let pending = executor.activeLoop?.pendingStep,
+              pending.approval.id == requestID,
+              pending.approval.taskID == rootTaskID else { return nil }
+        return pending
+    }
+#endif
+
     func execute(prompt: String, tools: ComputerUseHostTools,
                  progress: @escaping (String) -> Void) async throws -> ComputerUseExecutionResult {
         let taskID = UUID().uuidString

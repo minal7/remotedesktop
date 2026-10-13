@@ -1,0 +1,8 @@
+id: "web-basic-043"
+surface: web
+start: {"url":"http://127.0.0.1:8765/controls.html"}
+prompt: "Scroll the item list down until the bottom item Cedar is visible."
+checker: {"type":"dom","expect":[{"selector":"#bottom-item","text":"Bottom item: Cedar","visible":true}],"min_events":[{"selector":"#scroll-area","event":"scroll","count":1}],"url_prefix":"http://127.0.0.1:8765/"}
+max_steps: 10
+tags: ["scroll"]
+approval_policy: {"allow_fixture_interaction":true}

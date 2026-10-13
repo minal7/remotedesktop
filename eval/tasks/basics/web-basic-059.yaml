@@ -1,0 +1,8 @@
+id: "web-basic-059"
+surface: web
+start: {"url":"http://127.0.0.1:8765/read.html"}
+prompt: "Read the reference page and report the public list price."
+checker: {"type":"dom","expect":[{"selector":"#price","text":"$24.50"}],"url_prefix":"http://127.0.0.1:8765/","answer_contains":["$24.50"]}
+max_steps: 10
+tags: ["read","answer"]
+approval_policy: {"allow_fixture_interaction":true}

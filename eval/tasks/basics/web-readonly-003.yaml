@@ -1,0 +1,8 @@
+id: "web-readonly-003"
+surface: web
+start: {"url":"https://en.wikipedia.org/wiki/Photosynthesis"}
+prompt: "Read the public page about Photosynthesis and report one fact stated there that includes the term chlorophyll. Do not sign in or interact with forms."
+checker: {"type":"page_text","expect":{"contains":["chlorophyll"],"url_prefix":"https://en.wikipedia.org/wiki/","answer_contains":["chlorophyll"]}}
+max_steps: 12
+tags: ["read","public-web","read-only"]
+approval_policy: {"allow_start_interaction":true}

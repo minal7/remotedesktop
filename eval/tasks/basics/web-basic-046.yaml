@@ -1,0 +1,8 @@
+id: "web-basic-046"
+surface: web
+start: {"url":"http://127.0.0.1:8765/controls.html"}
+prompt: "Load more catalog results and report the newly loaded item."
+checker: {"type":"dom","expect":[{"selector":"#more-result","text":"Loaded: Pine"}],"url_prefix":"http://127.0.0.1:8765/"}
+max_steps: 10
+tags: ["click"]
+approval_policy: {"allow_fixture_interaction":true}

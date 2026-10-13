@@ -1,0 +1,8 @@
+id: "web-basic-020"
+surface: web
+start: {"url":"http://127.0.0.1:8765/forms.html"}
+prompt: "Enable the Receive updates checkbox and leave the form on screen."
+checker: {"type":"dom","expect":[{"selector":"#updates","checked":true},{"selector":"#submitted","text":"Not submitted"}],"url_prefix":"http://127.0.0.1:8765/"}
+max_steps: 10
+tags: ["form","checkbox","no-commit"]
+approval_policy: {"allow_fixture_interaction":true}

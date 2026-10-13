@@ -69,6 +69,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         #if DEBUG
+        if DebugAgentEvalCommand.shouldRun() {
+            NSApp.setActivationPolicy(.prohibited)
+            Task { @MainActor in
+                Darwin.exit(await DebugAgentEvalCommand.runIfRequested() ?? 2)
+            }
+            return
+        }
         if SafariBridgeSpikeRunner.startIfRequested() {
             return
         }

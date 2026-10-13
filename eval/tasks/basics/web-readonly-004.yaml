@@ -1,0 +1,8 @@
+id: "web-readonly-004"
+surface: web
+start: {"url":"https://en.wikipedia.org/wiki/Octopus"}
+prompt: "Read the public page about Octopus and report one fact stated there that includes the term eight arms. Do not sign in or interact with forms."
+checker: {"type":"page_text","expect":{"contains":["eight arms"],"url_prefix":"https://en.wikipedia.org/wiki/","answer_contains":["eight arms"]}}
+max_steps: 12
+tags: ["read","public-web","read-only"]
+approval_policy: {"allow_start_interaction":true}

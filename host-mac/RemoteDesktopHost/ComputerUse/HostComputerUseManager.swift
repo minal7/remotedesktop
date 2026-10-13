@@ -5743,6 +5743,18 @@ final class HostComputerUseManager: ObservableObject {
     private var generalAgent: AgentCapabilityAdapter? {
         (executor as? ComputerUseCapabilityExecutor)?.agentAdapter ?? executor as? AgentCapabilityAdapter
     }
+#if DEBUG
+    func debugPendingAgentApproval(taskID: String, requestID: String) -> AgentLoop.PendingStep? {
+        guard case .awaitingApproval = activity,
+              let pendingApproval,
+              pendingApproval.context.envelope.id == taskID,
+              pendingApproval.request.taskID == taskID,
+              pendingApproval.request.requestID == requestID,
+              case .agent(let request) = pendingApproval.operation,
+              let id = UUID(uuidString: requestID), request.id == id else { return nil }
+        return generalAgent?.debugPendingApproval(taskID: taskID, requestID: id)
+    }
+#endif
     private let injector: InputInjector
     private let tools: ComputerUseHostTools
     var nativeVisualTypingDiagnosticForTests: [String: String] {
@@ -5764,6 +5776,7 @@ final class HostComputerUseManager: ObservableObject {
     /// keep the production default so their installer lifecycle tests retain
     /// the behavior they are explicitly exercising.
     let allowsExternalServices: Bool
+    private let allowsAutomaticSetup: Bool
     private let experimentalEnabled: @MainActor () -> Bool
     private let peerAuthorizationEpoch = ComputerUsePeerAuthorizationEpoch()
     private let webRTCAuthorizationFence =
@@ -5850,6 +5863,8 @@ final class HostComputerUseManager: ObservableObject {
         browserNavigationFactory: ((@escaping () -> Bool) -> ComputerUseBrowserNavigationTask)? = nil,
         transportTeardownTimeout: Duration = .seconds(5),
         allowsExternalServices: Bool = true,
+        allowsAutomaticSetup: Bool = true,
+        agentConfiguration: AgentHostFactory.Configuration = .init(),
         approvalTargetProvider:
             ((ComputerUsePredictedAction) throws -> ComputerUseApprovalTargetSnapshot)? = nil,
         actionPerformer: ((ComputerUsePredictedAction) throws -> Void)? = nil,
@@ -5890,7 +5905,8 @@ final class HostComputerUseManager: ObservableObject {
         if executor == nil, visualExecutorLoader == nil, executorComposer == nil,
            nativeTextLoader == nil, nativeTextPreparer == nil, macControlInstaller == nil {
             generalAgentFactory = { receipt in
-                try AgentHostFactory.make(receipt: receipt, injector: injector, mayAct: mayAct)
+                try AgentHostFactory.make(receipt: receipt, injector: injector, mayAct: mayAct,
+                    configuration: agentConfiguration)
             }
         } else { generalAgentFactory = nil }
         self.nativeTextLoader = nativeTextLoader ?? { receipt, tools, progress in
@@ -5944,6 +5960,7 @@ final class HostComputerUseManager: ObservableObject {
         self.textClarifications = textClarifications ?? ComputerUseTextClarificationStore()
         self.transportTeardownTimeout = transportTeardownTimeout
         self.allowsExternalServices = allowsExternalServices
+        self.allowsAutomaticSetup = allowsAutomaticSetup
         self.channelFactory = channelFactory
         if allowsExternalServices {
             refreshModelState()
@@ -5972,7 +5989,7 @@ final class HostComputerUseManager: ObservableObject {
                         executor = try generalAgentFactory(receipt)
                         modelState = .ready(runtimeName: executor!.runtimeName)
                     } catch { modelState = .error(error.localizedDescription) }
-                } else if await installer.interruptedInstallationExists() {
+                } else if allowsAutomaticSetup, await installer.interruptedInstallationExists() {
                     guard !Task.isCancelled, !isShuttingDown else { return }
                     startSetupPipeline()
                 } else { modelState = .downloadRequired }

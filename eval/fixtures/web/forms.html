@@ -1,0 +1,13 @@
+<!doctype html><meta charset="utf-8"><title>General form controls</title>
+<main><h1>Profile form</h1>
+<form id="profile" action="/submitted.html">
+<label for="name">Full name</label><input id="name" name="name" autocomplete="name">
+<label for="email">Email address</label><input id="email" name="email" type="email" autocomplete="email">
+<label for="city">City</label><input id="city" name="city">
+<label for="notes">Notes</label><textarea id="notes" name="notes"></textarea>
+<label for="visit-date">Preferred date</label><input id="visit-date" type="date">
+<label for="country">Country</label><select id="country"><option value="">Choose</option><option>Canada</option><option>Japan</option><option>Portugal</option><option>United States</option></select>
+<label><input id="updates" type="checkbox"> Receive updates</label>
+<button id="save" type="submit">Submit profile</button>
+</form><p id="submitted">Not submitted</p></main>
+<script>document.querySelector('#profile').addEventListener('submit',()=>{document.querySelector('#submitted').textContent='Submitted locally'});</script>

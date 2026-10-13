@@ -66,11 +66,15 @@ final class WebEnvironment: AgentEnvironment {
         }
         let sourceWidth = max(1, before.viewport[0]), sourceHeight = max(1, before.viewport[1])
         let sx = Double(imageDimensions.width) / sourceWidth, sy = Double(imageDimensions.height) / sourceHeight
-        let elements = Self.tokenBoundElements(after.elements, focusID: after.focus?.id).map { element in
+        let scaledElements = after.elements.map { element in
             AgentElement(id: element.id, role: element.role, name: element.name, value: element.value,
                 state: element.state, bbox: AgentBoundingBox(x: element.bbox.x * sx, y: element.bbox.y * sy,
                     width: element.bbox.width * sx, height: element.bbox.height * sy), inView: element.inView)
         }
+        let webElements = try AgentWebObservation.pageTextElement(after.pageText,
+            screenshotWidth: Double(imageDimensions.width), screenshotHeight: Double(imageDimensions.height),
+            bridgeElements: scaledElements)
+        let elements = Self.tokenBoundElements(webElements, focusID: after.focus?.id)
         let focus = after.focus.map { AgentFocus(id: $0.id, role: $0.role, name: $0.name,
             valuePrefix: $0.value_prefix, selection: AgentSelection(start: $0.selection.first ?? 0,
                 end: $0.selection.dropFirst().first ?? 0)) }
@@ -88,21 +92,14 @@ final class WebEnvironment: AgentEnvironment {
         let page = try await snapshot(); try checkActive()
         try checkPage(page, matches: frame)
         if case let .openURL(url) = action, !SafariBridgeCommand.isAllowedURL(url) { throw AgentEnvironmentError.unsupportedAction }
-        let currentFrame = Self.refreshedFrame(from: frame, page: page)
+        let currentFrame = try Self.refreshedFrame(from: frame, page: page)
         if case .type(nil, _, _) = action { try Self.requireSameFocus(frame.observation.focus, page.focus, elements: page.elements) }
         if case .key = action { try Self.requireSameFocus(frame.observation.focus, page.focus, elements: page.elements) }
         if case .findFiles = action { return AgentResolvedAction(action: action, frame: currentFrame, targets: []) }
-        let pairs = try Self.targetPairs(in: action, frame: frame)
-        var freshTargets: [AgentElement] = []
-        for (target, expected) in pairs {
-            if let expected {
-                guard let fresh = page.elements.first(where: { $0.id == expected.id }) else { throw AgentEnvironmentError.targetGone }
-                try Self.requireSameTarget(expected, fresh); freshTargets.append(fresh)
-            } else if case let .point(x, y) = target {
-                guard let hit = Self.element(at: x, y, in: page, screenshot: frame.observation.screenshot) else { throw AgentEnvironmentError.targetGone }
-                try Self.requireSafeTarget(hit); freshTargets.append(hit)
-            }
-        }
+        let pairs = try AgentWebObservation.targetPairs(for: action, in: frame.observation.elements)
+        let imageDimensions = Self.pngDimensions(Data(base64Encoded: frame.observation.screenshot) ?? Data())
+        let freshTargets = try AgentWebObservation.resolveTargets(pairs, currentElements: page.elements,
+            viewport: page.viewport, screenshotSize: [imageDimensions.width, imageDimensions.height])
         return AgentResolvedAction(action: action, frame: currentFrame, targets: freshTargets)
     }
 
@@ -117,7 +114,7 @@ final class WebEnvironment: AgentEnvironment {
         }
         for old in resolved.targets {
             guard let current = fresh.elements.first(where: { $0.id == old.id }) else { throw AgentEnvironmentError.targetGone }
-            try Self.requireSameTarget(old, current)
+            try AgentWebObservation.requireSameTarget(old, current)
         }
         try await Task.checkCancellation(); try checkActive()
         if case let .findFiles(query, kind, modifiedAfter) = resolved.action {
@@ -213,7 +210,7 @@ final class WebEnvironment: AgentEnvironment {
     }
     private func ensureBound() async throws {
         try checkActive(); guard binding == nil else { return }
-        try await transport.startTask(taskToken: token); try checkActive()
+        try await transport.startTask(taskToken: token, registerHelperIfNeeded: true); try checkActive()
         if let initialBinding {
             let ping = SafariBridgeCommand(taskToken: token, operation: .ping, tabId: initialBinding.tabId,
                 windowId: initialBinding.windowId, nonce: UUID().uuidString)
@@ -241,6 +238,9 @@ final class WebEnvironment: AgentEnvironment {
         do {
             let page = try JSONDecoder().decode(PageSnapshot.self, from: Data(resultJSON.utf8))
             try Self.validateViewport(page.viewport)
+            guard AgentWebObservation.validBridgeElementIDs(page.elements) else {
+                throw AgentEnvironmentError.unavailable("Safari returned invalid page element identities.")
+            }
             guard Self.isSHA256Digest(page.authorityDigest) else { throw AgentEnvironmentError.unavailable("Safari returned an invalid page authority digest.") }
             return page
         }
@@ -301,15 +301,18 @@ final class WebEnvironment: AgentEnvironment {
     private static func isSHA256Digest(_ value: String) -> Bool {
         value.utf8.count == 64 && value.utf8.allSatisfy { (48...57).contains($0) || (97...102).contains($0) }
     }
-    private static func refreshedFrame(from frame: AgentFrame, page: PageSnapshot) -> AgentFrame {
+    private static func refreshedFrame(from frame: AgentFrame, page: PageSnapshot) throws -> AgentFrame {
         let dimensions = pngDimensions(Data(base64Encoded: frame.observation.screenshot) ?? Data())
         let sx = Double(dimensions.width) / max(1, page.viewport[0]), sy = Double(dimensions.height) / max(1, page.viewport[1])
         let elements = page.elements.map { e in AgentElement(id: e.id, role: e.role, name: e.name, value: e.value,
             state: e.state, bbox: AgentBoundingBox(x: e.bbox.x * sx, y: e.bbox.y * sy, width: e.bbox.width * sx, height: e.bbox.height * sy), inView: e.inView) }
+        let webElements = try AgentWebObservation.pageTextElement(page.pageText,
+            screenshotWidth: Double(dimensions.width), screenshotHeight: Double(dimensions.height),
+            bridgeElements: elements)
         let focus = page.focus.map { AgentFocus(id: $0.id, role: $0.role, name: $0.name,
             valuePrefix: $0.value_prefix, selection: AgentSelection(start: $0.selection.first ?? 0, end: $0.selection.dropFirst().first ?? 0)) }
         let observation = AgentObservation(task: frame.observation.task, surface: .web(url: page.url, title: page.title),
-            screenshot: frame.observation.screenshot, elements: tokenBoundElements(elements, focusID: page.focus?.id),
+            screenshot: frame.observation.screenshot, elements: tokenBoundElements(webElements, focusID: page.focus?.id),
             focus: focus, history: frame.observation.history, budget: frame.observation.budget)
         return AgentFrame(observation: observation, scope: frame.scope, authorityDigest: page.authorityDigest)
     }
@@ -327,45 +330,12 @@ final class WebEnvironment: AgentEnvironment {
         if let focusID, !kept.contains(where: { $0.id == focusID }), let focus = elements.first(where: { $0.id == focusID }) { kept.append(focus) }
         return kept
     }
-    private static func element(at x: Double, _ y: Double, in page: PageSnapshot, screenshot: String) -> AgentElement? {
-        let dimensions = pngDimensions(Data(base64Encoded: screenshot) ?? Data())
-        let px = x * page.viewport[0] / max(1, dimensions.width)
-        let py = y * page.viewport[1] / max(1, dimensions.height)
-        return page.elements.first { e in px >= e.bbox.x && py >= e.bbox.y && px <= e.bbox.x + e.bbox.width && py <= e.bbox.y + e.bbox.height }
-    }
-    private static func targetPairs(in action: AgentAction, frame: AgentFrame) throws -> [(AgentTarget, AgentElement?)] {
-        func expected(_ target: AgentTarget) -> AgentElement? {
-            guard case let .element(id) = target else { return nil }
-            return frame.observation.elements.first(where: { $0.id == id })
-        }
-        switch action {
-        case let .click(target, _, _), let .type(target?, _, _), let .scroll(target?, _, _), let .select(target, _), let .setFiles(target, _):
-            guard let item = expected(target) else { throw AgentEnvironmentError.targetGone }
-            return [(target, item)]
-        case let .drag(from, to): return try [from, to].map { target in
-            if case .element = target, let item = expected(target) { return (target, item) }
-            if case .point = target { return (target, nil) }
-            throw AgentEnvironmentError.targetGone
-        }
-        default: return []
-        }
-    }
-    private static func requireSafeTarget(_ fresh: AgentElement) throws {
-        guard fresh.state.contains("visible") else { throw AgentEnvironmentError.targetGone }
-        guard !fresh.state.contains("covered") else { throw AgentEnvironmentError.targetCovered }
-        guard !fresh.state.contains("disabled") else { throw AgentEnvironmentError.disabledTarget }
-        guard !AgentContractValidation.isSecureRoleOrState(role: fresh.role, state: fresh.state) else { throw AgentEnvironmentError.credentialHandoff }
-    }
-    private static func requireSameTarget(_ expected: AgentElement, _ fresh: AgentElement) throws {
-        guard expected.role == fresh.role, expected.name == fresh.name else { throw AgentEnvironmentError.targetChanged }
-        try requireSafeTarget(fresh)
-    }
     private static func requireSameFocus(_ expected: AgentFocus?, _ fresh: PageSnapshot.Focus?, elements: [AgentElement]) throws {
         guard let expected, let fresh, expected.id == fresh.id, expected.role == fresh.role, expected.name == fresh.name else {
             throw AgentEnvironmentError.targetChanged
         }
         guard let focused = elements.first(where: { $0.id == fresh.id }) else { throw AgentEnvironmentError.targetGone }
-        try requireSafeTarget(focused)
+        try AgentWebObservation.requireSafeTarget(focused)
     }
     private static func operation(for action: AgentAction) throws -> SafariBridgeOperation {
         switch action { case .click: .click; case .type: .type; case .key: .key; case .scroll: .scroll; case .select: .select; case .drag: .drag
