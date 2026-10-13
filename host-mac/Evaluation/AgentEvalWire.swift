@@ -143,7 +143,7 @@ struct AgentEvalRequest: Decodable {
         return FileManager.default.fileExists(atPath: root.path) ? [root] : []
     }
 
-    private static let supportedPolicies = ["fara15-4b", "ui-tars15-7b"]
+    private static let supportedPolicies = ["fara15-4b", "ui-tars15-7b", "gui-owl15-4b"]
 }
 
 struct AgentEvalResponse: Encodable {

@@ -172,7 +172,7 @@ enum AgentEvalPreflight {
 
         guard let model = AgentPolicyModel(rawValue: request.policy) else {
             return blocked("model", "The requested local model policy is unsupported.",
-                "Select fara15-4b or ui-tars15-7b, then rerun preflight.", checks: checks, policy: request.policy)
+                "Select fara15-4b, ui-tars15-7b, or gui-owl15-4b, then rerun preflight.", checks: checks, policy: request.policy)
         }
         if let modelFailure = await dependencies.modelCheck(model) {
             return blocked("model", "The local \(model.rawValue) runtime did not become ready: \(modelFailure)",

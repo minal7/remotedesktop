@@ -1436,10 +1436,9 @@ actor OSAtlasLlamaRuntime {
                 guard data.count <= FaraPolicyAdapter.maximumCompletionBytes else {
                     throw OSAtlasLlamaRuntimeError.invalidResponse
                 }
-                if input.model == .fara15_4b {
-                    // Fara's native XML tool-call protocol is ordinary assistant
-                    // message content. Deliberately ignore reasoning_content and
-                    // OpenAI function-call envelopes.
+                if input.model == .fara15_4b || input.model == .guiOwl15_4b {
+                    // Native model protocols live in assistant message content;
+                    // do not turn them into function/tool calls.
                     return try OSAtlasLlamaHTTPClient.responseText(from: data)
                 }
                 guard let completion = String(data: data, encoding: .utf8), !completion.isEmpty else {
@@ -2184,6 +2183,9 @@ actor OSAtlasLlamaRuntime {
         case .uiTars15_7b:
             modelName = "UI-TARS-1.5-7B.Q4_K_M.gguf"
             projectorName = "UI-TARS-1.5-7B.mmproj-f16.gguf"
+        case .guiOwl15_4b:
+            modelName = "GUI-Owl-1.5-4B-Instruct.Q4_K_M.gguf"
+            projectorName = "GUI-Owl-1.5-4B-Instruct.mmproj-Q8_0.gguf"
         }
         try validateTrainedVisionInputs(modelURL: inputs.modelURL, projectorURL: inputs.projectorURL,
             llamaServerURL: inputs.llamaServerURL, modelFileName: modelName, projectorFileName: projectorName)
@@ -2304,8 +2306,8 @@ enum OSAtlasLlamaHTTPClient {
     static func makeAgentActionRequest(endpoint: OSAtlasLlamaEndpoint,
                                        input: AgentVLMRequestInput) throws -> URLRequest {
         try OSAtlasLlamaRuntime.validateLoopbackEndpoint(endpoint.baseURL)
-        let expectedAlias = input.model == .fara15_4b
-            ? ComputerUseFaraRuntimeInputs.modelAlias : "ui-tars15-7b-v1"
+        let expectedAlias = input.model == .fara15_4b ? ComputerUseFaraRuntimeInputs.modelAlias :
+            (input.model == .uiTars15_7b ? "ui-tars15-7b-v1" : "gui-owl15-4b-v1")
         guard endpoint.variant == nil, !endpoint.bearerToken.isEmpty,
               input.modelAlias == expectedAlias,
               input.messages.count >= 2, input.messages.first?.role == .system,

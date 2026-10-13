@@ -215,7 +215,8 @@ final class DebugAgentEvalSession {
     }
 
     private func makeResult(outcome: String, answer: String) -> AgentEvalResponse {
-        let requestedCropMode = request.policy == "ui-tars15-7b" ? "full-display" : "frontmost-window"
+        let requestedCropMode = ["ui-tars15-7b", "gui-owl15-4b"].contains(request.policy)
+            ? "full-display" : "frontmost-window"
         let metadataURL = runStore.directory.appendingPathComponent("pixel-metadata.json")
         let cropMode = AgentEvalPixelMetadata.actualCropMode(from: try? Data(contentsOf: metadataURL))
         return AgentEvalResponse(taskID: request.taskID, outcome: outcome, answer: answer,

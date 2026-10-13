@@ -49,8 +49,8 @@ from blocked_results import (with_integrity_metrics as _with_integrity_metrics,
                              with_response_fields as _with_response_fields)
 from checkers import match_expectation as _match_checker, normalized_text as _normalized_text
 
-SUPPORTED_POLICIES = {"fara15-4b", "ui-tars15-7b"}
-POLICY_ALIASES = {"fara": "fara15-4b", "uitars": "ui-tars15-7b"}
+SUPPORTED_POLICIES = {"fara15-4b", "ui-tars15-7b", "gui-owl15-4b"}
+POLICY_ALIASES = {"fara": "fara15-4b", "uitars": "ui-tars15-7b", "guiowl": "gui-owl15-4b"}
 
 class EvalError(Exception):
     pass
@@ -583,7 +583,12 @@ def _blocked_result(task: Task, run_index: int, execution: str, reason: str,
         "environment": "pixel", "policy": response.get("policy", "none") if response else "none",
         "requested_policy": requested_policy,
         "crop_mode": response.get("crop_mode", "unknown") if response else "unknown",
-        "requested_crop_mode": response.get("requested_crop_mode", "full-display" if requested_policy == "ui-tars15-7b" else "frontmost-window") if response else ("full-display" if requested_policy == "ui-tars15-7b" else "frontmost-window"),
+        "requested_crop_mode": response.get(
+            "requested_crop_mode",
+            "full-display" if requested_policy in {"ui-tars15-7b", "gui-owl15-4b"} else "frontmost-window",
+        ) if response else (
+            "full-display" if requested_policy in {"ui-tars15-7b", "gui-owl15-4b"} else "frontmost-window"
+        ),
         "episode_path": response.get("episode_path") if response else None,
         "checker": reason, "execution": execution,
     }

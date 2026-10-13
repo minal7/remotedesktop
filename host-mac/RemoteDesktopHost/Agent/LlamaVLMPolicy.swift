@@ -3,11 +3,13 @@ import Foundation
 enum AgentPolicyModel: String, CaseIterable, Codable, Sendable {
     case fara15_4b = "fara15-4b"
     case uiTars15_7b = "ui-tars15-7b"
+    case guiOwl15_4b = "gui-owl15-4b"
 
     var capturePreference: PixelCapturePreference {
         switch self {
         case .fara15_4b: .frontmostWindow
         case .uiTars15_7b: .fullDisplay
+        case .guiOwl15_4b: .fullDisplay
         }
     }
 }
@@ -31,6 +33,7 @@ struct AgentVisionRuntimeInputs: Equatable, Sendable {
         switch model {
         case .fara15_4b: ComputerUseFaraRuntimeInputs.modelAlias
         case .uiTars15_7b: "ui-tars15-7b-v1"
+        case .guiOwl15_4b: "gui-owl15-4b-v1"
         }
     }
 
@@ -44,6 +47,9 @@ struct AgentVisionRuntimeInputs: Equatable, Sendable {
                 projectorURL: faraInputs.projectorURL, llamaServerURL: faraInputs.llamaServerURL)
         case .uiTars15_7b:
             return try OSAtlasRuntimeInputResolver().resolveUITARS15(modelRootURL: modelRootURL,
+                runtimeDirectoryURL: runtimeDirectoryURL, enclosingBundleURL: enclosingBundleURL)
+        case .guiOwl15_4b:
+            return try OSAtlasRuntimeInputResolver().resolveGUIOwl15(modelRootURL: modelRootURL,
                 runtimeDirectoryURL: runtimeDirectoryURL, enclosingBundleURL: enclosingBundleURL)
         }
     }
@@ -135,7 +141,11 @@ final class LlamaVLMPolicy: AgentPolicy {
         }
         self.transport = transport
         self.model = model
-        self.promptVersion = model == .fara15_4b ? "v1-fara-native-content" : "v1-ui-tars-native-tool"
+        self.promptVersion = switch model {
+        case .fara15_4b: "v1-fara-native-content"
+        case .uiTars15_7b: "v1-ui-tars-native-tool"
+        case .guiOwl15_4b: "v1-gui-owl-native-content"
+        }
         self.prompt = Self.nativePrompt(prompt, model: model)
     }
 
@@ -153,7 +163,8 @@ final class LlamaVLMPolicy: AgentPolicy {
     convenience init(runtimeInputs: AgentVisionRuntimeInputs,
                      runtime: OSAtlasLlamaRuntime = .shared,
                      bundle: Bundle = .main) throws {
-        let promptURL = try Self.resourceURL(bundle: bundle, name: "v1", extension: "txt", subdirectory: "policy/prompts")
+        let promptURL = try Self.resourceURL(bundle: bundle, name: Self.promptResourceName(for: runtimeInputs.model),
+            extension: "txt", subdirectory: "policy/prompts")
         let prompt = try String(contentsOf: promptURL, encoding: .utf8)
         try self.init(transport: RuntimeAgentVLMTransport(inputs: runtimeInputs, runtime: runtime),
             prompt: prompt, model: runtimeInputs.model)
@@ -358,14 +369,20 @@ final class LlamaVLMPolicy: AgentPolicy {
         return url
     }
 
+    static func promptResourceName(for model: AgentPolicyModel) -> String {
+        model == .guiOwl15_4b ? "gui-owl-1.5" : "v1"
+    }
+
     private static func modelAlias(_ model: AgentPolicyModel) -> String {
         switch model {
         case .fara15_4b: ComputerUseFaraRuntimeInputs.modelAlias
         case .uiTars15_7b: "ui-tars15-7b-v1"
+        case .guiOwl15_4b: "gui-owl15-4b-v1"
         }
     }
 
     static func nativePrompt(_ base: String, model: AgentPolicyModel) -> String {
+        if model == .guiOwl15_4b { return base }
         if model == .fara15_4b {
             let official4BIdentity = """
             You are Fara, a computer use agent (CUA) specialized for web browsers. You are developed by Microsoft AI Frontiers. You assist users with completing and automating tasks that require the use of a web browser.
@@ -393,6 +410,8 @@ final class LlamaVLMPolicy: AgentPolicy {
             instruction = "Call Fara's native computer_use tool exactly once. Use its native action names and arguments rather than canonical host actions. Coordinates and scroll distances use Fara's normalized 0–1000 display space. Omit mode on native type to append at the current selection; use a preceding cmd+a key action when replacing. Use only host-provided file IDs; never include paths. The host checks scope and approvals."
         case .uiTars15_7b:
             instruction = "Use UI-TARS 1.5 native text format: one Thought line and one Action line. Native actions include click(start_box='...'), left_double(start_box='...'), right_single(start_box='...'), drag(start_box='...', end_box='...'), hotkey(key='...'), type(content='...'), scroll(start_box='...', direction='down'), wait(), finished(content='...'), call_user(content='...'). Generic host actions are open_url(url='...'), open_app(name='...'), find_files(query='...', kind='...'), select_option(start_box='...', option='...'), set_files(start_box='...', file_ids='[\"host-id\"]'), and fail(reason='...'). Use only host-issued file IDs, never paths. Coordinates are absolute pixels in the model's factor-28 resized image; the adapter maps them to the attached PNG. A type action appends at the current selection; use a preceding cmd+a key action when replacing. Never emit multiple actions, Python code, arbitrary paths, or extra tool calls. The host checks scope and approvals."
+        case .guiOwl15_4b:
+            instruction = ""
         }
         return [adapted, core, instruction].joined(separator: "\n\n")
     }
@@ -402,6 +421,7 @@ final class LlamaVLMPolicy: AgentPolicy {
         switch model {
         case .fara15_4b: return try FaraPolicyAdapter.canonicalActionJSON(fromCompletion: raw, imageSize: dimensions)
         case .uiTars15_7b: return try UiTarsPolicyAdapter.canonicalActionJSON(fromCompletion: raw, imageSize: dimensions)
+        case .guiOwl15_4b: return try GUIOwlPolicyAdapter.canonicalActionJSON(fromCompletion: raw, imageSize: dimensions)
         }
     }
 }

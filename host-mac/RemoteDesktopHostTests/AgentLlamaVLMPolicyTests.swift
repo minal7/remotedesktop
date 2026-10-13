@@ -252,6 +252,60 @@ final class AgentLlamaVLMPolicyTests: XCTestCase {
         XCTAssertEqual(assistant.content, [.text(nativeAction)])
     }
 
+    func testGUIOwlUsesFullDisplayVersionedAliasAndPlainChatRequest() async throws {
+        let model = try XCTUnwrap(AgentPolicyModel(rawValue: "gui-owl15-4b"))
+        XCTAssertEqual(model.capturePreference, .fullDisplay)
+        let nativePrompt = "GUI-Owl native prompt resource sentinel"
+        let response = try completion(arguments: #"{"action":"wait","time":1}"#, content: "Action: Wait.")
+        let transport = RecordingAgentVLMTransport(response: response)
+        let ( _, observation, _) = try fixture(transport: transport)
+        let policy = try LlamaVLMPolicy(transport: transport, prompt: nativePrompt, model: model)
+
+        let output = try await policy.propose(observation)
+
+        XCTAssertEqual(output.action, .wait(seconds: 1))
+        let input = try XCTUnwrap(transport.inputs.last)
+        XCTAssertEqual(input.modelAlias, "gui-owl15-4b-v1")
+        let endpoint = OSAtlasLlamaEndpoint(generation: 1, variant: nil,
+            baseURL: URL(string: "http://127.0.0.1:43123")!, bearerToken: "unit-test-token")
+        let request = try OSAtlasLlamaHTTPClient.makeAgentActionRequest(endpoint: endpoint, input: input)
+        let body = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(request.httpBody)) as? [String: Any])
+        XCTAssertEqual(body["model"] as? String, "gui-owl15-4b-v1")
+        XCTAssertNil(body["tools"])
+        XCTAssertNil(body["tool_choice"])
+        XCTAssertNil(body["grammar"])
+        XCTAssertNil(body["response_format"])
+        let messages = try XCTUnwrap(body["messages"] as? [[String: Any]])
+        XCTAssertEqual(messages.map { $0["role"] as? String }, ["system", "user"])
+        XCTAssertEqual(messages[0]["content"] as? String, nativePrompt)
+    }
+
+    func testGUIOwlNativeMessageContentIsTheAssistantHistoryTurn() async throws {
+        let model = try XCTUnwrap(AgentPolicyModel(rawValue: "gui-owl15-4b"))
+        let promptURL = try XCTUnwrap(Bundle.main.url(forResource: LlamaVLMPolicy.promptResourceName(for: model), withExtension: "txt",
+                                                      subdirectory: "policy/prompts"))
+        XCTAssertEqual(promptURL.lastPathComponent, "gui-owl-1.5.txt")
+        let nativePrompt = try String(contentsOf: promptURL, encoding: .utf8)
+        XCTAssertEqual(LlamaVLMPolicy.nativePrompt(nativePrompt, model: model), nativePrompt)
+
+        let rawContent = try completion(arguments: #"{"action":"wait","time":1}"#, content: "Action: Wait.")
+        let transport = RecordingAgentVLMTransport(responses: [rawContent, rawContent])
+        let (_, observation, _) = try fixture(transport: transport)
+        let policy = try LlamaVLMPolicy(transport: transport, prompt: nativePrompt, model: model)
+        _ = try await policy.propose(observation)
+        let next = AgentObservation(task: observation.task, surface: observation.surface,
+            screenshot: observation.screenshot, elements: observation.elements, focus: observation.focus,
+            history: [.init(action: .wait(seconds: 1), result: "ok: waited")],
+            budget: .init(step: 1, maxSteps: 40))
+
+        _ = try await policy.propose(next)
+
+        let messages = try XCTUnwrap(transport.inputs.last?.messages)
+        XCTAssertEqual(messages.first(where: { $0.role == .system })?.content, [.text(nativePrompt)])
+        XCTAssertEqual(messages.filter { $0.role == .assistant }.map(\.content), [[.text(rawContent)]])
+        XCTAssertEqual(messages.map(\.role), [.system, .user, .assistant, .user])
+    }
+
     func testEachPriorScreenshotStaysInItsActionUserTurn() async throws {
         let raw = try completion(arguments: #"{"action":"wait","time":1}"#)
         let transport = RecordingAgentVLMTransport(response: raw)

@@ -146,9 +146,32 @@ struct OSAtlasRuntimeInputResolver {
     /// mutating the active Fara installation receipt.
     func resolveUITARS15(modelRootURL: URL, runtimeDirectoryURL: URL,
                          enclosingBundleURL: URL) throws -> AgentVisionRuntimeInputs {
-        let manifest = ComputerUseArtifactManifest.uiTars15
+        try resolveAgentVisionPackage(manifest: .uiTars15, model: .uiTars15_7b,
+            modelRootURL: modelRootURL, runtimeDirectoryURL: runtimeDirectoryURL,
+            enclosingBundleURL: enclosingBundleURL)
+    }
+
+    func resolveGUIOwl15(modelRootURL: URL, runtimeDirectoryURL: URL,
+                         enclosingBundleURL: URL) throws -> AgentVisionRuntimeInputs {
+        try resolveAgentVisionPackage(manifest: .guiOwl15, model: .guiOwl15_4b,
+            modelRootURL: modelRootURL, runtimeDirectoryURL: runtimeDirectoryURL,
+            enclosingBundleURL: enclosingBundleURL)
+    }
+
+    func resolveAgentVisionPackage(manifest: ComputerUseArtifactManifest, model: AgentPolicyModel,
+        modelRootURL: URL, runtimeDirectoryURL: URL, enclosingBundleURL: URL) throws -> AgentVisionRuntimeInputs {
+        let expectedVariant: ComputerUseArtifactManifest.ModelVariant
+        switch model {
+        case .uiTars15_7b: expectedVariant = .uiTars15_7B
+        case .guiOwl15_4b: expectedVariant = .guiOwl15_4B
+        case .fara15_4b: throw OSAtlasRuntimeInstallationError.invalidReceipt
+        }
         let directory = modelRootURL.appendingPathComponent(manifest.installationVersion, isDirectory: true).standardizedFileURL
-        guard manifest.modelVariant == .uiTars15_7B, manifest.modelArtifacts.count == 2,
+        guard manifest.modelVariant == expectedVariant,
+              manifest.modelArtifacts.count == 2,
+              manifest.modelArtifacts.filter({ $0.kind == .textModelShard }).count == 1,
+              manifest.modelArtifacts.filter({ $0.kind == .visionProjector }).count == 1,
+              Set(manifest.modelArtifacts.map(\.fileName)).count == 2,
               isStrictDirectory(directory), contains(modelRootURL.standardizedFileURL, directory) else {
             throw OSAtlasRuntimeInstallationError.invalidReceipt
         }
@@ -164,12 +187,12 @@ struct OSAtlasRuntimeInputResolver {
             }
             resolved[artifact.fileName] = url
         }
-        guard let model = resolved["UI-TARS-1.5-7B.Q4_K_M.gguf"],
-              let projector = resolved["UI-TARS-1.5-7B.mmproj-f16.gguf"] else {
+        guard let modelArtifact = manifest.modelArtifacts.first(where: { $0.kind == .textModelShard }),
+              let projectorArtifact = manifest.modelArtifacts.first(where: { $0.kind == .visionProjector }),
+              let modelURL = resolved[modelArtifact.fileName], let projectorURL = resolved[projectorArtifact.fileName] else {
             throw OSAtlasRuntimeInstallationError.invalidReceipt
         }
-        return AgentVisionRuntimeInputs(model: .uiTars15_7b, modelURL: model,
-            projectorURL: projector,
+        return AgentVisionRuntimeInputs(model: model, modelURL: modelURL, projectorURL: projectorURL,
             llamaServerURL: try resolveBundledExecutable(runtimeDirectoryURL: runtimeDirectoryURL,
                                                           enclosingBundleURL: enclosingBundleURL))
     }

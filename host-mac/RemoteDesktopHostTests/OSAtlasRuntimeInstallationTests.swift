@@ -1,6 +1,7 @@
 import Foundation
 import AppKit
 import XCTest
+import CryptoKit
 @testable import RemoteDesktopHost
 
 actor PreparationRejectingLauncher: OSAtlasLlamaServerLaunching {
@@ -93,6 +94,89 @@ final class OSAtlasRuntimeInstallationTests: XCTestCase {
             let url = try XCTUnwrap(ComputerUseArtifactManifest.bundledLegalDocumentURL(artifact))
             XCTAssertEqual(try Data(contentsOf: url).count, Int(artifact.byteCount))
         }
+    }
+
+    func testGUIOwlManifestPinsConvertedPairAndLegalAttributionWithoutChangingDefault() throws {
+        let manifest = ComputerUseArtifactManifest.guiOwl15
+        XCTAssertEqual(ComputerUseArtifactManifest.current, .fara15)
+        XCTAssertEqual(manifest.modelVariant, .guiOwl15_4B)
+        XCTAssertEqual(manifest.modelRepository, "mradermacher/GUI-Owl-1.5-4B-Instruct-GGUF")
+        XCTAssertEqual(manifest.modelRevision, "f77e8a457158e773d9f3135ff0cac5811878d3b7")
+        XCTAssertEqual(manifest.modelArtifacts.map(\.byteCount), [2_497_282_208, 453_974_336])
+        XCTAssertEqual(manifest.modelArtifacts.map(\.sha256), [
+            "8e1793b69bb4064671ab6529b43f5b943850f73a9244ad139c16e93a44709232",
+            "b705d940e9b7f212235a16c9c4b8cc9dd9053a1ccf549b99fc069a0ae694b073",
+        ])
+        XCTAssertTrue(manifest.modelArtifacts.allSatisfy { $0.downloadURL.path.contains("/resolve/" + manifest.modelRevision + "/") })
+        XCTAssertEqual(Set(manifest.legalArtifacts.map(\.fileName)), Set([
+            "GUI-OWL-DESKTOP-MIT-LICENSE.txt", "QWEN35-APACHE-2.0-LICENSE.txt",
+            "LLAMA-CPP-MIT-LICENSE.txt", "GUI-OWL-NOTICE.txt",
+        ]))
+        for artifact in manifest.legalArtifacts {
+            let url = try XCTUnwrap(ComputerUseArtifactManifest.bundledLegalDocumentURL(artifact))
+            let data = try Data(contentsOf: url)
+            XCTAssertEqual(data.count, Int(artifact.byteCount))
+            XCTAssertEqual(SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined(), artifact.sha256)
+        }
+    }
+
+    func testAgentVisionResolverChecksExactGUIOwlPairAndRejectsTampering() throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let root = fixture.root.appendingPathComponent("VisionModels", isDirectory: true)
+        let directory = root.appendingPathComponent("gui-test", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let bytes = Data([1, 2, 3])
+        let digest = "039058c6f2c0cb492c533b0a4d14ef77cc0f78abccced5287d84a1a2011cfb81"
+        let names = ["gui-model.gguf", "gui-projector.gguf"]
+        for name in names { try bytes.write(to: directory.appendingPathComponent(name)) }
+        let manifest = ComputerUseArtifactManifest(installationVersion: "gui-test", modelVariant: .guiOwl15_4B,
+            modelRepository: "test/gui-owl", modelRevision: "test-revision", modelArtifacts: [
+                .init(kind: .textModelShard, fileName: names[0], byteCount: Int64(bytes.count), sha256: digest,
+                      downloadURL: URL(string: "https://example.invalid/gui-model.gguf")!),
+                .init(kind: .visionProjector, fileName: names[1], byteCount: Int64(bytes.count), sha256: digest,
+                      downloadURL: URL(string: "https://example.invalid/gui-projector.gguf")!),
+            ], minimumMemoryBytes: 0)
+        let resolver = OSAtlasRuntimeInputResolver()
+        let result = try resolver.resolveAgentVisionPackage(manifest: manifest, model: .guiOwl15_4b,
+            modelRootURL: root, runtimeDirectoryURL: fixture.runtimeDirectory,
+            enclosingBundleURL: fixture.bundleDirectory)
+        XCTAssertEqual(result.model, .guiOwl15_4b)
+        XCTAssertEqual(result.modelURL.lastPathComponent, names[0])
+        XCTAssertEqual(result.projectorURL.lastPathComponent, names[1])
+        try Data([9]).write(to: directory.appendingPathComponent(names[1]))
+        XCTAssertThrowsError(try resolver.resolveAgentVisionPackage(manifest: manifest, model: .guiOwl15_4b,
+            modelRootURL: root, runtimeDirectoryURL: fixture.runtimeDirectory,
+            enclosingBundleURL: fixture.bundleDirectory))
+    }
+
+    func testUITarsResolverAllowsItsExistingDownloadCacheMetadata() throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let root = fixture.root.appendingPathComponent("VisionModels", isDirectory: true)
+        let directory = root.appendingPathComponent("ui-test", isDirectory: true)
+        let cache = directory.appendingPathComponent(".cache/huggingface/download", isDirectory: true)
+        try FileManager.default.createDirectory(at: cache, withIntermediateDirectories: true)
+        let bytes = Data([1, 2, 3])
+        let digest = "039058c6f2c0cb492c533b0a4d14ef77cc0f78abccced5287d84a1a2011cfb81"
+        let names = ["ui-model.gguf", "ui-projector.gguf"]
+        for name in names { try bytes.write(to: directory.appendingPathComponent(name)) }
+        try Data("cache metadata".utf8).write(to: cache.appendingPathComponent("download.metadata"))
+        let manifest = ComputerUseArtifactManifest(installationVersion: "ui-test", modelVariant: .uiTars15_7B,
+            modelRepository: "test/ui-tars", modelRevision: "test-revision", modelArtifacts: [
+                .init(kind: .textModelShard, fileName: names[0], byteCount: Int64(bytes.count), sha256: digest,
+                      downloadURL: URL(string: "https://example.invalid/ui-model.gguf")!),
+                .init(kind: .visionProjector, fileName: names[1], byteCount: Int64(bytes.count), sha256: digest,
+                      downloadURL: URL(string: "https://example.invalid/ui-projector.gguf")!),
+            ], minimumMemoryBytes: 0)
+
+        let result = try OSAtlasRuntimeInputResolver().resolveAgentVisionPackage(manifest: manifest,
+            model: .uiTars15_7b, modelRootURL: root, runtimeDirectoryURL: fixture.runtimeDirectory,
+            enclosingBundleURL: fixture.bundleDirectory)
+
+        XCTAssertEqual(result.model, .uiTars15_7b)
+        XCTAssertEqual(result.modelURL.lastPathComponent, names[0])
+        XCTAssertEqual(result.projectorURL.lastPathComponent, names[1])
     }
 
     func testFaraReceiptResolvesCurrentTwoFilePackageWithoutLegacyModels() throws {
