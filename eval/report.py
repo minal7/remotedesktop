@@ -12,8 +12,8 @@ from typing import Any
 
 def write_report(output: Path, rows: list[dict[str, Any]], execution: str) -> None:
     output.mkdir(parents=True, exist_ok=True)
-    infra_rows = [row for row in rows if row.get("status") == "INFRA-BLOCKED"]
-    eligible = [row for row in rows if row.get("status") != "INFRA-BLOCKED"]
+    infra_rows = [row for row in rows if _is_infrastructure(row)]
+    eligible = [row for row in rows if not _is_infrastructure(row)]
     (output / "run_metadata.json").write_text(json.dumps({
         "execution": execution,
         "golden_vm_eligible": execution == "tart" and bool(eligible)
@@ -21,6 +21,13 @@ def write_report(output: Path, rows: list[dict[str, Any]], execution: str) -> No
         "scheduled_task_runs": len(rows),
         "evaluated_task_runs": len(eligible),
         "infra_blocked_task_runs": len(infra_rows),
+        "observed_infra_task_runs": sum(_has_observation(row) for row in infra_rows),
+        "count_semantics": {
+            "scheduled_task_runs": "all result rows, including infrastructure rows",
+            "evaluated_task_runs": "non-infrastructure rows used in model denominators",
+            "infra_blocked_task_runs": "rows with INFRA-BLOCKED status or infra failure_class",
+            "observed_infra_task_runs": "infrastructure rows with one or more recorded steps",
+        },
         "actual_policies": _count_values(rows, "policy"),
         "actual_environments": _count_values(rows, "environment"),
         "actual_crop_modes": _count_values(rows, "crop_mode"),
@@ -99,7 +106,8 @@ def _write_skill_policy_summary(path: Path, rows: list[dict[str, Any]]) -> None:
 
 
 def _tag_summary(tagged: list[dict[str, Any]]) -> dict[str, Any]:
-    evaluated = [row for row in tagged if row.get("status") != "INFRA-BLOCKED"]
+    infra_rows = [row for row in tagged if _is_infrastructure(row)]
+    evaluated = [row for row in tagged if not _is_infrastructure(row)]
     latencies = [row["mean_step_latency_ms"] for row in evaluated
                  if isinstance(row.get("mean_step_latency_ms"), (int, float))]
     phases = {"observe": "observe_step_latencies_ms", "model": "model_step_latencies_ms",
@@ -120,7 +128,14 @@ def _tag_summary(tagged: list[dict[str, Any]]) -> dict[str, Any]:
     successes = sum(row.get("success") is True for row in evaluated)
     return {
         "scheduled_tasks": len(tagged), "tasks": len(evaluated),
-        "infra_blocked": len(tagged) - len(evaluated), "successes": successes,
+        "infra_blocked": len(infra_rows),
+        "observed_infra": sum(_has_observation(row) for row in infra_rows), "successes": successes,
+        "count_semantics": {
+            "scheduled_tasks": "all rows in this group",
+            "tasks": "non-infrastructure rows used in model denominators",
+            "infra_blocked": "rows with INFRA-BLOCKED status or infra failure_class",
+            "observed_infra": "infrastructure rows with one or more recorded steps",
+        },
         "success_rate": successes / len(evaluated) if evaluated else None,
         "mean_steps": sum(row.get("steps", 0) for row in evaluated) / len(evaluated) if evaluated else None,
         "mean_wall_seconds": sum(row.get("wall_seconds", 0) or 0 for row in evaluated) / len(evaluated) if evaluated else None,
@@ -137,6 +152,15 @@ def _tag_summary(tagged: list[dict[str, Any]]) -> dict[str, Any]:
         "unsafe_count": sum(row.get("unsafe_count", 0) for row in evaluated),
         "failure_classes": dict(failure_classes),
     }
+
+
+def _is_infrastructure(row: dict[str, Any]) -> bool:
+    return row.get("status") == "INFRA-BLOCKED" or row.get("failure_class") == "infra"
+
+
+def _has_observation(row: dict[str, Any]) -> bool:
+    steps = row.get("steps")
+    return isinstance(steps, int) and not isinstance(steps, bool) and steps > 0
 
 
 def _step_samples(rows: list[dict[str, Any]], field: str) -> list[float]:

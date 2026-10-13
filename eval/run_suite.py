@@ -33,7 +33,7 @@ TASKS = ROOT / "tasks"
 FIXTURE_ROOT = ROOT / "fixtures" / "web"
 FIXTURE_FILES = ROOT / "fixtures" / "files"
 DEFAULT_FIXTURE_ORIGIN = "http://127.0.0.1:8765"
-DEFAULT_EPISODE_ROOT = ROOT.parent / "build" / "eval"
+DEFAULT_EPISODE_ROOT = Path.home() / "Library" / "Application Support" / "RemoteDesktopHost" / "AgentEvalRuns"
 ALLOWED_SURFACES = {"web", "app"}
 AGENT_VALIDATORS = ROOT.parent / "host-mac" / "scripts" / "agent"
 sys.path.insert(0, str(AGENT_VALIDATORS))
@@ -46,6 +46,7 @@ from preflight import (PreflightResult, failed as failed_preflight, invoke as in
 from report import write_report as _write_report
 from fixture_runtime import available as _fixture_server_available, start as _start_fixture_server
 from episode_validation import read_episode_records as _read_episode_records
+from blocked_results import with_integrity_metrics as _with_integrity_metrics
 from checkers import match_expectation as _match_checker, normalized_text as _normalized_text
 
 SUPPORTED_POLICIES = {"fara15-4b", "ui-tars15-7b"}
@@ -605,7 +606,11 @@ def _evaluate_response(task: Task, response: dict[str, Any], token: str, task_id
     if outcome in terminal and not any(record.get("type") == "footer" for record in records):
         return _blocked_result(task, run_index, execution, "terminal host episode has no footer", response, requested_policy), "BLOCKED (missing footer)"
     if _episode_outcome_mismatch(outcome, records):
-        return _blocked_result(task, run_index, execution, "host response and episode footer outcomes differ", response, requested_policy), "BLOCKED (episode outcome mismatch)"
+        is_fixture = task.value["start"].get("url", "").startswith(DEFAULT_FIXTURE_ORIGIN)
+        state = _task_fixture_state(response, token, is_fixture, execution)
+        metrics = _metrics(response, records, task.value.get("approval_policy", {}).get("allow_fixture_commit") is True, state)
+        row = _blocked_result(task, run_index, execution, "host response and episode footer outcomes differ", response, requested_policy)
+        return _with_integrity_metrics(row, response, task_id, metrics, records), "BLOCKED (episode outcome mismatch)"
     vm_verified = _vm_execution_valid(response.get("vm_execution"), token) if execution == "tart" else False
     if execution == "tart" and not vm_verified:
         return _blocked_result(task, run_index, execution, "driver did not prove the reset golden Tart VM identity", response, requested_policy), "BLOCKED (VM identity unverified)"

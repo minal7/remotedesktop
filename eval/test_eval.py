@@ -108,6 +108,32 @@ class FixtureServerTests(unittest.TestCase):
 
 
 class TaskAndCheckerTests(unittest.TestCase):
+    def test_default_episode_root_is_private_application_support_location(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        expected = Path.home() / "Library" / "Application Support" / "RemoteDesktopHost" / "AgentEvalRuns"
+        with patch.dict(os.environ, {"REMOTE_DESKTOP_EVAL_ROOT": ""}):
+            self.assertEqual(run_suite._episode_root(), expected)
+        self.assertFalse(run_suite.DEFAULT_EPISODE_ROOT.is_relative_to(run_suite.ROOT.parent))
+        with TemporaryDirectory() as directory:
+            root = Path(directory) / "private" / "runs"
+            with patch.dict(os.environ, {"REMOTE_DESKTOP_EVAL_ROOT": str(root)}):
+                self.assertEqual(run_suite._prepare_episode_root(), root.resolve())
+            self.assertEqual(root.stat().st_mode & 0o777, 0o700)
+
+    def test_bad_episode_root_overrides_do_not_bypass_private_path_validation(self) -> None:
+        with patch.dict(os.environ, {"REMOTE_DESKTOP_EVAL_ROOT": "relative/eval"}):
+            with self.assertRaisesRegex(run_suite.EvalError, "absolute path"):
+                run_suite._prepare_episode_root()
+        from tempfile import TemporaryDirectory
+        with TemporaryDirectory() as directory:
+            root = Path(directory) / "public"
+            root.mkdir(mode=0o755)
+            root.chmod(0o755)
+            with patch.dict(os.environ, {"REMOTE_DESKTOP_EVAL_ROOT": str(root)}):
+                with self.assertRaisesRegex(run_suite.EvalError, "private"):
+                    run_suite._prepare_episode_root()
+
     def test_task_inventory_and_smoke_subset(self) -> None:
         basics = run_suite.load_tasks("basics")
         safety = run_suite.load_tasks("safety")
@@ -529,6 +555,7 @@ class TaskAndCheckerTests(unittest.TestCase):
             response["answer"] = "bridge binding failed before observation"
             absent, _ = run_suite._evaluate_response(task, response, "a" * 32, task_id, 1, "real-host")
         self.assertEqual(absent["status"], "INFRA-BLOCKED")
+        self.assertEqual(absent["failure_class"], "infra")
         self.assertIn("bridge binding failed", absent["checker"])
         records = [{"type": "step", "step": 0, "timings": {"total_ms": 12, "observation_ms": 2,
                     "policy_ms": 7, "execution_ms": 3}},
@@ -605,14 +632,55 @@ class TaskAndCheckerTests(unittest.TestCase):
         response = {"task_id": task_id, "outcome": "completed", "answer": "done",
                     "episode_path": "/tmp/unused.jsonl", "wall_seconds": 1,
                     "real_host_app": True, "environment": "pixel", "policy": "fara15-4b"}
-        cancelled = [{"type": "step", "step": 0, "timings": {}},
+        cancelled = [{"type": "step", "step": 0,
+                      "gate": {"decision": "rejected", "reason": "response/footer conflict"},
+                      "timings": {"observation_ms": 2, "policy_ms": 4,
+                                  "execution_ms": 1, "total_ms": 7}},
                      {"type": "footer", "outcome": "cancelled", "approvals": []}]
         with patch.object(run_suite, "_episode_records", return_value=cancelled):
             blocked, _ = run_suite._evaluate_response(task, response, "a" * 32, task_id, 1, "real-host")
         self.assertEqual(blocked["status"], "BLOCKED")
         self.assertIn("outcomes differ", blocked["checker"])
+        self.assertEqual(blocked["failure_class"], "infra")
+        self.assertEqual(blocked["steps"], 1)
+        self.assertEqual(blocked["median_total_step_latency_ms"], 7)
+        self.assertEqual(blocked["median_observe_latency_ms"], 2)
+        self.assertEqual(blocked["median_model_latency_ms"], 4)
+        self.assertEqual(blocked["median_execute_latency_ms"], 1)
+        self.assertEqual(blocked["gate_rejections"], {"response/footer conflict": 1})
+        self.assertEqual(blocked["answer"], "done")
 
         response["outcome"] = "failed"
+        response["answer"] = "Question could not be retained"
+        with patch.object(run_suite, "_episode_records", return_value=cancelled):
+            failed_cancelled, _ = run_suite._evaluate_response(
+                task, response, "a" * 32, task_id, 1, "real-host")
+        self.assertEqual(failed_cancelled["status"], "BLOCKED")
+        self.assertEqual(failed_cancelled["failure_class"], "infra")
+        self.assertIn("outcomes differ", failed_cancelled["checker"])
+
+        ask_user_cancelled = [{"type": "step", "step": 0,
+                               "action": {"type": "ask_user", "question": "Which country?"},
+                               "observation": {"surface": {"kind": "app", "app": "com.example.Form"}},
+                               "gate": {"decision": "allowed", "reason": "clarification"},
+                               "execution": {"status": "not_executed"},
+                               "timings": {"observation_ms": 11, "policy_ms": 13,
+                                           "execution_ms": 0, "total_ms": 24}},
+                              {"type": "footer", "outcome": "cancelled", "approvals": []}]
+        response["answer"] = "Question could not be retained"
+        with patch.object(run_suite, "_episode_records", return_value=ask_user_cancelled):
+            ask_row, _ = run_suite._evaluate_response(task, response, "a" * 32,
+                                                       task_id, 1, "real-host")
+        self.assertEqual(ask_row["status"], "BLOCKED")
+        self.assertEqual(ask_row["failure_class"], "infra")
+        self.assertEqual(ask_row["action_types"], {"ask_user": 1})
+        self.assertEqual(ask_row["steps"], 1)
+        self.assertEqual(ask_row["median_observe_latency_ms"], 11)
+        self.assertEqual(ask_row["median_model_latency_ms"], 13)
+        self.assertEqual(ask_row["approval_requests"], 0)
+        self.assertEqual(ask_row["gate_rejections"], {})
+        self.assertEqual(ask_row["answer"], "Question could not be retained")
+
         response["answer"] = "Malformed model output"
         failed_records = [{"type": "step", "step": 0,
                            "gate": {"decision": "rejected", "reason": "target was not visible"},
@@ -644,6 +712,45 @@ class TaskAndCheckerTests(unittest.TestCase):
         self.assertEqual(summary["success_rate"], 1.0)
         self.assertIsNone(summary["median_total_step_latency_ms"])
         self.assertEqual(summary["latency_aggregation"], "unavailable_no_raw_step_samples")
+
+    def test_observed_integrity_infra_is_reported_but_excluded_from_model_metrics(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        rows = [
+            {"task_id": "capability", "status": "PASS", "success": True, "tags": ["reading"],
+             "policy": "fara15-4b", "environment": "pixel", "steps": 1,
+             "wall_seconds": 1, "mean_step_latency_ms": 4, "approvals": 0,
+             "approval_requests": 0, "gate_rejections": {}, "unsafe_count": 0,
+             "observe_step_latencies_ms": [2], "model_step_latencies_ms": [3],
+             "execute_step_latencies_ms": [1], "total_step_latencies_ms": [6]},
+            {"task_id": "integrity", "status": "BLOCKED", "failure_class": "infra",
+             "success": False, "tags": ["reading"], "policy": "fara15-4b",
+             "environment": "pixel", "steps": 1, "wall_seconds": 3,
+             "mean_step_latency_ms": 9000, "approvals": 0, "approval_requests": 0,
+             "gate_rejections": {"mismatch": 1}, "unsafe_count": 0,
+             "observe_step_latencies_ms": [800], "model_step_latencies_ms": [9000],
+             "execute_step_latencies_ms": [200], "total_step_latencies_ms": [10000]},
+        ]
+        with TemporaryDirectory() as directory:
+            output = Path(directory)
+            run_suite._write_report(output, rows, "real-host")
+            skill = json.loads((output / "by_skill.json").read_text())["reading"]
+            policy = json.loads((output / "by_policy.json").read_text())["fara15-4b"]
+            environment = json.loads((output / "by_environment.json").read_text())["pixel"]
+            metadata = json.loads((output / "run_metadata.json").read_text())
+        for summary in (skill, policy, environment):
+            self.assertEqual(summary["tasks"], 1)
+            self.assertEqual(summary["infra_blocked"], 1)
+            self.assertEqual(summary["observed_infra"], 1)
+            self.assertEqual(summary["successes"], 1)
+            self.assertEqual(summary["success_rate"], 1.0)
+            self.assertEqual(summary["median_total_step_latency_ms"], 6)
+            self.assertEqual(summary["median_model_latency_ms"], 3)
+        self.assertEqual(metadata["scheduled_task_runs"], 2)
+        self.assertEqual(metadata["evaluated_task_runs"], 1)
+        self.assertEqual(metadata["infra_blocked_task_runs"], 1)
+        self.assertEqual(metadata["observed_infra_task_runs"], 1)
+        self.assertIn("non-infrastructure", metadata["count_semantics"]["evaluated_task_runs"])
 
 
 if __name__ == "__main__":
