@@ -23,7 +23,12 @@ final class AgentAppRegistry {
     private let openHandler: OpenHandler?
 
     init(records: [Record]? = nil, openHandler: OpenHandler? = nil) {
-        self.records = records ?? Self.discoverInstalledApps()
+        self.records = records ?? Self.discoverInstalledApps(roots: Self.defaultSearchRoots)
+        self.openHandler = openHandler
+    }
+
+    init(searchRoots: [URL], openHandler: OpenHandler? = nil) {
+        records = Self.discoverInstalledApps(roots: searchRoots)
         self.openHandler = openHandler
     }
 
@@ -61,10 +66,14 @@ final class AgentAppRegistry {
             .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: Locale(identifier: "en_US_POSIX"))
     }
 
-    private static func discoverInstalledApps() -> [Record] {
-        let roots = [URL(fileURLWithPath: "/Applications", isDirectory: true),
-                     URL(fileURLWithPath: "/System/Applications", isDirectory: true),
-                     FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Applications", isDirectory: true)]
+    static var defaultSearchRoots: [URL] { [
+        URL(fileURLWithPath: "/Applications", isDirectory: true),
+        URL(fileURLWithPath: "/System/Applications", isDirectory: true),
+        URL(fileURLWithPath: "/System/Library/CoreServices", isDirectory: true),
+        FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Applications", isDirectory: true),
+    ] }
+
+    private static func discoverInstalledApps(roots: [URL]) -> [Record] {
         var urls: [URL] = []
         for root in roots where FileManager.default.fileExists(atPath: root.path) {
             guard let enumerator = FileManager.default.enumerator(at: root,

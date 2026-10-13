@@ -27,6 +27,38 @@ final class AgentHostServicesTests: XCTestCase {
         }
     }
 
+    func testAppRegistryDiscoversFromInjectedSystemRootAndKeepsInvalidNamesSafe() throws {
+        let root = try makePrivateDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let coreServices = root.appendingPathComponent("System/Library/CoreServices", isDirectory: true)
+        let adjacentApplications = root.appendingPathComponent("Applications", isDirectory: true)
+        try FileManager.default.createDirectory(at: coreServices, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: adjacentApplications, withIntermediateDirectories: true)
+        let primary = try makeApp(name: "Fixture Utility", bundleID: "org.example.fixture.utility", under: coreServices)
+        _ = try makeApp(name: "Duplicate Utility", bundleID: "org.example.duplicate.one", under: coreServices)
+        _ = try makeApp(name: "Duplicate Utility", bundleID: "org.example.duplicate.two", under: adjacentApplications)
+        try makeApp(name: "Incomplete Utility", bundleID: nil, under: coreServices)
+
+        let registry = AgentAppRegistry(searchRoots: [coreServices, adjacentApplications])
+
+        XCTAssertEqual(try registry.resolve("fixture utility").bundleID, "org.example.fixture.utility")
+        XCTAssertEqual(try registry.resolve("ORG.EXAMPLE.FIXTURE.UTILITY").url, primary)
+        XCTAssertThrowsError(try registry.resolve("duplicate utility")) { error in
+            guard let failure = error as? AgentAppRegistry.Failure,
+                  case .ambiguous = failure else { return XCTFail("Unexpected error: \(error)") }
+        }
+        XCTAssertThrowsError(try registry.resolve("incomplete utility")) { error in
+            guard let failure = error as? AgentAppRegistry.Failure,
+                  case .notFound = failure else { return XCTFail("Unexpected error: \(error)") }
+        }
+    }
+
+    func testDefaultAppSearchRootsIncludeSystemComponentBundles() {
+        XCTAssertTrue(AgentAppRegistry.defaultSearchRoots.contains {
+            $0.standardizedFileURL.path == "/System/Library/CoreServices"
+        })
+    }
+
     func testAppOpenUsesResolvedHostRecordAndPolicyDeniesUnknownApps() async throws {
         let appURL = try makeApp(name: "Generic Utility", bundleID: "org.example.utility")
         var opened: URL?
@@ -88,12 +120,18 @@ final class AgentHostServicesTests: XCTestCase {
     private func makeApp(name: String, bundleID: String) throws -> URL {
         let root = try makePrivateDirectory()
         addTeardownBlock { try? FileManager.default.removeItem(at: root) }
+        return try makeApp(name: name, bundleID: bundleID, under: root)
+    }
+
+    @discardableResult
+    private func makeApp(name: String, bundleID: String?, under root: URL) throws -> URL {
         let url = root.appendingPathComponent(name + ".app", isDirectory: true)
             .appendingPathComponent("Contents", isDirectory: true)
         try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true,
                                                 attributes: [.posixPermissions: 0o700])
-        let info: [String: Any] = ["CFBundleIdentifier": bundleID, "CFBundleName": name,
-                                   "CFBundleDisplayName": name, "CFBundlePackageType": "APPL"]
+        var info: [String: Any] = ["CFBundleName": name, "CFBundleDisplayName": name,
+                                   "CFBundlePackageType": "APPL"]
+        info["CFBundleIdentifier"] = bundleID
         let data = try PropertyListSerialization.data(fromPropertyList: info, format: .xml, options: 0)
         try data.write(to: url.appendingPathComponent("Info.plist"))
         return url.deletingLastPathComponent()
