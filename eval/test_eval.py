@@ -625,7 +625,7 @@ class TaskAndCheckerTests(unittest.TestCase):
             self.assertEqual(row["steps"], 1)
             self.assertEqual(row["median_observe_latency_ms"], 10)
             self.assertEqual(row["median_model_latency_ms"], 20)
-            self.assertEqual(row["median_execute_latency_ms"], 3)
+            self.assertIsNone(row["median_execute_latency_ms"])
             self.assertEqual(row["environment"], "pixel")
             self.assertEqual(row["policy"], "ui-tars15-7b")
             self.assertEqual(row["crop_mode"], "full-display")
@@ -633,6 +633,39 @@ class TaskAndCheckerTests(unittest.TestCase):
             self.assertEqual(row["answer"], answer)
             self.assertEqual(row["driver_task_id"], task_id)
             self.assertEqual(row["wall_seconds"], 1.5)
+
+    def test_latency_summaries_use_actual_model_calls_and_executed_actions(self) -> None:
+        records = [
+            {"type": "step", "step": 0,
+             "timings": {"observation_ms": 4, "policy_ms": 80,
+                         "execution_ms": 12, "total_ms": 96},
+             "execution": {"status": "ok"}},
+            {"type": "step", "step": 1,
+             "gate": {"decision": "needs_approval"},
+             "timings": {"observation_ms": 3, "policy_ms": 0,
+                         "execution_ms": 0, "total_ms": 3},
+             "execution": {"status": "not_executed"}},
+        ]
+        metrics = run_suite._metrics({}, records)
+
+        self.assertEqual(metrics["median_model_latency_ms"], 80)
+        self.assertEqual(metrics["mean_step_latency_ms"], 80)
+        self.assertEqual(metrics["median_execute_latency_ms"], 12)
+        self.assertEqual(metrics["model_step_latencies_ms"], [80, 0])
+        self.assertEqual(metrics["execute_step_latencies_ms"], [12, 0])
+        self.assertEqual(metrics["model_latency_sample_count"], 1)
+        self.assertEqual(metrics["execute_latency_sample_count"], 1)
+
+        no_model_calls = run_suite._metrics({}, [
+            {"type": "step", "step": 0, "timings": {"policy_ms": 0, "execution_ms": 0},
+             "execution": {"status": "not_executed"}},
+            {"type": "step", "step": 1, "timings": {"policy_ms": 0, "execution_ms": 0},
+             "execution": {"status": "not_executed"}},
+        ])
+        self.assertIsNone(no_model_calls["median_model_latency_ms"])
+        self.assertIsNone(no_model_calls["mean_step_latency_ms"])
+        self.assertEqual(no_model_calls["model_step_latencies_ms"], [0, 0])
+        self.assertEqual(no_model_calls["model_latency_sample_count"], 0)
 
     def test_terminal_footer_mismatch_stays_blocked_and_failed_output_is_gave_up(self) -> None:
         task = run_suite.load_tasks("native")[0]

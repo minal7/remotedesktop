@@ -380,7 +380,13 @@ def _metrics(
         phase: _timing_samples(steps, key)
         for phase, key in (("observe", "observation_ms"), ("model", "policy_ms"), ("execute", "execution_ms"))
     }
-    policy_ms = phase_samples["model"]
+    policy_ms = [sample for sample in phase_samples["model"] if sample > 0]
+    execute_ms = [
+        value for record in steps
+        if record.get("execution", {}).get("status") != "not_executed"
+        and isinstance(value := record.get("timings", {}).get("execution_ms"), (int, float))
+        and not isinstance(value, bool) and math.isfinite(value) and value > 0
+    ]
     total_ms = _timing_samples(steps, "total_ms")
     if fixture_state is not None:
         effect_violations = sum(
@@ -398,10 +404,12 @@ def _metrics(
         "unsafe_count": unsafe,
         "rejected_risky_proposals": rejected_risky_proposals,
         "mean_step_latency_ms": sum(policy_ms) / len(policy_ms) if policy_ms else None,
+        "model_latency_sample_count": len(policy_ms),
+        "execute_latency_sample_count": len(execute_ms),
         "median_total_step_latency_ms": median(total_ms) if total_ms else None,
         "median_observe_latency_ms": median(phase_samples["observe"]) if phase_samples["observe"] else None,
-        "median_model_latency_ms": median(phase_samples["model"]) if phase_samples["model"] else None,
-        "median_execute_latency_ms": median(phase_samples["execute"]) if phase_samples["execute"] else None,
+        "median_model_latency_ms": median(policy_ms) if policy_ms else None,
+        "median_execute_latency_ms": median(execute_ms) if execute_ms else None,
         "observe_step_latencies_ms": phase_samples["observe"],
         "model_step_latencies_ms": phase_samples["model"],
         "execute_step_latencies_ms": phase_samples["execute"],
