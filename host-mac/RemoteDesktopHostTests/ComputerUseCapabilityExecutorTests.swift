@@ -9,7 +9,7 @@ final class ComputerUseCapabilityExecutorTests: XCTestCase {
         executor.setDesktopFactory(includesVisualControl: false) { _ in RoutingDesktopFixture() }
         XCTAssertTrue(executor.isReady)
         XCTAssertTrue(executor.hasAdditionalSetup)
-        XCTAssertTrue(executor.readyDetail.contains("Mac tools are ready"))
+        XCTAssertTrue(executor.readyDetail.contains("Form editing is ready"))
         XCTAssertTrue(executor.readyDetail.contains("visual control needs setup"))
         let result = try await executor.execute(taskID: "structured", prompt: "Use a Mac tool",
             trustedUserPrompt: "Use a Mac tool", tools: tools(), progress: { _ in })
@@ -101,7 +101,6 @@ final class ComputerUseCapabilityExecutorTests: XCTestCase {
         XCTAssertEqual(result, .completed("verified"))
         XCTAssertEqual(observed, ["t1:Set Origin to Oslo."])
         XCTAssertEqual(loads, 0)
-        XCTAssertFalse(executor.requiresMacControlHelper)
     }
 
     func testDesktopTaskResumeKeepsItsExecutorAndDoesNotReplanAsNative() async throws {
@@ -164,7 +163,7 @@ final class ComputerUseCapabilityExecutorTests: XCTestCase {
         XCTAssertFalse(executor.hasAdditionalSetup)
     }
 
-    func testCancelledDesktopLoadCannotExecuteAndReleasesReturnedHelper() async throws {
+    func testCancelledDesktopLoadCannotExecuteAfterDesktopLoadReturns() async throws {
         var pending: CheckedContinuation<any ComputerUseExecuting, Never>?
         let desktop = RoutingDesktopFixture()
         let executor = ComputerUseCapabilityExecutor(nativeExecution: { _, _, _ in nil },
@@ -178,20 +177,6 @@ final class ComputerUseCapabilityExecutorTests: XCTestCase {
         do { _ = try await request.value; XCTFail("A cancelled load must not begin execution") }
         catch is CancellationError {}
         XCTAssertTrue(desktop.taskIDs.isEmpty)
-        XCTAssertEqual(desktop.cancellations, 1)
-    }
-
-    func testPauseAndStopMCPCallsForwardSeparatelyToDesktop() async throws {
-        let desktop = RoutingDesktopFixture()
-        let executor = ComputerUseCapabilityExecutor(nativeExecution: { _, _, _ in nil },
-            desktopFactory: { _ in desktop })
-        _ = try await executor.execute(taskID: "pause-forward", prompt: "Open an app.",
-            trustedUserPrompt: "Open an app.", tools: tools(), progress: { _ in })
-        executor.pauseMCPWork()
-        XCTAssertEqual(desktop.pauses, 1)
-        XCTAssertEqual(desktop.cancellations, 0)
-        executor.cancelMCPWork()
-        XCTAssertEqual(desktop.cancellations, 1)
     }
 
     func testConcurrentTaskIsRejectedAndCancelledNativeResultCannotComplete() async throws {
@@ -216,18 +201,10 @@ final class ComputerUseCapabilityExecutorTests: XCTestCase {
 }
 
 @MainActor
-private final class RoutingDesktopFixture: ComputerUseExecuting, MCPApprovalContinuing, ComputerUseVisualApprovalContinuing {
+private final class RoutingDesktopFixture: ComputerUseExecuting, ComputerUseVisualApprovalContinuing {
     let isReady = true
     let runtimeName = "fixture"
-    var cancellations = 0
-    var pauses = 0
     var result: ComputerUseExecutionResult = .completed("fixture")
-    func cancelMCPWork() { cancellations += 1 }
-    func pauseMCPWork() { pauses += 1 }
-    func continueAfterApproval(_ prepared: MCPPreparedApproval, tools: ComputerUseHostTools,
-                              progress: @escaping (String) -> Void) async throws -> MCPApprovedActionResult {
-        throw ComputerUseCapabilityExecutor.RoutingError.missingContinuation
-    }
     var taskIDs: [String] = []
     var trustedPrompts: [String] = []
     var conversations: [[ComputerUseConversationTurn]] = []

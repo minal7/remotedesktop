@@ -66,94 +66,6 @@ final class ComputerUseTaskLedger {
         }
     }
 
-    /// Independent of the task's first terminal result. Stop can remain the
-    /// terminal outcome while a late helper result confirms an approved effect.
-    struct ApprovedActionRecord: Codable, Equatable {
-        let fingerprint: MCPApprovalFingerprint
-        let attemptedAt: Date
-        var response: String?
-        var responseDigest: String? = nil
-        /// Present only when the host separately proved the complete original
-        /// request. Legacy records and action-only confirmations leave it nil.
-        var completionPromptDigest: String? = nil
-        var stepEffectID: String? = nil
-        var confirmedAt: Date? = nil
-
-        func exactlyMatches(_ other: ApprovedActionRecord?) -> Bool {
-            guard let other, self == other else { return false }
-            switch (response, other.response) {
-            case (.some(let lhs), .some(let rhs)): return lhs.utf8.elementsEqual(rhs.utf8)
-            case (.none, .none): return true
-            default: return false
-            }
-        }
-    }
-
-    /// Durable approval order projected from an already host-bound task
-    /// contract. This journal records dispatch/confirmation; it does not
-    /// evaluate the contract's external preconditions or whole-goal outcomes.
-    struct ApprovedActionPlan: Codable, Equatable {
-        struct Step: Codable, Equatable {
-            let effectID: String
-            let callDigest: String
-        }
-        let taskID: String
-        let requestDigest: String
-        let contractDigest: String
-        let steps: [Step]
-        let planDigest: String
-
-        init(contract: ComputerUseTaskContract, promptBody: String, calls: [MCPToolCall]) throws {
-            let prompt = ComputerUsePromptRequest.decodeCompatibleBody(promptBody).prompt
-            let approvedSteps = contract.steps.filter { $0.operation.capabilityID == "mcp.approved" }
-            guard promptBody.utf8.count <= 1_048_576,
-                  contract.promptDigest == ComputerUseTaskContract.digest([prompt]),
-                  !approvedSteps.isEmpty, approvedSteps.count == calls.count else { throw LedgerError.invalidIdentity }
-            var bindings: [Step] = []
-            for (step, call) in zip(approvedSteps, calls) {
-                let reconstructed = try MCPToolCall(taskID: call.taskID, serverID: call.serverID,
-                    processGeneration: call.processGeneration, toolName: call.toolName, arguments: call.arguments,
-                    schemaDigest: call.schemaDigest, risk: call.risk, approval: call.approvalDisplay, stepEffectID: call.stepEffectID)
-                guard reconstructed == call, call.taskID == contract.taskID, call.risk == .approvalRequired,
-                      call.stepEffectID == contract.effectIdentity(for: step), step.operation.payloadVersion == 1,
-                      step.operation.payloadDigest == call.argumentsDigest,
-                      contract.entities.first(where: { $0.id == step.operation.entityID })?.authorityDigest
-                        == Self.authorityDigest(for: call) else { throw LedgerError.invalidIdentity }
-                bindings.append(.init(effectID: contract.effectIdentity(for: step), callDigest: call.canonicalDigest))
-            }
-            taskID = contract.taskID
-            requestDigest = SHA256.hash(data: Data(promptBody.utf8)).map { String(format: "%02x", $0) }.joined()
-            contractDigest = contract.contractDigest
-            steps = bindings
-            planDigest = Self.digest(taskID: taskID, requestDigest: requestDigest, contractDigest: contractDigest, steps: bindings)
-            guard isWellFormed else { throw LedgerError.invalidIdentity }
-        }
-
-        static func authorityDigest(for call: MCPToolCall) -> String {
-            ComputerUseTaskContract.digest(["mcp-approved-target-v1", call.serverID, call.toolName, call.schemaDigest])
-        }
-
-        var isWellFormed: Bool {
-            !taskID.isEmpty && taskID.utf8.count <= 256
-                && !taskID.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains)
-                && ComputerUseTaskLedger.validDigest(requestDigest) && ComputerUseTaskLedger.validDigest(contractDigest)
-                && (1...64).contains(steps.count)
-                && Set(steps.map(\.effectID)).count == steps.count && Set(steps.map(\.callDigest)).count == steps.count
-                && steps.allSatisfy({ ComputerUseTaskLedger.validDigest($0.effectID) && ComputerUseTaskLedger.validDigest($0.callDigest) })
-                && planDigest == Self.digest(taskID: taskID, requestDigest: requestDigest, contractDigest: contractDigest, steps: steps)
-        }
-
-        private static func digest(taskID: String, requestDigest: String, contractDigest: String, steps: [Step]) -> String {
-            ComputerUseTaskContract.digest(["approved-action-plan-v1", taskID, requestDigest, contractDigest, String(steps.count)]
-                + steps.flatMap { [$0.effectID, $0.callDigest] })
-        }
-    }
-
-    enum ApprovedActionClaim: Equatable {
-        case new
-        case existing(ApprovedActionRecord)
-    }
-
     static let stoppedResponse = "Stopped. You're in control of the Mac."
 
     private struct ControlSnapshot: Codable {
@@ -177,20 +89,9 @@ final class ComputerUseTaskLedger {
         var control: ControlSnapshot?
         var hostControlEpoch: UInt64 = 0
         var localControlState: ControlState?
-        var approvedAction: ApprovedActionRecord?
-        /// The latest record is also encoded in approvedAction so an older
-        /// host cannot mistake this task for one with no attempted mutation.
-        var approvedActionPlan: ApprovedActionPlan? = nil
-        var approvedActionSteps: [ApprovedActionRecord]? = nil
 
         var effectiveControlState: ControlState? {
             control?.state == .cancelled ? .cancelled : (localControlState ?? control?.state)
-        }
-
-        var approvalRetentionDate: Date {
-            (approvedActionSteps ?? approvedAction.map { [$0] } ?? []).reduce(acceptedAt) {
-                max($0, max($1.attemptedAt, $1.confirmedAt ?? $1.attemptedAt))
-            }
         }
 
         init(
@@ -214,7 +115,6 @@ final class ComputerUseTaskLedger {
             self.outcome = outcome
             self.clarification = nil
             self.control = control
-            self.approvedAction = nil
         }
 
         private enum CodingKeys: String, CodingKey {
@@ -232,8 +132,6 @@ final class ComputerUseTaskLedger {
             case control
             case hostControlEpoch
             case localControlState
-            case approvedAction
-            case approvedActionPlan, approvedActionSteps
         }
 
         init(from decoder: Decoder) throws {
@@ -279,9 +177,6 @@ final class ComputerUseTaskLedger {
                 guard hostControlEpoch > 0, promptClaimed, promptDigest != nil,
                       localControlState != .cancelled else { throw LedgerError.unavailable }
             }
-            approvedAction = try values.decodeIfPresent(ApprovedActionRecord.self, forKey: .approvedAction)
-            approvedActionPlan = try values.decodeIfPresent(ApprovedActionPlan.self, forKey: .approvedActionPlan)
-            approvedActionSteps = try values.decodeIfPresent([ApprovedActionRecord].self, forKey: .approvedActionSteps)
             if clarificationOwner != nil {
                 guard outcome == .userInterventionRequired, let response, ComputerUseClarificationText.isValid(response),
                       promptClaimed, promptDigest != nil, clarificationRetry == nil,
@@ -290,38 +185,7 @@ final class ComputerUseTaskLedger {
             if clarificationRetry != nil {
                 guard outcome == .userInterventionRequired, clarification == nil,
                       let response, ComputerUseClarificationText.isValid(response),
-                      promptClaimed, promptDigest != nil,
-                      approvedAction == nil, approvedActionPlan == nil,
-                      approvedActionSteps?.isEmpty ?? true else { throw LedgerError.unavailable }
-            }
-            if approvedAction != nil, !promptClaimed || !executionStarted || senderID == nil || sessionID == nil {
-                throw LedgerError.unavailable
-            }
-            if let approvedAction, (approvedAction.response == nil) != (approvedAction.responseDigest == nil) {
-                throw LedgerError.unavailable
-            }
-            if let proof = approvedAction?.completionPromptDigest {
-                guard approvedAction?.response != nil, proof.utf8.count == 64,
-                      proof.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }) else {
-                    throw LedgerError.unavailable
-                }
-            }
-            if let plan = approvedActionPlan, let actions = approvedActionSteps {
-                guard plan.isWellFormed, promptDigest == plan.requestDigest,
-                      !actions.isEmpty, actions.count <= plan.steps.count,
-                      approvedAction?.exactlyMatches(actions.last) == true,
-                      actions.enumerated().allSatisfy({ index, action in
-                          action.stepEffectID == plan.steps[index].effectID
-                            && action.fingerprint.canonicalDigest == plan.steps[index].callDigest
-                            && action.completionPromptDigest == nil
-                            && ((action.response == nil && action.responseDigest == nil && action.confirmedAt == nil && index == actions.count - 1)
-                                || (action.response != nil && action.confirmedAt != nil
-                                    && action.responseDigest.map(ComputerUseTaskLedger.validDigest) == true))
-                      }) else { throw LedgerError.unavailable }
-            } else {
-                guard approvedActionPlan == nil, approvedActionSteps == nil, approvedAction?.stepEffectID == nil else {
-                    throw LedgerError.unavailable
-                }
+                      promptClaimed, promptDigest != nil else { throw LedgerError.unavailable }
             }
         }
     }
@@ -343,8 +207,7 @@ final class ComputerUseTaskLedger {
                 [String: Record].self,
                 from: data)
             guard decoded.allSatisfy({ key, record in
-                (record.approvedActionPlan.map { $0.taskID == key } ?? true)
-                    && (record.clarificationRetry.map { $0.reference.taskID != key } ?? true)
+                (record.clarificationRetry.map { $0.reference.taskID != key } ?? true)
                     && (record.clarificationOwner == nil || record.clarification == nil || record.clarification?.taskID == key)
             }) else {
                 throw LedgerError.unavailable
@@ -620,8 +483,6 @@ final class ComputerUseTaskLedger {
         if let retry = clarificationRetry {
             guard outcome == .userInterventionRequired, clarification == nil, retry.reference.taskID != taskID,
                   record.promptClaimed, record.promptDigest != nil,
-                  record.approvedAction == nil, record.approvedActionPlan == nil,
-                  record.approvedActionSteps?.isEmpty ?? true,
                   let sender = record.senderID, let session = record.sessionID,
                   let question = records[retry.reference.taskID], question.response != nil,
                   question.outcome == .userInterventionRequired, question.clarification == retry.reference,
@@ -648,127 +509,6 @@ final class ComputerUseTaskLedger {
     func terminalOutcome(taskID: String) -> ComputerUseTerminalOutcome? {
         guard initializationError == nil else { return nil }
         return records[taskID]?.outcome
-    }
-
-    func claimApprovedAction(taskID: String, senderID: String, sessionID: String,
-                             prepared: MCPPreparedApproval) throws -> ApprovedActionClaim {
-        try ensureAvailable()
-        guard var record = records[taskID], record.promptClaimed, record.promptDigest != nil, record.executionStarted,
-              record.senderID == senderID, record.sessionID == sessionID,
-              prepared.call.taskID == taskID, prepared.call.risk == .approvalRequired,
-              prepared.fingerprint.matches(call: prepared.call) else {
-            throw LedgerError.invalidIdentity
-        }
-        // A legacy claim seals this task's dispatch. Scoped calls must use the
-        // contract-bound overload and cannot reinterpret this legacy record.
-        guard record.approvedActionPlan == nil, prepared.call.stepEffectID == nil else { throw LedgerError.invalidIdentity }
-        if let existing = record.approvedAction { return .existing(existing) }
-        guard record.response == nil, record.effectiveControlState != .cancelled,
-              record.effectiveControlState != .paused else { throw LedgerError.invalidControl }
-        record.approvedAction = ApprovedActionRecord(fingerprint: prepared.fingerprint, attemptedAt: Date(), response: nil)
-        try commit(record, for: taskID)
-        return .new
-    }
-
-    func claimApprovedAction(taskID: String, senderID: String, sessionID: String,
-                             prepared: MCPPreparedApproval, plan: ApprovedActionPlan) throws -> ApprovedActionClaim {
-        try ensureAvailable()
-        guard var record = records[taskID], record.promptClaimed, record.executionStarted,
-              record.senderID == senderID, record.sessionID == sessionID,
-              plan.isWellFormed, plan.taskID == taskID, plan.requestDigest == record.promptDigest,
-              prepared.call.taskID == taskID, prepared.call.risk == .approvalRequired,
-              prepared.fingerprint.matches(call: prepared.call),
-              let effectID = prepared.call.stepEffectID,
-              let index = plan.steps.firstIndex(where: { $0.effectID == effectID }),
-              plan.steps[index].callDigest == prepared.call.canonicalDigest else { throw LedgerError.invalidIdentity }
-        let call = prepared.call
-        let reconstructed = try MCPToolCall(taskID: call.taskID, serverID: call.serverID,
-            processGeneration: call.processGeneration, toolName: call.toolName, arguments: call.arguments,
-            schemaDigest: call.schemaDigest, risk: call.risk, approval: call.approvalDisplay, stepEffectID: call.stepEffectID)
-        guard reconstructed == call else { throw LedgerError.invalidIdentity }
-        if let existingPlan = record.approvedActionPlan {
-            guard existingPlan == plan else { throw LedgerError.invalidIdentity }
-        } else {
-            guard record.approvedAction == nil, record.approvedActionSteps == nil else { throw LedgerError.invalidControl }
-        }
-        var actions = record.approvedActionSteps ?? []
-        if index < actions.count { return .existing(actions[index]) }
-        guard index == actions.count, actions.last.map({ $0.response != nil }) ?? true,
-              record.response == nil, record.effectiveControlState != .cancelled,
-              record.effectiveControlState != .paused else { throw LedgerError.invalidControl }
-        let action = ApprovedActionRecord(fingerprint: prepared.fingerprint, attemptedAt: Date(),
-            response: nil, stepEffectID: effectID)
-        actions.append(action)
-        record.approvedActionPlan = plan
-        record.approvedActionSteps = actions
-        record.approvedAction = action
-        try commit(record, for: taskID)
-        return .new
-    }
-
-    func recordApprovedActionResult(taskID: String, senderID: String, sessionID: String,
-                                    fingerprint: MCPApprovalFingerprint, response: String,
-                                    completionPromptDigest: String? = nil) throws {
-        try ensureAvailable()
-        guard var record = records[taskID], record.senderID == senderID, record.sessionID == sessionID else {
-            throw LedgerError.invalidIdentity
-        }
-        let stepIndex = record.approvedActionSteps?.firstIndex { $0.fingerprint == fingerprint }
-        var action: ApprovedActionRecord
-        if let actions = record.approvedActionSteps {
-            guard let stepIndex, completionPromptDigest == nil else { throw LedgerError.invalidIdentity }
-            action = actions[stepIndex]
-        } else {
-            guard let existing = record.approvedAction, existing.fingerprint == fingerprint else { throw LedgerError.invalidIdentity }
-            action = existing
-        }
-        if let proof = completionPromptDigest {
-            guard proof.utf8.count == 64,
-                  proof.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }) else {
-                throw LedgerError.invalidIdentity
-            }
-        }
-        let bounded = String(response.prefix(4_000))
-        let digest = try MCPDigest.sha256(of: .string(response))
-        if action.response != nil {
-            guard action.responseDigest == digest, action.completionPromptDigest == completionPromptDigest else {
-                throw LedgerError.invalidIdentity
-            }
-            return
-        }
-        action.response = bounded
-        action.responseDigest = digest
-        action.completionPromptDigest = completionPromptDigest
-        action.confirmedAt = Date()
-        if let stepIndex {
-            record.approvedActionSteps?[stepIndex] = action
-            record.approvedAction = record.approvedActionSteps?.last
-        } else { record.approvedAction = action }
-        // Do not change a Cancel/Stop terminal or its control revision.
-        try commit(record, for: taskID)
-    }
-
-    func approvedAction(taskID: String, senderID: String, sessionID: String,
-                        fingerprint: MCPApprovalFingerprint? = nil) throws -> ApprovedActionRecord? {
-        let actions = try approvedActionHistory(taskID: taskID, senderID: senderID, sessionID: sessionID)
-        if let fingerprint { return actions.first { $0.fingerprint == fingerprint } }
-        return actions.last
-    }
-
-    func approvedActionHistory(taskID: String, senderID: String, sessionID: String) throws -> [ApprovedActionRecord] {
-        try ensureAvailable()
-        guard let record = records[taskID], record.senderID == senderID, record.sessionID == sessionID else {
-            throw LedgerError.invalidIdentity
-        }
-        return record.approvedActionSteps ?? record.approvedAction.map { [$0] } ?? []
-    }
-
-    func approvedActionPlan(taskID: String, senderID: String, sessionID: String) throws -> ApprovedActionPlan? {
-        try ensureAvailable()
-        guard let record = records[taskID], record.senderID == senderID, record.sessionID == sessionID else {
-            throw LedgerError.invalidIdentity
-        }
-        return record.approvedActionPlan
     }
 
     func terminalClarification(taskID: String) -> ComputerUseClarificationReference? {
@@ -833,10 +573,6 @@ final class ComputerUseTaskLedger {
         return true
     }
 
-    private static func validDigest(_ value: String) -> Bool {
-        value.utf8.count == 64 && value.utf8.allSatisfy { (48...57).contains($0) || (97...102).contains($0) }
-    }
-
     private static func validIdentity(
         taskID: String,
         senderID: String,
@@ -865,21 +601,19 @@ final class ComputerUseTaskLedger {
     private func prune(_ candidate: inout [String: Record]) {
         let cutoff = Date(timeIntervalSinceNow: -(90 * 24 * 60 * 60))
         let accepted = candidate.filter {
-            ($0.value.promptClaimed && $0.value.response == nil)
-                || ($0.value.approvedAction != nil && $0.value.approvedAction?.response == nil)
+            $0.value.promptClaimed && $0.value.response == nil
         }
         let replayable = candidate
             .filter {
                 (!$0.value.promptClaimed || $0.value.response != nil)
-                    && !($0.value.approvedAction != nil && $0.value.approvedAction?.response == nil)
-                    && $0.value.approvalRetentionDate >= cutoff
+                    && $0.value.acceptedAt >= cutoff
             }
-            .sorted { $0.value.approvalRetentionDate > $1.value.approvalRetentionDate }
+            .sorted { $0.value.acceptedAt > $1.value.acceptedAt }
         // Never evict an accepted-but-nonterminal privileged task: doing so
         // would permit a delayed retry to execute it again after a restart.
         // Terminal records and controls that arrived before their Prompt
-        // outlive CloudKit's delivery window by a wide margin, while the
-        // generous cap keeps storage bounded.
+        // outlive the delivery window by a wide margin, while the generous
+        // cap keeps storage bounded.
         let replayableCapacity = max(0, 10_000 - accepted.count)
         candidate = accepted
         for (key, value) in replayable.prefix(replayableCapacity) {

@@ -53,7 +53,7 @@ enum ComputerUseGUIOwlModel {
             guard case .string(let value)? = args[field], !value.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty else { throw invalid }
             return value
         }
-        func number(_ value: MCPJSONValue?) throws -> Double {
+        func number(_ value: JSONValue?) throws -> Double {
             let number: Double
             switch value { case .integer(let n): number=Double(n); case .double(let n):number=n;default:throw invalid }
             guard number.isFinite else { throw invalid };return number

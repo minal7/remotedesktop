@@ -4591,7 +4591,6 @@ enum ComputerUseExecutionResult: Equatable {
         message: String,
         action: ComputerUsePredictedAction,
         continuation: ComputerUseVisualApprovalContinuation)
-    case mcpApprovalRequired(MCPPreparedApproval)
     case agentApprovalRequired(AgentApprovalRequest)
 }
 
@@ -4692,15 +4691,6 @@ extension CloudKitComputerUseChannel: HostComputerUseChannel {}
 /// constructing the manager or opening the Mac UI can never start a download.
 /// The production actor performs signature and receipt validation for status;
 /// tests inject an in-memory implementation and never touch the network.
-protocol MacControlMCPProvisioning: Sendable {
-    func durableStatus() async -> MacControlMCPInstaller.DurableStatus
-    func install(
-        progress: @MainActor @Sendable @escaping (MacControlMCPInstaller.Update) -> Void
-    ) async throws -> MacControlMCPInstallationReceipt
-}
-
-extension MacControlMCPInstaller: MacControlMCPProvisioning {}
-
 protocol ComputerUseModelProvisioning: Sendable {
     func currentInstallation() async -> ComputerUseInstallationReceipt?
     func interruptedInstallationExists() async -> Bool
@@ -4722,7 +4712,6 @@ extension ComputerUseInstaller: ComputerUseModelProvisioning {}
 protocol ComputerUseExecuting: AnyObject {
     var isReady: Bool { get }
     var runtimeName: String { get }
-    var requiresMacControlHelper: Bool { get }
     var hasAdditionalSetup: Bool { get }
     var supportsNativeTextTasks: Bool { get }
     var readyDetail: String { get }
@@ -4793,7 +4782,6 @@ extension ComputerUseVisualApprovalContinuing {
 }
 
 extension ComputerUseExecuting {
-    var requiresMacControlHelper: Bool { true }
     var hasAdditionalSetup: Bool { false }
     var supportsNativeTextTasks: Bool { false }
     var readyDetail: String { "AI Computer Use is ready" }
@@ -4831,11 +4819,6 @@ extension ComputerUseExecuting {
             progress: progress)
     }
 }
-
-typealias ComputerUseExecutorComposer = @MainActor @Sendable (
-    MacControlMCPInstallationReceipt,
-    any ComputerUseExecuting
-) async throws -> any ComputerUseExecuting
 
 typealias ComputerUseNativeTextLoader = @MainActor @Sendable (
     ComputerUseInstallationReceipt, ComputerUseHostTools, @escaping (String) -> Void
@@ -5025,8 +5008,7 @@ final class HostComputerUseManager: ObservableObject {
     private var pausedInputScopeID: UUID?
 
     private var executorIsReady: Bool {
-        guard let executor, executor.isReady else { return false }
-        return !executor.requiresMacControlHelper || macControlReceipt != nil
+        executor?.isReady == true
     }
 
     var needsAdditionalSetup: Bool {
@@ -5070,7 +5052,7 @@ final class HostComputerUseManager: ObservableObject {
             guard executorIsReady else {
                 return ComputerUseCapability(
                     state: .setupRequired,
-                    detail: "Set up Mac control")
+                    detail: "Set up AI Computer Use")
             }
             return ComputerUseCapability(state: .ready, detail: executor?.readyDetail ?? "AI Computer Use is ready")
         }
@@ -5108,10 +5090,6 @@ final class HostComputerUseManager: ObservableObject {
         /// Typed prior chat supplied by the signed prompt payload. Host-authored
         /// resume/replan prose is deliberately not inserted into these turns.
         let conversation: [ComputerUseConversationTurn]
-        /// Exact signed request body used to bind durable approval plans.
-        /// Conversation/Resume prose changes model input, never this identity.
-        let requestBody: String
-        let supportsApprovedActionEvidence: Bool
         let textClarification: TextClarificationContinuation?
         /// False only when a versioned Pause reached the durable ledger before
         /// its Prompt. Resume can then claim and start that Prompt exactly once
@@ -5123,7 +5101,6 @@ final class HostComputerUseManager: ObservableObject {
             channel: any HostComputerUseChannel,
             trustedUserPrompt: String? = nil,
             conversation: [ComputerUseConversationTurn]? = nil,
-            requestBody: String? = nil,
             textClarification: TextClarificationContinuation? = nil,
             hasStarted: Bool = true
         ) {
@@ -5135,9 +5112,6 @@ final class HostComputerUseManager: ObservableObject {
             self.conversation = conversation
                 ?? ComputerUsePromptRequest.decodeCompatibleBody(
                     envelope.body).conversation
-            self.requestBody = requestBody ?? envelope.body
-            self.supportsApprovedActionEvidence = ComputerUsePromptRequest.decodeCompatibleBody(
-                requestBody ?? envelope.body).supportsApprovedActionEvidence
             self.hasStarted = hasStarted
             self.textClarification = textClarification
         }
@@ -5153,7 +5127,6 @@ final class HostComputerUseManager: ObservableObject {
             continuation: ComputerUseVisualApprovalContinuation,
             action: ComputerUsePredictedAction,
             fingerprint: ComputerUseApprovalFingerprint)
-        case mcp(MCPPreparedApproval)
         case agent(AgentApprovalRequest)
     }
 
@@ -5179,7 +5152,6 @@ final class HostComputerUseManager: ObservableObject {
 
     private var executor: (any ComputerUseExecuting)?
     private let generalAgentFactory: ((ComputerUseInstallationReceipt) throws -> ComputerUseCapabilityExecutor)?
-    private let executorComposer: ComputerUseExecutorComposer?
     private var agentLifecycleTask: Task<Void, Never>?
     var hasRetainedAgentTask: Bool { generalAgent?.hasRetainedTask == true }
     private var generalAgent: AgentCapabilityAdapter? {
@@ -5207,7 +5179,6 @@ final class HostComputerUseManager: ObservableObject {
     private let nativeTextInstaller: (any ComputerUseModelProvisioning)?
     private let nativeTextLoader: ComputerUseNativeTextLoader
     private let nativeTextPreparer: ComputerUseNativeTextLoader
-    private let macControlInstaller: any MacControlMCPProvisioning
     private let visualExecutorLoader: any ComputerUseVisualExecutorLoading
     private let taskLedger: ComputerUseTaskLedger
     private let textClarifications: ComputerUseTextClarificationStore
@@ -5236,7 +5207,7 @@ final class HostComputerUseManager: ObservableObject {
     /// Some channel implementations cannot promptly cancel an in-flight
     /// network request, so Task cancellation alone is not a sufficient fence.
     private var transportGeneration: UInt64 = 0
-    private var actionEvidenceAuthorizationGeneration: UInt64 = 0
+    private var peerAuthorizationGeneration: UInt64 = 0
     private var executionTask: Task<Void, Never>?
     private var currentExecution: ExecutionContext?
     private var pausedExecution: ExecutionContext?
@@ -5260,7 +5231,6 @@ final class HostComputerUseManager: ObservableObject {
     private var modelCheckTask: Task<Void, Never>?
     private var setupRecipients = ComputerUseSetupRecipientRegistry()
     private var currentSetupProgress: ComputerUseSetupProgress?
-    private var macControlReceipt: MacControlMCPInstallationReceipt?
     private var authorizedPeerID: String? {
         didSet { refreshLocalTaskControls() }
     }
@@ -5293,9 +5263,7 @@ final class HostComputerUseManager: ObservableObject {
         nativeTextInstaller: (any ComputerUseModelProvisioning)? = nil,
         nativeTextLoader: ComputerUseNativeTextLoader? = nil,
         nativeTextPreparer: ComputerUseNativeTextLoader? = nil,
-        macControlInstaller: (any MacControlMCPProvisioning)? = nil,
         visualExecutorLoader: (any ComputerUseVisualExecutorLoading)? = nil,
-        executorComposer: ComputerUseExecutorComposer? = nil,
         taskLedger: ComputerUseTaskLedger = ComputerUseTaskLedger(),
         textClarifications: ComputerUseTextClarificationStore? = nil,
         transportTeardownTimeout: Duration = .seconds(5),
@@ -5335,12 +5303,11 @@ final class HostComputerUseManager: ObservableObject {
             approvedActionStepDidPost: approvedActionStepDidPost,
             screenProvider: screenProvider,
             accessibilityContextProvider: accessibilityContextProvider)
-        self.executorComposer = executorComposer
         let modelInstaller = installer ?? ComputerUseInstaller()
         self.installer = modelInstaller
         self.nativeTextInstaller = nativeTextInstaller
-        if executor == nil, visualExecutorLoader == nil, executorComposer == nil,
-           nativeTextLoader == nil, nativeTextPreparer == nil, macControlInstaller == nil {
+        if executor == nil, visualExecutorLoader == nil,
+           nativeTextLoader == nil, nativeTextPreparer == nil {
             generalAgentFactory = { receipt in
                 try AgentHostFactory.make(receipt: receipt, injector: injector, mayAct: mayAct,
                     configuration: agentConfiguration)
@@ -5352,7 +5319,6 @@ final class HostComputerUseManager: ObservableObject {
         self.nativeTextPreparer = nativeTextPreparer ?? nativeTextLoader ?? { receipt, tools, progress in
             try await ComputerUseNativeTextExecutorLoader.prepare(receipt: receipt, tools: tools, progress: progress)
         }
-        self.macControlInstaller = macControlInstaller ?? MacControlMCPInstaller()
         let modelLoader = visualExecutorLoader ?? OSAtlasVisualExecutorLoader()
         self.visualExecutorLoader = modelLoader
         self.taskLedger = taskLedger
@@ -5402,46 +5368,15 @@ final class HostComputerUseManager: ObservableObject {
                 guard !Task.isCancelled, !isShuttingDown else { return }
                 if interrupted { startSetupPipeline(); return }
             }
-            let helperStatus = await macControlInstaller.durableStatus()
-            guard !Task.isCancelled, !isShuttingDown else { return }
-            switch helperStatus {
-            case .ready(let receipt):
-                macControlReceipt = receipt
-                if let executor, executor.isReady {
-                    modelState = .ready(runtimeName: executor.runtimeName)
-                } else if nativeTextInstaller != nil {
-                    // The normal host can use the installed helper even when
-                    // neither model package has finished installing.
-                    let modelReceipt = await installer.currentInstallation()
-                    guard !Task.isCancelled, !isShuttingDown else { return }
-                    beginStructuredActivation(helperReceipt: receipt, visualReceipt: modelReceipt)
-                } else if let modelReceipt = await installer.currentInstallation() {
-                    modelState = .packageFound(fileName: "Verified model installation")
-                    beginActivation(of: modelReceipt)
-                } else if await installer.interruptedInstallationExists() {
-                    // The helper receipt plus the model marker prove that this
-                    // setup was explicitly initiated before the host exited.
-                    modelState = .installing(
-                        detail: "Resuming AI setup…",
-                        fraction: nil)
-                    startSetupPipeline()
-                } else {
-                    modelState = .downloadRequired
-                }
-
-            case .downloadPresent(let downloadedByteCount, _)
-                where downloadedByteCount > 0:
-                // Only real bytes in the installer's managed download area
-                // authorize an automatic helper resume. A fresh status check,
-                // repair state, or zero-byte marker never starts networking.
-                macControlReceipt = nil
-                modelState = .installing(
-                    detail: "Resuming Mac control setup…",
-                    fraction: nil)
+            if let modelReceipt = await installer.currentInstallation() {
+                guard !Task.isCancelled, !isShuttingDown else { return }
+                modelState = .packageFound(fileName: "Verified model installation")
+                beginActivation(of: modelReceipt)
+            } else if allowsAutomaticSetup, await installer.interruptedInstallationExists() {
+                guard !Task.isCancelled, !isShuttingDown else { return }
+                modelState = .installing(detail: "Resuming AI setup…", fraction: nil)
                 startSetupPipeline()
-
-            case .notInstalled, .repairRequired, .downloadPresent:
-                macControlReceipt = nil
+            } else {
                 modelState = .downloadRequired
             }
         }
@@ -5599,7 +5534,7 @@ final class HostComputerUseManager: ObservableObject {
         guard !senderID.isEmpty else { return }
         if authorizedPeerID != senderID {
             invalidateTextClarification()
-            actionEvidenceAuthorizationGeneration &+= 1
+            peerAuthorizationGeneration &+= 1
         }
         authorizedPeerID = senderID
         authorizedPeerSupportsOrderedComputerUseControls =
@@ -5643,7 +5578,7 @@ final class HostComputerUseManager: ObservableObject {
 
     func revokePeerAuthorization() {
         invalidateTextClarification()
-        actionEvidenceAuthorizationGeneration &+= 1
+        peerAuthorizationGeneration &+= 1
         authorizedPeerID = nil
         authorizedPeerSupportsOrderedComputerUseControls = false
         _ = blockActionsForUserIntervention()
@@ -5895,7 +5830,7 @@ final class HostComputerUseManager: ObservableObject {
         cancelActiveVisualApprovalContinuation()
         postedApprovedVisualTaskID = nil
         if invalidatedApproval == nil {
-            cancelActiveMCPWork()
+            cancelActiveTaskWork()
         }
         pollingTask?.cancel()
         pollingTask = nil
@@ -6105,7 +6040,7 @@ final class HostComputerUseManager: ObservableObject {
         var identity = TaskControlIdentity(taskID: context.envelope.id,
             senderID: context.envelope.senderID, sessionID: context.envelope.sessionID,
             executionToken: currentExecutionToken,
-            authorizationGeneration: actionEvidenceAuthorizationGeneration,
+            authorizationGeneration: peerAuthorizationGeneration,
             transportGeneration: transportGeneration,
             remoteRevision: taskLedger.appliedControlRevision(taskID: context.envelope.id),
             hostControlEpoch: taskLedger.hostControlEpoch(taskID: context.envelope.id),
@@ -6288,7 +6223,7 @@ final class HostComputerUseManager: ObservableObject {
                     == context.envelope.id {
                     // A newer Resume revision supersedes the causal state
                     // stamped onto the outstanding approval. Tear down its
-                    // delivery loop and held MCP generation, then replan from
+                    // delivery loop and held Agent lifecycle work, then replan from
                     // the current screen so only a revision-current approval
                     // can be presented or accepted.
                     pauseExecution(context)
@@ -6495,7 +6430,7 @@ final class HostComputerUseManager: ObservableObject {
         approvalDeliveryTask = nil
         currentExecutionToken = nil
         cancelActiveVisualApprovalContinuation()
-        cancelActiveMCPWork(preservingTaskProgress: true)
+        cancelActiveTaskWork(preservingTaskProgress: true)
         if generalAgent == nil { executionTask?.cancel() }
         activity = .paused
         sendUserInterventionStatus(
@@ -6578,7 +6513,6 @@ final class HostComputerUseManager: ObservableObject {
             for: resumed,
             trustedUserPrompt: pausedExecution.trustedUserPrompt,
             conversation: pausedExecution.conversation,
-            requestBody: pausedExecution.requestBody,
             textClarification: pausedExecution.textClarification,
             channel: pausedExecution.channel,
             isResuming: true, pendingAutomationID: pendingAutomationID)
@@ -6598,7 +6532,7 @@ final class HostComputerUseManager: ObservableObject {
         let invalidatedApproval = pendingApproval
         postedApprovedVisualTaskID = nil
         cancelActiveVisualApprovalContinuation()
-        cancelActiveMCPWork()
+        cancelActiveTaskWork()
         executionTask?.cancel()
         currentExecution = nil
         pausedExecution = nil
@@ -6702,12 +6636,6 @@ final class HostComputerUseManager: ObservableObject {
 
         switch pendingApproval.operation {
         case .agent: return
-        case .mcp(let prepared):
-            continueApprovedMCP(
-                prepared,
-                executor: executor,
-                context: pendingApproval.context)
-
         case .visual(let continuation, let action, let fingerprint):
             continueApprovedVisualAction(
                 continuation,
@@ -6778,14 +6706,9 @@ final class HostComputerUseManager: ObservableObject {
         guard let approval else { return }
         switch approval.operation {
         case .agent:
-            cancelActiveMCPWork(preservingTaskProgress: preservingTaskProgress)
+            cancelActiveTaskWork(preservingTaskProgress: preservingTaskProgress)
         case .visual(let token, _, _):
             cancelVisualApprovalContinuation(token)
-        case .mcp:
-            guard let continuation =
-                    executor as? any MCPApprovalContinuing else { return }
-            if preservingTaskProgress { continuation.pauseMCPWork() }
-            else { continuation.cancelMCPWork() }
         }
     }
 
@@ -6810,7 +6733,7 @@ final class HostComputerUseManager: ObservableObject {
     ) {
         actionGate.endAutomation(allowsActions: false)
         cancelActiveVisualApprovalContinuation()
-        cancelActiveMCPWork()
+        cancelActiveTaskWork()
         executionTask?.cancel()
         postedApprovedVisualTaskID = nil
         currentExecution = nil
@@ -6826,11 +6749,9 @@ final class HostComputerUseManager: ObservableObject {
             allowsActions: false)
     }
 
-    /// Captures and invalidates the currently owned helper generation before
-    /// task cancellation can race an immediate Resume. MCPFirst binds the
-    /// asynchronous stop to that captured generation, so stale cleanup cannot
-    /// terminate the generation started by the resumed task.
-    private func cancelActiveMCPWork(preservingTaskProgress: Bool = false) {
+    /// Serialize AgentLoop pause/cancel requests behind prior lifecycle work so
+    /// an immediate Resume cannot be overtaken by stale cleanup.
+    private func cancelActiveTaskWork(preservingTaskProgress: Bool = false) {
         if let agent = generalAgent {
             if preservingTaskProgress { agent.requestPause() }
             else { agent.requestCancellation() }
@@ -6842,9 +6763,6 @@ final class HostComputerUseManager: ObservableObject {
             }
             return
         }
-        guard let continuation = executor as? any MCPApprovalContinuing else { return }
-        if preservingTaskProgress { continuation.pauseMCPWork() }
-        else { continuation.cancelMCPWork() }
     }
 
     private func finishApprovedActionFailure(
@@ -6998,10 +6916,7 @@ final class HostComputerUseManager: ObservableObject {
         lastInstallerProgressPhase = nil
         lastInstallerProgressFraction = nil
         lastInstallerProgressDate = .distantPast
-        publishSetupProgress(
-            phase: .queued,
-            fraction: 0,
-            detail: "Checking this Mac…")
+        publishSetupProgress(phase: .queued, fraction: 0, detail: "Checking this Mac…")
         modelState = .installing(detail: "Checking this Mac…", fraction: 0)
         setupTask = Task { [weak self] in
             guard let self else { return }
@@ -7009,8 +6924,6 @@ final class HostComputerUseManager: ObservableObject {
             let previouslyAvailableExecutor = executor
             var activationReceipt: ComputerUseInstallationReceipt?
             var nativeExecutor: ComputerUseCapabilityExecutor?
-            var composedExecutor: (any ComputerUseExecuting)?
-            var retainedCapabilities: (any ComputerUseExecuting)?
             do {
                 if let nativeTextInstaller {
                     let receipt = try await nativeTextInstaller.install { [weak self] update in
@@ -7026,94 +6939,53 @@ final class HostComputerUseManager: ObservableObject {
                     try Task.checkCancellation()
                     executor = nativeExecutor
                 }
-                let helperReceipt = try await macControlInstaller.install { [weak self] update in
-                    self?.consumeMacControlInstallerUpdate(update)
-                }
-                macControlReceipt = helperReceipt
-                try Task.checkCancellation()
-                if let nativeExecutor {
-                    configureVisualFactory(nativeExecutor, receipt: nil)
-                    let composed = try await composeExecutor(helperReceipt: helperReceipt, fallback: nativeExecutor)
-                    composedExecutor = composed
-                    retainedCapabilities = composed
-                    try Task.checkCancellation()
-                    executor = composed
-                }
                 let receipt = try await installer.install { [weak self] update in
                     self?.consumeInstallerUpdate(update)
                 }
                 activationReceipt = receipt
                 try Task.checkCancellation()
-                modelState = .installing(
-                    detail: "Loading the on-device AI…",
-                    fraction: 0.98)
-                publishSetupProgress(
-                    phase: .installingPackages,
-                    fraction: 0.98,
+                modelState = .installing(detail: "Loading the on-device AI…", fraction: 0.98)
+                publishSetupProgress(phase: .installingPackages, fraction: 0.98,
                     detail: "Loading the on-device AI…")
                 if nativeExecutor == nil { executor = nil }
-                let loaded = try await visualExecutorLoader.load(
-                    receipt: receipt,
-                    progress: { [weak self] detail in
-                        self?.consumeRuntimeActivationUpdate(detail)
-                    })
+                let loaded = try await visualExecutorLoader.load(receipt: receipt) { [weak self] detail in
+                    self?.consumeRuntimeActivationUpdate(detail)
+                }
                 try Task.checkCancellation()
-                modelState = .installing(
-                    detail: "Starting verified local Mac tools…",
-                    fraction: 0.99)
-                publishSetupProgress(
-                    phase: .installingPackages,
-                    fraction: 0.99,
-                    detail: "Starting verified local Mac tools…")
-                let hybrid: any ComputerUseExecuting
-                if let retainedCapabilities { hybrid = retainedCapabilities }
-                else { hybrid = try await composeExecutor(helperReceipt: helperReceipt, fallback: loaded) }
-                composedExecutor = hybrid
-                try Task.checkCancellation()
+                publishSetupProgress(phase: .installingPackages, fraction: 0.99,
+                    detail: "Starting the on-device AI…")
                 try await installer.recordRuntimeActivationSuccess(for: receipt)
                 try Task.checkCancellation()
                 if let nativeExecutor {
                     configureVisualFactory(nativeExecutor, receipt: receipt)
+                    executor = nativeExecutor
+                } else {
+                    executor = loaded
                 }
-                executor = hybrid
-                modelState = .ready(runtimeName: executor?.runtimeName ?? hybrid.runtimeName)
-                publishSetupProgress(
-                    phase: .ready,
-                    fraction: 1,
+                modelState = .ready(runtimeName: executor?.runtimeName ?? loaded.runtimeName)
+                publishSetupProgress(phase: .ready, fraction: 1,
                     detail: executor?.readyDetail ?? "AI Computer Use is ready")
             } catch is CancellationError {
-                (composedExecutor as? any MCPApprovalContinuing)?.cancelMCPWork()
                 await visualExecutorLoader.deactivate()
-                executor = retainedCapabilities ?? nativeExecutor ?? previouslyAvailableExecutor
+                executor = nativeExecutor ?? previouslyAvailableExecutor
                 if let activationReceipt {
-                    try? await installer.restorePreviousInstallation(
-                        afterFailedActivationOf: activationReceipt)
+                    try? await installer.restorePreviousInstallation(afterFailedActivationOf: activationReceipt)
                 }
                 modelState = executor.map { .ready(runtimeName: $0.runtimeName) } ?? .downloadRequired
-                publishSetupProgress(
-                    phase: .failed,
-                    fraction: nil,
-                    detail: "Setup stopped",
+                publishSetupProgress(phase: .failed, fraction: nil, detail: "Setup stopped",
                     errorMessage: executor == nil
                         ? "Setup stopped before AI Computer Use was activated. Tap Retry to continue."
                         : "Available AI tools are ready. Additional setup stopped; tap Retry to finish it.")
-                return
             } catch {
-                (composedExecutor as? any MCPApprovalContinuing)?.cancelMCPWork()
                 await visualExecutorLoader.deactivate()
-                executor = retainedCapabilities ?? nativeExecutor ?? previouslyAvailableExecutor
+                executor = nativeExecutor ?? previouslyAvailableExecutor
                 if let activationReceipt {
-                    try? await installer.restorePreviousInstallation(
-                        afterFailedActivationOf: activationReceipt)
+                    try? await installer.restorePreviousInstallation(afterFailedActivationOf: activationReceipt)
                 }
                 await installer.clearInterruptedInstallationMarker()
-                let message = (error as? LocalizedError)?.errorDescription
-                    ?? error.localizedDescription
+                let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
                 modelState = executor.map { .ready(runtimeName: $0.runtimeName) } ?? .error(message)
-                publishSetupProgress(
-                    phase: .failed,
-                    fraction: nil,
-                    detail: "Setup needs attention",
+                publishSetupProgress(phase: .failed, fraction: nil, detail: "Setup needs attention",
                     errorMessage: message)
             }
         }
@@ -7137,6 +7009,7 @@ final class HostComputerUseManager: ObservableObject {
                 modelState = executor.map { .ready(runtimeName: $0.runtimeName) } ?? .downloadRequired
                 publishSetupProgress(phase: .failed, fraction: nil, detail: "Setup stopped", errorMessage: "Setup stopped before the local agent was ready.")
             } catch {
+                await installer.clearInterruptedInstallationMarker()
                 modelState = .error(error.localizedDescription)
                 publishSetupProgress(phase: .failed, fraction: nil, detail: "Setup needs attention", errorMessage: error.localizedDescription)
             }
@@ -7149,12 +7022,6 @@ final class HostComputerUseManager: ObservableObject {
             guard let self else { throw CancellationError() }
             return deferredVisualExecutor(receipt: receipt)
         }
-    }
-
-    private func composeExecutor(helperReceipt: MacControlMCPInstallationReceipt,
-                                 fallback: any ComputerUseExecuting) async throws -> any ComputerUseExecuting {
-        guard let executorComposer else { return fallback }
-        return try await executorComposer(helperReceipt, fallback)
     }
 
     private func deferredVisualExecutor(receipt: ComputerUseInstallationReceipt?) -> ComputerUseDeferredVisualExecutor {
@@ -7175,40 +7042,6 @@ final class HostComputerUseManager: ObservableObject {
         }, abandon: { [visualExecutorLoader] _ in await visualExecutorLoader.deactivate() })
     }
 
-    private func beginStructuredActivation(helperReceipt: MacControlMCPInstallationReceipt,
-                                           visualReceipt: ComputerUseInstallationReceipt?) {
-        guard allowsExternalServices, !isShuttingDown, setupTask == nil else { return }
-        modelState = .installing(detail: "Starting local Mac tools…", fraction: nil)
-        setupTask = Task { [weak self] in
-            guard let self else { return }
-            var loaded: (any ComputerUseExecuting)?
-            var finishRequestedSetup = false
-            defer {
-                setupTask = nil
-                if finishRequestedSetup, !Task.isCancelled, !isShuttingDown { startSetupPipeline() }
-            }
-            do {
-                let structured = try await composeExecutor(helperReceipt: helperReceipt,
-                    fallback: deferredVisualExecutor(receipt: visualReceipt))
-                loaded = structured
-                try Task.checkCancellation()
-                let interrupted = visualReceipt == nil ? await installer.interruptedInstallationExists() : false
-                try Task.checkCancellation()
-                executor = structured
-                modelState = .ready(runtimeName: structured.runtimeName)
-                // A missing native package still needs full setup. Availability
-                // of the helper is not a terminal full-setup response.
-                if currentSetupProgress?.phase == .ready { currentSetupProgress = nil }
-                finishRequestedSetup = interrupted || !setupRecipients.activeRecipients().isEmpty
-            } catch {
-                (loaded as? any MCPApprovalContinuing)?.cancelMCPWork()
-                executor = nil
-                modelState = .error((error as? LocalizedError)?.errorDescription ?? error.localizedDescription)
-                publishRequestedActivationFailure(error)
-            }
-        }
-    }
-
     private func publishRequestedActivationFailure(_ error: Error) {
         guard !setupRecipients.activeRecipients().isEmpty else { return }
         publishSetupProgress(phase: .failed, fraction: nil, detail: "Setup needs attention",
@@ -7221,86 +7054,35 @@ final class HostComputerUseManager: ObservableObject {
         setupTask = Task { [weak self] in
             guard let self else { return }
             var finishRequestedSetup = false
-            var structuredCandidate: (any ComputerUseExecuting)?
             defer {
                 setupTask = nil
-                if finishRequestedSetup, !Task.isCancelled, !isShuttingDown {
-                    startSetupPipeline()
-                }
+                if finishRequestedSetup, !Task.isCancelled, !isShuttingDown { startSetupPipeline() }
             }
             do {
-                let helperStatus = await macControlInstaller.durableStatus()
-                try Task.checkCancellation()
-                let native: ComputerUseCapabilityExecutor
-                do {
-                    native = try await nativeTextPreparer(receipt, tools) { [weak self] detail in
-                        self?.consumeRuntimeActivationUpdate(detail)
-                    }
-                } catch {
-                    try Task.checkCancellation()
-                    guard !(error is CancellationError), case .ready(let helper) = helperStatus else { throw error }
-                    // A missing/changed fallback package cannot disable an
-                    // independently verified helper. Do not certify activation
-                    // or silently start downloads to repair that package.
-                    macControlReceipt = helper
-                    let visualReceipt = await installer.currentInstallation()
-                    try Task.checkCancellation()
-                    let structured = try await composeExecutor(helperReceipt: helper,
-                        fallback: deferredVisualExecutor(receipt: visualReceipt))
-                    structuredCandidate = structured
-                    try Task.checkCancellation()
-                    executor = structured
-                    modelState = .ready(runtimeName: structured.runtimeName)
-                    publishRequestedActivationFailure(error)
-                    return
+                let native = try await nativeTextPreparer(receipt, tools) { [weak self] detail in
+                    self?.consumeRuntimeActivationUpdate(detail)
                 }
                 try Task.checkCancellation()
-                var activated: any ComputerUseExecuting = native
-                // Fresh missing packages remain optional. Preserve the
-                // previous startup recovery policy for an installation that
-                // was already explicitly started before this process exited.
-                if case .ready(let helper) = helperStatus {
-                    macControlReceipt = helper
-                    let visualReceipt = await installer.currentInstallation()
-                    configureVisualFactory(native, receipt: visualReceipt)
-                    let structured = try await composeExecutor(helperReceipt: helper, fallback: native)
-                    structuredCandidate = structured
-                    activated = structured
-                }
+                let visualReceipt = await installer.currentInstallation()
                 try Task.checkCancellation()
+                configureVisualFactory(native, receipt: visualReceipt)
                 if native.hasAdditionalSetup {
-                    // Capability readiness is not completion of an explicit
-                    // full setup request. A request received during this load
-                    // must enter the remaining pipeline after its slot clears.
-                    if currentSetupProgress?.phase == .ready { currentSetupProgress = nil }
-                    let interruptedDesktopSetup: Bool
-                    switch helperStatus {
-                    case .ready:
-                        interruptedDesktopSetup = await installer.interruptedInstallationExists()
-                    case .downloadPresent(let bytes, _):
-                        interruptedDesktopSetup = bytes > 0
-                    case .notInstalled, .repairRequired:
-                        interruptedDesktopSetup = false
-                    }
+                    let interrupted = await installer.interruptedInstallationExists()
                     try Task.checkCancellation()
-                    finishRequestedSetup = interruptedDesktopSetup || !setupRecipients.activeRecipients().isEmpty
+                    finishRequestedSetup = interrupted || !setupRecipients.activeRecipients().isEmpty
                 }
-                // Publish capability state only after every asynchronous
-                // package/recovery check has finished. Admission stays closed
-                // until this activation slot is released below.
-                executor = activated
-                modelState = .ready(runtimeName: activated.runtimeName)
+                executor = native
+                modelState = .ready(runtimeName: native.runtimeName)
                 if !native.hasAdditionalSetup {
                     publishSetupProgress(phase: .ready, fraction: 1, detail: native.readyDetail)
                 }
+                if finishRequestedSetup, currentSetupProgress?.phase == .ready { currentSetupProgress = nil }
             } catch is CancellationError {
-                (structuredCandidate as? any MCPApprovalContinuing)?.cancelMCPWork()
                 await visualExecutorLoader.deactivate()
                 executor = nil
                 modelState = .downloadRequired
                 publishRequestedActivationFailure(CancellationError())
             } catch {
-                (structuredCandidate as? any MCPApprovalContinuing)?.cancelMCPWork()
                 await visualExecutorLoader.deactivate()
                 executor = nil
                 modelState = .error((error as? LocalizedError)?.errorDescription ?? error.localizedDescription)
@@ -7310,73 +7092,42 @@ final class HostComputerUseManager: ObservableObject {
     }
 
     private func beginActivation(of receipt: ComputerUseInstallationReceipt) {
-        guard allowsExternalServices,
-              !isShuttingDown,
-              setupTask == nil,
-              let helperReceipt = macControlReceipt,
+        guard allowsExternalServices, !isShuttingDown, setupTask == nil,
               executor?.isReady != true else { return }
-        modelState = .installing(
-            detail: "Loading the on-device AI…",
-            fraction: 0.98)
+        modelState = .installing(detail: "Loading the on-device AI…", fraction: 0.98)
         setupTask = Task { [weak self] in
             guard let self else { return }
             do {
                 executor = nil
-                let loaded = try await visualExecutorLoader.load(
-                    receipt: receipt,
-                    progress: { [weak self] detail in
-                        self?.consumeRuntimeActivationUpdate(detail)
-                    })
-                try Task.checkCancellation()
-                modelState = .installing(
-                    detail: "Starting verified local Mac tools…",
-                    fraction: 0.99)
-                let hybrid = try await composeExecutor(helperReceipt: helperReceipt, fallback: loaded)
+                let loaded = try await visualExecutorLoader.load(receipt: receipt) { [weak self] detail in
+                    self?.consumeRuntimeActivationUpdate(detail)
+                }
                 try Task.checkCancellation()
                 try await installer.recordRuntimeActivationSuccess(for: receipt)
-                executor = hybrid
-                modelState = .ready(runtimeName: hybrid.runtimeName)
-                publishSetupProgress(
-                    phase: .ready,
-                    fraction: 1,
-                    detail: "AI Computer Use is ready")
+                try Task.checkCancellation()
+                executor = loaded
+                modelState = .ready(runtimeName: loaded.runtimeName)
+                publishSetupProgress(phase: .ready, fraction: 1, detail: "AI Computer Use is ready")
             } catch is CancellationError {
                 await visualExecutorLoader.deactivate()
                 executor = nil
-                try? await installer.restorePreviousInstallation(
-                    afterFailedActivationOf: receipt)
+                try? await installer.restorePreviousInstallation(afterFailedActivationOf: receipt)
                 modelState = .downloadRequired
             } catch {
                 await visualExecutorLoader.deactivate()
                 executor = nil
-                try? await installer.restorePreviousInstallation(
-                    afterFailedActivationOf: receipt)
-                let message = (error as? LocalizedError)?.errorDescription
-                    ?? error.localizedDescription
+                try? await installer.restorePreviousInstallation(afterFailedActivationOf: receipt)
+                let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
                 modelState = .error(message)
             }
             setupTask = nil
         }
     }
 
-    /// The small signed helper receives a visible 8% phase allocation. Its
-    /// byte-count detail remains authoritative while the allocation prevents a
-    /// 2.6 MB prerequisite from looking frozen beside the multi-GB model.
-    private func consumeMacControlInstallerUpdate(_ update: MacControlMCPInstaller.Update) {
-        let base = Self.visibleMacControlInstallerFraction(update)
-        let candidate = nativeTextInstaller == nil ? base : 0.45 + 0.5 * base
-        consumeProvisioningProgress(
-            phase: .installingPackages,
-            candidateFraction: candidate,
-            detail: update.detail,
-            minimumPublishDelta: 0.005,
-            forcePublish: update.phase == .ready)
-    }
-
     private func consumeInstallerUpdate(_ update: ComputerUseInstaller.Update, nativeText: Bool = false) {
         let base = Self.visibleModelInstallerFraction(update)
         let visibleFraction = base.map { value in
-            nativeText ? value * 0.43
+            nativeText ? value * 0.45
                 : (nativeTextInstaller == nil ? value : 0.45 + value * 0.5)
         }
         let phase: ComputerUseSetupProgress.Phase
@@ -7441,22 +7192,10 @@ final class HostComputerUseManager: ObservableObject {
             detail: detail)
     }
 
-    nonisolated static let macControlSetupFraction = 0.08
-
-    nonisolated static func visibleMacControlInstallerFraction(
-        _ update: MacControlMCPInstaller.Update
-    ) -> Double {
-        guard update.fraction.isFinite else { return 0 }
-        return min(1, max(0, update.fraction)) * macControlSetupFraction
-    }
-
     nonisolated static func visibleModelInstallerFraction(
         _ update: ComputerUseInstaller.Update
     ) -> Double? {
-        guard let internalFraction = visibleInstallerFraction(update) else { return nil }
-        let normalized = internalFraction / 0.97
-        return macControlSetupFraction
-            + normalized * (0.97 - macControlSetupFraction)
+        visibleInstallerFraction(update)
     }
 
     /// The installer owns the first 97% of user-visible setup. Native model
@@ -7655,21 +7394,9 @@ final class HostComputerUseManager: ObservableObject {
                             channel: channel)
                     }
                 } else {
-                    if let action = try taskLedger.approvedAction(taskID: envelope.id,
-                        senderID: envelope.senderID, sessionID: envelope.sessionID) {
-                        let prompt = ComputerUsePromptRequest.decodeCompatibleBody(envelope.body).prompt
-                        switch Self.resultForApprovedAction(action, trustedUserPrompt: prompt) {
-                        case .completed(let response):
-                            sendDurableTerminal(response, outcome: .taskCompleted, replyingTo: envelope, channel: channel)
-                        case .unableToComplete(let response):
-                            sendDurableTerminal(response, outcome: .unableToComplete, replyingTo: envelope, channel: channel)
-                        default: preconditionFailure("Approved action reconciliation must return a bounded terminal disposition")
-                        }
-                    } else {
-                        let response = "That request was received before the host restarted, so it was not run again. Send it as a new request if it is still needed."
-                        sendDurableTerminal(response, outcome: .unableToComplete,
-                            replyingTo: envelope, channel: channel)
-                    }
+                    let response = "That request was received before the host restarted, so it was not run again. Send it as a new request if it is still needed."
+                    sendDurableTerminal(response, outcome: .unableToComplete,
+                        replyingTo: envelope, channel: channel)
                     sendStatus("ready", replyingTo: envelope, channel: channel)
                 }
                 return
@@ -7782,7 +7509,6 @@ final class HostComputerUseManager: ObservableObject {
             for: executionEnvelope,
             trustedUserPrompt: request.prompt,
             conversation: request.conversation,
-            requestBody: envelope.body,
             textClarification: continuation,
             channel: channel, pendingAutomationID: pendingAutomationID)
     }
@@ -7792,7 +7518,6 @@ final class HostComputerUseManager: ObservableObject {
         for envelope: ComputerUseEnvelope,
         trustedUserPrompt: String,
         conversation: [ComputerUseConversationTurn],
-        requestBody: String? = nil,
         textClarification: TextClarificationContinuation? = nil,
         channel: any HostComputerUseChannel,
         isResuming: Bool = false,
@@ -7803,7 +7528,6 @@ final class HostComputerUseManager: ObservableObject {
             channel: channel,
             trustedUserPrompt: trustedUserPrompt,
             conversation: conversation,
-            requestBody: requestBody,
             textClarification: textClarification)
         let admissionID = pendingAutomationID ?? actionGate.reservePendingAutomation()
         guard actionGate.adoptPendingAutomation(admissionID) else {
@@ -7844,36 +7568,27 @@ final class HostComputerUseManager: ObservableObject {
                     self?.activity = .working(value)
                     self?.sendStatus(value, replyingTo: envelope, channel: channel)
                 }
+                try Task.checkCancellation()
+                guard currentExecutionToken == token else { throw CancellationError() }
                 let result: ComputerUseExecutionResult
-                if let action = try taskLedger.approvedAction(taskID: envelope.id,
-                    senderID: envelope.senderID, sessionID: envelope.sessionID) {
-                    // Resume joins the previous execution first. Reconcile a
-                    // claimed approved effect instead of asking any executor
-                    // to reconstruct or repeat this consequential task.
-                    result = try await resultAfterApprovedAction(action, executor: executor,
-                        context: context, token: token, progress: progress)
+                if let textClarification {
+                    guard let continuing = executor as? any ComputerUseTextClarificationContinuing else {
+                        throw ComputerUseTextClarificationStore.Failure.invalidReference
+                    }
+                    result = try await continuing.continueClarification(taskID: envelope.id,
+                        originatingTaskID: textClarification.originatingTaskID, goal: textClarification.goal,
+                        selectedChoice: textClarification.selectedChoice, progress: progress)
                 } else {
+                    await agentLifecycleTask?.value
                     try Task.checkCancellation()
                     guard currentExecutionToken == token else { throw CancellationError() }
-                    if let textClarification {
-                        guard let continuing = executor as? any ComputerUseTextClarificationContinuing else {
-                            throw ComputerUseTextClarificationStore.Failure.invalidReference
-                        }
-                        result = try await continuing.continueClarification(taskID: envelope.id,
-                            originatingTaskID: textClarification.originatingTaskID, goal: textClarification.goal,
-                            selectedChoice: textClarification.selectedChoice, progress: progress)
-                    } else {
-                        await agentLifecycleTask?.value
-                        try Task.checkCancellation()
-                        guard currentExecutionToken == token else { throw CancellationError() }
-                            result = try await executor.execute(
-                                taskID: envelope.id,
-                                modelPrompt: envelope.body,
-                                currentUserPrompt: trustedUserPrompt,
-                                conversation: conversation,
-                                tools: tools,
-                                progress: progress)
-                    }
+                    result = try await executor.execute(
+                        taskID: envelope.id,
+                        modelPrompt: envelope.body,
+                        currentUserPrompt: trustedUserPrompt,
+                        conversation: conversation,
+                        tools: tools,
+                        progress: progress)
                 }
                 guard !Task.isCancelled,
                       currentExecutionToken == token else { return }
@@ -8128,226 +7843,9 @@ final class HostComputerUseManager: ObservableObject {
             for: replanned,
             trustedUserPrompt: context.trustedUserPrompt,
             conversation: context.conversation,
-            requestBody: context.requestBody,
             textClarification: context.textClarification,
             channel: context.channel,
             isResuming: true)
-    }
-
-    private func continueApprovedMCP(
-        _ prepared: MCPPreparedApproval,
-        executor: any ComputerUseExecuting,
-        context: ExecutionContext
-    ) {
-        guard let continuation = executor as? any MCPApprovalContinuing else {
-            finishApprovedActionFailure(
-                MCPClientError.approvalMismatch,
-                context: context)
-            return
-        }
-
-        let evidenceTransportGeneration = transportGeneration
-        let evidenceAuthorizationGeneration = actionEvidenceAuthorizationGeneration
-        let precedingExecution = executionTask
-        precedingExecution?.cancel()
-        let token = UUID()
-        currentExecution = context
-        currentExecutionToken = token
-        activity = .working("Performing the one approved Mac action…")
-        sendStatus(
-            "Performing the one approved Mac action…",
-            replyingTo: context.envelope,
-            channel: context.channel)
-
-        executionTask = Task { [weak self] in
-            guard let self else { return }
-            await precedingExecution?.value
-            guard !Task.isCancelled,
-                  currentExecutionToken == token else { return }
-            guard actionGate.allowsActions else {
-                pauseAfterApprovedOperationWasBlocked(context: context)
-                return
-            }
-            do {
-                let result: ComputerUseExecutionResult
-                let claim: ComputerUseTaskLedger.ApprovedActionClaim
-                let recordedAction = try taskLedger.approvedAction(
-                    taskID: context.envelope.id,
-                    senderID: context.envelope.senderID,
-                    sessionID: context.envelope.sessionID,
-                    fingerprint: prepared.fingerprint)
-                if recordedAction == nil {
-                    do {
-                        try await continuation.preflightApprovedAction(prepared)
-                    } catch is CancellationError {
-                        finishUnexpectedCancellationIfCurrent(context: context, token: token)
-                        return
-                    }
-                    try Task.checkCancellation()
-                    guard currentExecutionToken == token else { return }
-                    guard actionGate.allowsActions else {
-                        pauseAfterApprovedOperationWasBlocked(context: context)
-                        return
-                    }
-                }
-                if let plan = try continuation.approvedActionPlan(taskID: context.envelope.id, promptBody: context.requestBody) {
-                    claim = try taskLedger.claimApprovedAction(taskID: context.envelope.id,
-                        senderID: context.envelope.senderID, sessionID: context.envelope.sessionID,
-                        prepared: prepared, plan: plan)
-                } else {
-                    claim = try taskLedger.claimApprovedAction(taskID: context.envelope.id,
-                        senderID: context.envelope.senderID, sessionID: context.envelope.sessionID, prepared: prepared)
-                }
-                let progress: (String) -> Void = { [weak self] value in
-                    guard self?.currentExecutionToken == token else { return }
-                    self?.activity = .working(value)
-                    self?.sendStatus(value, replyingTo: context.envelope, channel: context.channel)
-                }
-                switch claim {
-                case .existing(let action):
-                    result = try await resultAfterApprovedAction(action, executor: executor,
-                        context: context, token: token, progress: progress)
-                case .new:
-                    sendApprovedActionEvidence(for: context, transportGeneration: evidenceTransportGeneration,
-                        authorizationGeneration: evidenceAuthorizationGeneration)
-                    let confirmation = try await continuation.continueAfterApproval(
-                        prepared,
-                        tools: tools,
-                        progress: { [weak self] value in
-                            guard self?.currentExecutionToken == token else { return }
-                            self?.activity = .working(value)
-                            self?.sendStatus(value, replyingTo: context.envelope, channel: context.channel)
-                        })
-                    let trustedPromptDigest = try MCPDigest.sha256(of: .string(context.trustedUserPrompt))
-                    guard confirmation.callDigest == prepared.call.canonicalDigest,
-                          confirmation.completionPromptDigest == nil
-                            || confirmation.completionPromptDigest == trustedPromptDigest else {
-                        throw MCPClientError.serverMismatch("The approved operation returned a confirmation for another task.")
-                    }
-                    // Record the exact old task's confirmed effect before
-                    // checking its UI token. Stop's first terminal still wins;
-                    // a stale completion may not clear or update a newer task.
-                    try taskLedger.recordApprovedActionResult(taskID: context.envelope.id,
-                        senderID: context.envelope.senderID, sessionID: context.envelope.sessionID,
-                        fingerprint: prepared.fingerprint, response: confirmation.response,
-                        completionPromptDigest: confirmation.completionPromptDigest)
-                    guard let recorded = try taskLedger.approvedAction(taskID: context.envelope.id,
-                        senderID: context.envelope.senderID, sessionID: context.envelope.sessionID, fingerprint: prepared.fingerprint) else {
-                        throw MCPClientError.serverMismatch("The approved action confirmation could not be retained.")
-                    }
-                    sendApprovedActionEvidence(for: context, transportGeneration: evidenceTransportGeneration,
-                        authorizationGeneration: evidenceAuthorizationGeneration)
-                    result = try await resultAfterApprovedAction(recorded, executor: executor,
-                        context: context, token: token, progress: progress)
-                }
-                guard currentExecutionToken == token else { return }
-                try await acceptExecutionResult(
-                    result,
-                    executor: executor,
-                    context: context,
-                    token: token)
-            } catch is CancellationError {
-                finishUnexpectedCancellationIfCurrent(
-                    context: context,
-                    token: token)
-                return
-            } catch {
-                guard currentExecutionToken == token else { return }
-                currentExecution = nil
-                currentExecutionToken = nil
-                executionTask = nil
-                finishApprovedActionFailure(error, context: context)
-            }
-        }
-    }
-
-    private static let unconfirmedApprovedActionResponse = "The approved action may already have been performed. I couldn't confirm its result, so I will not repeat it. Check the Mac before starting another request for this action."
-
-    private func resultAfterApprovedAction(_ action: ComputerUseTaskLedger.ApprovedActionRecord,
-        executor: any ComputerUseExecuting, context: ExecutionContext, token: UUID,
-        progress: @escaping (String) -> Void) async throws -> ComputerUseExecutionResult {
-        guard action.stepEffectID != nil, action.response != nil else {
-            return Self.resultForApprovedAction(action, trustedUserPrompt: context.trustedUserPrompt)
-        }
-        try Task.checkCancellation()
-        guard currentExecutionToken == token, actionGate.allowsActions else { throw CancellationError() }
-        let envelope = context.envelope
-        guard let continuation = executor as? any MCPApprovalContinuing,
-              let plan = try taskLedger.approvedActionPlan(taskID: envelope.id,
-                  senderID: envelope.senderID, sessionID: envelope.sessionID),
-              try continuation.approvedActionPlan(taskID: envelope.id, promptBody: context.requestBody) == plan else { throw MCPClientError.approvalMismatch }
-        let history = try taskLedger.approvedActionHistory(taskID: envelope.id,
-            senderID: envelope.senderID, sessionID: envelope.sessionID)
-        guard !history.isEmpty, history.count <= plan.steps.count,
-              history.last == action,
-              zip(history, plan.steps).allSatisfy({ record, step in
-                  record.stepEffectID == step.effectID && record.fingerprint.canonicalDigest == step.callDigest
-                    && record.response != nil && record.completionPromptDigest == nil
-              }) else { throw MCPClientError.approvalMismatch }
-        // The confirmed prefix is durable before continuing. An executor may
-        // verify outcomes, ask for the next exact approval, or hand control
-        // back; it must never reconstruct earlier effects from the prompt.
-        let result = try await continuation.continueApprovedActionPlan(taskID: envelope.id,
-            confirmedActions: history, tools: tools, progress: progress)
-        try Task.checkCancellation()
-        guard currentExecutionToken == token, actionGate.allowsActions else { throw CancellationError() }
-        switch result {
-        case .completed:
-            guard history.count == plan.steps.count else { throw MCPClientError.approvalMismatch }
-        case .mcpApprovalRequired(let prepared):
-            guard history.count < plan.steps.count, prepared.call.taskID == envelope.id,
-                  prepared.call.stepEffectID == plan.steps[history.count].effectID,
-                  prepared.call.canonicalDigest == plan.steps[history.count].callDigest,
-                  prepared.fingerprint.matches(call: prepared.call) else { throw MCPClientError.approvalMismatch }
-        case .unableToComplete, .userInterventionRequired:
-            break
-        default:
-            // A clarification or a different action capability needs an
-            // explicit transfer of this retained plan before it can continue.
-            throw MCPClientError.approvalMismatch
-        }
-        return result
-    }
-
-    private static func resultForApprovedAction(_ action: ComputerUseTaskLedger.ApprovedActionRecord,
-                                               trustedUserPrompt: String) -> ComputerUseExecutionResult {
-        if let response = action.response {
-            if let proof = action.completionPromptDigest,
-               proof == (try? MCPDigest.sha256(of: .string(trustedUserPrompt))) { return .completed(response) }
-            return .unableToComplete("The full request remains unverified. I retained this action confirmation and will not repeat it:\n\n" + response)
-        }
-        return .unableToComplete(unconfirmedApprovedActionResponse)
-    }
-
-    private func actionEvidence(for envelope: ComputerUseEnvelope) -> ComputerUseApprovedActionEvidence? {
-        guard let action = try? taskLedger.approvedAction(taskID: envelope.id,
-            senderID: envelope.senderID, sessionID: envelope.sessionID) else { return nil }
-        let summary = action.response.map { response in
-            var bounded = "", byteCount = 0
-            for character in response.prefix(4_000) {
-                let bytes = String(character).utf8.count
-                guard byteCount + bytes <= 16_000 else { break }
-                bounded.append(character)
-                byteCount += bytes
-            }
-            return bounded.isEmpty ? "The Mac confirmed the approved action." : bounded
-        }
-        return try? ComputerUseApprovedActionEvidence(actionID: action.fingerprint.canonicalDigest,
-            state: action.response == nil ? .unconfirmed : .confirmed,
-            summary: summary, resultDigest: action.responseDigest)
-    }
-
-    private func sendApprovedActionEvidence(for context: ExecutionContext, transportGeneration: UInt64,
-        authorizationGeneration: UInt64) {
-        // A late result may annotate its original task while a newer task is
-        // active. Check again after queued delivery to fence a later revocation.
-        guard context.supportsApprovedActionEvidence,
-              self.transportGeneration == transportGeneration,
-              actionEvidenceAuthorizationGeneration == authorizationGeneration,
-              authorizedPeerID == context.envelope.senderID else { return }
-        send(kind: .status, body: "", replyingTo: context.envelope,
-            channel: context.channel, isApprovedActionEvidenceOnly: true,
-            evidenceDeliveryGeneration: (transportGeneration, authorizationGeneration))
     }
 
     private func acceptExecutionResult(
@@ -8474,20 +7972,7 @@ final class HostComputerUseManager: ObservableObject {
                         action: proposedAction,
                         fingerprint: prepared.fingerprint)))
 
-        case .mcpApprovalRequired(let prepared):
-            guard prepared.call.taskID == envelope.id else {
-                throw MCPClientError.approvalMismatch
-            }
-            let presentation = prepared.computerUsePresentation
-            let request = ComputerUseApprovalRequest(
-                taskID: envelope.id,
-                message: presentation.message,
-                details: presentation.details,
-                confirmLabel: presentation.confirmLabel)
-            enterApproval(PendingApproval(
-                request: request,
-                context: context,
-                operation: .mcp(prepared)))
+
         }
     }
 
@@ -8580,8 +8065,8 @@ final class HostComputerUseManager: ObservableObject {
             channel: channel,
             outcome: .userInterventionRequired,
             researchProgress: report,
-            evidenceDeliveryGeneration: report == nil ? nil :
-                (transport: transportGeneration, authorization: actionEvidenceAuthorizationGeneration))
+            authorizationDeliveryGeneration: report == nil ? nil :
+                (transport: transportGeneration, authorization: peerAuthorizationGeneration))
     }
 
     /// A terminal reply is authoritative only after its first-result-wins
@@ -8667,15 +8152,12 @@ final class HostComputerUseManager: ObservableObject {
         clarification: ComputerUseClarificationReference? = nil,
         clarificationChoices requestedClarificationChoices: [ComputerUseClarificationChoice]? = nil,
         researchProgress: ComputerUseResearchProgress? = nil,
-        isApprovedActionEvidenceOnly: Bool = false,
-        evidenceDeliveryGeneration: (transport: UInt64, authorization: UInt64)? = nil
+        authorizationDeliveryGeneration: (transport: UInt64, authorization: UInt64)? = nil
     ) {
         // Gate every projection of an older unbound result, including Cancel
         // replies with no prompt body. Preserve the durable result for future
-        // reconciliation; do not attach its clarification or action evidence.
+        // reconciliation; do not attach its clarification.
         let needsIdentityRecovery = taskLedger.requiresPromptIdentityRecovery(taskID: envelope.id)
-        let evidence = needsIdentityRecovery ? nil : actionEvidence(for: envelope)
-        if isApprovedActionEvidenceOnly && evidence == nil { return }
         let liveQuestion = clarification.map { reference in
             !needsIdentityRecovery
                 && taskLedger.terminalClarification(taskID: envelope.id) == reference
@@ -8701,29 +8183,26 @@ final class HostComputerUseManager: ObservableObject {
             wireBody = (try? ComputerUseTaskUpdate(
                 taskID: envelope.id,
                 text: responseBody,
-                appliedControlRevision: isApprovedActionEvidenceOnly ? nil : taskLedger.appliedControlRevision(
-                    taskID: envelope.id),
-                hostControlEpoch: isApprovedActionEvidenceOnly ? nil : taskLedger.hostControlEpoch(taskID: envelope.id),
+                appliedControlRevision: taskLedger.appliedControlRevision(taskID: envelope.id),
+                hostControlEpoch: taskLedger.hostControlEpoch(taskID: envelope.id),
                 outcome: (needsIdentityRecovery && kind == .assistant) || unavailableQuestion ? .unableToComplete : outcome,
                 clarification: needsIdentityRecovery || unavailableQuestion ? nil : clarification,
                 clarificationAnswerPolicy: nil,
                 clarificationRetry: nil,
                 clarificationChoices: needsIdentityRecovery || unavailableQuestion ? nil : clarificationChoices,
                 supportsClarificationRecovery: !needsIdentityRecovery && !unavailableQuestion && clarification != nil,
-                approvedActionEvidence: evidence,
-                isApprovedActionEvidenceOnly: isApprovedActionEvidenceOnly,
                 researchProgress: needsIdentityRecovery ? nil : researchProgress).encodedBody()) ?? responseBody
         default:
             wireBody = body
         }
         let previousDelivery = outboundDeliveryTask
         let guardedGeneration = clarification != nil
-            ? (transport: transportGeneration, authorization: actionEvidenceAuthorizationGeneration) : evidenceDeliveryGeneration
+            ? (transport: transportGeneration, authorization: peerAuthorizationGeneration) : authorizationDeliveryGeneration
         let delivery = Task { [weak self] in
             if let previousDelivery { await previousDelivery.value }
             if let guardedGeneration {
                 guard let self, self.transportGeneration == guardedGeneration.transport,
-                      self.actionEvidenceAuthorizationGeneration == guardedGeneration.authorization,
+                      self.peerAuthorizationGeneration == guardedGeneration.authorization,
                       self.authorizedPeerID == envelope.senderID else { return }
             }
             var deliveredBody = wireBody
@@ -8764,7 +8243,7 @@ final class HostComputerUseManager: ObservableObject {
         return try? ComputerUseTaskUpdate(taskID: original.taskID,
             text: "The original question is no longer active. Start a new request with the complete instruction.",
             appliedControlRevision: original.appliedControlRevision, hostControlEpoch: original.hostControlEpoch,
-            outcome: .unableToComplete, approvedActionEvidence: original.approvedActionEvidence).encodedBody()
+            outcome: .unableToComplete).encodedBody()
     }
 
     private func retainsNativeQuestion(_ reference: ComputerUseClarificationReference, for envelope: ComputerUseEnvelope) -> Bool {
@@ -8777,11 +8256,11 @@ final class HostComputerUseManager: ObservableObject {
     private func sendClarificationProbeResult(_ probe: ComputerUseClarificationProbe, replyingTo envelope: ComputerUseEnvelope,
                                               channel: any HostComputerUseChannel) {
         let previousDelivery = outboundDeliveryTask
-        let generation = (transport: transportGeneration, authorization: actionEvidenceAuthorizationGeneration)
+        let generation = (transport: transportGeneration, authorization: peerAuthorizationGeneration)
         let delivery = Task { [weak self] in
             if let previousDelivery { await previousDelivery.value }
             guard let self, self.transportGeneration == generation.transport,
-                  self.actionEvidenceAuthorizationGeneration == generation.authorization,
+                  self.peerAuthorizationGeneration == generation.authorization,
                   self.authorizedPeerID == envelope.senderID else { return }
             // This is a read-only lookup. Never claim a new prompt, change
             // controls, interpret a goal or reconstruct a missing owner.

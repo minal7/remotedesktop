@@ -87,8 +87,8 @@ enum ComputerUseSourceBoundTextPlan {
     private struct Requirement {
         let source: String
         let kind: String
-        let edits: [MCPJSONValue]
-        let preserve: [MCPJSONValue]
+        let edits: [JSONValue]
+        let preserve: [JSONValue]
     }
     private struct Slice { let text: String; let offset: Int }
     private struct Token { let text: String; let range: NSRange }

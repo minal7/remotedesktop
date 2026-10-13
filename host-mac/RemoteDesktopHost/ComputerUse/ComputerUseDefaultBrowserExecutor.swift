@@ -465,7 +465,6 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
     }
     var isReady: Bool { desktop.isReady }
     var runtimeName: String { "Default-browser desktop computer use" }
-    var requiresMacControlHelper: Bool { desktop.requiresMacControlHelper }
     var hasAdditionalSetup: Bool { desktop.hasAdditionalSetup }
     var supportsNativeTextTasks: Bool { desktop.supportsNativeTextTasks }
     var readyDetail: String { desktop.readyDetail }

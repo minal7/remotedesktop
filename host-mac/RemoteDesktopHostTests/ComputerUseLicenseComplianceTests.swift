@@ -134,20 +134,6 @@ final class ComputerUseLicenseComplianceTests: XCTestCase {
         XCTAssertFalse(notice.localizedCaseInsensitiveContains("LoRA"))
     }
 
-    func testBundledMacControlMCPLicenseAndNoticeArePresent() throws {
-        let licenseText = try String(
-            contentsOf: bundledURL(fileName: "MAC-CONTROL-MCP-LICENSE.txt"),
-            encoding: .utf8)
-        XCTAssertTrue(licenseText.hasPrefix("MIT License\n"))
-        XCTAssertTrue(licenseText.contains("Copyright (c) 2026 Adil El-Ouariachi"))
-
-        let noticeText = try String(
-            contentsOf: bundledURL(for: ComputerUseArtifactManifest.modelNotice),
-            encoding: .utf8)
-        XCTAssertTrue(noticeText.contains(
-            "mac-control-mcp is licensed under the MIT License"))
-    }
-
     func testUserRequestedInstallRepairsMissingAndTamperedLegalDocuments() async throws {
         let fixture = try makeFixture()
         defer { try? FileManager.default.removeItem(at: fixture.root) }

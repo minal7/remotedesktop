@@ -45,7 +45,7 @@ protocol ComputerUseNativeOnlyExecuting {
 /// to reconstruct and replay the goal through another executor.
 @MainActor
 final class ComputerUseCapabilityExecutor: ComputerUseTaskAwareExecuting,
-    MCPApprovalContinuing, ComputerUseVisualApprovalContinuing, ComputerUseTextClarificationContinuing,
+    ComputerUseVisualApprovalContinuing, ComputerUseTextClarificationContinuing,
     ComputerUseNativeOnlyExecuting, ComputerUseClarifiedGoalExecuting {
     typealias NativeExecution = @MainActor (String, String, @escaping (String) -> Void) async throws -> ComputerUseExecutionResult?
     typealias DesktopFactory = @MainActor (@escaping (String) -> Void) async throws -> any ComputerUseExecuting
@@ -90,14 +90,13 @@ final class ComputerUseCapabilityExecutor: ComputerUseTaskAwareExecuting,
 
     let isReady = true
     let supportsNativeTextTasks = true
-    let requiresMacControlHelper = false
     var hasAdditionalSetup: Bool { agentAdapter == nil && (desktopFactory == nil || !desktopIncludesVisualControl) }
     var readyDetail: String {
         if let agentAdapter { return agentAdapter.readyDetail }
         guard desktopFactory != nil else { return "Form editing is ready; desktop tools need setup" }
         return desktopIncludesVisualControl
-            ? "Form editing, Mac tools and visual control are ready"
-            : "Form editing and Mac tools are ready; visual control needs setup"
+            ? "Form editing and visual control are ready"
+            : "Form editing is ready; visual control needs setup"
     }
     var runtimeName: String { readyDetail }
 
@@ -154,7 +153,6 @@ final class ComputerUseCapabilityExecutor: ComputerUseTaskAwareExecuting,
             }
         } else {
             nativeClarification?.invalidateClarification()
-            (desktop as? any MCPApprovalContinuing)?.cancelMCPWork()
             desktop = nil
             self.taskID = taskID
             promptDigest = digest
@@ -168,11 +166,7 @@ final class ComputerUseCapabilityExecutor: ComputerUseTaskAwareExecuting,
         if desktop == nil {
             try Task.checkCancellation()
             let loaded = try await desktopFactory(progress)
-            do { try Task.checkCancellation() }
-            catch {
-                (loaded as? any MCPApprovalContinuing)?.cancelMCPWork()
-                throw error
-            }
+            try Task.checkCancellation()
             desktop = loaded
         }
         guard let desktop else { throw RoutingError.missingContinuation }
@@ -214,7 +208,6 @@ final class ComputerUseCapabilityExecutor: ComputerUseTaskAwareExecuting,
             }
         } else {
             nativeClarification?.invalidateClarification()
-            (desktop as? any MCPApprovalContinuing)?.cancelMCPWork()
             desktop = nil
             self.taskID = taskID
             promptDigest = digest
@@ -241,11 +234,7 @@ final class ComputerUseCapabilityExecutor: ComputerUseTaskAwareExecuting,
             // Native planning may have stopped an older visual process. Build
             // the fallback against a newly activated endpoint for this task.
             let loaded = try await desktopFactory(progress)
-            do { try Task.checkCancellation() }
-            catch {
-                (loaded as? any MCPApprovalContinuing)?.cancelMCPWork()
-                throw error
-            }
+            try Task.checkCancellation()
             desktop = loaded
         }
         guard let desktop else { throw RoutingError.missingContinuation }
@@ -339,53 +328,6 @@ final class ComputerUseCapabilityExecutor: ComputerUseTaskAwareExecuting,
         return result
     }
 
-    func continueAfterApproval(_ prepared: MCPPreparedApproval, tools: ComputerUseHostTools,
-                              progress: @escaping (String) -> Void) async throws -> MCPApprovedActionResult {
-        guard !isExecuting else { throw RoutingError.alreadyExecuting }
-        isExecuting = true
-        defer { isExecuting = false }
-        try Task.checkCancellation()
-        guard route == .desktop, let continuing = desktop as? any MCPApprovalContinuing else {
-            throw RoutingError.missingContinuation
-        }
-        let result = try await continuing.continueAfterApproval(prepared, tools: tools, progress: progress)
-        // A successful approved effect remains a fact after concurrent Stop.
-        // The manager records it separately from task cancellation/state.
-        return result
-    }
-
-    func preflightApprovedAction(_ prepared: MCPPreparedApproval) async throws {
-        guard !isExecuting else { throw RoutingError.alreadyExecuting }
-        isExecuting = true
-        defer { isExecuting = false }
-        try Task.checkCancellation()
-        guard route == .desktop, prepared.call.taskID == taskID,
-              let continuing = desktop as? any MCPApprovalContinuing else {
-            throw RoutingError.missingContinuation
-        }
-        try await continuing.preflightApprovedAction(prepared)
-        try Task.checkCancellation()
-    }
-
-    func approvedActionPlan(taskID: String, promptBody: String) throws -> ComputerUseTaskLedger.ApprovedActionPlan? {
-        guard route == .desktop, self.taskID == taskID else { return nil }
-        return try (desktop as? any MCPApprovalContinuing)?.approvedActionPlan(taskID: taskID, promptBody: promptBody)
-    }
-
-    func continueApprovedActionPlan(taskID: String, confirmedActions: [ComputerUseTaskLedger.ApprovedActionRecord],
-        tools: ComputerUseHostTools, progress: @escaping (String) -> Void) async throws -> ComputerUseExecutionResult {
-        guard !isExecuting else { throw RoutingError.alreadyExecuting }
-        isExecuting = true
-        defer { isExecuting = false }
-        try Task.checkCancellation()
-        guard route == .desktop, self.taskID == taskID,
-              let continuing = desktop as? any MCPApprovalContinuing else { throw RoutingError.missingContinuation }
-        let result = try await continuing.continueApprovedActionPlan(taskID: taskID, confirmedActions: confirmedActions,
-            tools: tools, progress: progress)
-        try Task.checkCancellation()
-        return result
-    }
-
     func performApprovedVisualAction(_ continuation: ComputerUseVisualApprovalContinuation,
         action: ComputerUsePredictedAction, fingerprint: ComputerUseApprovalFingerprint,
         tools: ComputerUseHostTools, willBeginEffect: () -> Void) async throws {
@@ -419,13 +361,6 @@ final class ComputerUseCapabilityExecutor: ComputerUseTaskAwareExecuting,
         (desktop as? any ComputerUseVisualApprovalContinuing)?.cancelVisualApprovalContinuation(continuation)
     }
 
-    func cancelMCPWork() {
-        (desktop as? any MCPApprovalContinuing)?.cancelMCPWork()
-    }
-
-    func pauseMCPWork() {
-        (desktop as? any MCPApprovalContinuing)?.pauseMCPWork()
-    }
 }
 
 /// Defers the expensive visual model until a structured route actually needs
@@ -448,7 +383,6 @@ final class ComputerUseDeferredVisualExecutor: ComputerUseTaskAwareExecuting, Co
     }
 
     var isReady: Bool { loader != nil }
-    let requiresMacControlHelper = false
     var hasAdditionalSetup: Bool { loader == nil }
     var runtimeName: String { isReady ? "Visual control is available on demand" : "Visual control needs setup" }
     var readyDetail: String { runtimeName }

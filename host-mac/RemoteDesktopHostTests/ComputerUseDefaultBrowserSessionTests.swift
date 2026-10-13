@@ -1055,7 +1055,6 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                 case .approvalRequired: return "approvalRequired"
                 case .clarificationRequired: return "clarificationRequired"
                 case .completed: return "completed"
-                case .mcpApprovalRequired: return "mcpApprovalRequired"
                 case .agentApprovalRequired: return "agentApprovalRequired"
                 case .unableToComplete: return "unableToComplete"
                 case .userInterventionRequired: return "userInterventionRequired"

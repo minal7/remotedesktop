@@ -85,7 +85,7 @@ enum ComputerUseFaraAction: Equatable, Sendable {
                 guard case .string(let value)? = args[key], permitsEmpty || !value.isEmpty else { throw Failure.invalidResponse }
                 return value
             }
-            func number(_ value: MCPJSONValue?) throws -> Double {
+            func number(_ value: JSONValue?) throws -> Double {
                 let result: Double
                 switch value {
                 case .integer(let value): result = Double(value)

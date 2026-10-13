@@ -163,13 +163,6 @@ struct HostSettingsView: View {
                         destination: ComputerUseArtifactManifest.bundledLegalDocumentURL(
                             ComputerUseArtifactManifest.llamaCPPLicense)
                             ?? ComputerUseArtifactManifest.llamaCPPLicenseURL)
-                    Divider().padding(.vertical, 10)
-                    licenseRow(
-                        name: "mac-control-mcp",
-                        license: "MIT License",
-                        destination: bundledDocument(
-                            named: "MAC-CONTROL-MCP-LICENSE",
-                            fallback: URL(string: "https://github.com/AdelElo13/mac-control-mcp/blob/v0.8.2/LICENSE")!))
                 }
                 .padding(6)
             }

@@ -17,7 +17,7 @@ struct StrictSemanticJSONParser {
         self.maximumValueCount = max(1, maximumValueCount)
     }
 
-    mutating func parse() throws -> MCPJSONValue {
+    mutating func parse() throws -> JSONValue {
         skipWhitespace()
         let result = try parseValue(depth: 0)
         skipWhitespace()
@@ -25,7 +25,7 @@ struct StrictSemanticJSONParser {
         return result
     }
 
-    private mutating func parseValue(depth: Int) throws -> MCPJSONValue {
+    private mutating func parseValue(depth: Int) throws -> JSONValue {
         guard depth <= Self.maximumNestingDepth, index < bytes.count else {
             throw ParserError.invalidJSON
         }
@@ -53,10 +53,10 @@ struct StrictSemanticJSONParser {
         }
     }
 
-    private mutating func parseObject(depth: Int) throws -> MCPJSONValue {
+    private mutating func parseObject(depth: Int) throws -> JSONValue {
         index += 1
         skipWhitespace()
-        var result: [String: MCPJSONValue] = [:]
+        var result: [String: JSONValue] = [:]
         var keys: Set<String> = []
         if consume(0x7D) { return .object(result) }
         while true {
@@ -78,10 +78,10 @@ struct StrictSemanticJSONParser {
         }
     }
 
-    private mutating func parseArray(depth: Int) throws -> MCPJSONValue {
+    private mutating func parseArray(depth: Int) throws -> JSONValue {
         index += 1
         skipWhitespace()
-        var result: [MCPJSONValue] = []
+        var result: [JSONValue] = []
         if consume(0x5D) { return .array(result) }
         while true {
             result.append(try parseValue(depth: depth))
@@ -122,7 +122,7 @@ struct StrictSemanticJSONParser {
         throw ParserError.invalidJSON
     }
 
-    private mutating func parseNumber() throws -> MCPJSONValue {
+    private mutating func parseNumber() throws -> JSONValue {
         let start = index
         _ = consume(0x2D)
         guard index < bytes.count else { throw ParserError.invalidJSON }

@@ -172,19 +172,19 @@ enum ComputerUseHoloModel {
 
     private static var invalid: OSAtlasLlamaRuntimeError { .invalidResponse }
     private struct Message {
-        let message: MCPJSONValue
+        let message: JSONValue
         let callID: String?
         let action: ComputerUseFaraAction
     }
 
-    private static func encode(_ value: MCPJSONValue) throws -> String {
+    private static func encode(_ value: JSONValue) throws -> String {
         let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
         let data = try encoder.encode(value)
         guard data.count <= 32_768, let text = String(data: data, encoding: .utf8) else { throw invalid }
         return text
     }
 
-    private static func decodeMessage(_ value: MCPJSONValue) throws -> Message {
+    private static func decodeMessage(_ value: JSONValue) throws -> Message {
         guard case .object(let message) = value, message["role"] == .string("assistant"),
               Set(message.keys).isSubset(of: ["role", "content", "tool_calls", "reasoning", "reasoning_content", "refusal"]),
               message["refusal"] == nil || message["refusal"] == .null else { throw invalid }
@@ -195,8 +195,8 @@ enum ComputerUseHoloModel {
         default: throw invalid
         }
         guard content.utf8.count <= 16_384 else { throw invalid }
-        var retained: [String: MCPJSONValue] = ["role": .string("assistant"), "content": .string(content)]
-        let calls: [MCPJSONValue]
+        var retained: [String: JSONValue] = ["role": .string("assistant"), "content": .string(content)]
+        let calls: [JSONValue]
         switch message["tool_calls"] {
         case .array(let values): calls = values
         case nil, .null: calls = []

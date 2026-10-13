@@ -212,8 +212,8 @@ struct ComputerUseArtifactManifest: Codable, Equatable, Sendable {
     // the upstream checkpoint and converter revisions used for the data files.
     static let modelNotice = BundledArtifact(
         fileName: "NOTICE.txt",
-        byteCount: 806,
-        sha256: "23fc858c612406dbc26d9f6340aa6c49624f0cb4c7c7641d9a3a422a06637748")
+        byteCount: 657,
+        sha256: "2d5f3e0e8342a7f00fc5c53eb80ca1ebef5d2c267a5e6b55bf41d654840fe997")
 
     static let modelLegalArtifacts = [
         osAtlasLicense,

@@ -148,7 +148,6 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
     /// diagnostics; reading it performs no capture, model request or input.
     var diagnosticHistory: [ComputerUseFaraModel.Step] { session?.history ?? [] }
     let isReady = true
-    let requiresMacControlHelper = false
     let runtimeName = "Native desktop computer use"
     let readyDetail = "Native desktop execution is available"
 

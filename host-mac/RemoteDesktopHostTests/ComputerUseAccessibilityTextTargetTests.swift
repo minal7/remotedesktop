@@ -1956,7 +1956,6 @@ final class ComputerUseAccessibilityTextTargetTests: XCTestCase {
                 case .completed: resultSummary = "completed"
                 case .clarificationRequired: resultSummary = "clarificationRequired"
                 case .approvalRequired: resultSummary = "approvalRequired"
-                case .mcpApprovalRequired: resultSummary = "mcpApprovalRequired"
                 case .agentApprovalRequired: resultSummary = "agentApprovalRequired"
                 }
             } catch {

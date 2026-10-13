@@ -165,17 +165,6 @@ inference, OS-Atlas visual grounding, and action execution remain on the Mac.
 - `InputInjector` — consumes `ControlMessage.pointer|scroll|key|text`
   and posts `CGEvent`s with correct button transitions and drag types
 - Full HID → macOS virtual-keycode translation table for common keys
-- MCP-first Computer Use using Apple's on-device Foundation Models planner and
-  a pinned, notarized universal `mac-control-mcp` helper. It runs locally over
-  stdio with a scrubbed environment: no API key, paid service, Python,
-  Homebrew, or Conda is required. The host owns the tool allowlist, schema
-  validation, mutation ledger, and exact one-use approvals.
-- Reliable Apple Mail draft/send support through `remote_desktop_mail`, a
-  reviewed MCP server embedded in the signed host and connected in memory. It
-  uses the default Mail sending account, creates a visible draft, suppresses
-  automatic signatures so the approved body stays exact, and sends only after
-  iOS shows the complete recipients, subject, and body for one-action approval.
-  The downloaded helper's generic `mail_send` tool remains blocked.
 - GUI-only apps use a local hybrid when no suitable structured tool exists.
   Its always-installed semantic router opens an explicitly named common app
   once before interacting and handles bounded literal text and unambiguous
@@ -184,8 +173,8 @@ inference, OS-Atlas visual grounding, and action execution remain on the Mac.
   arguments. OS-Atlas-Pro-4B grounds pointer targets, and the host composes,
   validates, approves, and executes the native action.
   iOS sends one idempotent request through the bounded setup lifecycle; the
-  host streams the helper download, model download, verification, and
-  runtime-loading progress back to the device row. Setup is the only
+  host streams model download, verification, and runtime-loading progress
+  back to the device row. Setup is the only
   Computer Use lifecycle permitted on CloudKit.
 - Versioned model installation in Application Support with Apple-silicon,
   8 GiB memory, free-space, byte-size, and streaming SHA-256 checks before an
@@ -210,14 +199,6 @@ inference, OS-Atlas visual grounding, and action execution remain on the Mac.
   switching likewise accepts only a typed `OPEN_APP` route. Direct user input
   immediately pauses automation, and malformed or out-of-range actions are
   rejected before any effect.
-
-## Computer Use local component distribution
-
-`mac-control-mcp` 0.8.2 is fetched only after setup is requested on iOS. The
-host pins its release URL, byte count, SHA-256, bundle identifier, Developer ID
-team, hardened-runtime signature, universal architectures, Gatekeeper result,
-and notarization ticket before activating a versioned receipt. The helper is
-not launched by the installer. Its MIT license and notice ship in the host.
 
 The v1 visual model is OS-Atlas-Pro-4B, pinned to the public, ungated
 `OS-Copilot/OS-Atlas-Pro-4B` revision
@@ -252,28 +233,6 @@ the signed-in iPhone Air Simulator. The component and UI tests below establish
 their individual contracts; they are not a substitute for that pending release
 acceptance result.
 
-- `host-mac/scripts/run_mcp_acceptance.py` validates the pinned helper identity,
-  inventory, host policy, and schemas, then issues real stdio JSON-RPC
-  `tools/call` requests for all 29 exposed sidecar operations. A no-Dock
-  accessory AppKit fixture stays outside every display. A 20 ms native
-  watchdog starts before helper launch/initialization and aborts on any new
-  visible window or prompt. The one explicit native-feedback allowance is the
-  bounded macOS screen-capture privacy status indicator during
-  `ax_tree_augmented`; it is reported and must fade before the next call. Exact
-  frontmost state is restored after cleanup. Private read results are never
-  printed. Five Safari tab tools are explicitly blocked because the live gate
-  proved v0.8.2 activates and mutates Safari's ambient front window; browser
-  pricing tasks therefore use the OS-Atlas visual fallback and its login
-  handoff instead. This 29-operation gate is low-level component and host-policy
-  coverage; it does not claim that all 29 operations are available to the
-  natural-language product planner. The production structured planner exposes
-  seven read-only sidecar operations (Contacts search, Reminders list,
-  Shortcuts list, focused app, running apps, windows, and permission status)
-  plus the host's embedded Mail operation. Host executor tests cover an
-  ordinary-person prompt, typed proposal, execution, and consumed result for
-  every read-only operation. A separate Contacts-to-Mail test proves that a
-  detailed send request consumes the contact result, stops at the exact Mail
-  approval, and invokes Mail only after approval.
 - The `RemoteDesktopLiveE2E` suite is the acceptance path for visible login
   takeover, exact email-send confirmation, approvals, progress, and results on
   an iOS Simulator. Its final signed Release transport run is pending, so no
@@ -281,7 +240,7 @@ acceptance result.
 - `host-mac/scripts/run_doordash_takeover_resume_simulator_live_e2e.py`
   runs only the continuous Release-Simulator DoorDash acceptance through
   direct `xcodebuild`, preserving the person-handled macOS consent, private
-  login, quote preparation, and resume windows without an MCP transport
+  login, quote preparation, and resume windows without a request transport
   timeout. It requires `--allow-visible-ui`, validates the installed Release
   host and one booted iPhone Air, and stops after 40 minutes. It first uses
   `build-for-testing`, copies the generated old-style xctestrun beside the
@@ -308,7 +267,7 @@ acceptance result.
   `doordash.com` sign-in form. The test OCR-audits only the streamed Mac
   viewport before credentials and after the prepared quote, failing on visible
   Safari History, Everyday Planner,
-  Reminders/Calendar/Contacts, or MCP UI. It deliberately performs no OCR
+  Reminders/Calendar/Contacts. It deliberately performs no OCR
   during the person's private sign-in window.
 - `host-mac/scripts/run_osatlas_acceptance.sh` runs the hidden deterministic
   OS-Atlas compatibility tests selected by the checked-in inventory. It
@@ -316,8 +275,8 @@ acceptance result.
   verified before and after the test run, with automatic package resolution
   disabled and the resolved package versions enforced.
 
-See [AcceptanceFixtures/README.md](AcceptanceFixtures/README.md) for exact
-commands, mode boundaries, privacy guidance, and the MCP operation matrix.
+See [AcceptanceFixtures/README.md](AcceptanceFixtures/README.md) for local fixture
+commands, mode boundaries, and privacy guidance.
 
 ## Current limitations
 
