@@ -35,17 +35,14 @@ class ReleaseGateEvidenceTests(unittest.TestCase):
         self.temp.cleanup()
 
     def make_run(self, run_id: str | None = None, job: str = "gmail",
-                 bridge: bool = True, send_granted: bool = False,
+                 send_granted: bool = False,
                  trace_mtime: float | None = None) -> tuple[Path, dict[str, object]]:
         identity = run_id or self.run_id
         trace = self.trace_root / f"m0-acceptance-{job}-20261012-{identity}"
         trace.mkdir()
         expected = {"job": job, "run_id": identity}
         outcome = {"job": job, "run_id": identity, "raw_outcome": "taskCompleted",
-                   "evidence": {"safari_bridge_verified": bridge,
-                                "bridge_round_trip_p95_ms": 42,
-                                "bridge_step_median_seconds": 2.1,
-                                "send_approval_granted": send_granted}}
+                   "evidence": {"send_approval_granted": send_granted}}
         checker = {"job": job, "run_id": identity, "passed": True,
                    "check": {"passed": True}}
         for name, data in (("expected.json", expected), ("outcome.json", outcome),
@@ -85,30 +82,14 @@ class ReleaseGateEvidenceTests(unittest.TestCase):
         self.assertIsNone(summary)
         self.assertEqual(reason, "run identity is missing, invalid, or replayed")
 
-    def test_missing_bridge_attestation_is_not_inferred_from_job_pass(self) -> None:
-        trace, run = self.make_run(bridge=False)
-        summary, reason = self.validate(trace, run)
-        self.assertIsNone(summary)
-        self.assertEqual(reason, "missing fresh Safari bridge attestation")
-
     def test_send_approval_must_remain_ungranted(self) -> None:
         trace, run = self.make_run(send_granted=True)
         summary, reason = self.validate(trace, run)
         self.assertIsNone(summary)
         self.assertEqual(reason, "Gmail send approval was granted during acceptance")
 
-    def test_missing_bridge_speed_proof_blocks_old_ax_job_pass(self) -> None:
-        trace, run = self.make_run()
-        outcome_path = trace / "outcome.json"
-        outcome = json.loads(outcome_path.read_text(encoding="utf-8"))
-        outcome["evidence"].pop("bridge_round_trip_p95_ms")
-        outcome_path.write_text(json.dumps(outcome), encoding="utf-8")
-        summary, reason = self.validate(trace, run)
-        self.assertIsNone(summary)
-        self.assertEqual(reason, "missing passing Safari bridge 1,000-round-trip speed evidence (<50ms)")
-
-    def test_apple_mail_acceptance_does_not_require_safari_bridge(self) -> None:
-        trace, run = self.make_run(job="email", bridge=False)
+    def test_email_acceptance_is_valid_without_bridge_evidence(self) -> None:
+        trace, run = self.make_run(job="email")
         summary, reason = self.validate(trace, run, job="email")
         self.assertIsNotNone(summary)
         self.assertEqual(reason, "independent checker passed")

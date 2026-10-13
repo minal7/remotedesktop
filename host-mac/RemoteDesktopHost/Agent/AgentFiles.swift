@@ -1,5 +1,8 @@
 import Foundation
 
+/// Host-owned file search shared by the Pixel environment and host backends.
+typealias AgentWebFileFinder = @MainActor (String, String?, String?) async throws -> [AgentFileCandidate]
+
 /// A file selected by a host-owned catalog. Model-visible records contain only
 /// candidate IDs and display metadata; local paths never enter AgentObservation.
 struct AgentFileCandidate: Equatable, Sendable {

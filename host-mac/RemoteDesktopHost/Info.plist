@@ -38,11 +38,5 @@
 	<false/>
 	<key>NSSupportsSuddenTermination</key>
 	<false/>
-	<key>SafariBridgeExtensionIdentifier</key>
-	<string>$(HOST_BUNDLE_IDENTIFIER).safari</string>
-	<key>SafariBridgeHelperIdentifier</key>
-	<string>$(HOST_BUNDLE_IDENTIFIER).bridge-broker</string>
-	<key>SafariBridgeHostIdentifier</key>
-	<string>$(HOST_BUNDLE_IDENTIFIER)</string>
 </dict>
 </plist>

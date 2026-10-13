@@ -84,9 +84,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             }
             return
         }
-        if SafariBridgeSpikeRunner.startIfRequested() {
-            return
-        }
         if let standaloneOptIn = ProcessInfo.processInfo.environment["CORE_JOB_ACCEPTANCE_STANDALONE"] {
             guard standaloneOptIn == "1" else {
                 FileHandle.standardError.write(Data("standalone acceptance opt-in invalid\n".utf8))
