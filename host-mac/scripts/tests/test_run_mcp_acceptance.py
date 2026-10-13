@@ -173,7 +173,6 @@ class MCPAcceptanceRunnerTests(unittest.TestCase):
                 mock.patch.object(acceptance.AcceptanceRunner, "_run_fixture_cases"),
                 mock.patch.object(acceptance.AcceptanceRunner, "_run_everyday_workflows"),
                 mock.patch.object(acceptance.AcceptanceRunner, "_run_private_read_cases"),
-                mock.patch.object(acceptance.AcceptanceRunner, "_verify_mail_live_evidence"),
             ):
                 runner = acceptance.AcceptanceRunner(binary)
                 self.addCleanup(shutil.rmtree, runner.temporary, True)
@@ -237,11 +236,8 @@ class MCPAcceptanceRunnerTests(unittest.TestCase):
     def test_every_exposed_operation_has_semantic_runtime_evidence(self) -> None:
         self.assertEqual(set(acceptance.TOOL_POSTCONDITIONS), acceptance.HOST_EXPOSED_TOOLS)
         self.assertEqual(len(acceptance.SIDECAR_EXPOSED_TOOLS), 29)
-        self.assertEqual(len(acceptance.HOST_EXPOSED_TOOLS), 30)
-        self.assertEqual(
-            acceptance.SIDECAR_EXPOSED_TOOLS,
-            acceptance.HOST_EXPOSED_TOOLS - {"remote_desktop_mail"},
-        )
+        self.assertEqual(len(acceptance.HOST_EXPOSED_TOOLS), 29)
+        self.assertEqual(acceptance.SIDECAR_EXPOSED_TOOLS, acceptance.HOST_EXPOSED_TOOLS)
 
     def test_fixture_is_accessory_offscreen_and_has_no_planner_artifact(self) -> None:
         fixture = acceptance.FIXTURE_SOURCE.read_text()

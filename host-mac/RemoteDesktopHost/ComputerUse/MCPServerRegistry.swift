@@ -30,10 +30,6 @@ protocol MCPServerBinaryValidating: Sendable {
 /// server requires a reviewed code change adding a pinned definition and
 /// safety policy, rather than importing an arbitrary desktop MCP config.
 enum MCPServerRegistry {
-    /// In-process MCP server compiled into the signed host. Unlike curated
-    /// sidecars it has no separately validated binary or user configuration.
-    static let remoteDesktopMailServerID = RemoteDesktopMailMCP.serverID
-
     static let macControl = MCPServerDefinition(
         serverID: "io.github.AdelElo13.mac-control-mcp",
         expectedServerName: "mac-control-mcp",

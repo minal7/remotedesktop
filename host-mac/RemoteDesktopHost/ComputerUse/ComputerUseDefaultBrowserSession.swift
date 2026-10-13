@@ -61,47 +61,6 @@ final class ComputerUseDefaultBrowserSession {
         var isNavigatingPath: Bool { goToFolderBounds != nil }
     }
 
-    struct SafariAddressBarCandidate {
-        let element: AXUIElement
-        let processIdentifier: pid_t
-        let role: String
-        let identifier: String
-        let isEnabled: Bool
-        let valueIsSettable: Bool
-        let isSecure: Bool
-        let isHidden: Bool
-        let isProtected: Bool
-    }
-
-    struct SafariAddressBarAXAccess {
-        let read: (String, AXUIElement) -> CFTypeRef?
-        let processIdentifier: (AXUIElement) -> pid_t?
-        let valueIsSettable: (AXUIElement) -> Bool
-        let setValue: (CFTypeRef, AXUIElement) -> AXError
-
-        static var live: SafariAddressBarAXAccess {
-            func read(_ name: String, _ element: AXUIElement) -> CFTypeRef? {
-                guard !Task.isCancelled else { return nil }
-                AXUIElementSetMessagingTimeout(element, 0.1)
-                var result: CFTypeRef?
-                guard AXUIElementCopyAttributeValue(element, name as CFString, &result) == .success,
-                      !Task.isCancelled else { return nil }
-                return result
-            }
-            return SafariAddressBarAXAccess(read: read, processIdentifier: { element in
-                var pid: pid_t = 0
-                guard AXUIElementGetPid(element, &pid) == .success else { return nil }
-                return pid
-            }, valueIsSettable: { element in
-                var settable = DarwinBoolean(false)
-                return AXUIElementIsAttributeSettable(element, kAXValueAttribute as CFString, &settable) == .success
-                    && settable.boolValue
-            }, setValue: { value, element in
-                AXUIElementSetAttributeValue(element, kAXValueAttribute as CFString, value)
-            })
-        }
-    }
-
     enum Failure: Error, Equatable {
         case changedTaskOrGoal, targetLost, ambiguousWindows, noNewFocusedWindow
         case existingWindowsChanged, interrupted, journalUncertain, authenticationHandoff, browserAutomationPermissionRequired
@@ -113,8 +72,6 @@ final class ComputerUseDefaultBrowserSession {
     typealias LaunchApplication = @MainActor (ComputerUseDefaultBrowserTarget.Handler, @escaping @MainActor () throws -> Void) async throws -> ComputerUseApplicationIdentity
     typealias CaptureWindows = @MainActor (ComputerUseApplicationIdentity) throws -> WindowSnapshot
     typealias CaptureRetainedWindow = @MainActor (ComputerUseApplicationIdentity, Window) throws -> WindowSnapshot
-    typealias CaptureFocusedRetainedWindow = @MainActor (ComputerUseApplicationIdentity, Window,
-        @MainActor () throws -> Void) throws -> WindowSnapshot
 
     static let defaultNewWindowWaitBudget: Duration = .seconds(30)
     private static let nativeWindowCaptureBudget: Duration = .seconds(4)
@@ -135,9 +92,6 @@ final class ComputerUseDefaultBrowserSession {
         var currentActionBounds: CGRect?
         var navigationDispatches: Set<String> = []
         var navigationReturnsCompleted: Set<String> = []
-        var stableNavigationRetryConsumed: Set<String> = []
-        var stableNavigationRetryPermits: Set<String> = []
-        var allowsW2FocusedRetainedCapture = false
 
         init(taskID: String, goalDigest: String, sessionTaskID: String,
              handler: ComputerUseDefaultBrowserTarget.Handler) {
@@ -208,10 +162,8 @@ final class ComputerUseDefaultBrowserSession {
     private let launchApplication: LaunchApplication
     private let captureWindows: CaptureWindows
     private let captureRetainedWindow: CaptureRetainedWindow?
-    private let captureFocusedRetainedWindow: CaptureFocusedRetainedWindow?
     private let makeStore: (URL) throws -> ComputerUseTaskJournalStore
     private let newWindowWaitBudget: Duration
-    private let safariAddressBarAX: SafariAddressBarAXAccess
     private let captureDiagnosticProvider: @MainActor () -> String?
     private let captureDiagnosticAXErrorProvider: @MainActor () -> Int?
     private let captureDiagnosticElapsedMsProvider: @MainActor () -> Int?
@@ -222,7 +174,6 @@ final class ComputerUseDefaultBrowserSession {
     private(set) var lastWindowTransitionDiagnostic: String?
     /// Failure-only scalar evidence for the bounded Safari address-focus wait.
     /// Contains no page text, URL, AX label, or identifier.
-    private(set) var lastAddressFocusWaitDiagnostic: [String: String] = [:]
     var currentWindow: Window? { runState?.target }
     var currentFileOpenPanel: FileOpenPanel? { runState?.currentFileOpenPanel }
     var currentActionBounds: CGRect? { runState?.currentActionBounds }
@@ -259,11 +210,6 @@ final class ComputerUseDefaultBrowserSession {
                 captureDiagnosticState.reset()
                 return try Self.captureWindowsForApplication(application, expectedWindow: target,
                     diagnostic: recordDiagnostic)
-            }, captureFocusedRetainedWindow: { application, target, authorizeFallback in
-                captureDiagnosticState.reset()
-                return try Self.captureWindowsForApplication(application, expectedWindow: target,
-                    allowFocusedRetainedInventoryFallback: true,
-                    authorizeFocusedFallback: authorizeFallback, diagnostic: recordDiagnostic)
             }, captureDiagnosticProvider: { captureDiagnosticState.reason },
             captureDiagnosticAXErrorProvider: { captureDiagnosticState.axErrorCode },
             captureDiagnosticElapsedMsProvider: { captureDiagnosticState.elapsedMs },
@@ -278,11 +224,9 @@ final class ComputerUseDefaultBrowserSession {
          resolveHandler: @escaping ResolveHandler,
          launchApplication: @escaping LaunchApplication,
          captureWindows: @escaping CaptureWindows,
-         safariAddressBarAX: SafariAddressBarAXAccess = .live,
          makeStore: @escaping (URL) throws -> ComputerUseTaskJournalStore = { try .init(directory: $0) },
          newWindowWaitBudget: Duration = ComputerUseDefaultBrowserSession.defaultNewWindowWaitBudget,
          captureRetainedWindow: CaptureRetainedWindow? = nil,
-         captureFocusedRetainedWindow: CaptureFocusedRetainedWindow? = nil,
          captureDiagnosticProvider: @escaping @MainActor () -> String? = { nil },
          captureDiagnosticAXErrorProvider: @escaping @MainActor () -> Int? = { nil },
          captureDiagnosticElapsedMsProvider: @escaping @MainActor () -> Int? = { nil },
@@ -293,8 +237,6 @@ final class ComputerUseDefaultBrowserSession {
         self.launchApplication = launchApplication
         self.captureWindows = captureWindows
         self.captureRetainedWindow = captureRetainedWindow
-        self.captureFocusedRetainedWindow = captureFocusedRetainedWindow
-        self.safariAddressBarAX = safariAddressBarAX
         self.makeStore = makeStore
         self.newWindowWaitBudget = newWindowWaitBudget
         self.captureDiagnosticProvider = captureDiagnosticProvider
@@ -407,633 +349,6 @@ final class ComputerUseDefaultBrowserSession {
         lastValidationPhaseForDiagnostics = .complete
     }
 
-    /// Called only after a typed W2 upload request is validated and assigned to
-    /// its executor scope. The setting belongs to this exact task run and is
-    /// intentionally absent from startup, generic browser, and Gmail sessions.
-    func enableW2FocusedRetainedCaptureFallback(taskID: String, goal: String,
-                                                tools: ComputerUseHostTools) throws {
-        try Task.checkCancellation()
-        try tools.requireActive()
-        let goalDigest = ComputerUseTextTaskContract.digest(goal)
-        guard let state = runState, state.taskID == taskID, state.goalDigest == goalDigest,
-              let app = state.app, let target = state.target,
-              target.application == app,
-              target.identity.applicationProcessIdentifier == app.processIdentifier else {
-            throw Failure.changedTaskOrGoal
-        }
-        try Self.validate(application: app, matches: state.handler)
-        try Task.checkCancellation()
-        try tools.requireActive()
-        state.allowsW2FocusedRetainedCapture = true
-    }
-
-    /// Navigates through Safari's observed address field using only the
-    /// already-authorized Accessibility and native input paths.
-    func rearmStableGmailNavigationRetry(to targetURL: URL, observedPageURL: URL,
-        accountIndex: Int, taskID: String, goal: String, tools: ComputerUseHostTools) throws -> Bool {
-        try Task.checkCancellation()
-        try tools.requireActive()
-        try validate(taskID: taskID, goal: goal, tools: tools)
-        guard let state = runState, let target = state.target,
-              state.currentFileOpenPanel == nil,
-              Self.isCanonicalStableGmailNavigationURL(targetURL, accountIndex: accountIndex),
-              Self.isSameAccountGmailObservationURL(observedPageURL, accountIndex: accountIndex),
-              observedPageURL.absoluteString != targetURL.absoluteString,
-              state.navigationDispatches.contains(targetURL.absoluteString),
-              state.navigationReturnsCompleted.contains(targetURL.absoluteString),
-              !state.stableNavigationRetryConsumed.contains(targetURL.absoluteString),
-              !state.stableNavigationRetryPermits.contains(targetURL.absoluteString),
-              target.application.bundleIdentifier == "com.apple.Safari" else { return false }
-        try Task.checkCancellation()
-        try tools.requireActive()
-        try validate(taskID: taskID, goal: goal, tools: tools)
-        guard let current = runState?.target, Self.sameWindow(current, target),
-              state.currentFileOpenPanel == nil else { return false }
-        state.stableNavigationRetryConsumed.insert(targetURL.absoluteString)
-        state.stableNavigationRetryPermits.insert(targetURL.absoluteString)
-        return true
-    }
-
-    func navigateRetainedSafariTab(to url: URL, taskID: String, goal: String,
-                                   tools: ComputerUseHostTools,
-                                   webUploadNavigation: (stage: ComputerUseWebUploadJob.NavigationStage,
-                                       provider: ComputerUseWebUploadJob.Provider, filename: String?)? = nil,
-                                   diagnostic: @escaping @MainActor (String) -> Void = { _ in }) async throws {
-        try Task.checkCancellation()
-        try tools.requireActive()
-        do { try validate(taskID: taskID, goal: goal, tools: tools) }
-        catch { diagnostic("phase=pre_navigation_scope_validation_failed"); throw error }
-        guard let state = runState, let target = state.target else {
-            diagnostic("phase=retained_target_missing"); throw Failure.targetLost
-        }
-        guard target.application.bundleIdentifier == "com.apple.Safari" else {
-            diagnostic("phase=unsupported_browser bundle=safari_required"); throw Failure.targetLost
-        }
-        let uploadNavigationKey: String? = webUploadNavigation.map { "web-upload-\($0.stage.rawValue)" }
-        let supportedURL: Bool
-        if let webUploadNavigation {
-            supportedURL = Self.isSupportedWebUploadNavigationURL(url, stage: webUploadNavigation.stage,
-                provider: webUploadNavigation.provider, filename: webUploadNavigation.filename)
-        } else {
-            supportedURL = Self.isSupportedWebNavigationURL(url)
-        }
-        guard supportedURL else {
-            diagnostic("phase=destination_rejected"); throw Failure.targetLost
-        }
-        let dispatchKey = uploadNavigationKey ?? url.absoluteString
-        if state.navigationDispatches.contains(dispatchKey) {
-            guard uploadNavigationKey == nil else {
-                diagnostic("phase=already_latched"); throw Failure.targetLost
-            }
-            guard state.stableNavigationRetryPermits.remove(url.absoluteString) != nil else {
-                diagnostic("phase=already_latched"); throw Failure.targetLost
-            }
-        }
-        let initiallyObservedAddressField: AXUIElement
-        do { initiallyObservedAddressField = try uniqueSafariAddressField(in: target, diagnostic: diagnostic) }
-        catch { diagnostic("phase=address_field_not_found"); throw error }
-        try Task.checkCancellation()
-        try tools.requireActive()
-        try validate(taskID: taskID, goal: goal, tools: tools)
-        // AX focus can name Safari's address control before Cmd+L has
-        // activated location editing, so always establish that native mode.
-        do {
-            try tools.performNativeBrowserHostCommand(.focusAddress,
-                expectedApplication: target.application, willBeginEffect: {
-                    try Task.checkCancellation()
-                    try tools.requireActive()
-                    try self.validate(taskID: taskID, goal: goal, tools: tools)
-                    guard let currentState = self.runState, currentState.currentFileOpenPanel == nil,
-                          let current = currentState.target, Self.sameWindow(current, target),
-                          self.focusedSafariAddressField(in: current) != nil else { throw Failure.targetLost }
-                })
-        } catch { diagnostic("phase=address_field_focus_dispatch_failed"); throw error }
-        diagnostic("phase=address_editing_activated")
-        let addressField: AXUIElement
-        do {
-            addressField = try await waitForFocusedSafariAddressField(
-                initiallyObserved: initiallyObservedAddressField, target: target,
-                taskID: taskID, goal: goal, tools: tools, diagnostic: diagnostic)
-        } catch {
-            diagnostic("phase=address_field_not_focused_before_navigation")
-            throw error
-        }
-        try Task.checkCancellation()
-        try tools.requireActive()
-        do { try validate(taskID: taskID, goal: goal, tools: tools) }
-        catch { diagnostic("phase=pre_address_write_scope_validation_failed"); throw error }
-        guard isCurrentSafariAddressField(addressField, target: target),
-              focusedSafariAddressField(in: target).map({ CFEqual($0, addressField) }) == true else {
-            diagnostic("phase=pre_address_write_focus_validation_failed")
-            throw Failure.targetLost
-        }
-        let addressValue = safariAddressBarAX.read(kAXValueAttribute as String, addressField) as? String
-        guard isCurrentSafariAddressField(addressField, target: target),
-              focusedSafariAddressField(in: target).map({ CFEqual($0, addressField) }) == true,
-              let addressValue else {
-            diagnostic("phase=address_value_read_failed")
-            throw Failure.targetLost
-        }
-        let typeAction = ComputerUsePredictedAction.typeText(url.absoluteString)
-        var typeFingerprint: ComputerUseApprovalFingerprint?
-        var typeFingerprintAttempts = 0
-        var typeFingerprintRetryDeadline: ContinuousClock.Instant?
-        while typeFingerprint == nil {
-            if typeFingerprintAttempts > 0 {
-                guard let deadline = typeFingerprintRetryDeadline, ContinuousClock.now < deadline else {
-                    throw ComputerUseHostTools.ToolError.approvalTargetUnavailable
-                }
-                try Task.checkCancellation()
-                try tools.requireActive()
-                try await Task.sleep(for: .milliseconds(50))
-                try Task.checkCancellation()
-                try tools.requireActive()
-                try validate(taskID: taskID, goal: goal, tools: tools)
-                guard isCurrentSafariAddressField(addressField, target: target),
-                      focusedSafariAddressField(in: target).map({ CFEqual($0, addressField) }) == true,
-                      safariAddressBarAX.read(kAXValueAttribute as String, addressField) as? String == addressValue else {
-                    throw Failure.targetLost
-                }
-                guard ContinuousClock.now < deadline else {
-                    throw ComputerUseHostTools.ToolError.approvalTargetUnavailable
-                }
-            }
-            try Task.checkCancellation()
-            try tools.requireActive()
-            typeFingerprintAttempts += 1
-            do {
-                typeFingerprint = try tools.prepareNativeActionFingerprint(for: typeAction)
-            } catch ComputerUseHostTools.ToolError.approvalTargetUnavailable {
-                typeFingerprintRetryDeadline = typeFingerprintRetryDeadline
-                    ?? ContinuousClock.now.advanced(by: .seconds(2))
-                guard typeFingerprintAttempts < 3 else {
-                    throw ComputerUseHostTools.ToolError.approvalTargetUnavailable
-                }
-            } catch {
-                throw error
-            }
-        }
-        guard let typeFingerprint else { throw Failure.targetLost }
-        let addressEntryScope = ComputerUseNativeBrowserAddressEntryScope(
-            application: target.application,
-            window: target.identity,
-            retainedWindow: target.accessibilityElement,
-            addressField: addressField)
-        do {
-            try await tools.performNativeBrowserAddressValueWrite(url.absoluteString, scope: addressEntryScope,
-                fingerprint: typeFingerprint, willBeginEffect: {
-                    try Task.checkCancellation()
-                    try tools.requireActive()
-                    try self.validate(taskID: taskID, goal: goal, tools: tools)
-                    guard self.isCurrentSafariAddressField(addressField, target: target),
-                          self.focusedSafariAddressField(in: target).map({ CFEqual($0, addressField) }) == true,
-                          self.safariAddressBarAX.read(kAXValueAttribute as String, addressField) as? String == addressValue else {
-                        throw Failure.targetLost
-                    }
-                    // A partial or uncertain AX write must never be replayed.
-                    state.navigationDispatches.insert(dispatchKey)
-                    diagnostic("phase=ax_address_value_write_latched")
-                }, writeValue: {
-                    try Task.checkCancellation()
-                    try tools.requireActive()
-                    try self.validate(taskID: taskID, goal: goal, tools: tools)
-                    guard self.isCurrentSafariAddressField(addressField, target: target),
-                          self.focusedSafariAddressField(in: target).map({ CFEqual($0, addressField) }) == true,
-                          self.safariAddressBarAX.read(kAXValueAttribute as String, addressField) as? String == addressValue else {
-                        throw Failure.targetLost
-                    }
-                    let result = self.safariAddressBarAX.setValue(url.absoluteString as CFTypeRef, addressField)
-                    diagnostic(result == .success
-                        ? "phase=ax_address_value_write_completed"
-                        : "phase=ax_address_value_write_status_uncertain")
-                })
-        } catch { diagnostic("phase=ax_address_value_write_failed"); throw error }
-        // W2 retained-window validation may consume its bounded native capture budget.
-        // Include that budget once in each monotonic phase deadline; ordinary navigation
-        // keeps the original readback and Return limits.
-        let w2CaptureAllowance: Duration = webUploadNavigation != nil && state.allowsW2FocusedRetainedCapture
-            ? Self.nativeWindowCaptureBudget : .zero
-        let addressReadbackDeadline = ContinuousClock.now.advanced(by: .seconds(2) + w2CaptureAllowance)
-        while true {
-            try Task.checkCancellation()
-            try tools.requireActive()
-            guard ContinuousClock.now < addressReadbackDeadline else {
-                diagnostic("phase=ax_address_value_readback_deadline")
-                throw Failure.targetLost
-            }
-            do { try validate(taskID: taskID, goal: goal, tools: tools) }
-            catch {
-                guard isTransientValidationCaptureFailure(error),
-                      ContinuousClock.now < addressReadbackDeadline else {
-                    diagnostic("phase=ax_address_value_readback_scope_failed")
-                    throw error
-                }
-                diagnostic("phase=ax_address_value_readback_scope_unavailable")
-                try await Task.sleep(for: .milliseconds(50))
-                continue
-            }
-            switch addressReadbackReadiness(field: addressField, target: target,
-                                            url: url, previousValue: addressValue) {
-            case .ready:
-                guard ContinuousClock.now < addressReadbackDeadline else {
-                    diagnostic("phase=ax_address_value_readback_deadline")
-                    throw Failure.targetLost
-                }
-                diagnostic("phase=ax_address_value_readback_verified")
-                break
-            case .temporarilyUnavailable(let phase):
-                guard ContinuousClock.now < addressReadbackDeadline else {
-                    diagnostic("phase=ax_address_value_readback_deadline")
-                    throw Failure.targetLost
-                }
-                diagnostic("phase=\(phase)")
-                try await Task.sleep(for: .milliseconds(50))
-                continue
-            case .rejected(let phase):
-                switch phase {
-                case "return_field_process_changed", "return_field_role_changed", "return_field_identifier_changed",
-                     "return_field_secure", "return_field_protected", "return_field_disabled",
-                     "return_field_not_writable", "return_field_window_unconfirmed",
-                     "return_field_ancestry_changed", "return_window_changed":
-                    diagnostic("phase=ax_address_value_readback_field_unconfirmed_reason_\(phase)")
-                case "return_focus_changed", "return_focus_unavailable":
-                    diagnostic("phase=ax_address_value_readback_focus_unconfirmed")
-                default:
-                    diagnostic("phase=ax_address_value_readback_value_mismatch")
-                }
-                throw Failure.targetLost
-            }
-            break
-        }
-        let returnPreparationDeadline = ContinuousClock.now.advanced(by: .seconds(3) + w2CaptureAllowance)
-        var returnEffectReady = false
-        var transientReturnFailure: String?
-        var returnPreparationPhase: String?
-        while true {
-            try Task.checkCancellation()
-            try tools.requireActive()
-            guard ContinuousClock.now < returnPreparationDeadline else {
-                diagnostic("phase=return_preparation_deadline")
-                throw Failure.targetLost
-            }
-            returnEffectReady = false
-            transientReturnFailure = nil
-            returnPreparationPhase = nil
-            do {
-                try tools.performNativeBrowserHostCommand(.commitAddress,
-                    expectedApplication: target.application, willBeginEffect: {
-                    try Task.checkCancellation()
-                    try tools.requireActive()
-                    do {
-                        try self.validate(taskID: taskID, goal: goal, tools: tools)
-                    } catch {
-                        guard self.isTransientValidationCaptureFailure(error) else {
-                            returnPreparationPhase = "return_scope_changed"
-                            diagnostic("phase=return_scope_changed")
-                            throw error
-                        }
-                        transientReturnFailure = "return_scope_unavailable"
-                        returnPreparationPhase = "return_scope_unavailable"
-                        diagnostic("phase=return_scope_unavailable")
-                        throw Failure.targetLost
-                    }
-                    switch self.returnPreparationReadiness(field: addressField, target: target, url: url) {
-                    case .ready:
-                        guard ContinuousClock.now < returnPreparationDeadline else {
-                            transientReturnFailure = "return_preparation_deadline"
-                            returnPreparationPhase = "return_preparation_deadline"
-                            diagnostic("phase=return_preparation_deadline")
-                            throw Failure.targetLost
-                        }
-                    case .temporarilyUnavailable(let phase):
-                        transientReturnFailure = phase
-                        returnPreparationPhase = phase
-                        diagnostic("phase=\(phase)")
-                        throw Failure.targetLost
-                    case .rejected(let phase):
-                        transientReturnFailure = nil
-                        returnPreparationPhase = phase
-                        diagnostic("phase=\(phase)")
-                        throw Failure.targetLost
-                    }
-                    // This must remain the final statement after fresh scope, panel,
-                    // exact field, focus, and exact URL checks. The host command
-                    // performs its own app/gate check before posting Return.
-                    returnEffectReady = true
-                })
-                break
-            } catch {
-                guard !returnEffectReady,
-                      (error as? Failure) == .targetLost,
-                      transientReturnFailure != nil else {
-                    if returnPreparationPhase == nil { diagnostic("phase=return_dispatch_failed") }
-                    throw error
-                }
-                try Task.checkCancellation()
-                try tools.requireActive()
-                guard ContinuousClock.now < returnPreparationDeadline else {
-                    diagnostic("phase=return_preparation_deadline")
-                    throw Failure.targetLost
-                }
-                try await Task.sleep(for: .milliseconds(50))
-            }
-        }
-        try Task.checkCancellation()
-        try tools.requireActive()
-        let postReturnValidationDeadline = ContinuousClock.now.advanced(by: .seconds(15))
-        var lastQualifyingCaptureFailure: Error?
-        while true {
-            try Task.checkCancellation()
-            try tools.requireActive()
-            guard ContinuousClock.now < postReturnValidationDeadline else {
-                diagnostic("phase=post_navigation_scope_validation_failed")
-                throw lastQualifyingCaptureFailure ?? Failure.targetLost
-            }
-            guard runState === state,
-                  state.taskID == taskID,
-                  state.goalDigest == ComputerUseTextTaskContract.digest(goal),
-                  state.app == target.application,
-                  let currentTarget = state.target,
-                  Self.sameWindow(currentTarget, target) else {
-                diagnostic("phase=post_navigation_scope_validation_failed")
-                throw Failure.targetLost
-            }
-            let frontmost = tools.frontmostApplicationSnapshot()
-            guard frontmost.identityIsAuthoritative,
-                  frontmost.identity == target.application else {
-                diagnostic("phase=post_navigation_scope_validation_failed")
-                throw Failure.targetLost
-            }
-            do {
-                try validate(taskID: taskID, goal: goal, tools: tools)
-                break
-            } catch {
-                guard isTransientValidationCaptureFailure(error) else {
-                    diagnostic("phase=post_navigation_scope_validation_failed")
-                    throw error
-                }
-                lastQualifyingCaptureFailure = error
-                guard ContinuousClock.now < postReturnValidationDeadline else {
-                    diagnostic("phase=post_navigation_scope_validation_failed")
-                    throw error
-                }
-                try Task.checkCancellation()
-                try tools.requireActive()
-                guard runState === state,
-                      state.taskID == taskID,
-                      state.goalDigest == ComputerUseTextTaskContract.digest(goal),
-                      state.app == target.application,
-                      let currentTarget = state.target,
-                      Self.sameWindow(currentTarget, target) else {
-                    diagnostic("phase=post_navigation_scope_validation_failed")
-                    throw Failure.targetLost
-                }
-                let retryFrontmost = tools.frontmostApplicationSnapshot()
-                guard retryFrontmost.identityIsAuthoritative,
-                      retryFrontmost.identity == target.application else {
-                    diagnostic("phase=post_navigation_scope_validation_failed")
-                    throw Failure.targetLost
-                }
-                try await Task.sleep(for: .milliseconds(50))
-            }
-        }
-        guard let after = state.target, after.id == target.id,
-              after.application == target.application else {
-            diagnostic("phase=post_navigation_identity_mismatch")
-            throw Failure.targetLost
-        }
-        state.navigationReturnsCompleted.insert(dispatchKey)
-        diagnostic("phase=ax_navigation_dispatched")
-    }
-
-    static func isSupportedWebUploadNavigationURL(_ url: URL,
-        stage: ComputerUseWebUploadJob.NavigationStage,
-        provider: ComputerUseWebUploadJob.Provider, filename: String?) -> Bool {
-        switch stage {
-        case .home, .returnToRoot:
-            return url == provider.homeURL
-        case .collisionSearch, .finalSearch:
-            guard provider == .googleDrive, let filename else { return false }
-            return ComputerUseWebUploadJob.isDriveTitleSearchURL(url, filename: filename)
-        }
-    }
-
-    private static func isCanonicalStableGmailNavigationURL(_ url: URL, accountIndex: Int) -> Bool {
-        guard (0...9_999).contains(accountIndex),
-              let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
-              components.scheme?.lowercased() == "https",
-              components.host?.lowercased() == "mail.google.com",
-              components.user == nil, components.password == nil, components.port == nil,
-              components.query == nil,
-              let parsedIndex = ComputerUseGmailAccountDirectory.accountIndex(from: url.absoluteString),
-              parsedIndex == accountIndex,
-              components.path == "/mail/u/\(accountIndex)/",
-              components.fragment == "inbox" || components.fragment == "drafts" else {
-            return false
-        }
-        return true
-    }
-
-    private static func isSameAccountGmailObservationURL(_ url: URL, accountIndex: Int) -> Bool {
-        guard (0...9_999).contains(accountIndex),
-              let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
-              components.scheme?.lowercased() == "https",
-              components.host?.lowercased() == "mail.google.com",
-              components.user == nil, components.password == nil, components.port == nil,
-              ComputerUseGmailAccountDirectory.accountIndex(from: url.absoluteString) == accountIndex,
-              components.path == "/mail/u/\(accountIndex)" || components.path == "/mail/u/\(accountIndex)/" else {
-            return false
-        }
-        return true
-    }
-
-    static func selectedSafariAddressBarCandidate(from candidates: [SafariAddressBarCandidate],
-                                                   processIdentifier: pid_t) -> AXUIElement? {
-        let matches = candidates.filter {
-            $0.processIdentifier == processIdentifier
-                && ($0.role == "AXTextField" || $0.role == "AXComboBox")
-                && $0.identifier == "WEB_BROWSER_ADDRESS_AND_SEARCH_FIELD"
-                && $0.isEnabled && $0.valueIsSettable
-                && !$0.isSecure && !$0.isHidden && !$0.isProtected
-        }
-        guard matches.count == 1 else { return nil }
-        return matches[0].element
-    }
-
-    static func uniquelyListedRetainedWindow(_ target: AXUIElement,
-                                             in windows: [AXUIElement]) -> Bool {
-        windows.filter { CFEqual($0, target) }.count == 1
-    }
-
-    private func uniqueSafariAddressField(in target: Window,
-                                          diagnostic: (String) -> Void = { _ in }) throws -> AXUIElement {
-        let deadline = ContinuousClock.now.advanced(by: .milliseconds(750))
-        var queue: [AXUIElement] = [target.accessibilityElement]
-        var visited: [AXUIElement] = []
-        var candidates: [SafariAddressBarCandidate] = []
-        var foreignBranches = 0
-        func failure(_ reason: String) -> Failure {
-            diagnostic("phase=address_scan_failed reason=\(reason) nodes=\(visited.count) candidates=\(candidates.count) foreign_branches=\(foreignBranches)")
-            return .targetLost
-        }
-        while !queue.isEmpty {
-            try Task.checkCancellation()
-            guard ContinuousClock.now < deadline, visited.count < 256 else { throw failure("time_or_node_bound") }
-            let node = queue.removeFirst()
-            guard !visited.contains(where: { CFEqual($0, node) }) else { continue }
-            visited.append(node)
-            func read(_ attribute: String, _ element: AXUIElement) throws -> CFTypeRef? {
-                try Task.checkCancellation()
-                guard ContinuousClock.now < deadline else { throw failure("attribute_read_time_bound") }
-                return safariAddressBarAX.read(attribute, element)
-            }
-            guard let role = try read(kAXRoleAttribute as String, node) as? String else {
-                throw failure("role_unavailable")
-            }
-            if role == "AXWebArea" { continue }
-            guard safariAddressBarAX.processIdentifier(node) == target.application.processIdentifier else {
-                foreignBranches += 1
-                continue
-            }
-            let subrole = try read(kAXSubroleAttribute as String, node) as? String ?? ""
-            let isSecure = role == "AXSecureTextField" || subrole == (kAXSecureTextFieldSubrole as String)
-            let isHidden = (try read("AXHidden", node) as? NSNumber)?.boolValue == true
-            let isProtected = (try read("AXProtectedContent", node) as? NSNumber)?.boolValue == true
-            if isSecure || isHidden || isProtected { continue }
-            if role == "AXTextField" || role == "AXComboBox" {
-                let identifier = try read("AXIdentifier", node) as? String ?? ""
-                if identifier.isEmpty { diagnostic("phase=address_candidate_metadata_missing field=identifier") }
-                let enabledValue = try read(kAXEnabledAttribute as String, node) as? NSNumber
-                let enabled = enabledValue?.boolValue == true
-                if enabledValue == nil { diagnostic("phase=address_candidate_metadata_missing field=enabled") }
-                let valueIsSettable = safariAddressBarAX.valueIsSettable(node)
-                if !valueIsSettable { diagnostic("phase=address_candidate_not_writable") }
-                candidates.append(.init(element: node,
-                    processIdentifier: safariAddressBarAX.processIdentifier(node) ?? -1,
-                    role: role, identifier: identifier, isEnabled: enabled,
-                    valueIsSettable: valueIsSettable,
-                    isSecure: isSecure, isHidden: isHidden, isProtected: isProtected))
-            }
-            let knownLeafRoles: Set<String> = ["AXTextField", "AXComboBox", "AXButton", "AXStaticText",
-                "AXLink", "AXImage", "AXCheckBox", "AXPopUpButton", "AXMenuButton", "AXSlider",
-                "AXSeparator", "AXSplitter", "AXDisclosureTriangle", "AXProgressIndicator"]
-            guard let childrenValue = try read(kAXChildrenAttribute as String, node) else {
-                if knownLeafRoles.contains(role) { continue }
-                let safeRole = ["AXApplication", "AXWindow", "AXToolbar", "AXGroup", "AXSplitGroup",
-                    "AXTabGroup", "AXTab", "AXRadioButton"].contains(role) ? role : "other"
-                throw failure("children_unavailable_container_role_\(safeRole)")
-            }
-            guard CFGetTypeID(childrenValue) == CFArrayGetTypeID(),
-                  let children = childrenValue as? [AXUIElement],
-                  visited.count + queue.count + children.count <= 256 else { throw failure("children_malformed_or_over_bound") }
-            queue.append(contentsOf: children)
-        }
-        guard queue.isEmpty, ContinuousClock.now < deadline else { throw failure("incomplete_scan") }
-        guard let field = Self.selectedSafariAddressBarCandidate(from: candidates,
-                processIdentifier: target.application.processIdentifier) else {
-            let exactIdentifierCount = candidates.filter {
-                $0.processIdentifier == target.application.processIdentifier
-                    && $0.identifier == "WEB_BROWSER_ADDRESS_AND_SEARCH_FIELD"
-            }.count
-            throw failure(exactIdentifierCount > 1 ? "ambiguous_address_field" : "no_eligible_address_field")
-        }
-        guard addressFieldBelongsToRetainedWindow(field, target: target, deadline: deadline) else {
-            throw failure("address_field_outside_retained_window")
-        }
-        return field
-    }
-
-    private func addressFieldBelongsToRetainedWindow(_ field: AXUIElement, target: Window,
-                                                      deadline: ContinuousClock.Instant) -> Bool {
-        addressFieldRetainedWindowAncestry(field, target: target, deadline: deadline) == .confirmed
-    }
-
-    private enum AddressFieldAncestryReadiness: Equatable {
-        case confirmed
-        case temporarilyUnavailable
-        case changed
-    }
-
-    private func addressFieldRetainedWindowAncestry(_ field: AXUIElement, target: Window,
-                                                     deadline: ContinuousClock.Instant) -> AddressFieldAncestryReadiness {
-        var cursor: AXUIElement? = field
-        var seen: [AXUIElement] = []
-        for _ in 0..<16 {
-            guard ContinuousClock.now < deadline else { return .temporarilyUnavailable }
-            guard let current = cursor, !seen.contains(where: { CFEqual($0, current) }) else { return .changed }
-            guard let processIdentifier = safariAddressBarAX.processIdentifier(current) else {
-                return .temporarilyUnavailable
-            }
-            guard processIdentifier == target.application.processIdentifier else { return .changed }
-            if CFEqual(current, target.accessibilityElement) { return .confirmed }
-            seen.append(current)
-            guard let roleValue = safariAddressBarAX.read(kAXRoleAttribute as String, current) else {
-                return .temporarilyUnavailable
-            }
-            guard let role = roleValue as? String, role != "AXWebArea" else { return .changed }
-            guard let parentValue = safariAddressBarAX.read(kAXParentAttribute as String, current) else {
-                return .temporarilyUnavailable
-            }
-            guard CFGetTypeID(parentValue) == AXUIElementGetTypeID() else { return .changed }
-            cursor = unsafeBitCast(parentValue, to: AXUIElement.self)
-        }
-        return .changed
-    }
-
-    private func isCurrentSafariAddressField(_ field: AXUIElement, target: Window) -> Bool {
-        let deadline = ContinuousClock.now.advanced(by: .milliseconds(750))
-        func read(_ attribute: String) -> CFTypeRef? {
-            guard ContinuousClock.now < deadline else { return nil }
-            return safariAddressBarAX.read(attribute, field)
-        }
-        guard safariAddressBarAX.processIdentifier(field) == target.application.processIdentifier,
-              let role = read(kAXRoleAttribute as String) as? String,
-              role == "AXTextField" || role == "AXComboBox",
-              read("AXIdentifier") as? String == "WEB_BROWSER_ADDRESS_AND_SEARCH_FIELD",
-              role != "AXSecureTextField",
-              (read(kAXSubroleAttribute as String) as? String) != (kAXSecureTextFieldSubrole as String),
-              (read("AXHidden") as? NSNumber)?.boolValue != true,
-              (read("AXProtectedContent") as? NSNumber)?.boolValue != true,
-              (read(kAXEnabledAttribute as String) as? NSNumber)?.boolValue == true,
-              ContinuousClock.now < deadline, safariAddressBarAX.valueIsSettable(field),
-              ContinuousClock.now < deadline else { return false }
-        return addressFieldBelongsToRetainedWindow(field, target: target, deadline: deadline)
-    }
-
-    private enum ReturnPreparationReadiness {
-        case ready
-        case temporarilyUnavailable(String)
-        case rejected(String)
-    }
-
-    private func returnPreparationReadiness(field: AXUIElement, target: Window, url: URL) -> ReturnPreparationReadiness {
-        addressReadbackReadiness(field: field, target: target, url: url, previousValue: nil)
-    }
-
-    private func addressReadbackReadiness(field: AXUIElement, target: Window, url: URL,
-                                          previousValue: String?) -> ReturnPreparationReadiness {
-        guard let state = runState, let current = state.target, Self.sameWindow(current, target) else {
-            return .rejected("return_window_changed")
-        }
-        guard state.currentFileOpenPanel == nil else { return .rejected("return_picker_present") }
-        let fieldReadiness = safariAddressFieldReadiness(field, target: current)
-        guard case .ready = fieldReadiness else { return fieldReadiness }
-        switch focusedSafariAddressFieldReadiness(in: current, expected: field) {
-        case .ready: break
-        case .temporarilyUnavailable(let reason): return .temporarilyUnavailable(reason)
-        case .rejected(let reason): return .rejected(reason)
-        }
-        guard let valueValue = safariAddressBarAX.read(kAXValueAttribute as String, field) else {
-            return .temporarilyUnavailable("return_value_unavailable")
-        }
-        guard let value = valueValue as? String else { return .rejected("return_value_changed") }
-        guard value != url.absoluteString else { return .ready }
-        if let previousValue, value == previousValue {
-            return .temporarilyUnavailable("return_value_unavailable")
-        }
-        return .rejected("return_value_changed")
-    }
-
     private func isTransientValidationCaptureFailure(_ error: Error) -> Bool {
         guard lastValidationPhaseForDiagnostics == .capture,
               lastCaptureAXErrorCodeForDiagnostics == Int(AXError.cannotComplete.rawValue),
@@ -1050,198 +365,9 @@ final class ComputerUseDefaultBrowserSession {
         }
     }
 
-    private func safariAddressFieldReadiness(_ field: AXUIElement, target: Window) -> ReturnPreparationReadiness {
-        let deadline = ContinuousClock.now.advanced(by: .milliseconds(750))
-        func read(_ attribute: String) -> CFTypeRef? {
-            guard ContinuousClock.now < deadline else { return nil }
-            return safariAddressBarAX.read(attribute, field)
-        }
-        guard safariAddressBarAX.processIdentifier(field) == target.application.processIdentifier else {
-            return .rejected("return_field_process_changed")
-        }
-        guard let roleValue = read(kAXRoleAttribute as String) else {
-            return .temporarilyUnavailable("return_field_metadata_unavailable")
-        }
-        guard let role = roleValue as? String else { return .rejected("return_field_metadata_malformed") }
-        guard role == "AXTextField" || role == "AXComboBox" else {
-            return .rejected("return_field_role_changed")
-        }
-        guard let identifierValue = read("AXIdentifier") else {
-            return .temporarilyUnavailable("return_field_metadata_unavailable")
-        }
-        guard let identifier = identifierValue as? String else {
-            return .rejected("return_field_metadata_malformed")
-        }
-        guard identifier == "WEB_BROWSER_ADDRESS_AND_SEARCH_FIELD" else {
-            return .rejected("return_field_identifier_changed")
-        }
-        if (read(kAXSubroleAttribute as String) as? String) == (kAXSecureTextFieldSubrole as String) {
-            return .rejected("return_field_secure")
-        }
-        if (read("AXHidden") as? NSNumber)?.boolValue == true
-            || (read("AXProtectedContent") as? NSNumber)?.boolValue == true {
-            return .rejected("return_field_protected")
-        }
-        guard let enabledValue = read(kAXEnabledAttribute as String) else {
-            return .temporarilyUnavailable("return_field_metadata_unavailable")
-        }
-        guard let enabled = enabledValue as? NSNumber else {
-            return .rejected("return_field_metadata_malformed")
-        }
-        guard enabled.boolValue else { return .rejected("return_field_disabled") }
-        guard ContinuousClock.now < deadline else {
-            return .temporarilyUnavailable("return_field_observation_deadline")
-        }
-        switch addressFieldRetainedWindowAncestry(field, target: target, deadline: deadline) {
-        case .confirmed:
-            break
-        case .temporarilyUnavailable:
-            return ContinuousClock.now >= deadline
-                ? .temporarilyUnavailable("return_field_observation_deadline")
-                : .temporarilyUnavailable("return_field_ancestry_unavailable")
-        case .changed:
-            return .rejected("return_field_ancestry_changed")
-        }
-        return .ready
-    }
-
-    private func focusedSafariAddressFieldReadiness(in target: Window,
-                                                     expected: AXUIElement) -> ReturnPreparationReadiness {
-        let root = AXUIElementCreateApplication(target.application.processIdentifier)
-        guard let focusedWindowValue = safariAddressBarAX.read(kAXFocusedWindowAttribute as String, root) else {
-            return .temporarilyUnavailable("return_focus_unavailable")
-        }
-        guard CFGetTypeID(focusedWindowValue) == AXUIElementGetTypeID() else {
-            return .rejected("return_focus_changed")
-        }
-        let focusedWindow = unsafeBitCast(focusedWindowValue, to: AXUIElement.self)
-        guard CFEqual(focusedWindow, target.accessibilityElement) else {
-            return .rejected("return_focus_changed")
-        }
-        guard let focusedValue = safariAddressBarAX.read(kAXFocusedUIElementAttribute as String, root) else {
-            return .temporarilyUnavailable("return_focus_unavailable")
-        }
-        guard CFGetTypeID(focusedValue) == AXUIElementGetTypeID() else {
-            return .rejected("return_focus_changed")
-        }
-        let focused = unsafeBitCast(focusedValue, to: AXUIElement.self)
-        guard CFEqual(focused, expected) else { return .rejected("return_focus_changed") }
-        return .ready
-    }
-
-    private func waitForFocusedSafariAddressField(initiallyObserved: AXUIElement, target: Window,
-                                                  taskID: String, goal: String,
-                                                  tools: ComputerUseHostTools,
-                                                  diagnostic: (String) -> Void) async throws -> AXUIElement {
-        let deadline = ContinuousClock.now.advanced(by: .seconds(5))
-        let started = ContinuousClock.now
-        var validationCount = 0
-        var focusCheckCount = 0
-        var reacquisitionCount = 0
-        var validationElapsed = Duration.zero
-        var focusCheckElapsed = Duration.zero
-        var reacquisitionElapsed = Duration.zero
-        var sawFocusedUIElement = false
-        var sawInitiallyObservedField = false
-        var sawReacquiredCurrentField = false
-        func elapsedMilliseconds(_ duration: Duration) -> String {
-            let components = duration.components
-            return String(components.seconds * 1_000
-                + components.attoseconds / 1_000_000_000_000_000)
-        }
-        func recordFailure(_ reason: String) {
-            lastAddressFocusWaitDiagnostic = [
-                "reason": reason,
-                "validation_count": String(validationCount),
-                "validation_elapsed_ms": elapsedMilliseconds(validationElapsed),
-                "focus_check_count": String(focusCheckCount),
-                "focus_check_elapsed_ms": elapsedMilliseconds(focusCheckElapsed),
-                "reacquisition_count": String(reacquisitionCount),
-                "reacquisition_elapsed_ms": elapsedMilliseconds(reacquisitionElapsed),
-                "elapsed_ms": elapsedMilliseconds(started.duration(to: ContinuousClock.now)),
-                "saw_focused_ui_element": String(sawFocusedUIElement),
-                "saw_initial_field": String(sawInitiallyObservedField),
-                "saw_reacquired_current_field": String(sawReacquiredCurrentField),
-            ]
-        }
-        lastAddressFocusWaitDiagnostic = [:]
-        while ContinuousClock.now < deadline {
-            try Task.checkCancellation()
-            try tools.requireActive()
-            let validationStarted = ContinuousClock.now
-            do {
-                try validate(taskID: taskID, goal: goal, tools: tools)
-            } catch let failure as Failure {
-                validationCount += 1
-                validationElapsed += validationStarted.duration(to: ContinuousClock.now)
-                guard isTransientValidationCaptureFailure(failure), ContinuousClock.now < deadline else {
-                    recordFailure("validation_failed")
-                    throw failure
-                }
-                try await Task.sleep(for: .milliseconds(50))
-                continue
-            }
-            validationCount += 1
-            validationElapsed += validationStarted.duration(to: ContinuousClock.now)
-            let focusStarted = ContinuousClock.now
-            let focused = focusedSafariAddressField(in: target)
-            focusCheckCount += 1
-            focusCheckElapsed += focusStarted.duration(to: ContinuousClock.now)
-            if let focused {
-                sawFocusedUIElement = true
-                let isInitiallyObserved = CFEqual(focused, initiallyObserved)
-                if isInitiallyObserved { sawInitiallyObservedField = true }
-                if isInitiallyObserved,
-                   isCurrentSafariAddressField(focused, target: target),
-                   ContinuousClock.now < deadline { return focused }
-                let reacquisitionStarted = ContinuousClock.now
-                let reacquired = try? uniqueSafariAddressField(in: target, diagnostic: diagnostic)
-                reacquisitionCount += 1
-                reacquisitionElapsed += reacquisitionStarted.duration(to: ContinuousClock.now)
-                if let reacquired,
-                   ContinuousClock.now < deadline,
-                   isCurrentSafariAddressField(reacquired, target: target),
-                   let currentFocus = focusedSafariAddressField(in: target), CFEqual(currentFocus, reacquired) {
-                    sawReacquiredCurrentField = true
-                    if ContinuousClock.now < deadline { return reacquired }
-                }
-            }
-            if ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(50)) }
-        }
-        try Task.checkCancellation()
-        try tools.requireActive()
-        try validate(taskID: taskID, goal: goal, tools: tools)
-        recordFailure("focus_deadline")
-        diagnostic("phase=address_focus_observation_timeout")
-        throw Failure.targetLost
-    }
-
-    private func focusedSafariAddressField(in target: Window) -> AXUIElement? {
-        let root = AXUIElementCreateApplication(target.application.processIdentifier)
-        guard let focusedWindowValue = safariAddressBarAX.read(kAXFocusedWindowAttribute as String, root),
-              CFGetTypeID(focusedWindowValue) == AXUIElementGetTypeID() else { return nil }
-        let focusedWindow = unsafeBitCast(focusedWindowValue, to: AXUIElement.self)
-        guard CFEqual(focusedWindow, target.accessibilityElement),
-              let focusedValue = safariAddressBarAX.read(kAXFocusedUIElementAttribute as String, root),
-              CFGetTypeID(focusedValue) == AXUIElementGetTypeID() else { return nil }
-        return unsafeBitCast(focusedValue, to: AXUIElement.self)
-    }
-
-    static func isSupportedGmailNavigationURL(_ url: URL) -> Bool {
-        ComputerUseGmailAccountDirectory.accountIndex(from: url.absoluteString) != nil
-    }
-
-    static func isSupportedWebNavigationURL(_ url: URL) -> Bool {
-        if isSupportedGmailNavigationURL(url) { return true }
-        guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
-              components.scheme?.lowercased() == "https", components.user == nil, components.password == nil,
-              components.port == nil, components.query == nil, components.fragment == nil else { return false }
-        switch (components.host?.lowercased(), components.path) {
-        case ("drive.google.com", "/drive/my-drive"), ("www.dropbox.com", "/home"):
-            return true
-        default:
-            return false
-        }
+    static func uniquelyListedRetainedWindow(_ target: AXUIElement,
+                                             in windows: [AXUIElement]) -> Bool {
+        windows.filter { CFEqual($0, target) }.count == 1
     }
 
     static func matchingCGWindowNumber(target: Window, windowInfo: [[String: Any]]) -> CGWindowID? {
@@ -1314,27 +440,6 @@ final class ComputerUseDefaultBrowserSession {
                                       target: Window, taskID: String, goalDigest: String,
                                       tools: ComputerUseHostTools) throws -> WindowSnapshot {
         func capture() throws -> WindowSnapshot {
-            if let state = runState, state.allowsW2FocusedRetainedCapture,
-               state.target.map({ Self.sameWindow($0, target) }) == true,
-               let captureFocusedRetainedWindow {
-                // The W2 capture performs its narrow fallback inside this same
-                // native capture and retains its original four-second deadline.
-                return try captureFocusedRetainedWindow(application, target) {
-                    try Task.checkCancellation()
-                    try tools.requireActive()
-                    guard let state = runState, state.taskID == taskID,
-                          state.goalDigest == goalDigest,
-                          state.allowsW2FocusedRetainedCapture,
-                          state.app == application,
-                          state.target.map({ Self.sameWindow($0, target) }) == true,
-                          try resolveHandler() == state.handler else { throw Failure.targetLost }
-                    try Self.validate(application: application, matches: state.handler)
-                    let frontmost = tools.frontmostApplicationSnapshot()
-                    guard frontmost.identityIsAuthoritative,
-                          let current = frontmost.identity, current == application,
-                          current.codeIdentity == application.codeIdentity else { throw Failure.targetLost }
-                }
-            }
             if let captureRetainedWindow {
                 return try captureRetainedWindow(application, target)
             }
@@ -1618,27 +723,6 @@ final class ComputerUseDefaultBrowserSession {
         }
         return safariStableWindowID(processIdentifier: application.processIdentifier,
             accessibilityHash: accessibilityHash, safariAXIdentifier: safariAXIdentifier)
-    }
-
-    static func isW2FocusedRetainedCaptureEligible(
-        enabledForTask: Bool,
-        application: ComputerUseApplicationIdentity,
-        expectedWindow: Window?,
-        frontmostIdentity: ComputerUseApplicationIdentity?,
-        targetProcessIdentifier: pid_t?,
-        targetRole: String?,
-        targetSubrole: String?,
-        withinCaptureDeadline: Bool
-    ) -> Bool {
-        guard enabledForTask, withinCaptureDeadline, application.bundleIdentifier == "com.apple.Safari",
-              let codeIdentity = application.codeIdentity,
-              let frontmostIdentity, frontmostIdentity == application,
-              frontmostIdentity.codeIdentity == codeIdentity,
-              let expectedWindow, expectedWindow.application == application,
-              expectedWindow.identity.applicationProcessIdentifier == application.processIdentifier,
-              targetProcessIdentifier == application.processIdentifier,
-              targetRole == "AXWindow", targetSubrole == "AXStandardWindow" else { return false }
-        return true
     }
 
     private static func parsedSafariWindowUUID(_ identifier: String?) -> UUID? {
@@ -2014,8 +1098,6 @@ final class ComputerUseDefaultBrowserSession {
         _ application: ComputerUseApplicationIdentity,
         expectedWindow: Window? = nil,
         startupDocumentInventory: Bool = false,
-        allowFocusedRetainedInventoryFallback: Bool = false,
-        authorizeFocusedFallback: @MainActor () throws -> Void = {},
         diagnostic: @MainActor (String) -> Void = { _ in }
     ) throws -> WindowSnapshot {
         guard !Task.isCancelled else {
@@ -2041,30 +1123,6 @@ final class ComputerUseDefaultBrowserSession {
         let deadline = ContinuousClock.now.advanced(by: Self.nativeWindowCaptureBudget)
         let root = AXUIElementCreateApplication(application.processIdentifier)
         var rootReadAXError: Int?
-        var lastReadAXError: AXError?
-        var focusedRetainedFallbackUsed = false
-        var focusedRetainedFallbackStructureFailed = false
-        var firstStructureFailureRecorded = false
-        var structureFailureCount = 0
-        var structureFailuresAreCannotComplete = true
-        func attributeToken(_ attribute: CFString) -> String {
-            let name = attribute as String
-            let allowed = ["AXRole", "AXSubrole", "AXPosition", "AXSize", "AXChildren", "AXSheets",
-                "AXParent", "AXIdentifier", "AXURL", "AXFocusedUIElement", "AXValue",
-                "AXSelectedTextRange", "AXEnabled", "AXSelectedRows", "AXSelectedChildren"]
-            return allowed.contains(name) ? name : "other"
-        }
-        func recordStructureFailure(_ attribute: CFString, kind: String, error: AXError? = nil) {
-            focusedRetainedFallbackStructureFailed = true
-            structureFailureCount += 1
-            if kind != "read_error" || error != .cannotComplete {
-                structureFailuresAreCannotComplete = false
-            }
-            guard !firstStructureFailureRecorded else { return }
-            firstStructureFailureRecorded = true
-            let errorField = error.map { " structure_ax_error=\($0.rawValue)" } ?? ""
-            diagnostic("phase=capture_structure_failure structure_attribute=\(attributeToken(attribute)) structure_kind=\(kind)\(errorField)")
-        }
         func read(_ element: AXUIElement, _ attribute: CFString,
                   messagingTimeout: Float? = nil) -> CFTypeRef? {
             guard !Task.isCancelled, ContinuousClock.now < deadline else { return nil }
@@ -2080,11 +1138,6 @@ final class ComputerUseDefaultBrowserSession {
             let readStarted = ContinuousClock.now
             let result = AXUIElementCopyAttributeValue(element, attribute, &value)
             guard result == .success else {
-                lastReadAXError = result
-                if focusedRetainedFallbackUsed,
-                   result != .noValue, result != .attributeUnsupported {
-                    recordStructureFailure(attribute, kind: "read_error", error: result)
-                }
                 let readDuration = readStarted.duration(to: .now).components
                 let elapsedMs = max(0, min(2_000, Int(Double(readDuration.seconds) * 1_000
                     + Double(readDuration.attoseconds) / 1_000_000_000_000_000)))
@@ -2093,8 +1146,7 @@ final class ComputerUseDefaultBrowserSession {
                     diagnostic("phase=capture_failure reason=windows_read ax_error=\(result.rawValue) elapsed_ms=\(elapsedMs)")
                 } else if CFEqual(element, root), attribute == (kAXFocusedWindowAttribute as CFString) {
                     rootReadAXError = Int(result.rawValue)
-                    let stage = focusedRetainedFallbackUsed ? " stage=focus" : ""
-                    diagnostic("phase=capture_failure reason=focused_window_read\(stage) ax_error=\(result.rawValue) elapsed_ms=\(elapsedMs)")
+                    diagnostic("phase=capture_failure reason=focused_window_read ax_error=\(result.rawValue) elapsed_ms=\(elapsedMs)")
                 }
                 if let expectedWindow,
                    CFEqual(element, expectedWindow.accessibilityElement),
@@ -2104,7 +1156,6 @@ final class ComputerUseDefaultBrowserSession {
                 }
                 return nil
             }
-            lastReadAXError = nil
             guard !Task.isCancelled, ContinuousClock.now < deadline else { return nil }
             return value
         }
@@ -2112,87 +1163,21 @@ final class ComputerUseDefaultBrowserSession {
             guard let raw = read(element, attribute), CFGetTypeID(raw) == AXValueGetTypeID() else { return false }
             return AXValueGetValue(raw as! AXValue, type, &result)
         }
-        var elements: [AXUIElement]
-        if allowFocusedRetainedInventoryFallback, let expectedWindow {
-            // A task-bound W2 validation already owns this exact browser window.
-            // Avoid the global AXWindows inventory, which may be unavailable while
-            // Safari presents a native picker; keep all reads on the retained root.
-            // Initial Drive-page role metadata can take about a second while loading,
-            // so these two reads use the existing shared capture deadline with 1.5s caps.
-            try authorizeFocusedFallback()
-            guard !Task.isCancelled, ContinuousClock.now < deadline,
-                  let currentApp = NSWorkspace.shared.frontmostApplication, !currentApp.isTerminated,
-                  let currentIdentity = ComputerUseApplicationIdentity(runningApplication: currentApp),
-                  currentIdentity == application else {
-                diagnostic("phase=capture_failure reason=focused_retained_fallback_unverified stage=identity")
-                throw Failure.targetLost
-            }
-            lastReadAXError = nil
-            guard let roleValue = read(expectedWindow.accessibilityElement, kAXRoleAttribute as CFString,
-                                       messagingTimeout: 1.5) else {
-                if lastReadAXError == .cannotComplete {
-                    diagnostic("phase=capture_failure reason=focused_retained_metadata_read stage=metadata ax_error=\(AXError.cannotComplete.rawValue)")
-                } else {
-                    diagnostic("phase=capture_failure reason=focused_retained_fallback_unverified stage=metadata")
-                }
-                throw Failure.targetLost
-            }
-            guard let targetRole = roleValue as? String else {
-                diagnostic("phase=capture_failure reason=focused_retained_fallback_unverified stage=metadata")
-                throw Failure.targetLost
-            }
-            lastReadAXError = nil
-            guard let subroleValue = read(expectedWindow.accessibilityElement, kAXSubroleAttribute as CFString,
-                                          messagingTimeout: 1.5) else {
-                if lastReadAXError == .cannotComplete {
-                    diagnostic("phase=capture_failure reason=focused_retained_metadata_read stage=metadata ax_error=\(AXError.cannotComplete.rawValue)")
-                } else {
-                    diagnostic("phase=capture_failure reason=focused_retained_fallback_unverified stage=metadata")
-                }
-                throw Failure.targetLost
-            }
-            guard let targetSubrole = subroleValue as? String else {
-                diagnostic("phase=capture_failure reason=focused_retained_fallback_unverified stage=metadata")
-                throw Failure.targetLost
-            }
-            guard targetRole == "AXWindow", targetSubrole == "AXStandardWindow" else {
-                diagnostic("phase=capture_failure reason=focused_retained_fallback_unverified stage=metadata")
-                throw Failure.targetLost
-            }
-            var targetPID: pid_t = 0
-            guard AXUIElementGetPid(expectedWindow.accessibilityElement, &targetPID) == .success,
-                  Self.isW2FocusedRetainedCaptureEligible(
-                    enabledForTask: true, application: application, expectedWindow: expectedWindow,
-                    frontmostIdentity: currentIdentity, targetProcessIdentifier: targetPID,
-                    targetRole: targetRole, targetSubrole: targetSubrole,
-                    withinCaptureDeadline: ContinuousClock.now < deadline) else {
-                diagnostic("phase=capture_failure reason=focused_retained_fallback_unverified stage=identity")
-                throw Failure.targetLost
-            }
-            try authorizeFocusedFallback()
-            guard !Task.isCancelled, ContinuousClock.now < deadline else {
-                diagnostic("phase=capture_failure reason=capture_deadline")
-                throw Failure.targetLost
-            }
-            focusedRetainedFallbackUsed = true
-            elements = [expectedWindow.accessibilityElement]
-        } else {
-            guard let windowsValue = read(root, kAXWindowsAttribute as CFString) else {
-                if Task.isCancelled { diagnostic("phase=capture_failure reason=capture_cancelled") }
-                else if ContinuousClock.now >= deadline { diagnostic("phase=capture_failure reason=capture_deadline") }
-                else if rootReadAXError == nil { diagnostic("phase=capture_failure reason=windows_read") }
-                throw Failure.targetLost
-            }
-            guard CFGetTypeID(windowsValue) == CFArrayGetTypeID() else {
-                diagnostic("phase=capture_failure reason=windows_malformed")
-                throw Failure.targetLost
-            }
-            guard let listed = windowsValue as? [AXUIElement] else {
-                diagnostic("phase=capture_failure reason=windows_unconvertible")
-                throw Failure.targetLost
-            }
-            elements = listed
+        guard let windowsValue = read(root, kAXWindowsAttribute as CFString) else {
+            if Task.isCancelled { diagnostic("phase=capture_failure reason=capture_cancelled") }
+            else if ContinuousClock.now >= deadline { diagnostic("phase=capture_failure reason=capture_deadline") }
+            else if rootReadAXError == nil { diagnostic("phase=capture_failure reason=windows_read") }
+            throw Failure.targetLost
         }
+        guard CFGetTypeID(windowsValue) == CFArrayGetTypeID() else {
+            diagnostic("phase=capture_failure reason=windows_malformed")
+            throw Failure.targetLost
+        }
+        guard let listed = windowsValue as? [AXUIElement] else {
+            diagnostic("phase=capture_failure reason=windows_unconvertible")
+            throw Failure.targetLost
+        }
+        var elements = listed
         rootReadAXError = nil
         guard let focusedValue = read(root, kAXFocusedWindowAttribute as CFString) else {
             if Task.isCancelled { diagnostic("phase=capture_failure reason=capture_cancelled") }
@@ -2201,8 +1186,7 @@ final class ComputerUseDefaultBrowserSession {
             throw Failure.targetLost
         }
         guard CFGetTypeID(focusedValue) == AXUIElementGetTypeID() else {
-            let stage = focusedRetainedFallbackUsed ? " stage=focus" : ""
-            diagnostic("phase=capture_failure reason=focused_window_malformed\(stage)")
+            diagnostic("phase=capture_failure reason=focused_window_malformed")
             throw Failure.targetLost
         }
         let focusedElement = focusedValue as! AXUIElement
@@ -2224,10 +1208,7 @@ final class ComputerUseDefaultBrowserSession {
         func string(_ element: AXUIElement, _ attribute: CFString,
                     messagingTimeout: Float? = nil) -> String? {
             guard let raw = read(element, attribute, messagingTimeout: messagingTimeout) else { return nil }
-            guard let value = raw as? String else {
-                if focusedRetainedFallbackUsed { recordStructureFailure(attribute, kind: "type_mismatch") }
-                return nil
-            }
+            guard let value = raw as? String else { return nil }
             return value
         }
         func safeRole(_ element: AXUIElement) -> String {
@@ -2255,19 +1236,9 @@ final class ComputerUseDefaultBrowserSession {
                   size.width > 0, size.height > 0 else { return (nil, "malformed") }
             return (CGRect(origin: origin, size: size), "ok")
         }
-        func array(_ element: AXUIElement, _ attribute: CFString,
-                   requiredForFallback: Bool = false) -> [AXUIElement] {
-            guard let raw = read(element, attribute) else {
-                if focusedRetainedFallbackUsed,
-                   (requiredForFallback || (lastReadAXError != .noValue && lastReadAXError != .attributeUnsupported)) {
-                    recordStructureFailure(attribute, kind: "read_error", error: lastReadAXError)
-                }
-                return []
-            }
-            guard CFGetTypeID(raw) == CFArrayGetTypeID(), let values = raw as? [AXUIElement] else {
-                if focusedRetainedFallbackUsed { recordStructureFailure(attribute, kind: "type_mismatch") }
-                return []
-            }
+        func array(_ element: AXUIElement, _ attribute: CFString) -> [AXUIElement] {
+            guard let raw = read(element, attribute), CFGetTypeID(raw) == CFArrayGetTypeID(),
+                  let values = raw as? [AXUIElement] else { return [] }
             return values
         }
         func bounds(_ element: AXUIElement) -> CGRect? {
@@ -2280,11 +1251,8 @@ final class ComputerUseDefaultBrowserSession {
             return CGRect(origin: origin, size: size)
         }
         func parent(_ element: AXUIElement) -> AXUIElement? {
-            guard let raw = read(element, kAXParentAttribute as CFString) else { return nil }
-            guard CFGetTypeID(raw) == AXUIElementGetTypeID() else {
-                if focusedRetainedFallbackUsed { recordStructureFailure(kAXParentAttribute as CFString, kind: "type_mismatch") }
-                return nil
-            }
+            guard let raw = read(element, kAXParentAttribute as CFString),
+                  CFGetTypeID(raw) == AXUIElementGetTypeID() else { return nil }
             return (raw as! AXUIElement)
         }
         func descendants(_ start: AXUIElement, limit: Int = 256) -> [AXUIElement]? {
@@ -2442,8 +1410,7 @@ final class ComputerUseDefaultBrowserSession {
                 hasUnrecognizedSheets = true
             }
             var sheets: [AXUIElement] = []
-            for sheet in axSheets + array(element, kAXChildrenAttribute as CFString,
-                requiredForFallback: focusedRetainedFallbackUsed && isRetainedTarget)
+            for sheet in axSheets + array(element, kAXChildrenAttribute as CFString)
                 where string(sheet, kAXRoleAttribute as CFString) == "AXSheet"
                     && !sheets.contains(where: { CFEqual($0, sheet) }) {
                 sheets.append(sheet)
@@ -2540,18 +1507,6 @@ final class ComputerUseDefaultBrowserSession {
         } else if hasSheets {
             hasUnrecognizedSheets = true
         }
-        if focusedRetainedFallbackUsed, let expectedWindow {
-            let exactRetainedFocus = focusedID == expectedWindow.id
-            let exactFocusedParentPanel = fileOpenPanel.map {
-                $0.parentWindowID == expectedWindow.id
-                    && CFEqual($0.parentWindowElement, expectedWindow.accessibilityElement)
-                    && $0.isFocused
-            } ?? false
-            guard !hasUnrecognizedSheets, exactRetainedFocus || exactFocusedParentPanel else {
-                diagnostic("phase=capture_failure reason=focused_retained_fallback_unverified stage=focus")
-                throw Failure.targetLost
-            }
-        }
         guard let after = NSWorkspace.shared.frontmostApplication, !after.isTerminated else {
             diagnostic("phase=capture_failure reason=final_frontmost_unavailable")
             throw Failure.targetLost
@@ -2568,21 +1523,6 @@ final class ComputerUseDefaultBrowserSession {
         guard ContinuousClock.now < deadline else {
             diagnostic("phase=capture_failure reason=capture_deadline")
             throw Failure.targetLost
-        }
-        guard !focusedRetainedFallbackStructureFailed else {
-            if structureFailureCount > 0, structureFailuresAreCannotComplete {
-                diagnostic("phase=capture_failure reason=focused_retained_structure_read ax_error=\(AXError.cannotComplete.rawValue)")
-                throw Failure.targetLost
-            }
-            diagnostic("phase=capture_failure reason=focused_retained_fallback_structure_unreadable")
-            throw Failure.authenticationHandoff
-        }
-        if focusedRetainedFallbackUsed {
-            try authorizeFocusedFallback()
-            guard !Task.isCancelled, ContinuousClock.now < deadline else {
-                diagnostic("phase=capture_failure reason=capture_deadline")
-                throw Failure.targetLost
-            }
         }
         return WindowSnapshot(application: application, windows: windows,
             focusedWindowID: focusedID, hasSheets: hasSheets, fileOpenPanel: fileOpenPanel,

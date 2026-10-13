@@ -33,7 +33,7 @@ final class MCPFoundationTests: XCTestCase {
         let factory = FakeMCPSessionFactory(toolNames: ["press_key"])
         let pool = MCPClientPool(binaryValidator: AcceptingMCPBinaryValidator(),
             mutationLedger: MCPFileMutationCallLedger(fileURL: url),
-            sessionFactory: { factory.make(binary: $0, generation: $1) }, embeddedSessionFactory: { _ in nil })
+            sessionFactory: { factory.make(binary: $0, generation: $1) })
         _ = try await pool.start(binaryURL: fakeBinaryURL)
         let tools = try await pool.allowedTools(), tool = try XCTUnwrap(tools.first)
         let ids = [ComputerUseTaskContract.digest(["first"]), ComputerUseTaskContract.digest(["second"])]
@@ -68,24 +68,6 @@ final class MCPFoundationTests: XCTestCase {
         await pool.cancelAll()
     }
 
-    func testPausedCloudStorageIsNotAdvertisedByHostOrSidecar() async throws {
-        let primary = FakeMCPSessionFactory(toolNames: [
-            "focused_app", RemoteDesktopCloudStorageMCP.toolName,
-        ])
-        let pool = MCPClientPool(
-            binaryValidator: AcceptingMCPBinaryValidator(), mutationLedger: nil,
-            sessionFactory: { primary.make(binary: $0, generation: $1) },
-            embeddedSessionFactory: { _ in nil },
-            cloudEmbeddedSessionFactory: { generation in
-                RemoteDesktopCloudStorageMCPClientSession(processGeneration: generation)
-            })
-        _ = try await pool.start(binaryURL: fakeBinaryURL)
-        let tools = try await pool.allowedTools()
-        XCTAssertFalse(tools.contains { $0.toolName == RemoteDesktopCloudStorageMCP.toolName },
-            "A6 keeps sync-folder copying unrouted even when its experimental session exists.")
-        await pool.cancelAll()
-    }
-
     @MainActor
     func testPoolValidationCannotOutliveStopCancellationOrNewerStart() async throws {
         try await assertStartupInvalidation(at: .validation)
@@ -97,13 +79,8 @@ final class MCPFoundationTests: XCTestCase {
     }
 
     @MainActor
-    func testPoolPrimaryStartupCannotLaunchEmbeddedAfterStopCancellationOrNewerStart() async throws {
+    func testPoolPrimaryStartupCannotPublishAfterStopCancellationOrNewerStart() async throws {
         try await assertStartupInvalidation(at: .primary)
-    }
-
-    @MainActor
-    func testPoolEmbeddedStartupCannotPublishAfterStopCancellationOrNewerStart() async throws {
-        try await assertStartupInvalidation(at: .embedded)
     }
 
     @MainActor
@@ -111,7 +88,7 @@ final class MCPFoundationTests: XCTestCase {
         let validator = StagedMCPBinaryValidator()
         let factory = FakeMCPSessionFactory(toolNames: ["focused_app"])
         let pool = MCPClientPool(binaryValidator: validator, mutationLedger: nil,
-            sessionFactory: { factory.make(binary: $0, generation: $1) }, embeddedSessionFactory: { _ in nil })
+            sessionFactory: { factory.make(binary: $0, generation: $1) })
         let healthy = try await pool.start(binaryURL: fakeBinaryURL)
         let request = Task { try await pool.start(binaryURL: fakeBinaryURL) }
         request.cancel()
@@ -127,21 +104,14 @@ final class MCPFoundationTests: XCTestCase {
         await pool.cancelAll()
     }
 
-    func testPoolRejectsMismatchedPrimaryBeforeStartingEmbeddedServer() async throws {
+    func testPoolRejectsMismatchedPrimaryIdentityBeforePublishingTools() async throws {
         let primary = FakeMCPSessionFactory(toolNames: ["focused_app"], advertisedServerID: "unexpected-server")
-        let embedded = FakeMCPSessionFactory(toolNames: [RemoteDesktopMailMCP.toolName], advertisedServerID: RemoteDesktopMailMCP.serverID)
-        let binary = MCPValidatedBinary(definition: MCPServerRegistry.macControl, appBundleURL: fakeBinaryURL.deletingLastPathComponent(), executableURL: fakeBinaryURL)
         let pool = MCPClientPool(binaryValidator: AcceptingMCPBinaryValidator(), mutationLedger: nil,
-            sessionFactory: { primary.make(binary: $0, generation: $1) },
-            embeddedSessionFactory: { embedded.make(binary: binary, generation: $0) })
-        do { _ = try await pool.start(binaryURL: fakeBinaryURL); XCTFail("An invalid primary identity cannot activate embedded capabilities") }
+            sessionFactory: { primary.make(binary: $0, generation: $1) })
+        do { _ = try await pool.start(binaryURL: fakeBinaryURL); XCTFail("An invalid primary identity cannot publish tools") }
         catch { XCTAssertEqual(error as? MCPClientError, .cancelled) }
-        let embeddedStarts = await embedded.latestSession()?.startCount()
         let primaryStops = await primary.latestSession()?.stopCount()
-        let embeddedStops = await embedded.latestSession()?.stopCount()
-        XCTAssertEqual(embeddedStarts, 0)
         XCTAssertEqual(primaryStops, 1)
-        XCTAssertEqual(embeddedStops, 1)
         do { _ = try await pool.allowedTools(); XCTFail("A failed startup cannot publish tools") }
         catch { XCTAssertEqual(error as? MCPClientError, .notRunning) }
     }
@@ -154,8 +124,7 @@ final class MCPFoundationTests: XCTestCase {
         let primary = FakeMCPSessionFactory(toolNames: ["focused_app"], startGates: [1: gate])
         let validator = StagedMCPBinaryValidator(rejectedCalls: [2])
         let pool = MCPClientPool(binaryValidator: validator, mutationLedger: nil,
-            sessionFactory: { primary.make(binary: $0, generation: $1) }, embeddedSessionFactory: { _ in nil },
-            cloudEmbeddedSessionFactory: { _ in nil })
+            sessionFactory: { primary.make(binary: $0, generation: $1) })
         let obsolete = Task { try await pool.start(binaryURL: fakeBinaryURL) }
         await fulfillment(of: [gate.started], timeout: 1)
         do { _ = try await pool.start(binaryURL: fakeBinaryURL); XCTFail("The replacement fixture must fail validation") }
@@ -175,7 +144,7 @@ final class MCPFoundationTests: XCTestCase {
         await pool.cancelAll()
     }
 
-    private enum StartupStage { case validation, retirement, primary, embedded }
+    private enum StartupStage { case validation, retirement, primary }
 
     @MainActor
     private func assertStartupInvalidation(at stage: StartupStage) async throws {
@@ -186,14 +155,8 @@ final class MCPFoundationTests: XCTestCase {
             let validator = StagedMCPBinaryValidator(firstValidationGate: stage == .validation ? gate : nil)
             let primary = FakeMCPSessionFactory(toolNames: ["focused_app"],
                 startGates: stage == .primary ? [1: gate] : [:], stopGates: stage == .retirement ? [1: gate] : [:])
-            let embedded = FakeMCPSessionFactory(toolNames: [RemoteDesktopMailMCP.toolName],
-                advertisedServerID: RemoteDesktopMailMCP.serverID, startGates: stage == .embedded ? [1: gate] : [:])
-            let binary = MCPValidatedBinary(definition: MCPServerRegistry.macControl,
-                appBundleURL: fakeBinaryURL.deletingLastPathComponent(), executableURL: fakeBinaryURL)
             let pool = MCPClientPool(binaryValidator: validator, mutationLedger: nil,
-                sessionFactory: { primary.make(binary: $0, generation: $1) },
-                embeddedSessionFactory: { embedded.make(binary: binary, generation: $0) },
-                cloudEmbeddedSessionFactory: { _ in nil })
+                sessionFactory: { primary.make(binary: $0, generation: $1) })
             if stage == .retirement { _ = try await pool.start(binaryURL: fakeBinaryURL) }
             let obsolete = Task { try await pool.start(binaryURL: fakeBinaryURL) }
             await fulfillment(of: [gate.started], timeout: 1)
@@ -210,20 +173,12 @@ final class MCPFoundationTests: XCTestCase {
             await fulfillment(of: [gate.returned], timeout: 1)
             let expectedCount = (stage == .validation ? 0 : 1) + (replacement == nil ? 0 : 1)
             XCTAssertEqual(primary.createdSessions().count, expectedCount, "No obsolete candidate may be created after validation or retirement")
-            XCTAssertEqual(embedded.createdSessions().count, expectedCount)
-            if stage == .primary {
-                let staleEmbedded = try XCTUnwrap(embedded.createdSessions().first)
-                let starts = await staleEmbedded.startCount()
-                XCTAssertEqual(starts, 0, "A stopped or superseded primary must not start the next capability")
-            }
             if let replacement {
                 let current = try await pool.allowedTools()
-                XCTAssertEqual(current.count, 2)
+                XCTAssertEqual(current.count, 1)
                 XCTAssertTrue(current.allSatisfy { $0.processGeneration == replacement.processGeneration })
                 let primaryStops = await primary.latestSession()?.stopCount()
-                let embeddedStops = await embedded.latestSession()?.stopCount()
                 XCTAssertEqual(primaryStops, 0, "Late cleanup must retain the replacement's primary session")
-                XCTAssertEqual(embeddedStops, 0, "Late cleanup must retain the replacement's embedded session")
             } else {
                 do { _ = try await pool.allowedTools(); XCTFail("Cancelled startup cannot expose tools") }
                 catch { XCTAssertEqual(error as? MCPClientError, .notRunning) }
@@ -301,7 +256,6 @@ final class MCPFoundationTests: XCTestCase {
             "list_elements", "list_menu_titles", "list_shortcuts", "list_windows",
             "perform_element_action", "permissions_status", "press_key",
             "probe_ax_tree", "query_elements", "read_value", "reminders_list",
-            RemoteDesktopMailMCP.toolName, RemoteDesktopCloudStorageMCP.toolName,
             "set_element_attribute", "type_text",
             "wait_for_ax_notification",
             "wait_for_element", "wait_for_window_state_change",
@@ -328,7 +282,7 @@ final class MCPFoundationTests: XCTestCase {
         }
     }
 
-    func testDynamicApprovalCopyDoesNotRevealTypedTextOrEmailBody() throws {
+    func testDynamicApprovalCopyDoesNotRevealTypedText() throws {
         let typeTool = try allowedTool(
             name: "type_text",
             schema: objectSchema(
@@ -340,30 +294,6 @@ final class MCPFoundationTests: XCTestCase {
             arguments: ["text": .string(secret)])
         XCTAssertTrue(typeCall.approvalDetails.contains("\(secret.count) characters"))
         XCTAssertFalse(typeCall.approvalDetails.contains(secret))
-
-        let mailTool = try allowedTool(
-            name: RemoteDesktopMailMCP.toolName,
-            schema: objectSchema(
-                properties: [
-                    "to": .object(["type": .string("string")]),
-                    "subject": .object(["type": .string("string")]),
-                    "body": .object(["type": .string("string")]),
-                    "send_now": .object(["type": .string("boolean")]),
-                ],
-                required: ["to", "subject", "body", "send_now"]))
-        let body = "private medical details"
-        let mailCall = try mailTool.makeCall(
-            taskID: "mail",
-            arguments: [
-                "to": .string("person@example.com"),
-                "subject": .string("Hello"),
-                "body": .string(body),
-                "send_now": .bool(true),
-            ])
-        XCTAssertEqual(mailCall.approvalConfirmLabel, "Send email")
-        XCTAssertTrue(mailCall.approvalDetails.contains("person@example.com"))
-        XCTAssertTrue(mailCall.approvalDetails.contains("Hello"))
-        XCTAssertFalse(mailCall.approvalDetails.contains(body))
     }
 
     func testRegistryPinsOneExpectedServerAndRejectsWrongLayoutBeforeLaunch() throws {
@@ -487,8 +417,7 @@ final class MCPFoundationTests: XCTestCase {
         let pool = MCPClientPool(
             binaryValidator: AcceptingMCPBinaryValidator(),
             mutationLedger: MCPFileMutationCallLedger(fileURL: temporary),
-            sessionFactory: { factory.make(binary: $0, generation: $1) },
-            embeddedSessionFactory: { _ in nil })
+            sessionFactory: { factory.make(binary: $0, generation: $1) })
         _ = try await pool.start(binaryURL: fakeBinaryURL)
         let tools = try await pool.allowedTools()
         let tool = try XCTUnwrap(tools.first)
@@ -538,8 +467,7 @@ final class MCPFoundationTests: XCTestCase {
             binaryValidator: AcceptingMCPBinaryValidator(),
             mutationLedger: MCPFileMutationCallLedger(
                 fileURL: temporaryURL("completed-ledger.json")),
-            sessionFactory: { factory.make(binary: $0, generation: $1) },
-            embeddedSessionFactory: { _ in nil })
+            sessionFactory: { factory.make(binary: $0, generation: $1) })
         _ = try await pool.start(binaryURL: fakeBinaryURL)
         let tools = try await pool.allowedTools()
         let tool = try XCTUnwrap(tools.first)
@@ -627,8 +555,7 @@ final class MCPFoundationTests: XCTestCase {
             binaryValidator: AcceptingMCPBinaryValidator(),
             mutationLedger: MCPFileMutationCallLedger(
                 fileURL: temporaryURL("cancel-ledger.json")),
-            sessionFactory: { factory.make(binary: $0, generation: $1) },
-            embeddedSessionFactory: { _ in nil })
+            sessionFactory: { factory.make(binary: $0, generation: $1) })
         _ = try await pool.start(binaryURL: fakeBinaryURL)
         let tools = try await pool.allowedTools()
         let tool = try XCTUnwrap(tools.first)
@@ -656,8 +583,7 @@ final class MCPFoundationTests: XCTestCase {
             binaryValidator: AcceptingMCPBinaryValidator(),
             mutationLedger: MCPFileMutationCallLedger(
                 fileURL: temporaryURL("stale-cancel-ledger.json")),
-            sessionFactory: { factory.make(binary: $0, generation: $1) },
-            embeddedSessionFactory: { _ in nil })
+            sessionFactory: { factory.make(binary: $0, generation: $1) })
         let firstIdentity = try await pool.start(binaryURL: fakeBinaryURL)
         let firstTools = try await pool.allowedTools()
         let firstTool = try XCTUnwrap(firstTools.first)
@@ -936,32 +862,10 @@ private actor FakeMCPSession: MCPClientSessioning {
     }
 
     private static func schema(for name: String) -> MCPJSONValue {
-        let fields: [String: MCPJSONValue]
-        let required: [String]
-        switch name {
-        case RemoteDesktopMailMCP.toolName:
-            fields = [
-                "to": .object(["type": .string("string")]),
-                "subject": .object(["type": .string("string")]),
-                "body": .object(["type": .string("string")]),
-                "cc": .object(["type": .string("string")]),
-                "bcc": .object(["type": .string("string")]),
-                "send_now": .object(["type": .string("boolean")]),
-            ]
-            required = ["to", "subject", "body", "send_now"]
-        default:
-            fields = [:]
-            required = []
-        }
-
-        var schema: [String: MCPJSONValue] = [
+        .object([
             "type": .string("object"),
-            "properties": .object(fields),
+            "properties": .object([:]),
             "additionalProperties": .bool(false),
-        ]
-        if !required.isEmpty {
-            schema["required"] = .array(required.map(MCPJSONValue.string))
-        }
-        return .object(schema)
+        ])
     }
 }

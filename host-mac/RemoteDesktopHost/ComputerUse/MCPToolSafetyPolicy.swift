@@ -63,8 +63,6 @@ enum MCPToolSafetyPolicy {
         "click_menu_path",
         "perform_element_action",
         "press_key",
-        "remote_desktop_mail",
-        RemoteDesktopCloudStorageMCP.toolName,
         "set_element_attribute",
         "type_text",
     ]
@@ -220,12 +218,6 @@ enum MCPToolSafetyPolicy {
                 "The Shortcut name exceeds the host limit.")
         }
 
-        if toolName == RemoteDesktopMailMCP.toolName {
-            _ = try RemoteDesktopMailRequest(arguments: arguments)
-        }
-        if toolName == RemoteDesktopCloudStorageMCP.toolName {
-            try RemoteDesktopCloudStorage.validateArguments(arguments)
-        }
 
     }
 
@@ -241,53 +233,6 @@ enum MCPToolSafetyPolicy {
                 summary: "Type text on this Mac?",
                 details: "Type \(count) characters into the currently focused field. The text is hidden here for privacy.",
                 confirmLabel: "Type text")
-
-        case RemoteDesktopMailMCP.toolName:
-            let recipient = safe(arguments.string("to"), fallback: "the selected recipients")
-            let subject = safe(arguments.string("subject"), fallback: "(no subject)")
-            let sendsNow = arguments.bool("send_now") ?? false
-            let attachmentNames: [String] = {
-                guard case .array(let values) = arguments["attachment_paths"] else { return [] }
-                return values.compactMap {
-                    guard case .string(let path) = $0 else { return nil }
-                    return URL(fileURLWithPath: path).lastPathComponent
-                }
-            }()
-            let attachmentDetail = attachmentNames.isEmpty
-                ? ""
-                : "\nAttachments: " + attachmentNames.joined(separator: ", ")
-            return MCPApprovalDisplay(
-                summary: sendsNow ? "Send this email?" : "Create this email draft?",
-                details: "From: Your default account in Mail\nTo: \(recipient)\nSubject: \(subject)\nThe message body is hidden here for privacy.\(attachmentDetail)\nOn first use, macOS may ask on your Mac; choose Allow so Remote Desktop Host can use Mail.",
-                confirmLabel: sendsNow ? "Send email" : "Create draft")
-
-        case RemoteDesktopCloudStorageMCP.toolName:
-            let sourceName = arguments.string("source_path")
-                .map { URL(fileURLWithPath: $0).lastPathComponent }
-            let providerID = arguments.string("provider_id")
-            let providerLabel: String
-            if providerID == "icloud-drive" {
-                providerLabel = "iCloud Drive"
-            } else if let providerID, providerID.hasPrefix("cloudstorage:") {
-                providerLabel = String(providerID.dropFirst("cloudstorage:".count))
-            } else {
-                providerLabel = "Selected cloud folder"
-            }
-            let folder = safe(arguments.string("relative_folder"), fallback: "")
-            let destinationName = arguments.string("destination_path")
-                .map { URL(fileURLWithPath: $0).lastPathComponent }
-                ?? sourceName
-            let replacing: Bool
-            if case .some(.string(_)) = arguments["existing_destination_sha256"] {
-                replacing = true
-            } else { replacing = false }
-            let destination = [providerLabel, folder, destinationName]
-                .compactMap { $0 }
-                .filter { !$0.isEmpty }.joined(separator: " › ")
-            return MCPApprovalDisplay(
-                summary: replacing ? "Replace this cloud-storage file?" : "Save a copy to cloud storage?",
-                details: "File: \(safe(sourceName, fallback: "Selected file"))\nDestination: \(safe(destination, fallback: "Selected cloud folder"))",
-                confirmLabel: replacing ? "Replace file" : "Save copy")
 
         case "calendar_create_event":
             return MCPApprovalDisplay(

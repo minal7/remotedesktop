@@ -411,7 +411,6 @@ enum MCPToolOutputSanitizer {
         let sensitiveKeys: Set<String>
         switch call.toolName {
         case "type_text": sensitiveKeys = ["text"]
-        case RemoteDesktopMailMCP.toolName: sensitiveKeys = ["body"]
         case "run_shortcut": sensitiveKeys = ["input"]
         case "set_element_attribute": sensitiveKeys = ["value"]
         default: sensitiveKeys = []
@@ -432,7 +431,6 @@ enum MCPToolOutputSanitizer {
             "authorization", "cookie", "password", "secret", "token",
         ].contains { normalizedKey.contains($0) }
         let callSensitive = (call.toolName == "type_text" && normalizedKey == "text")
-            || (call.toolName == RemoteDesktopMailMCP.toolName && normalizedKey == "body")
             || (call.toolName == "run_shortcut" && normalizedKey == "input")
         if alwaysSensitive || callSensitive { return .string("[redacted]") }
 

@@ -3,23 +3,6 @@ import Foundation
 
 typealias ComputerUseDefaultBrowserFileCatalogFactory = @MainActor (String) throws -> ComputerUseLocalFileCatalog
 
-enum ComputerUseGmailNavigationPolicy {
-    static func authenticationHandoff(url: String, controlLabels: [String]) -> String? {
-        guard let components = URLComponents(string: url),
-              let host = components.host?.lowercased() else { return nil }
-        let path = components.path.lowercased()
-        let authURL = host == "accounts.google.com"
-            || ((host == "google.com" || host.hasSuffix(".google.com"))
-                && (path.contains("/signin") || path.contains("/challenge")))
-        let authLabels = ["verify it's you", "2-step verification", "two-step verification", "captcha", "security key"]
-        let hasChallenge = controlLabels.contains { label in
-            authLabels.contains(where: { label.localizedCaseInsensitiveContains($0) })
-        }
-        guard authURL || hasChallenge else { return nil }
-        return "Complete Google sign-in, 2-step verification, or CAPTCHA in the browser yourself, then choose Resume. I will not enter credentials."
-    }
-}
-
 /// Keyboard admission for a retained browser window. No shortcut here can
 /// create, close, or switch a browser tab/window or application.
 enum ComputerUseDefaultBrowserActionScope {
@@ -122,75 +105,9 @@ enum ComputerUseDefaultBrowserActionScope {
     }
 }
 
-/// Opaque, task-scoped choices for a Contacts match. The wire shows both the
-/// contact name and address; only a choice retained in this set resolves.
-struct ComputerUseGmailRecipientChoiceSet: Equatable, Sendable {
-    let taskID: String
-    let choices: [ComputerUseClarificationChoice]
-    private let addressesByID: [String: String]
-
-    init(taskID: String, matches: [ComputerUseMailRecipients.Match]) throws {
-        guard !taskID.isEmpty, (2...ComputerUseClarificationChoice.maximumChoices).contains(matches.count) else {
-            throw ComputerUseTextClarificationStore.Failure.invalidChoice
-        }
-        var entries: [String: String] = [:]
-        var choices: [ComputerUseClarificationChoice] = []
-        for match in matches {
-            let id = "gmail-recipient-\(UUID().uuidString.lowercased())"
-            let label = match.name.isEmpty ? match.address : match.name
-            let choice = try ComputerUseClarificationChoice(id: id, label: label, detail: match.address)
-            guard entries[id] == nil else { throw ComputerUseTextClarificationStore.Failure.invalidChoice }
-            entries[id] = match.address
-            choices.append(choice)
-        }
-        try ComputerUseClarificationChoice.validate(choices)
-        self.taskID = taskID
-        self.choices = choices
-        addressesByID = entries
-    }
-
-    func address(for choice: ComputerUseClarificationChoice, taskID: String) -> String? {
-        guard self.taskID == taskID, choices.contains(choice),
-              let address = addressesByID[choice.id] else { return nil }
-        return address
-    }
-}
-
-struct ComputerUseGmailAccountChoiceSet: Equatable, Sendable {
-    let taskID: String
-    let choices: [ComputerUseClarificationChoice]
-    private let accountsByID: [String: ComputerUseGmailAccountDirectory.Account]
-
-    init(taskID: String, accounts: [ComputerUseGmailAccountDirectory.Account]) throws {
-        guard !taskID.isEmpty, (2...ComputerUseClarificationChoice.maximumChoices).contains(accounts.count),
-              Set(accounts.map(\.email)).count == accounts.count,
-              Set(accounts.map(\.index)).count == accounts.count else {
-            throw ComputerUseTextClarificationStore.Failure.invalidChoice
-        }
-        var entries: [String: ComputerUseGmailAccountDirectory.Account] = [:]
-        var choices: [ComputerUseClarificationChoice] = []
-        for account in accounts {
-            let id = "gmail-account-\(UUID().uuidString.lowercased())"
-            let choice = try ComputerUseClarificationChoice(id: id,
-                label: account.displayName.isEmpty ? account.email : account.displayName, detail: account.email)
-            entries[id] = account
-            choices.append(choice)
-        }
-        try ComputerUseClarificationChoice.validate(choices)
-        self.taskID = taskID
-        self.choices = choices
-        accountsByID = entries
-    }
-
-    func account(for choice: ComputerUseClarificationChoice, taskID: String) -> ComputerUseGmailAccountDirectory.Account? {
-        guard self.taskID == taskID, choices.contains(choice) else { return nil }
-        return accountsByID[choice.id]
-    }
-}
-
 @MainActor
 final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, ComputerUseVisualApprovalContinuing,
-    ComputerUseTextClarificationContinuing, ComputerUseClarifiedGoalExecuting, ComputerUseGmailApprovalPresenting {
+    ComputerUseTextClarificationContinuing, ComputerUseClarifiedGoalExecuting {
     typealias CompletionCheck = @MainActor @Sendable (String) async throws -> Bool
     typealias OutcomeCheck = ComputerUseDesktopExecutor.OutcomeCheck
     typealias RevalidationFailureObserver = ComputerUseDesktopExecutor.RevalidationFailureObserver
@@ -200,35 +117,7 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
         (ComputerUseFaraModel.Input) async throws -> ComputerUseDefaultBrowserControlPlan
     typealias NativeControlInputs = @MainActor @Sendable () async throws -> ComputerUseNativeTextRuntimeInputs?
     typealias LocalFileCatalogFactory = ComputerUseDefaultBrowserFileCatalogFactory
-    typealias GmailContentExtractor = @MainActor @Sendable (String) async throws -> ComputerUseWebJobContentExtractor.Extraction
-    typealias WebUploadContentExtractor = @MainActor @Sendable (String) async throws -> ComputerUseWebJobContentExtractor.UploadExtraction
-    enum WebUploadCheckpoint: Equatable, Sendable { case preUploadProgressClean, collisionSearchReady, uploadProgressComplete }
-    typealias WebUploadCheckpointObserver = @MainActor @Sendable (WebUploadCheckpoint) -> Void
-    typealias GmailRecipientLookup = ComputerUseMailRecipients.Lookup
     enum Failure: Error { case taskAlreadyBound, noRetainedWindow, invalidFileChoice, selectedFileStale, selectedFileChangeNeedsConfirmation }
-
-    enum WebUploadPageTarget: Equatable {
-        case home
-        case exactSearch
-    }
-
-    enum WebUploadStage: Equatable {
-        case navigateHome, resolveFile, navigateCollisionSearch, checkCollisionSearch
-        case navigateReturnToRoot, openUploaderMenu, chooseFileUpload, driveKeyboardChooseFileUpload
-        case visualChooseFileUpload
-        case waitingForPicker, waitingForUpload, navigateFinalSearch, checkFinalSearch
-        case selectFinalResult, openFinalDetails, verifyFinalDetails, complete
-
-        var pageTarget: WebUploadPageTarget {
-            switch self {
-            case .checkCollisionSearch, .checkFinalSearch, .selectFinalResult, .openFinalDetails,
-                 .verifyFinalDetails, .complete:
-                return .exactSearch
-            default:
-                return .home
-            }
-        }
-    }
 
     @MainActor private final class Scope {
         let session: ComputerUseDefaultBrowserSession
@@ -245,15 +134,6 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
         var userSelectedCandidateID: String?
         var pendingClarification: ComputerUseNativeTextExecutor.Clarification?
         var pendingChoiceCandidates: [String: ComputerUseLocalFileCatalog.Candidate] = [:]
-        enum PendingChoiceKind: Equatable { case file, gmailRecipient, gmailAccount }
-        var pendingChoiceKind: PendingChoiceKind?
-        var pendingGmailRecipientChoiceSet: ComputerUseGmailRecipientChoiceSet?
-        var pendingGmailAccountChoiceSet: ComputerUseGmailAccountChoiceSet?
-        var selectedGmailRecipientAddress: String?
-        var selectedGmailAccount: ComputerUseGmailAccountDirectory.Account?
-        var currentGmailAccountIndex: Int?
-        var gmailAccountMenuOpenAttempts = 0
-        var gmailExistingDraftNavigationPrepared = false
         var executionTaskID: String?
         var selectedChoice: ComputerUseClarificationChoice?
         var clarifiedGoal: ComputerUseUnresolvedTextGoal?
@@ -266,67 +146,13 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
         var pendingVisualDirective: ComputerUseFaraModel.WorkerDirective?
         private var pendingPickerConfirmation: (candidateID: String, action: ComputerUsePredictedAction)?
         var dispatchedPickerConfirmationCandidateID: String?
-        var gmailVerifiedAttachmentCandidateID: String?
-        var lastVerifiedGmailComposeURL: URL?
-        var gmailSavedDraftReopenURL: URL?
         private var fileOperationRevision: UInt64 = 0
         var lastSessionFailureForDiagnostics: ComputerUseDefaultBrowserSession.Failure?
         var nativeControlErrorDomainForDiagnostics: String?
         var nativeControlErrorCodeForDiagnostics: Int?
-        var gmailFieldDiagnostics: [String: String] = [:]
-        var webUploadScopeFailureForDiagnostics: String?
-        var gmailNavigationPhase: String?
-        var gmailAddressValueWriteAttemptCount = 0
-        var gmailAddressValueWriteCompletedCount = 0
-        enum GmailNavigationStage { case navigateTarget, waitForTarget, ready }
-        enum GmailFlowStage { case compose, normalizeDrafts, waitingForDraftReopen, attach, waitingForPicker, waitingForAttachment, send, saveDraft, verifySend, verifyDraft, complete }
-        struct GmailSetup {
-            let intent: ComputerUseWebJobRequest.GmailIntent
-            let extraction: ComputerUseWebJobContentExtractor.Extraction
-        }
-        var gmailSetup: GmailSetup?
-        var gmailFileQuery: ComputerUseLocalFileCatalog.Query?
-        var gmailRecipientsVerified = false
-        var gmailRecipientMenuAddressToDismiss: String?
-        var pendingGmailRecipientEscapeAction: ComputerUsePredictedAction?
-        var gmailRecipientEscapeDispatched = false
-        var gmailNavigationTargetURL: URL?
-        var gmailFlowStage: GmailFlowStage = .compose
-        var gmailStandaloneComposeContext: ComputerUseGmailRecipientVerifier.StandaloneComposeContext?
-        var gmailSavedDraftReopenVerification = false
-        var gmailJob: ComputerUseGmailJob?
-        var gmailNavigationStage: GmailNavigationStage = .navigateTarget
-        var pendingGmailFlowStage: GmailFlowStage?
-        var gmailWaitCount = 0
-        var gmailNavigationWaitCount = 0
-        var gmailExpandedRecipientControl = false
-        var gmailPendingSendAction: ComputerUsePredictedAction?
-        struct WebUploadState {
-            let intent: ComputerUseWebJobRequest.UploadIntent
-            let request: ComputerUseWebUploadJob.Request
-            let fileDescription: String
-            var stage: WebUploadStage = .navigateHome
-            var expectedAccountLabel: String?
-            var siteUploadDispatchCount = 0
-            var openDispatchCount = 0
-            var dispatchLatch = ComputerUseWebUploadJob.DispatchLatch()
-            var waitCount = 0
-            var menuFallbackAttempts = 0
-            var visualActionProposed = false
-            var visualActionDispatched = false
-            var pendingAction: ComputerUsePredictedAction?
-            var pendingStage: WebUploadStage?
-            var pendingOpenAction: ComputerUsePredictedAction?
-            var preOpenProgressObserved = false
-            var observedCompletionProgress = false
-        }
-        var webUpload: WebUploadState?
-        let webUploadCheckpointObserver: WebUploadCheckpointObserver?
         init(session: ComputerUseDefaultBrowserSession, pageReader: ComputerUseDefaultBrowserPageReader,
-             localFileCatalogFactory: @escaping ComputerUseDefaultBrowserFileCatalogFactory,
-             webUploadCheckpointObserver: WebUploadCheckpointObserver?) {
+             localFileCatalogFactory: @escaping ComputerUseDefaultBrowserFileCatalogFactory) {
             self.session = session; self.pageReader = pageReader; self.localFileCatalogFactory = localFileCatalogFactory
-            self.webUploadCheckpointObserver = webUploadCheckpointObserver
         }
         func prepare(_ id: String, _ goal: String, _ tools: ComputerUseHostTools) async throws {
             self.tools = tools
@@ -337,10 +163,6 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
             pendingPickerConfirmation = nil
             if isNewTask {
                 dispatchedPickerConfirmationCandidateID = nil
-                gmailVerifiedAttachmentCandidateID = nil
-                lastVerifiedGmailComposeURL = nil
-                gmailSavedDraftReopenURL = nil
-                webUpload = nil
             }
             visualFallbackPending = false
             pendingVisualDirective = nil
@@ -348,12 +170,6 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
             if window != nil {
                 try session.validate(taskID: id, goal: goal, tools: tools)
                 window = session.currentWindow
-                // A new host entry after Resume must reconfirm recipients from
-                // the retained compose controls before any further action.
-                gmailRecipientsVerified = false
-                gmailRecipientMenuAddressToDismiss = nil
-                pendingGmailRecipientEscapeAction = nil
-                gmailRecipientEscapeDispatched = false
                 return
             }
             // Session.ensure owns the durable attempt boundary. It can retry
@@ -364,19 +180,6 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
         func check(_ action: ComputerUsePredictedAction?, _ tools: ComputerUseHostTools) throws {
             pendingPickerConfirmation = nil
             guard let taskID, let goal else { throw Failure.noRetainedWindow }
-            webUploadScopeFailureForDiagnostics = nil
-            if webUpload != nil {
-                gmailFieldDiagnostics.removeValue(forKey: "webUploadAccountReadFailure")
-                gmailFieldDiagnostics.removeValue(forKey: "webUploadAccountReadElapsedMs")
-                gmailFieldDiagnostics.removeValue(forKey: "webUploadParentInitialReadFailure")
-                gmailFieldDiagnostics.removeValue(forKey: "webUploadParentInitialReadElapsedMs")
-                gmailFieldDiagnostics.removeValue(forKey: "webUploadParentRecheckFailure")
-                gmailFieldDiagnostics.removeValue(forKey: "webUploadParentRecheckElapsedMs")
-            }
-            let rejectWebUploadScope: @MainActor (String) throws -> Never = { reason in
-                if self.webUpload != nil { self.webUploadScopeFailureForDiagnostics = reason }
-                throw ComputerUseDesktopExecutor.Failure.scopedSurfaceChanged
-            }
             lastSessionFailureForDiagnostics = nil
             do { try session.validate(taskID: taskID, goal: goal, tools: tools) }
             catch let failure as ComputerUseDefaultBrowserSession.Failure {
@@ -386,24 +189,18 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
             guard let window = session.currentWindow else { throw Failure.noRetainedWindow }
             self.window = window
             if let panel = session.currentFileOpenPanel {
-                let selectedURL: URL?
-                do { selectedURL = try selectedFileURL() }
-                catch {
-                    if webUpload != nil { webUploadScopeFailureForDiagnostics = "native_panel_scope" }
-                    throw error
-                }
+                let selectedURL = try selectedFileURL()
                 guard panel.parentWindowID == window.id,
                       CFEqual(panel.parentWindowElement, window.accessibilityElement),
                       let bounds = session.currentActionBounds,
                       ComputerUseDefaultBrowserActionScope.permitsFilePanel(action, within: bounds,
                         panel: panel, selectedURL: selectedURL) else {
-                    try rejectWebUploadScope("native_panel_scope")
+                    throw ComputerUseDesktopExecutor.Failure.scopedSurfaceChanged
                 }
                 if let action, let selectedCandidate,
                    let candidateID = ComputerUseDefaultBrowserActionScope.confirmationCandidateID(
                     action: action, candidateID: selectedCandidate.id, panel: panel, candidateURL: selectedURL) {
                     pendingPickerConfirmation = (candidateID, action)
-                    if webUpload != nil { webUpload?.pendingOpenAction = action }
                 }
             } else if let action, case .key = action,
                       !ComputerUseDefaultBrowserActionScope.permits(action, within: window.identity.bounds) {
@@ -411,424 +208,14 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
             } else if !ComputerUseDefaultBrowserActionScope.permits(action, within: window.identity.bounds) {
                 throw ComputerUseDesktopExecutor.Failure.scopedSurfaceChanged
             }
-            if action != nil, var upload = webUpload {
-                if session.currentFileOpenPanel != nil {
-                    let parentURL: String?
-                    do {
-                        parentURL = try pageReader.readRetainedPageURL(window: window.accessibilityElement,
-                            application: window.application, mayAct: { (try? tools.requireActive()) != nil },
-                            diagnostic: { failure, elapsed in
-                                self.gmailFieldDiagnostics["webUploadParentInitialReadFailure"] = failure
-                                self.gmailFieldDiagnostics["webUploadParentInitialReadElapsedMs"] = String(elapsed)
-                            })
-                    } catch {
-                        webUploadScopeFailureForDiagnostics = "native_parent_url_unavailable"
-                        throw error
-                    }
-                    guard let parentURL, !parentURL.isEmpty else { try rejectWebUploadScope("native_parent_url_unavailable") }
-                    guard parentURL == upload.request.provider.homeURL.absoluteString else {
-                        try rejectWebUploadScope("native_parent_url_mismatch")
-                    }
-                    if upload.stage == .waitingForPicker, let action,
-                       let candidate = selectedCandidate, let confirmation = pendingPickerConfirmation,
-                       confirmation.0 == candidate.id, confirmation.1 == action {
-                        try Task.checkCancellation()
-                        try tools.requireActive()
-                        guard upload.request.provider == .googleDrive else { try rejectWebUploadScope("native_panel_scope") }
-                        guard upload.preOpenProgressObserved else { try rejectWebUploadScope("native_preopen_baseline_missing") }
-                        guard let expectedLabel = upload.expectedAccountLabel else {
-                            try rejectWebUploadScope("native_account_label_unavailable")
-                        }
-                        let observedLabel: String?
-                        do {
-                            observedLabel = try ComputerUseGmailRecipientVerifier.accountControlLabel(
-                                window: window.accessibilityElement, application: window.application,
-                                revalidate: { try session.validate(taskID: taskID, goal: goal, tools: tools) },
-                                diagnostic: { failure, elapsed in
-                                    self.gmailFieldDiagnostics["webUploadAccountReadFailure"] = failure
-                                    self.gmailFieldDiagnostics["webUploadAccountReadElapsedMs"] = String(elapsed)
-                                })
-                        } catch {
-                            webUploadScopeFailureForDiagnostics = "native_account_label_unavailable"
-                            throw error
-                        }
-                        guard let observedLabel else { try rejectWebUploadScope("native_account_label_unavailable") }
-                        guard observedLabel == expectedLabel else { try rejectWebUploadScope("native_account_label_mismatch") }
-                        let freshParentURL: String?
-                        do {
-                            freshParentURL = try pageReader.readRetainedPageURL(
-                                window: window.accessibilityElement, application: window.application,
-                                mayAct: { (try? tools.requireActive()) != nil },
-                                diagnostic: { failure, elapsed in
-                                    self.gmailFieldDiagnostics["webUploadParentRecheckFailure"] = failure
-                                    self.gmailFieldDiagnostics["webUploadParentRecheckElapsedMs"] = String(elapsed)
-                                })
-                        } catch {
-                            webUploadScopeFailureForDiagnostics = "native_parent_recheck_unavailable"
-                            throw error
-                        }
-                        guard let freshParentURL, !freshParentURL.isEmpty else {
-                            try rejectWebUploadScope("native_parent_recheck_unavailable")
-                        }
-                        guard freshParentURL == parentURL else { try rejectWebUploadScope("native_parent_recheck_mismatch") }
-                        try Task.checkCancellation()
-                        try tools.requireActive()
-                        try session.validate(taskID: taskID, goal: goal, tools: tools)
-                        guard session.currentFileOpenPanel?.parentWindowID == window.id,
-                              session.currentFileOpenPanel.map({ CFEqual($0.parentWindowElement, window.accessibilityElement) }) == true else {
-                            try rejectWebUploadScope("native_panel_recheck_changed")
-                        }
-                    }
-                } else {
-                    let expectedPageURL: String
-                    switch upload.stage.pageTarget {
-                    case .exactSearch:
-                        guard let candidate = selectedCandidate,
-                              let searchURL = ComputerUseWebUploadJob.driveTitleSearchURL(filename: candidate.displayName) else {
-                            throw ComputerUseDesktopExecutor.Failure.scopedSurfaceChanged
-                        }
-                        expectedPageURL = searchURL.absoluteString
-                    case .home:
-                        expectedPageURL = upload.request.provider.homeURL.absoluteString
-                    }
-                    let page: ComputerUseDefaultBrowserPageReader.Observation?
-                    do {
-                        page = try pageReader.read(window: window.accessibilityElement,
-                            application: window.application, mayAct: { (try? tools.requireActive()) != nil },
-                            mode: .webUploadControls)
-                    } catch {
-                        webUploadScopeFailureForDiagnostics = "page_scope_unconfirmed"
-                        throw error
-                    }
-                    guard let page else { try rejectWebUploadScope("page_scope_unconfirmed") }
-                    guard page.application == window.application, page.url == expectedPageURL,
-                          page.webUploadControlsComplete,
-                          let expectedLabel = upload.expectedAccountLabel,
-                          ComputerUseDefaultBrowserExecutor.webUploadAccountLabel(page,
-                              provider: upload.request.provider) == expectedLabel else {
-                        try rejectWebUploadScope("page_scope_unconfirmed")
-                    }
-                    if upload.pendingAction == action, upload.pendingStage == .waitingForPicker,
-                       !upload.preOpenProgressObserved {
-                        try verifyAndRecordPreUploadProgressBaseline(&upload, window: window, tools: tools, observedPage: page)
-                    }
-                }
-            }
-            if action != nil, let account = gmailJob?.request.account {
-                let accountURL: String
-                let observedAccountLabel: String?
-                if session.currentFileOpenPanel != nil {
-                    guard let url = try pageReader.readRetainedPageURL(window: window.accessibilityElement,
-                        application: window.application,
-                        mayAct: { (try? tools.requireActive()) != nil }),
-                        ComputerUseGmailAccountDirectory.accountIndex(from: url) == account.index else {
-                        throw ComputerUseDesktopExecutor.Failure.scopedSurfaceChanged
-                    }
-                    accountURL = url
-                    observedAccountLabel = nil
-                } else {
-                    guard let page = try pageReader.read(window: window.accessibilityElement,
-                        application: window.application,
-                        mayAct: { (try? tools.requireActive()) != nil }),
-                        page.application == window.application,
-                        ComputerUseGmailAccountDirectory.accountIndex(from: page.url) == account.index else {
-                        throw ComputerUseDesktopExecutor.Failure.scopedSurfaceChanged
-                    }
-                    accountURL = page.url
-                    observedAccountLabel = page.controls.first(where: {
-                        $0.role == "AXButton" && $0.label.hasPrefix("Google Account:")
-                    })?.label
-                }
-                let accountLabel = try observedAccountLabel ?? ComputerUseGmailRecipientVerifier.accountControlLabel(
-                    window: window.accessibilityElement, application: window.application,
-                    revalidate: { try session.validate(taskID: taskID, goal: goal, tools: tools) })
-                let title = try ComputerUseGmailAccountDirectory.observedWindowTitle(window: window.accessibilityElement,
-                    application: window.application,
-                    revalidate: { try session.validate(taskID: taskID, goal: goal, tools: tools) })
-                guard ComputerUseGmailAccountDirectory.confirmsActiveAccount(currentURL: accountURL,
-                    windowTitle: title, accountControlLabel: accountLabel, expected: account) else {
-                    throw ComputerUseDesktopExecutor.Failure.scopedSurfaceChanged
-                }
-                if let standaloneContext = gmailStandaloneComposeContext,
-                   !standaloneContext.matchesCurrent(pageURL: accountURL, windowTitle: title,
-                       accountControlLabel: accountLabel) {
-                    throw ComputerUseDesktopExecutor.Failure.scopedSurfaceChanged
-                }
-                try Task.checkCancellation()
-                try session.validate(taskID: taskID, goal: goal, tools: tools)
-            }
-            if let expectedAddress = gmailRecipientMenuAddressToDismiss,
-               let action, case .key(let usage, let modifiers) = action,
-               usage == 0x29, modifiers == 0 {
-                guard let currentWindow = session.currentWindow, session.currentFileOpenPanel == nil else {
-                    throw ComputerUseDesktopExecutor.Failure.unsupportedAction
-                }
-                guard let taskID = self.taskID, let goal = self.goal else { throw Failure.noRetainedWindow }
-                let observed = try ComputerUseGmailRecipientVerifier.recipientMenuObservation(
-                    window: currentWindow.accessibilityElement, application: currentWindow.application,
-                    standaloneContext: gmailStandaloneComposeContext,
-                    revalidate: { try session.validate(taskID: taskID, goal: goal, tools: tools) })
-                switch ComputerUseGmailRecipientVerifier.dismissalDecision(observation: observed,
-                    expectedAddress: expectedAddress, escapeDispatched: gmailRecipientEscapeDispatched) {
-                case .sendEscape:
-                    pendingGmailRecipientEscapeAction = action
-                case .menuAbsent:
-                    gmailRecipientMenuAddressToDismiss = nil
-                    gmailRecipientEscapeDispatched = false
-                    pendingGmailRecipientEscapeAction = nil
-                    throw ComputerUseDesktopExecutor.Failure.unsupportedAction
-                case .stop:
-                    throw ComputerUseDesktopExecutor.Failure.unsupportedAction
-                }
-            }
         }
-
-        func verifyFreshSavedGmailDraftCompletion(_ tools: ComputerUseHostTools) throws -> Bool? {
-            guard let job = gmailJob, !job.request.sendRequested, gmailFlowStage == .complete else { return nil }
-            func phase(_ value: String) { gmailFieldDiagnostics["gmailCompletionProofPhase"] = value }
-            for key in ["gmailCompletionSavedRowURLPresent", "gmailCompletionPendingWorkClear",
-                "gmailCompletionPageObserved", "gmailCompletionPageTruncated", "gmailCompletionURLMatches",
-                "gmailCompletionFieldsMatch", "gmailCompletionAccountMatches",
-                "gmailCompletionAttachmentMatches", "gmailCompletionRecipientsMatch"] {
-                gmailFieldDiagnostics[key] = "false"
-            }
-            phase("preflight")
-            gmailFieldDiagnostics["gmailCompletionSavedRowURLPresent"] = String(gmailSavedDraftReopenURL != nil)
-            gmailFieldDiagnostics["gmailCompletionPendingWorkClear"] = String(
-                gmailPendingSendAction == nil && pendingGmailFlowStage == nil
-                    && pendingPickerConfirmation == nil && session.currentFileOpenPanel == nil)
-            guard gmailPendingSendAction == nil, pendingGmailFlowStage == nil,
-                  pendingPickerConfirmation == nil, session.currentFileOpenPanel == nil,
-                  let savedURL = gmailSavedDraftReopenURL,
-                  ComputerUseGmailJob.isOpaqueComposeDraftURL(savedURL),
-                  let account = selectedGmailAccount,
-                  job.request.account?.index == account.index,
-                  ComputerUseGmailAccountDirectory.accountIndex(from: savedURL.absoluteString) == account.index,
-                  let initialWindow = session.currentWindow else { return false }
-
-            func checkScope() throws {
-                try Task.checkCancellation()
-                try tools.requireActive()
-                try check(nil, tools)
-                guard session.currentFileOpenPanel == nil,
-                      let current = session.currentWindow,
-                      current.id == initialWindow.id,
-                      current.application == initialWindow.application,
-                      CFEqual(current.accessibilityElement, initialWindow.accessibilityElement) else {
-                    throw ComputerUseDesktopExecutor.Failure.completionUnverified
-                }
-            }
-            func readVerifiedPage(_ stage: String) throws -> ComputerUseDefaultBrowserPageReader.Observation? {
-                phase("\(stage)_page_read")
-                gmailFieldDiagnostics["gmailCompletionPageObserved"] = "false"
-                gmailFieldDiagnostics["gmailCompletionPageTruncated"] = "false"
-                gmailFieldDiagnostics["gmailCompletionURLMatches"] = "false"
-                gmailFieldDiagnostics["gmailCompletionFieldsMatch"] = "false"
-                gmailFieldDiagnostics["gmailCompletionAccountMatches"] = "false"
-                try checkScope()
-                guard let current = session.currentWindow,
-                      let page = try pageReader.read(window: current.accessibilityElement,
-                        application: current.application,
-                        mayAct: { (try? tools.requireActive()) != nil }) else { return nil }
-                try checkScope()
-                gmailFieldDiagnostics["gmailCompletionPageObserved"] = "true"
-                gmailFieldDiagnostics["gmailCompletionPageTruncated"] = String(page.truncated)
-                phase("\(stage)_url")
-                let urlMatches = page.application == current.application && page.url == savedURL.absoluteString
-                    && ComputerUseGmailJob.isOpaqueComposeDraftURL(savedURL)
-                    && ComputerUseGmailAccountDirectory.accountIndex(from: page.url) == account.index
-                gmailFieldDiagnostics["gmailCompletionURLMatches"] = String(urlMatches)
-                guard urlMatches else { return nil }
-                phase("\(stage)_fields")
-                let fieldsMatch = try ComputerUseGmailRecipientVerifier.verifiesComposeContents(
-                    window: current.accessibilityElement, application: current.application,
-                    expectedSubject: job.request.subject, expectedBody: job.request.body,
-                    revalidate: checkScope)
-                gmailFieldDiagnostics["gmailCompletionFieldsMatch"] = String(fieldsMatch)
-                guard fieldsMatch else { return nil }
-                phase("\(stage)_account")
-                let accountLabel = try page.controls.first(where: {
-                    $0.role == "AXButton" && $0.label.hasPrefix("Google Account:")
-                })?.label ?? ComputerUseGmailRecipientVerifier.accountControlLabel(
-                    window: current.accessibilityElement, application: current.application,
-                    revalidate: checkScope)
-                let title = try ComputerUseGmailAccountDirectory.observedWindowTitle(
-                    window: current.accessibilityElement, application: current.application,
-                    revalidate: checkScope)
-                let accountMatches = ComputerUseGmailAccountDirectory.confirmsActiveAccount(currentURL: page.url,
-                    windowTitle: title, accountControlLabel: accountLabel, expected: account)
-                gmailFieldDiagnostics["gmailCompletionAccountMatches"] = String(accountMatches)
-                guard accountMatches else { return nil }
-                return page
-            }
-            func attachmentMatches(_ stage: String) throws -> Bool {
-                phase("\(stage)_attachment")
-                gmailFieldDiagnostics["gmailCompletionAttachmentMatches"] = "false"
-                try checkScope()
-                guard let current = session.currentWindow else { return false }
-                if let attachment = job.attachment {
-                    guard let candidate = selectedCandidate,
-                          attachment.candidateID == candidate.id,
-                          attachment.displayName == candidate.displayName,
-                          attachment.byteCount == candidate.byteCount,
-                          gmailVerifiedAttachmentCandidateID == candidate.id else { return false }
-                    let matches = try ComputerUseGmailRecipientVerifier.attachmentEvidence(
-                        window: current.accessibilityElement, application: current.application,
-                        expected: attachment, revalidate: checkScope) == .matching
-                    gmailFieldDiagnostics["gmailCompletionAttachmentMatches"] = String(matches)
-                    return matches
-                }
-                guard !job.requiresAttachment else { return false }
-                let absent = try ComputerUseGmailRecipientVerifier.attachmentEvidence(
-                    window: current.accessibilityElement, application: current.application,
-                    expected: nil, revalidate: checkScope) == .absent
-                gmailFieldDiagnostics["gmailCompletionAttachmentMatches"] = String(absent)
-                return absent
-            }
-
-            guard try readVerifiedPage("initial") != nil, try attachmentMatches("initial") else { return false }
-            phase("recipients")
-            gmailFieldDiagnostics["gmailCompletionRecipientsMatch"] = "false"
-            try checkScope()
-            guard let current = session.currentWindow,
-                  try ComputerUseGmailRecipientVerifier.verify(window: current.accessibilityElement,
-                    application: current.application, expected: job.request,
-                    revalidate: checkScope) else { return false }
-            gmailFieldDiagnostics["gmailCompletionRecipientsMatch"] = "true"
-            try checkScope()
-            guard try readVerifiedPage("final") != nil, try attachmentMatches("final") else { return false }
-            try checkScope()
-            phase("verified")
-            return true
-        }
-
-        func verifyFreshWebUploadCompletion(_ tools: ComputerUseHostTools) throws -> Bool? {
-            guard var upload = webUpload, upload.stage == .complete,
-                  upload.siteUploadDispatchCount == 1, upload.openDispatchCount == 1,
-                  upload.observedCompletionProgress,
-                  let candidate = selectedCandidate, let window = session.currentWindow,
-                  session.currentFileOpenPanel == nil, let expectedAccount = upload.expectedAccountLabel else { return nil }
-            try Task.checkCancellation(); try tools.requireActive(); try check(nil, tools)
-            guard let page = try pageReader.read(window: window.accessibilityElement,
-                application: window.application, mayAct: { (try? tools.requireActive()) != nil },
-                mode: .webUploadControls) else { return false }
-            try Task.checkCancellation(); try tools.requireActive(); try check(nil, tools)
-            guard let searchURL = ComputerUseWebUploadJob.driveTitleSearchURL(filename: candidate.displayName),
-                  let observedURL = URL(string: page.url),
-                  ComputerUseWebUploadJob.isDriveTitleSearchURL(observedURL, filename: candidate.displayName),
-                  page.application == window.application, page.webUploadControlsComplete,
-                  page.formFieldValues.filter({ $0.value == ComputerUseWebUploadJob.driveTitleSearchQuery(filename: candidate.displayName) }).count == 1,
-                  ComputerUseDefaultBrowserExecutor.webUploadAccountLabel(page, provider: upload.request.provider)
-                    == expectedAccount else { return false }
-            guard let rowsPage = try pageReader.read(window: window.accessibilityElement,
-                    application: window.application, mayAct: { (try? tools.requireActive()) != nil },
-                    mode: .webUploadListing),
-                  rowsPage.application == window.application, rowsPage.url == searchURL.absoluteString,
-                  !rowsPage.truncated else { return false }
-            guard ComputerUseWebUploadJob.verifiesDriveCompletion(rows: rowsPage.webUploadListingRows,
-                candidate: candidate, progress: .complete, pageIsComplete: true,
-                detailsTextValues: page.exactTextValues) else {
-                return false
-            }
-            upload.stage = .complete
-            webUpload = upload
-            return true
-        }
-
-        func checkGmailDraftsPage(_ action: ComputerUsePredictedAction, _ tools: ComputerUseHostTools) throws {
-            try check(action, tools)
-            guard let taskID, let goal, let window = self.window,
-                  let account = gmailJob?.request.account,
-                  let page = try pageReader.read(window: window.accessibilityElement, application: window.application,
-                    mayAct: { (try? tools.requireActive()) != nil }),
-                  page.application == window.application,
-                  page.url.range(of: #"^https://mail\.google\.com/mail/u/[0-9]+/#drafts$"#,
-                    options: [.regularExpression, .caseInsensitive]) != nil,
-                  ComputerUseGmailAccountDirectory.accountIndex(from: page.url) == account.index else {
-                throw ComputerUseDesktopExecutor.Failure.scopedSurfaceChanged
-            }
-            try session.validate(taskID: taskID, goal: goal, tools: tools)
-        }
-
         func successfulDispatch(_ action: ComputerUsePredictedAction) {
-            if var upload = webUpload {
-                if upload.stage == .visualChooseFileUpload, upload.visualActionProposed {
-                    upload.visualActionProposed = false
-                    upload.visualActionDispatched = true
-                }
-                if upload.pendingAction == action, let next = upload.pendingStage {
-                    if case .waitingForPicker = next, upload.dispatchLatch.siteUploadAttempted {
-                        upload.siteUploadDispatchCount += 1
-                    }
-                    upload.stage = next
-                    upload.pendingAction = nil
-                    upload.pendingStage = nil
-                }
-                if upload.pendingOpenAction == action {
-                    if upload.dispatchLatch.nativeOpenAttempted { upload.openDispatchCount += 1 }
-                    upload.pendingOpenAction = nil
-                    if upload.dispatchLatch.nativeOpenAttempted { upload.stage = .waitingForUpload }
-                }
-                webUpload = upload
-            }
-            if let pendingGmailFlowStage {
-                gmailFlowStage = pendingGmailFlowStage
-                self.pendingGmailFlowStage = nil
-            }
-            if let gmailPendingSendAction, gmailPendingSendAction == action {
-                self.gmailPendingSendAction = nil
-            }
-            if let pendingGmailRecipientEscapeAction, pendingGmailRecipientEscapeAction == action {
-                self.pendingGmailRecipientEscapeAction = nil
-                gmailRecipientEscapeDispatched = true
-            }
             guard let pendingPickerConfirmation, pendingPickerConfirmation.action == action else {
                 self.pendingPickerConfirmation = nil
                 return
             }
             dispatchedPickerConfirmationCandidateID = pendingPickerConfirmation.candidateID
-            gmailRecipientsVerified = false
             self.pendingPickerConfirmation = nil
-        }
-
-        func willBeginEffect(_ action: ComputerUsePredictedAction) {
-            guard var upload = webUpload else { return }
-            if upload.pendingAction == action, upload.pendingStage == .waitingForPicker {
-                guard upload.dispatchLatch.beginSiteUpload() else { return }
-            } else if upload.stage == .visualChooseFileUpload, upload.visualActionProposed {
-                guard upload.dispatchLatch.beginSiteUpload() else { return }
-            } else if upload.pendingOpenAction == action {
-                guard upload.dispatchLatch.beginNativeOpen() else { return }
-            }
-            webUpload = upload
-        }
-
-        func attachApprovalPresentation(for action: ComputerUsePredictedAction) -> MCPComputerUseApprovalPresentation? {
-            guard let pendingPickerConfirmation, pendingPickerConfirmation.action == action,
-                  let selectedCandidate, pendingPickerConfirmation.candidateID == selectedCandidate.id,
-                  let window = session.currentWindow,
-                  let panel = session.currentFileOpenPanel,
-                  panel.primaryActionEnabled == true,
-                  panel.parentWindowID == window.id,
-                  CFEqual(panel.parentWindowElement, window.accessibilityElement) else { return nil }
-            let selectedURL: URL
-            do {
-                guard let resolvedURL = try selectedFileURL() else { return nil }
-                selectedURL = resolvedURL
-            } catch { return nil }
-            guard ComputerUseDefaultBrowserActionScope.candidateIsSelected(panel: panel,
-                    candidateURL: selectedURL) else { return nil }
-            if let upload = webUpload, upload.stage == .waitingForPicker,
-               !upload.dispatchLatch.nativeOpenAttempted,
-               let accountLabel = upload.expectedAccountLabel {
-                return upload.request.openApprovalPresentation(candidate: selectedCandidate, accountLabel: accountLabel)
-            }
-            guard let job = gmailJob,
-                  let attachment = job.attachment,
-                  attachment.candidateID == selectedCandidate.id,
-                  attachment.displayName == selectedCandidate.displayName,
-                  attachment.byteCount == selectedCandidate.byteCount else { return nil }
-            return job.attachApprovalPresentation()
         }
 
         func modelInput(_ input: ComputerUseFaraModel.Input,
@@ -988,9 +375,6 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
                     scope: scopeDigest, expiresAt: expiresAt, choices: choices)
                 clarificationRetired = false
                 pendingChoiceCandidates = candidates
-                pendingChoiceKind = .file
-                pendingGmailRecipientChoiceSet = nil
-                pendingGmailAccountChoiceSet = nil
                 executionTaskID = clarificationTaskID
                 clarificationNonce = nonce
                 return .clarificationRequired(question)
@@ -1021,123 +405,6 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
             catch { throw Failure.selectedFileStale }
         }
 
-        func verifyAndRecordPreUploadProgressBaseline(_ upload: inout WebUploadState,
-            window expectedWindow: ComputerUseDefaultBrowserSession.Window,
-            tools: ComputerUseHostTools,
-            observedPage: ComputerUseDefaultBrowserPageReader.Observation? = nil) throws {
-            let recordsShortcutRecheck = upload.stage == .driveKeyboardChooseFileUpload && upload.preOpenProgressObserved
-            func recordShortcutRecheck(_ phase: String) {
-                if recordsShortcutRecheck { gmailFieldDiagnostics["webUploadDriveBaselineRecheckFailure"] = phase }
-            }
-            if recordsShortcutRecheck { recordShortcutRecheck("retained_scope") }
-            guard let taskID, let goal else { throw Failure.noRetainedWindow }
-            try Task.checkCancellation()
-            try tools.requireActive()
-            try session.validate(taskID: taskID, goal: goal, tools: tools)
-            guard session.currentFileOpenPanel == nil,
-                  let current = session.currentWindow,
-                  current.id == expectedWindow.id,
-                  current.application == expectedWindow.application,
-                  CFEqual(current.accessibilityElement, expectedWindow.accessibilityElement),
-                  upload.request.provider == .googleDrive,
-                  upload.expectedAccountLabel != nil else {
-                throw ComputerUseDesktopExecutor.Failure.scopedSurfaceChanged
-            }
-            if upload.preOpenProgressObserved {
-                guard let expectedLabel = upload.expectedAccountLabel else {
-                    recordShortcutRecheck("account_read")
-                    throw ComputerUseDesktopExecutor.Failure.scopedSurfaceChanged
-                }
-                let observedURL: String?
-                do {
-                    observedURL = try pageReader.readRetainedPageURL(window: current.accessibilityElement,
-                        application: current.application, mayAct: { (try? tools.requireActive()) != nil },
-                        diagnostic: { failure, elapsed in
-                            self.gmailFieldDiagnostics["webUploadParentInitialReadFailure"] = failure
-                            self.gmailFieldDiagnostics["webUploadParentInitialReadElapsedMs"] = String(elapsed)
-                        })
-                } catch {
-                    recordShortcutRecheck("url_read")
-                    throw error
-                }
-                guard let observedURL else {
-                    recordShortcutRecheck("url_read")
-                    throw ComputerUseDesktopExecutor.Failure.scopedSurfaceChanged
-                }
-                guard observedURL == upload.request.provider.homeURL.absoluteString else {
-                    recordShortcutRecheck("url_mismatch")
-                    throw ComputerUseDesktopExecutor.Failure.scopedSurfaceChanged
-                }
-                let observedLabel: String?
-                do {
-                    observedLabel = try ComputerUseGmailRecipientVerifier.accountControlLabel(
-                        window: current.accessibilityElement, application: current.application,
-                        revalidate: { try session.validate(taskID: taskID, goal: goal, tools: tools) },
-                        diagnostic: { failure, elapsed in
-                            self.gmailFieldDiagnostics["webUploadAccountReadFailure"] = failure
-                            self.gmailFieldDiagnostics["webUploadAccountReadElapsedMs"] = String(elapsed)
-                        })
-                } catch {
-                    recordShortcutRecheck("account_read")
-                    throw error
-                }
-                guard let observedLabel else {
-                    recordShortcutRecheck("account_read")
-                    throw ComputerUseDesktopExecutor.Failure.scopedSurfaceChanged
-                }
-                guard observedLabel == expectedLabel else {
-                    recordShortcutRecheck("account_mismatch")
-                    throw ComputerUseDesktopExecutor.Failure.scopedSurfaceChanged
-                }
-                try Task.checkCancellation()
-                try tools.requireActive()
-                try session.validate(taskID: taskID, goal: goal, tools: tools)
-                guard session.currentFileOpenPanel == nil,
-                      let confirmed = session.currentWindow,
-                      confirmed.id == expectedWindow.id,
-                      confirmed.application == expectedWindow.application,
-                      CFEqual(confirmed.accessibilityElement, expectedWindow.accessibilityElement) else {
-                    recordShortcutRecheck("retained_scope_recheck")
-                    throw ComputerUseDesktopExecutor.Failure.scopedSurfaceChanged
-                }
-                recordShortcutRecheck("complete")
-                return
-            }
-            let page: ComputerUseDefaultBrowserPageReader.Observation
-            if let observedPage { page = observedPage }
-            else {
-                guard let freshPage = try pageReader.read(window: current.accessibilityElement,
-                    application: current.application, mayAct: { (try? tools.requireActive()) != nil },
-                    mode: .webUploadControls) else {
-                    throw ComputerUseDesktopExecutor.Failure.scopedSurfaceChanged
-                }
-                page = freshPage
-            }
-            guard page.application == expectedWindow.application,
-                  page.url == upload.request.provider.homeURL.absoluteString,
-                  page.webUploadControlsComplete,
-                  let expectedAccountLabel = upload.expectedAccountLabel,
-                  ComputerUseDefaultBrowserExecutor.webUploadAccountLabel(page,
-                    provider: upload.request.provider) == expectedAccountLabel,
-                  ComputerUseDefaultBrowserExecutor.webUploadProgressBaselineIsClean(
-                    controlsComplete: page.webUploadControlsComplete, progressValues: page.exactTextValues) else {
-                throw ComputerUseDesktopExecutor.Failure.scopedSurfaceChanged
-            }
-            try Task.checkCancellation()
-            try tools.requireActive()
-            try session.validate(taskID: taskID, goal: goal, tools: tools)
-            guard session.currentFileOpenPanel == nil,
-                  let confirmed = session.currentWindow,
-                  confirmed.id == expectedWindow.id,
-                  confirmed.application == expectedWindow.application,
-                  CFEqual(confirmed.accessibilityElement, expectedWindow.accessibilityElement) else {
-                throw ComputerUseDesktopExecutor.Failure.scopedSurfaceChanged
-            }
-            upload.preOpenProgressObserved = true
-            webUpload = upload
-            webUploadCheckpointObserver?(.preUploadProgressClean)
-        }
-
         static var notQueriedFileContext: ComputerUseLocalFileContext {
             .init(query: .init(), page: .init(candidates: [], isComplete: false, nextCursor: nil,
                 hasTiedSortValues: false, hasMissingSortValues: false), inventoryState: .notQueried)
@@ -1146,85 +413,8 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
 
     private let scope: Scope
     private let desktop: ComputerUseDesktopExecutor
-    private let gmailContentExtractor: GmailContentExtractor?
-    private let webUploadContentExtractor: WebUploadContentExtractor?
-    private let webUploadCheckpointObserver: WebUploadCheckpointObserver?
-    private let gmailRecipientLookup: GmailRecipientLookup
-    private let gmailExistingDraftURL: URL?
-    private let gmailAccountPreferences: ComputerUseGmailAccountPreferences
 
-    private func prepareGmailJobIfNeeded(_ originalRequest: String, tools: ComputerUseHostTools) async throws
-        -> ComputerUseExecutionResult? {
-        guard scope.gmailJob == nil, scope.gmailSetup == nil,
-              case .gmail(let intent) = ComputerUseWebJobRequest.route(originalRequest) else { return nil }
-        guard let gmailContentExtractor else {
-            return .userInterventionRequired("Gmail setup is unavailable in this session. Restore the Gmail capability, then choose Resume.")
-        }
-        try scope.check(nil, tools)
-        let extraction = try await gmailContentExtractor(originalRequest)
-        try Task.checkCancellation()
-        try scope.check(nil, tools)
-        scope.gmailSetup = .init(intent: intent, extraction: extraction)
-        scope.gmailNavigationStage = .navigateTarget
-        scope.gmailNavigationTargetURL = ComputerUseGmailAccountDirectory.inboxURL(index: 0)
-        return nil
-    }
-    private func prepareWebUploadIfNeeded(_ originalRequest: String, tools: ComputerUseHostTools) async throws
-        -> ComputerUseExecutionResult? {
-        guard scope.webUpload == nil else { return nil }
-        let intent: ComputerUseWebJobRequest.UploadIntent
-        let provider: ComputerUseWebUploadJob.Provider
-        switch ComputerUseWebJobRequest.route(originalRequest) {
-        case .googleDriveUpload(let value): intent = value; provider = .googleDrive
-        case .dropboxUpload(let value): intent = value; provider = .dropbox
-        default: return nil
-        }
-        guard let webUploadContentExtractor else {
-            return .userInterventionRequired("Web upload setup is unavailable in this session. Restore the capability, then choose Resume.")
-        }
-        try scope.check(nil, tools)
-        let extraction = try await webUploadContentExtractor(originalRequest)
-        try Task.checkCancellation()
-        try scope.check(nil, tools)
-        let request = try ComputerUseWebUploadJob.Request(provider: provider,
-            fileQuery: extraction.fileQuery, destinationFolder: extraction.destinationFolder)
-        scope.webUpload = .init(intent: intent, request: request, fileDescription: extraction.fileDescription)
-        do {
-            guard let taskID = scope.taskID, let goal = scope.goal else { throw Failure.taskAlreadyBound }
-            try scope.session.enableW2FocusedRetainedCaptureFallback(taskID: taskID, goal: goal, tools: tools)
-        } catch {
-            scope.webUpload = nil
-            throw error
-        }
-        return nil
-    }
-    private func surfacePendingGmailClarification(_ result: ComputerUseExecutionResult,
-        taskID: String) -> ComputerUseExecutionResult {
-        guard scope.pendingChoiceKind == .gmailRecipient || scope.pendingChoiceKind == .gmailAccount,
-              let pending = scope.pendingClarification,
-              case .userInterventionRequired(let message) = result,
-              message == pending.question, pending.expiresAt > Date(),
-              scope.clarificationNonce != nil,
-              pending.taskID == scope.executionTaskID,
-              scope.executionTaskID == taskID else { return result }
-        return .clarificationRequired(pending.question)
-    }
-    /// Optional task-specific verification supplements the model's decision
-    /// from the fresh screenshot. Real-site acceptance checks outcomes separately.
     var retainedWindowForDiagnostics: ComputerUseDefaultBrowserSession.Window? { scope.window }
-    var webUploadRequestForDiagnostics: ComputerUseWebUploadJob.Request? { scope.webUpload?.request }
-    var webUploadSelectedFileForDiagnostics: (name: String, byteCount: Int64)? {
-        guard scope.webUpload != nil, let candidate = scope.selectedCandidate else { return nil }
-        return (candidate.displayName, candidate.byteCount)
-    }
-    var webUploadDispatchCountForDiagnostics: Int { scope.webUpload?.siteUploadDispatchCount ?? 0 }
-    var webUploadOpenDispatchCountForDiagnostics: Int { scope.webUpload?.openDispatchCount ?? 0 }
-    /// Recovery navigation hint only; it is not completion or approval evidence.
-    var gmailVerifiedComposeBookmarkForRecovery: (url: URL, subject: String)? {
-        guard let url = scope.lastVerifiedGmailComposeURL,
-              let subject = scope.gmailJob?.request.subject else { return nil }
-        return (url, subject)
-    }
     private(set) var lastSessionFailureForDiagnostics: ComputerUseDefaultBrowserSession.Failure?
     private(set) var lastApprovedVisualContinuationFailureForDiagnostics: String?
     private(set) var lastApprovedVisualContinuationDesktopFailureForDiagnostics: String?
@@ -1244,27 +434,6 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
         }
         if let reason = scope.tools?.lastScreenCaptureFailureForDiagnostics {
             diagnostic["screenCaptureFailure"] = reason
-        }
-        diagnostic.merge(scope.gmailFieldDiagnostics) { _, new in new }
-        if let failure = scope.webUploadScopeFailureForDiagnostics {
-            diagnostic["webUploadScopeFailure"] = failure
-        }
-        if scope.webUpload != nil {
-            for (key, value) in scope.pageReader.lastWebUploadControlsDiagnosticForDiagnostics {
-                diagnostic["webUploadControls_\(key)"] = value
-            }
-        }
-        if let phase = scope.gmailNavigationPhase { diagnostic["gmailNavigationPhase"] = phase }
-        if scope.gmailAddressValueWriteAttemptCount > 0 {
-            diagnostic["gmailAddressValueWriteAttemptCount"] = String(scope.gmailAddressValueWriteAttemptCount)
-        }
-        if scope.gmailAddressValueWriteCompletedCount > 0 {
-            diagnostic["gmailAddressValueWriteCompletedCount"] = String(scope.gmailAddressValueWriteCompletedCount)
-        }
-        if scope.gmailJob != nil {
-            diagnostic["gmailFlowStage"] = String(describing: scope.gmailFlowStage)
-            diagnostic["gmailNavigationStage"] = String(describing: scope.gmailNavigationStage)
-            if let stage = scope.pendingGmailFlowStage { diagnostic["gmailPendingFlowStage"] = String(describing: stage) }
         }
         if let phase = scope.session.lastValidationPhaseForDiagnostics {
             diagnostic["sessionValidationPhase"] = phase.rawValue
@@ -1291,9 +460,6 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
         if let transition = scope.session.lastWindowTransitionDiagnostic {
             diagnostic["sessionWindowTransitionDiagnostic"] = transition
         }
-        for (key, value) in scope.session.lastAddressFocusWaitDiagnostic {
-            diagnostic["addressFocusWait_\(key)"] = value
-        }
         diagnostic["lastSessionFailureForDiagnostics"] = String(describing: lastSessionFailureForDiagnostics)
         return diagnostic
     }
@@ -1303,13 +469,6 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
     var hasAdditionalSetup: Bool { desktop.hasAdditionalSetup }
     var supportsNativeTextTasks: Bool { desktop.supportsNativeTextTasks }
     var readyDetail: String { desktop.readyDetail }
-
-    func gmailApprovalPresentation(for action: ComputerUsePredictedAction) -> MCPComputerUseApprovalPresentation? {
-        if scope.gmailPendingSendAction == action {
-            return scope.gmailJob?.sendApprovalPresentation()
-        }
-        return scope.attachApprovalPresentation(for: action)
-    }
 
     init(journalDirectory: URL, session suppliedSession: ComputerUseDefaultBrowserSession? = nil,
          propose: @escaping ComputerUseDesktopExecutor.Propose,
@@ -1324,36 +483,16 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
          localFileCatalogFactory: @escaping LocalFileCatalogFactory = { taskID in
             try ComputerUseLocalFileCatalog(taskID: taskID,
                 approvedRoots: ComputerUseLocalFileCatalog.standardApprovedRoots(), pageSize: 8, usesSpotlight: true)
-         }, gmailContentExtractor: GmailContentExtractor? = nil,
-         webUploadContentExtractor: WebUploadContentExtractor? = nil,
-         webUploadCheckpointObserver: WebUploadCheckpointObserver? = nil,
-         gmailRecipientLookup: @escaping GmailRecipientLookup = { try await ComputerUseMailRecipients.contacts($0) },
-         gmailExistingDraftURL: URL? = nil,
-         gmailAccountPreferences: ComputerUseGmailAccountPreferences? = nil) throws {
+         }) throws {
         let session: ComputerUseDefaultBrowserSession
         if let suppliedSession { session = suppliedSession }
         else { session = try ComputerUseDefaultBrowserSession(journalDirectory: journalDirectory) }
-        let accountPreferences = gmailAccountPreferences ?? ComputerUseGmailAccountPreferences()
         let scope = Scope(session: session, pageReader: pageReader ?? ComputerUseDefaultBrowserPageReader(),
-            localFileCatalogFactory: localFileCatalogFactory,
-            webUploadCheckpointObserver: webUploadCheckpointObserver)
+            localFileCatalogFactory: localFileCatalogFactory)
         self.scope = scope
-        self.gmailContentExtractor = gmailContentExtractor
-        self.webUploadContentExtractor = webUploadContentExtractor
-        self.webUploadCheckpointObserver = webUploadCheckpointObserver
-        self.gmailRecipientLookup = gmailRecipientLookup
-        self.gmailAccountPreferences = accountPreferences
-        if let gmailExistingDraftURL {
-            guard ComputerUseGmailJob.isApprovedDraftURL(gmailExistingDraftURL) else {
-                throw ComputerUseGmailJob.Error.invalidDraftURL
-            }
-        }
-        self.gmailExistingDraftURL = gmailExistingDraftURL
         let scopedOutcomeCheck: ComputerUseDesktopExecutor.OutcomeCheck?
-        if outcomeCheck != nil || gmailContentExtractor != nil || webUploadContentExtractor != nil {
+        if outcomeCheck != nil {
             scopedOutcomeCheck = { rawInput, answer in
-                if scope.gmailJob != nil { return scope.gmailFlowStage == .complete }
-                if scope.webUpload != nil { return scope.webUpload?.stage == .complete }
                 guard let outcomeCheck else { return false }
                 var enriched = try scope.modelInput(rawInput)
                 // Never credit a destination observation supplied by an earlier
@@ -1389,114 +528,19 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
         let scopedCompletionCheck: CompletionCheck?
         if let completionCheck {
             scopedCompletionCheck = { answer in
-                if scope.gmailJob != nil { return true }
-                if scope.webUpload != nil { return scope.webUpload?.stage == .complete }
                 return try await completionCheck(answer)
             }
         } else { scopedCompletionCheck = nil }
-        let hostCompletionProof: ComputerUseDesktopExecutor.HostCompletionProof?
-        if gmailContentExtractor != nil || webUploadContentExtractor != nil {
-            hostCompletionProof = {
-                guard let tools = scope.tools else { return false }
-                if scope.webUpload != nil { return try scope.verifyFreshWebUploadCompletion(tools) }
-                return try scope.verifyFreshSavedGmailDraftCompletion(tools)
-            }
-        } else { hostCompletionProof = nil }
         desktop = try ComputerUseDesktopExecutor(journalDirectory: journalDirectory, propose: { input in
             scope.nativeControlErrorDomainForDiagnostics = nil
             scope.nativeControlErrorCodeForDiagnostics = nil
             scope.nativeFileOperationReady = false
-            if (scope.gmailSetup != nil || scope.gmailJob != nil),
-               scope.gmailNavigationStage == .navigateTarget,
-               scope.gmailNavigationTargetURL == nil {
-                return .init(response: "", decision: .handoff("The Gmail page address could not be prepared safely."),
-                    includeInModelHistory: false)
-            }
             if scope.session.currentFileOpenPanel != nil {
                 scope.visualFallbackPending = false
                 scope.pendingVisualDirective = nil
             }
-            if var upload = scope.webUpload, upload.stage == .visualChooseFileUpload,
-               upload.visualActionDispatched, scope.session.currentFileOpenPanel != nil {
-                upload.stage = .waitingForPicker
-                upload.siteUploadDispatchCount = 1
-                scope.webUpload = upload
-            }
-            if var upload = scope.webUpload, upload.stage == .chooseFileUpload,
-               upload.dispatchLatch.siteUploadAttempted, scope.session.currentFileOpenPanel != nil {
-                upload.stage = .waitingForPicker
-                upload.siteUploadDispatchCount = 1
-                scope.webUpload = upload
-            }
             if scope.session.currentFileOpenPanel != nil && scope.selectedCandidate == nil {
                 return .init(response: "", decision: .handoff("Choose a file in the native picker before continuing."),
-                    includeInModelHistory: false)
-            }
-            if let panel = scope.session.currentFileOpenPanel, let candidate = scope.selectedCandidate,
-               var job = scope.gmailJob, job.requiresAttachment {
-                guard let selectedURL = try scope.selectedFileURL(), selectedURL.lastPathComponent == candidate.displayName else {
-                    throw Failure.selectedFileStale
-                }
-                if let navigation = ComputerUseDefaultBrowserActionScope.nativeSelectionProposal(panel: panel,
-                    selectedURL: selectedURL) {
-                    return navigation
-                }
-                guard ComputerUseDefaultBrowserActionScope.candidateIsSelected(panel: panel, candidateURL: selectedURL) else {
-                    return .init(response: "", decision: .handoff(
-                        "The native picker has not selected the requested file yet. Review it, then choose Resume."),
-                        includeInModelHistory: false)
-                }
-                try job.selectAttachment(.init(candidateID: candidate.id, displayName: candidate.displayName,
-                    byteCount: candidate.byteCount))
-                scope.gmailJob = job
-                guard panel.primaryActionEnabled == true, let bounds = panel.primaryActionBounds,
-                      let display = input.desktopDisplayBounds else {
-                    return .init(response: "", decision: .handoff(
-                        "The selected Gmail attachment is not ready to open. Review the file chooser, then choose Resume."),
-                        includeInModelHistory: false)
-                }
-                let center = CGPoint(x: bounds.midX, y: bounds.midY)
-                let action = try Self.normalizedPointerAction(center: center, display: display)
-                guard let tools = scope.tools else { throw Failure.noRetainedWindow }
-                let predicted = ComputerUsePredictedAction.click(x: Int(center.x.rounded()), y: Int(center.y.rounded()),
-                    button: 1, count: 1)
-                try scope.check(predicted, tools)
-                scope.pendingGmailFlowStage = .waitingForAttachment
-                return .init(response: "", action: action, includeInModelHistory: false)
-            }
-            if let panel = scope.session.currentFileOpenPanel,
-               let candidate = scope.selectedCandidate,
-               var upload = scope.webUpload, upload.stage == .waitingForPicker {
-                guard !upload.dispatchLatch.nativeOpenAttempted else {
-                    return .init(response: "", decision: .handoff(
-                        "Opening the selected file may already have started. Review the provider page before choosing Resume."),
-                        includeInModelHistory: false)
-                }
-                guard let selectedURL = try scope.selectedFileURL(),
-                      selectedURL.lastPathComponent == candidate.displayName else {
-                    throw Failure.selectedFileStale
-                }
-                if let navigation = ComputerUseDefaultBrowserActionScope.nativeSelectionProposal(panel: panel,
-                    selectedURL: selectedURL) {
-                    return navigation
-                }
-                guard ComputerUseDefaultBrowserActionScope.candidateIsSelected(panel: panel,
-                          candidateURL: selectedURL),
-                      panel.primaryActionEnabled == true,
-                      let bounds = panel.primaryActionBounds,
-                      let display = input.desktopDisplayBounds,
-                      let accountLabel = upload.expectedAccountLabel else {
-                    return .init(response: "", decision: .handoff(
-                        "The selected file is not ready to upload. Review the native file chooser, then choose Resume."),
-                        includeInModelHistory: false)
-                }
-                let center = CGPoint(x: bounds.midX, y: bounds.midY)
-                let binding = try Self.observedControlActionPair(center: center, display: display)
-                guard let tools = scope.tools else { throw Failure.noRetainedWindow }
-                try scope.check(binding.predictedAction, tools)
-                upload.pendingOpenAction = binding.predictedAction
-                scope.webUpload = upload
-                return .init(response: "Signed-in account: \(accountLabel)", action: binding.proposalAction,
                     includeInModelHistory: false)
             }
             let enriched = try scope.modelInput(input)
@@ -1509,7 +553,7 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
             // A selected candidate with no host navigation proposal must return to the
             // visual planner for the explicitly guarded final Open action.
             if scope.session.currentFileOpenPanel != nil { return try await propose(enriched) }
-            if scope.visualFallbackPending, scope.webUpload == nil {
+            if scope.visualFallbackPending {
                 let directive = scope.pendingVisualDirective
                 var visualInput = enriched
                 visualInput.browserWorkerDirective = directive
@@ -1522,34 +566,17 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
                 scope.pendingVisualDirective = nil
                 return try await propose(visualInput)
             }
-            if nativeControlPlanner == nil && nativeBootstrapPlanner == nil,
-               scope.gmailSetup == nil, scope.gmailJob == nil {
+            if nativeControlPlanner == nil && nativeBootstrapPlanner == nil {
                 return try await propose(enriched)
             }
             guard let tools = scope.tools, let window = scope.session.currentWindow else {
                 return try await propose(enriched)
             }
-            @MainActor func waitForGmailPage(_ message: String) -> ComputerUseDesktopProposal {
-                scope.gmailNavigationWaitCount += 1
-                if scope.gmailNavigationWaitCount <= 20 {
-                    return .init(response: "", action: .wait(0.5), includeInModelHistory: false)
-                }
-                return .init(response: "", decision: .handoff(message), includeInModelHistory: false)
-            }
             try scope.check(nil, tools)
             guard let page = try scope.pageReader.read(window: window.accessibilityElement,
                 application: window.application,
-                mayAct: { (try? tools.requireActive()) != nil },
-                mode: scope.webUpload == nil ? .standard : .webUploadControls) else {
+                mayAct: { (try? tools.requireActive()) != nil }) else {
                 try scope.check(nil, tools)
-                if scope.webUpload != nil {
-                    return .init(response: "", decision: .handoff(
-                        "The storage page is not readable yet. Review the browser, then choose Resume."),
-                        includeInModelHistory: false)
-                }
-                if scope.gmailSetup != nil || (scope.gmailJob != nil && scope.gmailNavigationStage == .waitForTarget) {
-                    return waitForGmailPage("Gmail did not finish loading. Review the browser, then choose Resume.")
-                }
                 guard let nativeBootstrapPlanner else {
                     scope.visualFallbackPending = true
                     scope.pendingVisualDirective = nil
@@ -1610,1176 +637,6 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
                     return .init(response: "", decision: .handoff(
                         "The browser next step could not be verified. Review the window, then choose Resume."),
                         includeInModelHistory: false)
-                }
-            }
-            @MainActor func clickObservedControl(_ control: ComputerUseDefaultBrowserPageReader.Control,
-                next: Scope.GmailFlowStage, isSend: Bool = false) throws -> ComputerUseDesktopProposal? {
-                guard let bounds = scope.session.currentActionBounds,
-                      let display = enriched.desktopDisplayBounds,
-                      let center = try scope.pageReader.validatedControlCenter(observation: page,
-                        controlID: control.id, window: window.accessibilityElement,
-                        windowBounds: bounds, mayAct: { (try? tools.requireActive()) != nil }) else { return nil }
-                let binding = try Self.observedControlActionPair(center: center, display: display)
-                let action = binding.proposalAction
-                let predicted = binding.predictedAction
-                if isSend {
-                    guard let tools = scope.tools, tools.approvalReason(for: predicted) != nil else { return nil }
-                }
-                try scope.check(predicted, tools)
-                scope.pendingGmailFlowStage = next
-                scope.gmailPendingSendAction = isSend ? predicted : nil
-                return .init(response: "", action: action, includeInModelHistory: false,
-                    observedControl: .init(id: control.id, label: control.label, role: control.role))
-            }
-            @MainActor func clickUploadControl(_ control: ComputerUseDefaultBrowserPageReader.Control,
-                next: WebUploadStage, accountLabel: String,
-                countsAsUpload: Bool = true) throws -> ComputerUseDesktopProposal? {
-                guard control.enabled == true, let bounds = scope.session.currentActionBounds,
-                      let display = enriched.desktopDisplayBounds,
-                      let center = try scope.pageReader.validatedControlCenter(observation: page,
-                        controlID: control.id, window: window.accessibilityElement,
-                        windowBounds: bounds, mayAct: { (try? tools.requireActive()) != nil }) else { return nil }
-                let binding = try Self.observedControlActionPair(center: center, display: display)
-                try scope.check(binding.predictedAction, tools)
-                guard var upload = scope.webUpload, upload.expectedAccountLabel == accountLabel,
-                      !countsAsUpload || upload.siteUploadDispatchCount == 0 else { return nil }
-                upload.pendingAction = binding.predictedAction
-                upload.pendingStage = next
-                scope.webUpload = upload
-                return .init(response: "Signed-in account: \(accountLabel)", action: binding.proposalAction,
-                    includeInModelHistory: false,
-                    observedControl: .init(id: control.id, label: control.label, role: control.role))
-            }
-            if let message = ComputerUseGmailNavigationPolicy.authenticationHandoff(url: page.url,
-                controlLabels: page.controls.map(\.label)) {
-                return .init(response: "", decision: .handoff(message), includeInModelHistory: false)
-            }
-            if var upload = scope.webUpload {
-                guard upload.request.destinationFolder == nil else {
-                    return .init(response: "", decision: .handoff(
-                        "Named storage folders are not yet supported. Move the file into the provider root or choose Resume with a new task."),
-                        includeInModelHistory: false)
-                }
-                let candidate = scope.selectedCandidate
-                let expectedURL: String
-                switch upload.stage.pageTarget {
-                case .exactSearch:
-                    guard let candidate,
-                          let searchURL = ComputerUseWebUploadJob.driveTitleSearchURL(filename: candidate.displayName) else {
-                        return .init(response: "", decision: .handoff(
-                            "This storage result cannot be verified with a safe exact-name search."), includeInModelHistory: false)
-                    }
-                    expectedURL = searchURL.absoluteString
-                case .home:
-                    expectedURL = upload.request.provider.homeURL.absoluteString
-                }
-                guard page.application == window.application, page.url == expectedURL else {
-                    return .init(response: "", decision: .handoff(
-                        "The selected storage page or account changed. Review the browser before continuing."),
-                        includeInModelHistory: false)
-                }
-                guard let accountLabel = Self.webUploadAccountLabel(page, provider: upload.request.provider) else {
-                    return .init(response: "", decision: .handoff(
-                        "The signed-in storage account could not be confirmed. Sign in to the intended account, then choose Resume."),
-                        includeInModelHistory: false)
-                }
-                if let expected = upload.expectedAccountLabel, expected != accountLabel {
-                    return .init(response: "", decision: .handoff(
-                        "The signed-in storage account changed. Review the account before continuing."),
-                        includeInModelHistory: false)
-                }
-                upload.expectedAccountLabel = accountLabel
-                scope.webUpload = upload
-                guard page.webUploadControlsComplete else {
-                    return .init(response: "", decision: .handoff(
-                        "The provider’s account and global controls could not be read completely."), includeInModelHistory: false)
-                }
-                if upload.request.provider != .googleDrive, upload.stage == .resolveFile {
-                    return .init(response: "", decision: .handoff(
-                        "A safe exact-name collision search is not available for this provider yet."), includeInModelHistory: false)
-                }
-                if upload.stage == .resolveFile {
-                    if scope.fileContext?.query != upload.request.fileQuery {
-                        scope.nativeFileOperationReady = true
-                        if try await scope.apply(.listFiles(query: upload.request.fileQuery, cursor: nil)) != nil {
-                            return .init(response: "", decision: .handoff(
-                                "The requested local file could not be listed safely."), includeInModelHistory: false)
-                        }
-                        return .init(response: "", decision: .refreshObservation, includeInModelHistory: false)
-                    }
-                    guard let catalog = scope.fileCatalog, let fileContext = scope.fileContext,
-                          fileContext.page.isComplete else {
-                        return .init(response: "", decision: .handoff(
-                            "The requested local file is not a unique, verified match. Review the file choices, then choose Resume."),
-                            includeInModelHistory: false)
-                    }
-                    let automaticCandidate = scope.userSelectedCandidateID == nil
-                        ? catalog.automaticSelectionCandidate(for: upload.request.fileQuery) : nil
-                    if let candidate = ComputerUseWebUploadJob.selectedUploadCandidate(
-                        visibleCandidates: fileContext.page.candidates,
-                        automaticCandidateID: automaticCandidate?.id,
-                        userSelectedCandidateID: scope.userSelectedCandidateID) {
-                        guard fileContext.page.candidates.contains(where: { $0.id == candidate.id }),
-                              scope.userSelectedCandidateID.map({ $0 == candidate.id }) ?? true else {
-                            return .init(response: "", decision: .handoff(
-                                "The requested local file is not in the verified catalog page. Review the file choices, then choose Resume."),
-                                includeInModelHistory: false)
-                        }
-                        scope.nativeFileOperationReady = true
-                        if try await scope.apply(.selectFile(candidateID: candidate.id)) != nil {
-                            return .init(response: "", decision: .handoff("The source file selection could not be verified."),
-                                includeInModelHistory: false)
-                        }
-                        upload.stage = .navigateCollisionSearch
-                        scope.webUpload = upload
-                        return .init(response: "", decision: .refreshObservation, includeInModelHistory: false)
-                    }
-                    if scope.userSelectedCandidateID != nil {
-                        return .init(response: "", decision: .handoff(
-                            "The selected local file is no longer in the verified catalog page. Review the file choices, then choose Resume."),
-                            includeInModelHistory: false)
-                    }
-                    let choices = fileContext.page.candidates
-                    guard (2...8).contains(choices.count) else {
-                        return .init(response: "", decision: .handoff(
-                            "The requested local file could not be narrowed to a unique safe choice. Review the file choices, then choose Resume."),
-                            includeInModelHistory: false)
-                    }
-                    scope.nativeFileOperationReady = true
-                    return .init(response: "", action: .localFileOperation(.askFile(
-                        question: "Which listed file should be uploaded?", candidateIDs: choices.map(\.id))),
-                        includeInModelHistory: false)
-                }
-                if upload.stage == .checkCollisionSearch {
-                    guard let candidate = scope.selectedCandidate,
-                          let expectedSearch = ComputerUseWebUploadJob.driveTitleSearchURL(filename: candidate.displayName),
-                          let observedSearch = URL(string: page.url),
-                          ComputerUseWebUploadJob.isDriveTitleSearchURL(observedSearch, filename: candidate.displayName),
-                          let expectedQuery = ComputerUseWebUploadJob.driveTitleSearchQuery(filename: candidate.displayName),
-                          page.formFieldValues.filter({ $0.value == expectedQuery }).count == 1,
-                          page.exactTextValues.contains(ComputerUseWebUploadJob.driveNoSearchMatchesText) else {
-                        return .init(response: "", decision: .handoff(
-                            "The exact-name search did not reach a complete, verified no-match result."), includeInModelHistory: false)
-                    }
-                    guard let rowPage = try scope.pageReader.read(window: window.accessibilityElement,
-                        application: window.application, mayAct: { (try? tools.requireActive()) != nil },
-                        mode: .webUploadListing),
-                          rowPage.application == window.application, rowPage.url == expectedSearch.absoluteString,
-                          !rowPage.truncated else {
-                        return .init(response: "", decision: .handoff(
-                            "The exact-name result could not be independently read."), includeInModelHistory: false)
-                    }
-                    if rowPage.webUploadListingRows.contains(where: { $0.cellLabels.contains(candidate.displayName) }) {
-                        return .init(response: "", decision: .handoff(
-                            "A file with this exact name already exists in the destination. Review the collision before continuing."),
-                            includeInModelHistory: false)
-                    }
-                    webUploadCheckpointObserver?(.collisionSearchReady)
-                    upload.stage = .navigateReturnToRoot
-                    scope.webUpload = upload
-                    return .init(response: "", decision: .refreshObservation, includeInModelHistory: false)
-                }
-                if upload.stage == .navigateReturnToRoot {
-                    guard page.url == upload.request.provider.homeURL.absoluteString else {
-                        return .init(response: "", decision: .handoff(
-                            "The destination root could not be restored after collision checking."), includeInModelHistory: false)
-                    }
-                    upload.stage = .openUploaderMenu
-                    scope.webUpload = upload
-                }
-                if upload.stage == .openUploaderMenu {
-                    let label = upload.request.provider == .googleDrive ? "New" : "Upload"
-                    if upload.request.provider == .googleDrive {
-                        guard Self.driveUploaderMenuShortcutEligible(controls: page.controls) else {
-                            return .init(response: "", decision: .handoff(
-                                "Drive’s New control is not uniquely available and enabled."),
-                                includeInModelHistory: false)
-                        }
-                        upload.menuFallbackAttempts = 1
-                        upload.stage = .driveKeyboardChooseFileUpload
-                        scope.webUpload = upload
-                        return .init(response: "", decision: .refreshObservation, includeInModelHistory: false)
-                    }
-                    guard let control = page.controls.first(where: {
-                        ($0.role == "AXButton" || $0.role == "AXMenuItem")
-                            && $0.label.localizedCaseInsensitiveCompare(label) == .orderedSame
-                    }), let proposal = try clickUploadControl(control, next: .chooseFileUpload,
-                        accountLabel: accountLabel) else {
-                        return .init(response: "", decision: .handoff(
-                            "The provider’s upload control is not available as a unique observed control."),
-                            includeInModelHistory: false)
-                    }
-                    return proposal
-                }
-                if upload.stage == .chooseFileUpload {
-                    guard !upload.dispatchLatch.siteUploadAttempted else {
-                        return .init(response: "", decision: .handoff(
-                            "The upload menu action may already have started. Review the provider page before choosing Resume."),
-                            includeInModelHistory: false)
-                    }
-                    let labels = upload.request.provider == .googleDrive ? ["File upload"] : ["Files", "File upload"]
-                    let matches = page.controls.filter { control in
-                        (control.role == "AXButton" || control.role == "AXMenuItem")
-                            && labels.contains(where: { control.label.localizedCaseInsensitiveCompare($0) == .orderedSame })
-                    }
-                    if matches.isEmpty, upload.menuFallbackAttempts == 0 {
-                        upload.menuFallbackAttempts = 1
-                        if upload.request.provider == .googleDrive {
-                            upload.stage = .driveKeyboardChooseFileUpload
-                            scope.webUpload = upload
-                            return .init(response: "", decision: .refreshObservation, includeInModelHistory: false)
-                        }
-                        upload.stage = .visualChooseFileUpload
-                        scope.webUpload = upload
-                        let target = upload.request.provider == .googleDrive ? "File upload" : "Files"
-                        let directive = ComputerUseFaraModel.WorkerDirective(
-                            objective: "Click the visible provider menu item labeled \(target) once to open its native file chooser.",
-                            constraints: "Use one left click on that menu item only. Do not choose a file, enter a path, or confirm the chooser.",
-                            completionCriteria: ["The native file chooser is visible."])
-                        try directive.validate()
-                        scope.visualFallbackPending = true
-                        scope.pendingVisualDirective = directive
-                        return .init(response: "", decision: .refreshObservation, includeInModelHistory: false)
-                    }
-                    guard matches.count == 1, let control = matches.first,
-                          let proposal = try clickUploadControl(control, next: .waitingForPicker,
-                            accountLabel: accountLabel) else {
-                        return .init(response: "", decision: .handoff(
-                            "The provider’s file-upload command is not available as a unique observed control."),
-                            includeInModelHistory: false)
-                    }
-                    return proposal
-                }
-                if upload.stage == .driveKeyboardChooseFileUpload {
-                    return .init(response: "", decision: .handoff(
-                        "The Drive upload menu action may have started. Review the page before choosing Resume."),
-                        includeInModelHistory: false)
-                }
-                if upload.stage == .visualChooseFileUpload {
-                    guard upload.menuFallbackAttempts == 1, !upload.visualActionProposed,
-                          !upload.visualActionDispatched,
-                          scope.visualFallbackPending, let directive = scope.pendingVisualDirective else {
-                        return .init(response: "", decision: .handoff(
-                            "The upload menu item could not be verified. Review the browser, then choose Resume."),
-                            includeInModelHistory: false)
-                    }
-                    var visualInput = try scope.modelInput(input, advertiseFilePicker: true)
-                    visualInput.browserWorkerDirective = directive
-                    scope.visualFallbackPending = false
-                    scope.pendingVisualDirective = nil
-                    let visualProposal = try await propose(visualInput)
-                    guard let visualAction = visualProposal.action,
-                          case .pointer(.leftClick, _) = visualAction else {
-                        return .init(response: "", decision: .handoff(
-                            "The provider menu item could not be selected safely. Review the browser, then choose Resume."),
-                            includeInModelHistory: false)
-                    }
-                    upload.visualActionProposed = true
-                    scope.webUpload = upload
-                    return .init(response: "", action: visualAction, includeInModelHistory: false)
-                }
-                if upload.stage == .waitingForPicker {
-                    if scope.session.currentFileOpenPanel != nil {
-                        if upload.dispatchLatch.nativeOpenAttempted {
-                            return .init(response: "", decision: .handoff(
-                                "Opening the selected file may already have started. Review the provider page before choosing Resume."),
-                                includeInModelHistory: false)
-                        }
-                        return .init(response: "", decision: .refreshObservation, includeInModelHistory: false)
-                    }
-                    return .init(response: "", decision: .handoff(
-                        "The provider file chooser did not open. Review the browser, then choose Resume."),
-                        includeInModelHistory: false)
-                }
-                if upload.stage == .waitingForUpload {
-                    guard let candidate = scope.selectedCandidate,
-                          upload.siteUploadDispatchCount == 1, upload.openDispatchCount == 1,
-                          upload.preOpenProgressObserved else {
-                        return .init(response: "", decision: .handoff(
-                            "The upload action could not be tied to the selected file."), includeInModelHistory: false)
-                    }
-                    let progress = Self.webUploadProgress(page)
-                    if progress == .complete {
-                        upload.observedCompletionProgress = true
-                        webUploadCheckpointObserver?(.uploadProgressComplete)
-                        upload.stage = .navigateFinalSearch
-                        scope.webUpload = upload
-                        return .init(response: "", decision: .refreshObservation, includeInModelHistory: false)
-                    }
-                    if progress == .failed {
-                        return .init(response: "", decision: .handoff(
-                            "The provider reported an upload error. Review the destination before continuing."), includeInModelHistory: false)
-                    }
-                    let rowPage = try scope.pageReader.read(window: window.accessibilityElement,
-                        application: window.application, mayAct: { (try? tools.requireActive()) != nil },
-                        mode: .webUploadListing)
-                    let evidence = ComputerUseWebUploadJob.listingEvidence(rows: rowPage?.webUploadListingRows ?? [],
-                        candidate: candidate, progress: .unknown, pageIsComplete: rowPage?.truncated == false,
-                        expectedLocationLabel: ComputerUseWebUploadJob.driveRootLocationLabel)
-                    switch evidence {
-                    case .ambiguous, .mismatch:
-                        return .init(response: "", decision: .handoff(
-                            "The provider listing does not show one exact completed upload. Review the destination before continuing."),
-                            includeInModelHistory: false)
-                    case .complete, .inProgress, .absent, .unverified:
-                        upload.waitCount += 1
-                        scope.webUpload = upload
-                        if upload.waitCount <= 20 {
-                            return .init(response: "", action: .wait(0.5), includeInModelHistory: false)
-                        }
-                        return .init(response: "", decision: .handoff(
-                            "The upload has not reached a verifiable completed listing. Review the destination, then choose Resume."),
-                            includeInModelHistory: false)
-                    }
-                }
-                if upload.stage == .navigateFinalSearch {
-                    guard upload.observedCompletionProgress else {
-                        return .init(response: "", decision: .handoff(
-                            "Upload completion was not observed before exact-name verification."), includeInModelHistory: false)
-                    }
-                    return .init(response: "", decision: .refreshObservation, includeInModelHistory: false)
-                }
-                if upload.stage == .checkFinalSearch {
-                    guard upload.observedCompletionProgress,
-                          let candidate = scope.selectedCandidate,
-                          let expectedSearch = ComputerUseWebUploadJob.driveTitleSearchURL(filename: candidate.displayName),
-                          let observedSearch = URL(string: page.url),
-                          ComputerUseWebUploadJob.isDriveTitleSearchURL(observedSearch, filename: candidate.displayName),
-                          let expectedQuery = ComputerUseWebUploadJob.driveTitleSearchQuery(filename: candidate.displayName),
-                          page.formFieldValues.filter({ $0.value == expectedQuery }).count == 1 else {
-                        return .init(response: "", decision: .handoff(
-                            "The post-upload exact-name search could not be verified safely."), includeInModelHistory: false)
-                    }
-                    guard let rowPage = try scope.pageReader.read(window: window.accessibilityElement,
-                        application: window.application, mayAct: { (try? tools.requireActive()) != nil },
-                        mode: .webUploadListing),
-                          rowPage.application == window.application, rowPage.url == expectedSearch.absoluteString,
-                          !rowPage.truncated else {
-                        return .init(response: "", decision: .handoff(
-                            "The exact uploaded-file result is incomplete."), includeInModelHistory: false)
-                    }
-                    if ComputerUseWebUploadJob.verifiesDriveCompletion(rows: rowPage.webUploadListingRows,
-                        candidate: candidate, progress: .complete, pageIsComplete: true,
-                        detailsTextValues: page.exactTextValues) {
-                        upload.stage = .complete
-                        scope.webUpload = upload
-                        return .init(response: "", decision: .completionStatus(success: true), includeInModelHistory: false)
-                    }
-                    guard ComputerUseWebUploadJob.uniqueDriveRootRow(
-                        rows: rowPage.webUploadListingRows, candidate: candidate) != nil else {
-                        return .init(response: "", decision: .handoff(
-                            "The provider did not show one exact uploaded file in My Drive."), includeInModelHistory: false)
-                    }
-                    upload.stage = .selectFinalResult
-                    scope.webUpload = upload
-                    return .init(response: "", decision: .refreshObservation, includeInModelHistory: false)
-                }
-                if upload.stage == .selectFinalResult {
-                    guard let candidate = scope.selectedCandidate,
-                          let rowPage = try scope.pageReader.read(window: window.accessibilityElement,
-                            application: window.application, mayAct: { (try? tools.requireActive()) != nil },
-                            mode: .webUploadListing),
-                          rowPage.application == window.application,
-                          let searchURL = ComputerUseWebUploadJob.driveTitleSearchURL(filename: candidate.displayName),
-                          rowPage.url == searchURL.absoluteString, !rowPage.truncated else {
-                        return .init(response: "", decision: .handoff(
-                            "The exact uploaded-file row could not be selected safely."), includeInModelHistory: false)
-                    }
-                    guard let row = ComputerUseWebUploadJob.uniqueDriveRootRow(
-                            rows: rowPage.webUploadListingRows, candidate: candidate),
-                          let bounds = scope.session.currentActionBounds,
-                          let display = enriched.desktopDisplayBounds,
-                          let center = try scope.pageReader.validatedListingRowCenter(observation: rowPage,
-                            rowID: row.rowID,
-                            requiredLabels: Set([candidate.displayName, ComputerUseWebUploadJob.driveRootLocationLabel]),
-                            window: window.accessibilityElement, windowBounds: bounds,
-                            mayAct: { (try? tools.requireActive()) != nil }) else {
-                        return .init(response: "", decision: .handoff(
-                            "The exact uploaded file is not one safe, bounded result row in My Drive."), includeInModelHistory: false)
-                    }
-                    let binding = try Self.observedControlActionPair(center: center, display: display)
-                    try scope.check(binding.predictedAction, tools)
-                    upload.pendingAction = binding.predictedAction
-                    upload.pendingStage = .openFinalDetails
-                    scope.webUpload = upload
-                    return .init(response: "", action: binding.proposalAction, includeInModelHistory: false,
-                        observedControl: .init(id: row.rowID, label: candidate.displayName, role: "AXRow"))
-                }
-                if upload.stage == .openFinalDetails {
-                    if let candidate = scope.selectedCandidate,
-                       let details = try scope.pageReader.readDriveDetails(window: window.accessibilityElement,
-                            application: window.application, expectedFileName: candidate.displayName,
-                            mayAct: { (try? tools.requireActive()) != nil }),
-                       details.complete,
-                       ComputerUseWebUploadJob.driveDetailsMatch(textValues: details.exactTextValues,
-                            candidate: candidate) {
-                        // Selecting the unique result may open the Details pane
-                        // automatically. Verify that fresh pane instead of
-                        // clicking either of the page's two Hide controls.
-                        upload.stage = .verifyFinalDetails
-                        scope.webUpload = upload
-                        return .init(response: "", decision: .refreshObservation, includeInModelHistory: false)
-                    }
-                    let matches = page.controls.filter { control in
-                        control.role == "AXButton"
-                            && control.label.lowercased().hasPrefix("view details")
-                    }
-                    guard matches.count == 1, let control = matches.first,
-                          let proposal = try clickUploadControl(control, next: .verifyFinalDetails,
-                            accountLabel: accountLabel, countsAsUpload: false) else {
-                        return .init(response: "", decision: .handoff(
-                            "The selected result’s Details control is not uniquely available."), includeInModelHistory: false)
-                    }
-                    return proposal
-                }
-                if upload.stage == .verifyFinalDetails {
-                    guard upload.observedCompletionProgress,
-                          let candidate = scope.selectedCandidate,
-                          let details = try scope.pageReader.readDriveDetails(window: window.accessibilityElement,
-                            application: window.application, expectedFileName: candidate.displayName,
-                            mayAct: { (try? tools.requireActive()) != nil }),
-                          details.complete,
-                          let rowsPage = try scope.pageReader.read(window: window.accessibilityElement,
-                            application: window.application, mayAct: { (try? tools.requireActive()) != nil },
-                            mode: .webUploadListing),
-                          rowsPage.application == window.application, !rowsPage.truncated,
-                          rowsPage.url == page.url else {
-                        return .init(response: "", decision: .handoff(
-                            "The selected upload Details cannot be tied to the current exact-name search."), includeInModelHistory: false)
-                    }
-                    guard ComputerUseWebUploadJob.verifiesDriveCompletion(rows: rowsPage.webUploadListingRows,
-                        candidate: candidate, progress: .complete, pageIsComplete: true,
-                        detailsTextValues: details.exactTextValues) else {
-                        return .init(response: "", decision: .handoff(
-                            "The selected file’s Details do not verify its displayed size and My Drive location."),
-                            includeInModelHistory: false)
-                    }
-                    upload.stage = .complete
-                    scope.webUpload = upload
-                    return .init(response: "", decision: .completionStatus(success: true), includeInModelHistory: false)
-                }
-                if upload.stage == .complete {
-                    return .init(response: "", decision: .completionStatus(success: true), includeInModelHistory: false)
-                }
-            }
-            if let setup = scope.gmailSetup, scope.gmailJob == nil {
-                guard let pageURL = URL(string: page.url), pageURL.host?.lowercased() == "mail.google.com",
-                      pageURL.path.hasPrefix("/mail/u/") else {
-                    return waitForGmailPage("Gmail could not be opened in the retained browser window. Review it, then choose Resume.")
-                }
-                if scope.selectedGmailAccount == nil {
-                    let menu = try ComputerUseGmailAccountDirectory.readMenu(window: window.accessibilityElement,
-                        application: window.application, currentURL: page.url, closeMenu: true,
-                        revalidate: { try scope.check(nil, tools) })
-                    switch menu {
-                    case .notOpen:
-                        guard scope.gmailAccountMenuOpenAttempts == 0,
-                              try ComputerUseGmailAccountDirectory.openMenu(observation: page,
-                                window: window.accessibilityElement, reader: scope.pageReader,
-                                revalidate: { try scope.check(nil, tools) }) else {
-                            return .init(response: "", decision: .handoff(
-                                "The signed-in Gmail account list could not be verified. Open the account menu and choose Resume."),
-                                includeInModelHistory: false)
-                        }
-                        scope.gmailAccountMenuOpenAttempts += 1
-                        return .init(response: "", decision: .refreshObservation, includeInModelHistory: false)
-                    case .invalid:
-                        return .init(response: "", decision: .handoff(
-                            "The Gmail account list could not be verified. Review the account menu, then choose Resume."),
-                            includeInModelHistory: false)
-                    case .accounts(let snapshot):
-                        scope.currentGmailAccountIndex = snapshot.current.index
-                        switch ComputerUseGmailAccountDirectory.resolvePreference(
-                            accountPreferences.preferredEmail, in: snapshot) {
-                        case .selected(let preferred):
-                            scope.selectedGmailAccount = preferred
-                        case .unavailable:
-                            return .init(response: "", decision: .handoff(
-                                "Your preferred Gmail account is not signed in. Sign in to that account, then choose Resume."),
-                                includeInModelHistory: false)
-                        case .askUser where snapshot.accounts.count == 1:
-                            scope.selectedGmailAccount = snapshot.accounts[0]
-                        case .askUser:
-                            guard let rootTaskID = scope.taskID else { throw Failure.noRetainedWindow }
-                            let choiceTaskID = scope.executionTaskID ?? rootTaskID
-                            let choiceSet = try ComputerUseGmailAccountChoiceSet(taskID: choiceTaskID,
-                                accounts: snapshot.accounts)
-                            let unresolved = try ComputerUseUnresolvedTextGoal(userRequest: setup.intent.originalRequest)
-                            let nonce = UUID()
-                            let digest = ComputerUseTaskContract.digest(["gmail-account-choice-v1", rootTaskID,
-                                choiceTaskID, unresolved.taskIdentityText, page.url, nonce.uuidString])
-                            let question = "Which signed-in Google account should I use? Choose the matching email address."
-                            scope.pendingClarification = .init(taskID: choiceTaskID, goal: unresolved,
-                                question: question, scope: digest, expiresAt: Date().addingTimeInterval(600),
-                                choices: choiceSet.choices)
-                            scope.pendingGmailAccountChoiceSet = choiceSet
-                            scope.pendingChoiceKind = .gmailAccount
-                            scope.pendingGmailRecipientChoiceSet = nil
-                            scope.selectedGmailRecipientAddress = nil
-                            scope.clarificationNonce = nonce
-                            scope.clarificationRetired = false
-                            scope.executionTaskID = choiceTaskID
-                            return .init(response: "", decision: .handoff(question), includeInModelHistory: false)
-                        }
-                    }
-                }
-                guard let selectedAccount = scope.selectedGmailAccount,
-                      ComputerUseGmailAccountDirectory.accountIndex(from: page.url) != nil else {
-                    return .init(response: "", decision: .handoff(
-                        "The selected Gmail account is not active in the browser. Review the account, then choose Resume."),
-                        includeInModelHistory: false)
-                }
-                if ComputerUseGmailAccountDirectory.accountIndex(from: page.url) != selectedAccount.index {
-                    if scope.gmailNavigationStage == .waitForTarget {
-                        return waitForGmailPage("Gmail is still loading the selected account. Review the browser, then choose Resume.")
-                    }
-                    guard let target = ComputerUseGmailAccountDirectory.inboxURL(index: selectedAccount.index) else {
-                        return .init(response: "", decision: .handoff(
-                            "The selected Gmail account route could not be verified. Review the account, then choose Resume."),
-                            includeInModelHistory: false)
-                    }
-                    scope.gmailNavigationTargetURL = target
-                    scope.gmailNavigationStage = .navigateTarget
-                    return .init(response: "", decision: .refreshObservation, includeInModelHistory: false)
-                }
-                let observedAccountLabel = page.controls.first(where: {
-                    $0.role == "AXButton" && $0.label.hasPrefix("Google Account:")
-                })?.label
-                let currentAccountLabel = try observedAccountLabel ?? ComputerUseGmailRecipientVerifier.accountControlLabel(
-                    window: window.accessibilityElement, application: window.application,
-                    revalidate: { try scope.check(nil, tools) })
-                let currentWindowTitle = try ComputerUseGmailAccountDirectory.observedWindowTitle(
-                    window: window.accessibilityElement, application: window.application,
-                    revalidate: { try scope.check(nil, tools) })
-                let standaloneAccountEmail = ComputerUseGmailAccountDirectory.standaloneComposerEmail(
-                    currentWindowTitle, currentURL: page.url)
-                guard ComputerUseGmailAccountDirectory.confirmsActiveAccount(currentURL: page.url,
-                    windowTitle: currentWindowTitle, accountControlLabel: currentAccountLabel,
-                    expected: selectedAccount) else {
-                    if scope.gmailNavigationStage == .waitForTarget,
-                       currentAccountLabel == nil, standaloneAccountEmail == nil {
-                        return waitForGmailPage("Gmail is still loading the selected account. Review the browser, then choose Resume.")
-                    }
-                    return .init(response: "", decision: .handoff(
-                        "The selected Gmail account could not be confirmed. Review the account, then choose Resume."),
-                        includeInModelHistory: false)
-                }
-                if let existingURL = gmailExistingDraftURL {
-                    guard ComputerUseGmailAccountDirectory.accountIndex(from: existingURL.absoluteString) == selectedAccount.index else {
-                        return .init(response: "", decision: .handoff(
-                            "The existing Gmail draft belongs to a different account. It was not opened or changed."),
-                            includeInModelHistory: false)
-                    }
-                    if !scope.gmailExistingDraftNavigationPrepared {
-                        scope.gmailExistingDraftNavigationPrepared = true
-                        scope.gmailNavigationTargetURL = existingURL
-                        scope.gmailNavigationStage = .navigateTarget
-                        return .init(response: "", decision: .refreshObservation, includeInModelHistory: false)
-                    }
-                }
-                let accountLabel: String?
-                accountLabel = currentAccountLabel
-                switch try await ComputerUseWebJobRequest.resolveRecipient(in: setup.intent.originalRequest,
-                    trustedAccountControlLabel: accountLabel, lookup: gmailRecipientLookup) {
-                case .addresses(let addresses):
-                    let job = try ComputerUseGmailJob(request: .init(to: addresses, cc: [], bcc: [],
-                        subject: setup.extraction.subject, body: setup.extraction.body,
-                        fileDescription: setup.extraction.fileDescription,
-                        sendRequested: setup.intent.sendRequested, existingDraftURL: gmailExistingDraftURL,
-                        account: selectedAccount))
-                    scope.gmailJob = job
-                    scope.gmailFileQuery = setup.extraction.fileQuery
-                    scope.gmailRecipientsVerified = false
-                    scope.gmailSetup = nil
-                    if gmailExistingDraftURL != nil {
-                        guard job.verifiesComposeContents(page) else {
-                            scope.gmailFieldDiagnostics = job.composeFieldDiagnostics(page)
-                            if scope.gmailNavigationStage == .waitForTarget {
-                                return waitForGmailPage("Gmail is still loading the requested draft fields. Review the browser, then choose Resume.")
-                            }
-                            return .init(response: "", decision: .handoff(
-                                "The existing Gmail draft does not match the requested fields. Review it before continuing."),
-                                includeInModelHistory: false)
-                        }
-                        scope.gmailFieldDiagnostics = [:]
-                        scope.gmailNavigationWaitCount = 0
-                        scope.gmailNavigationStage = .ready
-                    } else {
-                        scope.gmailNavigationTargetURL = job.composeURL
-                        scope.gmailNavigationStage = .navigateTarget
-                        return .init(response: "", decision: .refreshObservation, includeInModelHistory: false)
-                    }
-                case .choose(let name, let matches):
-                    let unresolved = try ComputerUseUnresolvedTextGoal(userRequest: setup.intent.originalRequest)
-                    guard let rootTaskID = scope.taskID else { throw Failure.noRetainedWindow }
-                    let clarificationTaskID = scope.executionTaskID ?? rootTaskID
-                    let nonce = UUID()
-                    let choiceSet = try ComputerUseGmailRecipientChoiceSet(taskID: clarificationTaskID, matches: matches)
-                    let scopeDigest = ComputerUseTaskContract.digest(["default-browser-gmail-recipient-choice-v1",
-                        rootTaskID, clarificationTaskID, unresolved.taskIdentityText, scope.session.currentWindow?.id ?? "",
-                        nonce.uuidString])
-                    let question = "Which \(name) should I use? Choose the matching email address."
-                    let expiresAt = Date().addingTimeInterval(600)
-                    scope.pendingClarification = .init(taskID: clarificationTaskID, goal: unresolved,
-                        question: question, scope: scopeDigest, expiresAt: expiresAt, choices: choiceSet.choices)
-                    scope.pendingChoiceCandidates.removeAll()
-                    scope.pendingChoiceKind = .gmailRecipient
-                    scope.pendingGmailRecipientChoiceSet = choiceSet
-                    scope.selectedGmailRecipientAddress = nil
-                    scope.clarificationNonce = nonce
-                    scope.clarificationRetired = false
-                    scope.executionTaskID = clarificationTaskID
-                    return .init(response: "", decision: .handoff(question), includeInModelHistory: false)
-                case .clarification(let question):
-                    return .init(response: "", decision: .handoff(question), includeInModelHistory: false)
-                }
-            }
-            if let job = scope.gmailJob {
-                guard let account = job.request.account,
-                      let observedIndex = ComputerUseGmailAccountDirectory.accountIndex(from: page.url) else {
-                    return .init(response: "", decision: .handoff(
-                        "The selected Gmail account could not be confirmed for this draft. Review the account before continuing."),
-                        includeInModelHistory: false)
-                }
-                let observedAccountLabel = page.controls.first(where: {
-                    $0.role == "AXButton" && $0.label.hasPrefix("Google Account:")
-                })?.label
-                let currentLabel = try observedAccountLabel ?? ComputerUseGmailRecipientVerifier.accountControlLabel(
-                    window: window.accessibilityElement, application: window.application,
-                    revalidate: { try scope.check(nil, tools) })
-                let currentWindowTitle = try ComputerUseGmailAccountDirectory.observedWindowTitle(
-                    window: window.accessibilityElement, application: window.application,
-                    revalidate: { try scope.check(nil, tools) })
-                let standaloneAccountEmail = ComputerUseGmailAccountDirectory.standaloneComposerEmail(
-                    currentWindowTitle, currentURL: page.url)
-                if observedIndex != account.index {
-                    if scope.gmailNavigationStage == .waitForTarget,
-                       currentLabel == nil, standaloneAccountEmail == nil {
-                        return waitForGmailPage("Gmail is still loading the selected account. Review the browser, then choose Resume.")
-                    }
-                    return .init(response: "", decision: .handoff(
-                        "The selected Gmail account could not be confirmed for this draft. Review the account before continuing."),
-                        includeInModelHistory: false)
-                }
-                guard ComputerUseGmailAccountDirectory.confirmsActiveAccount(currentURL: page.url,
-                    windowTitle: currentWindowTitle, accountControlLabel: currentLabel, expected: account) else {
-                    if scope.gmailNavigationStage == .waitForTarget,
-                       currentLabel == nil, standaloneAccountEmail == nil {
-                        return waitForGmailPage("Gmail is still loading the selected account. Review the browser, then choose Resume.")
-                    }
-                    return .init(response: "", decision: .handoff(
-                        "The selected Gmail account could not be confirmed for this draft. Review the account before continuing."),
-                        includeInModelHistory: false)
-                }
-                scope.gmailStandaloneComposeContext = ComputerUseGmailRecipientVerifier.StandaloneComposeContext(
-                    pageURL: page.url, windowTitle: currentWindowTitle, accountControlLabel: currentLabel,
-                    account: account, expectedSubject: job.request.subject, expectedBody: job.request.body)
-            }
-            if var job = scope.gmailJob {
-                @MainActor func revalidateComposeRegion(
-                    _ standaloneContext: ComputerUseGmailRecipientVerifier.StandaloneComposeContext?
-                ) throws {
-                    try scope.check(nil, tools)
-                    guard let standaloneContext else { return }
-                    guard let currentWindow = scope.session.currentWindow,
-                          let currentURL = try scope.pageReader.readRetainedPageURL(
-                            window: currentWindow.accessibilityElement, application: currentWindow.application,
-                            mayAct: { (try? tools.requireActive()) != nil }) else {
-                        throw ComputerUseDesktopExecutor.Failure.scopedSurfaceChanged
-                    }
-                    let title = try ComputerUseGmailAccountDirectory.observedWindowTitle(
-                        window: currentWindow.accessibilityElement, application: currentWindow.application,
-                        revalidate: { try scope.check(nil, tools) })
-                    let accountLabel = try ComputerUseGmailRecipientVerifier.accountControlLabel(
-                        window: currentWindow.accessibilityElement, application: currentWindow.application,
-                        revalidate: { try scope.check(nil, tools) })
-                    guard standaloneContext.matchesCurrent(pageURL: currentURL, windowTitle: title,
-                        accountControlLabel: accountLabel) else {
-                        throw ComputerUseDesktopExecutor.Failure.scopedSurfaceChanged
-                    }
-                }
-                if scope.gmailFlowStage == .normalizeDrafts {
-                    guard let account = job.request.account,
-                          ComputerUseGmailAccountDirectory.accountIndex(from: page.url) == account.index else {
-                        return .init(response: "", decision: .handoff(
-                            "Gmail left the selected account while opening Drafts."),
-                            includeInModelHistory: false)
-                    }
-                    guard page.url.range(of: #"^https://mail\.google\.com/mail/u/[0-9]+/#drafts$"#,
-                        options: [.regularExpression, .caseInsensitive]) != nil else {
-                        if scope.gmailNavigationStage == .waitForTarget {
-                            if scope.gmailNavigationWaitCount >= 20,
-                               let taskID = scope.taskID, let goal = scope.goal,
-                               let targetURL = scope.gmailNavigationTargetURL,
-                               let observedURL = URL(string: page.url) {
-                                // The URL came from the freshly selected page observation above.
-                                // Revalidate the retained Safari window before granting one retry
-                                // for a completed canonical Inbox/Drafts navigation.
-                                try scope.check(nil, tools)
-                                let mayRetry = try scope.session.rearmStableGmailNavigationRetry(
-                                    to: targetURL, observedPageURL: observedURL,
-                                    accountIndex: account.index, taskID: taskID, goal: goal, tools: tools)
-                                guard mayRetry else {
-                                    return .init(response: "", decision: .handoff(
-                                        "Gmail is still showing a different page after navigation. Review the browser, then choose Resume."),
-                                        includeInModelHistory: false)
-                                }
-                                scope.gmailNavigationWaitCount = 0
-                                scope.gmailNavigationStage = .navigateTarget
-                                return .init(response: "", decision: .refreshObservation, includeInModelHistory: false)
-                            }
-                            return waitForGmailPage("Gmail is still opening Drafts. Review the browser, then choose Resume.")
-                        }
-                        return .init(response: "", decision: .handoff(
-                            "Gmail did not open the selected account’s Drafts page."), includeInModelHistory: false)
-                    }
-                    var ambiguousRow = false
-                    guard let row = try ComputerUseGmailRecipientVerifier.exactDraftSubjectCellEvidence(
-                        window: window.accessibilityElement, application: window.application,
-                        subject: job.request.subject, ambiguous: &ambiguousRow,
-                        revalidate: { try scope.check(nil, tools) }) else {
-                        if !ambiguousRow, scope.gmailNavigationStage == .waitForTarget {
-                            return waitForGmailPage("Gmail is still saving the draft. Review Drafts, then choose Resume.")
-                        }
-                        return .init(response: "", decision: .handoff(
-                            "Gmail did not show exactly one complete Drafts row for this subject. Review Drafts before continuing."),
-                            includeInModelHistory: false)
-                    }
-                    guard let actionBounds = scope.session.currentActionBounds else {
-                        return .init(response: "", decision: .handoff(
-                            "The retained Gmail Drafts window could not be positioned safely."), includeInModelHistory: false)
-                    }
-                    scope.gmailNavigationWaitCount = 0
-                    let center = CGPoint(x: row.bounds.midX, y: row.bounds.midY)
-                    guard center.x.isFinite, center.y.isFinite, actionBounds.contains(center) else {
-                        return .init(response: "", decision: .handoff(
-                            "The exact Gmail draft row is outside the retained browser window."), includeInModelHistory: false)
-                    }
-                    let predicted = ComputerUsePredictedAction.click(x: Int(center.x.rounded()), y: Int(center.y.rounded()),
-                        button: 1, count: 1)
-                    var pressAttempted = false
-                    let pressed = try ComputerUseGmailRecipientVerifier.pressExactDraftSubjectRow(
-                        window: window.accessibilityElement, application: window.application,
-                        subject: job.request.subject, expectedCell: row.cell, expectedRow: row.row,
-                        expectedBounds: row.bounds,
-                        revalidate: { try scope.checkGmailDraftsPage(predicted, tools) },
-                        willDispatch: {
-                            pressAttempted = true
-                            scope.gmailFlowStage = .waitingForDraftReopen
-                        })
-                    guard pressed else {
-                        let message = pressAttempted
-                            ? "Gmail did not confirm the native action on this draft row. Review Drafts before continuing."
-                            : "The exact Gmail draft row changed before it could be reopened. Review Drafts before continuing."
-                        return .init(response: "", decision: .handoff(message),
-                            includeInModelHistory: false)
-                    }
-                    scope.gmailNavigationWaitCount = 0
-                    return .init(response: "", decision: .refreshObservation, includeInModelHistory: false)
-                }
-                if scope.gmailFlowStage == .waitingForDraftReopen {
-                    guard let recoveredURL = URL(string: page.url),
-                          ComputerUseGmailJob.isOpaqueComposeDraftURL(recoveredURL) else {
-                        if scope.gmailNavigationStage == .waitForTarget {
-                            return waitForGmailPage("Gmail is still reopening the saved draft. Review the browser, then choose Resume.")
-                        }
-                        return .init(response: "", decision: .handoff(
-                            "Gmail did not reopen the saved draft from its exact Drafts row."),
-                            includeInModelHistory: false)
-                    }
-                    guard job.verifiesComposeContents(page) else {
-                        let diagnostics = job.composeFieldDiagnostics(page)
-                        scope.gmailFieldDiagnostics = diagnostics
-                        let subjectCount = Int(diagnostics["gmailSubjectFieldCount"] ?? "0") ?? 0
-                        let bodyCount = Int(diagnostics["gmailMessageBodyFieldCount"] ?? "0") ?? 0
-                        let hasConflict = (subjectCount > 0 && diagnostics["gmailSubjectValueMatches"] != "true")
-                            || (bodyCount > 0 && diagnostics["gmailMessageBodyValueMatches"] != "true")
-                        if !hasConflict, (subjectCount == 0 || bodyCount == 0),
-                           scope.gmailNavigationStage == .waitForTarget {
-                            return waitForGmailPage("Gmail is still loading the reopened draft fields. Review the browser, then choose Resume.")
-                        }
-                        return .init(response: "", decision: .handoff(
-                            "The recovered Gmail draft did not match the requested fields. Review it before continuing."),
-                            includeInModelHistory: false)
-                    }
-                    scope.gmailSavedDraftReopenURL = recoveredURL
-                    scope.gmailRecipientsVerified = false
-                    scope.gmailFlowStage = .compose
-                    scope.gmailNavigationStage = .ready
-                    scope.gmailWaitCount = 0
-                    scope.gmailNavigationWaitCount = 0
-                    scope.gmailFieldDiagnostics = [:]
-                    return .init(response: "", decision: .refreshObservation, includeInModelHistory: false)
-                }
-                let composerIsExpected = scope.gmailFlowStage != .verifySend
-                    && scope.gmailFlowStage != .verifyDraft && scope.gmailFlowStage != .complete
-                if scope.gmailRecipientsVerified, let expectedAddress = scope.gmailRecipientMenuAddressToDismiss {
-                    guard URL(string: page.url)?.host?.lowercased() == "mail.google.com",
-                          let recipientWindow = scope.session.currentWindow else {
-                        return .init(response: "", decision: .handoff(
-                            "The verified Gmail recipient menu is no longer in the retained compose window. Review it before continuing."),
-                            includeInModelHistory: false)
-                    }
-                    let observedMenu = try ComputerUseGmailRecipientVerifier.recipientMenuObservation(
-                        window: recipientWindow.accessibilityElement, application: recipientWindow.application,
-                        standaloneContext: scope.gmailStandaloneComposeContext,
-                        revalidate: { try scope.check(nil, tools) })
-                    switch ComputerUseGmailRecipientVerifier.dismissalDecision(observation: observedMenu,
-                        expectedAddress: expectedAddress, escapeDispatched: scope.gmailRecipientEscapeDispatched) {
-                    case .menuAbsent:
-                        scope.gmailRecipientMenuAddressToDismiss = nil
-                        scope.gmailRecipientEscapeDispatched = false
-                    case .sendEscape:
-                        scope.pendingGmailRecipientEscapeAction = .key(usage: 0x29, modifiers: 0)
-                        return .init(response: "", action: .key(["Escape"]), includeInModelHistory: false)
-                    case .stop:
-                        return .init(response: "", decision: .handoff(
-                            "Gmail’s recipient menu did not close safely. Review the draft before continuing."),
-                            includeInModelHistory: false)
-                    }
-                }
-                if composerIsExpected && job.verifiesComposeContents(page) {
-                    scope.gmailFieldDiagnostics = [:]
-                    scope.gmailNavigationStage = .ready
-                    scope.gmailNavigationWaitCount = 0
-                    if !scope.gmailRecipientsVerified {
-                        guard let currentWindow = scope.session.currentWindow else {
-                            return .init(response: "", decision: .handoff(
-                                "Gmail’s exact recipient addresses could not be verified by their compose fields. Review the draft before continuing."),
-                                includeInModelHistory: false)
-                        }
-                        var recipientFailure: String?
-                        let recipientsVerified = try ComputerUseGmailRecipientVerifier.verify(
-                            window: currentWindow.accessibilityElement, application: currentWindow.application,
-                            expected: job.request, standaloneContext: scope.gmailStandaloneComposeContext,
-                            revalidate: { try revalidateComposeRegion(scope.gmailStandaloneComposeContext) },
-                            diagnostic: { recipientFailure = $0 })
-                        guard recipientsVerified else {
-                            let allowedReasons: Set<String> = [
-                                "frontmost_mismatch", "compose_discovery_or_tree_incomplete", "subject_field_missing",
-                                "collapsed_to_menu_action_failed", "collapsed_to_menu_tree_unavailable",
-                                "collapsed_to_menu_cancel_failed", "collapsed_to_menu_item_unparsed",
-                                "to_chips_not_expanded", "to_chip_count_mismatch", "cc_chip_count_mismatch",
-                                "bcc_chip_count_mismatch", "compose_lost_before_to_menu", "compose_lost_before_cc_menu",
-                                "compose_lost_before_bcc_menu", "to_chips_changed", "cc_chips_changed", "bcc_chips_changed",
-                                "to_menu_action_failed", "cc_menu_action_failed", "bcc_menu_action_failed",
-                                "to_menu_tree_unavailable", "cc_menu_tree_unavailable", "bcc_menu_tree_unavailable",
-                                "to_menu_cancel_failed", "cc_menu_cancel_failed", "bcc_menu_cancel_failed",
-                                "to_menu_item_unparsed", "cc_menu_item_unparsed", "bcc_menu_item_unparsed",
-                                "to_address_set_mismatch", "cc_address_set_mismatch", "bcc_address_set_mismatch",
-                            ]
-                            if let recipientFailure, allowedReasons.contains(recipientFailure) {
-                                scope.gmailFieldDiagnostics["gmailRecipientVerificationFailure"] = recipientFailure
-                            }
-                            return .init(response: "", decision: .handoff(
-                                "Gmail’s exact recipient addresses could not be verified by their compose fields. Review the draft before continuing."),
-                                includeInModelHistory: false)
-                        }
-                        scope.gmailRecipientsVerified = true
-                        let menu = try ComputerUseGmailRecipientVerifier.recipientMenuObservation(
-                            window: currentWindow.accessibilityElement, application: currentWindow.application,
-                            standaloneContext: scope.gmailStandaloneComposeContext,
-                            revalidate: { try revalidateComposeRegion(scope.gmailStandaloneComposeContext) })
-                        switch menu {
-                        case .absent:
-                            break
-                        case .copyAddress(let address):
-                            let expected = job.request.to + job.request.cc + job.request.bcc
-                            guard expected.contains(where: { $0.caseInsensitiveCompare(address) == .orderedSame }) else {
-                                scope.gmailRecipientsVerified = false
-                                return .init(response: "", decision: .handoff(
-                                    "Gmail left an unexpected recipient menu open. Review the draft before continuing."),
-                                    includeInModelHistory: false)
-                            }
-                            scope.gmailRecipientMenuAddressToDismiss = address
-                            scope.gmailRecipientEscapeDispatched = false
-                        case .unrecognized:
-                            scope.gmailRecipientsVerified = false
-                            return .init(response: "", decision: .handoff(
-                                "Gmail’s recipient menu could not be safely identified. Review the draft before continuing."),
-                                includeInModelHistory: false)
-                        }
-                        return .init(response: "", decision: .refreshObservation, includeInModelHistory: false)
-                    }
-                    if let account = job.request.account,
-                       scope.selectedGmailAccount?.index == account.index,
-                       let composeURL = URL(string: page.url),
-                       ComputerUseGmailJob.isOpaqueComposeDraftURL(composeURL),
-                       ComputerUseGmailAccountDirectory.accountIndex(from: page.url) == account.index {
-                        // This actual opaque URL is saved only after exact
-                        // compose fields and recipients have been verified.
-                        // It supports retry navigation, never completion or
-                        // approval proof.
-                        scope.lastVerifiedGmailComposeURL = composeURL
-                    }
-                    if job.requiresAttachment && scope.selectedCandidate == nil {
-                        if scope.gmailSavedDraftReopenVerification {
-                            return .init(response: "", decision: .handoff(
-                                "The reopened Gmail draft did not retain the requested attachment. Review it before continuing."),
-                                includeInModelHistory: false)
-                        }
-                        guard let query = scope.gmailFileQuery, query.isValid else {
-                            return .init(response: "", decision: .handoff(
-                                "The requested attachment could not be resolved from a typed file query."), includeInModelHistory: false)
-                        }
-                        if let context = scope.fileContext, context.query == query {
-                            guard let catalog = scope.fileCatalog else { throw Failure.selectedFileStale }
-                            if let candidate = catalog.automaticSelectionCandidate(for: query),
-                               context.page.candidates.contains(where: { $0.id == candidate.id }) {
-                                scope.nativeFileOperationReady = true
-                                return .init(response: "", action: .localFileOperation(.selectFile(candidateID: candidate.id)),
-                                    includeInModelHistory: false)
-                            }
-                            let choices: [ComputerUseLocalFileCatalog.Candidate]
-                            if query.sort != nil {
-                                guard case .ids(let bestIDs) = catalog.rankedBestCandidates(for: query),
-                                      (2...8).contains(bestIDs.count),
-                                      Set(bestIDs).isSubset(of: Set(context.page.candidates.map(\.id))) else {
-                                    return .init(response: "", decision: .handoff(
-                                        "The requested attachment could not be resolved from a complete file list. Review the file choices, then choose Resume."),
-                                        includeInModelHistory: false)
-                                }
-                                choices = context.page.candidates.filter { bestIDs.contains($0.id) }
-                            } else {
-                                choices = context.page.candidates
-                            }
-                            guard (2...8).contains(choices.count) else {
-                                return .init(response: "", decision: .handoff(
-                                    "The requested attachment could not be resolved from a complete file list. Review the file choices, then choose Resume."),
-                                    includeInModelHistory: false)
-                            }
-                            scope.nativeFileOperationReady = true
-                            return .init(response: "", action: .localFileOperation(.askFile(
-                                question: "Which listed file should be attached?", candidateIDs: choices.map(\.id))),
-                                includeInModelHistory: false)
-                        }
-                        scope.nativeFileOperationReady = true
-                        return .init(response: "", action: .localFileOperation(.listFiles(query: query, cursor: nil)),
-                            includeInModelHistory: false)
-                    }
-                    if job.requiresAttachment, let candidate = scope.selectedCandidate {
-                        if job.attachment == nil {
-                            try job.selectAttachment(.init(candidateID: candidate.id,
-                                displayName: candidate.displayName, byteCount: candidate.byteCount))
-                            scope.gmailJob = job
-                        }
-                        guard let currentWindow = scope.session.currentWindow, let attachment = job.attachment else {
-                            throw Failure.selectedFileStale
-                        }
-                        if scope.gmailSavedDraftReopenVerification &&
-                           (scope.gmailVerifiedAttachmentCandidateID != candidate.id ||
-                            attachment.candidateID != candidate.id ||
-                            attachment.displayName != candidate.displayName ||
-                            attachment.byteCount != candidate.byteCount) {
-                            return .init(response: "", decision: .handoff(
-                                "The reopened Gmail draft attachment is not bound to the selected file. Review it before continuing."),
-                                includeInModelHistory: false)
-                        }
-                        switch try ComputerUseGmailRecipientVerifier.attachmentEvidence(
-                            window: currentWindow.accessibilityElement, application: currentWindow.application,
-                            expected: attachment, standaloneContext: scope.gmailStandaloneComposeContext,
-                            revalidate: { try revalidateComposeRegion(scope.gmailStandaloneComposeContext) }) {
-                        case .matching:
-                            if scope.gmailSavedDraftReopenVerification {
-                                scope.gmailSavedDraftReopenVerification = false
-                                switch ComputerUseGmailJob.verifiedStandaloneDraftContinuation(
-                                    sendRequested: job.request.sendRequested) {
-                                case .send: scope.gmailFlowStage = .send
-                                case .complete: scope.gmailFlowStage = .complete
-                                }
-                            } else {
-                                guard attachment.candidateID == candidate.id,
-                                      attachment.displayName == candidate.displayName,
-                                      attachment.byteCount == candidate.byteCount,
-                                      scope.gmailFlowStage != .waitingForAttachment ||
-                                        scope.dispatchedPickerConfirmationCandidateID == candidate.id else {
-                                    return .init(response: "", decision: .handoff(
-                                        "The Gmail attachment could not be bound to the selected file."),
-                                        includeInModelHistory: false)
-                                }
-                                scope.gmailVerifiedAttachmentCandidateID = candidate.id
-                                scope.gmailFlowStage = job.request.sendRequested ? .send : .saveDraft
-                            }
-                        case .conflicting:
-                            return .init(response: "", decision: .handoff(
-                                "The existing Gmail attachment does not match the selected file. Review the draft before continuing."),
-                                includeInModelHistory: false)
-                        case .absent:
-                            if scope.gmailSavedDraftReopenVerification {
-                                return .init(response: "", decision: .handoff(
-                                    "The reopened Gmail draft did not retain the requested attachment. Review it before continuing."),
-                                    includeInModelHistory: false)
-                            }
-                            break
-                        }
-                    }
-                    if scope.gmailSavedDraftReopenVerification && !job.requiresAttachment {
-                        guard let currentWindow = scope.session.currentWindow,
-                              try ComputerUseGmailRecipientVerifier.attachmentEvidence(
-                                window: currentWindow.accessibilityElement, application: currentWindow.application,
-                                expected: nil, revalidate: { try scope.check(nil, tools) }) == .absent else {
-                            return .init(response: "", decision: .handoff(
-                                "The reopened Gmail draft contains an unexpected attachment. Review it before continuing."),
-                                includeInModelHistory: false)
-                        }
-                        scope.gmailSavedDraftReopenVerification = false
-                        switch ComputerUseGmailJob.verifiedStandaloneDraftContinuation(
-                            sendRequested: job.request.sendRequested) {
-                        case .send: scope.gmailFlowStage = .send
-                        case .complete: scope.gmailFlowStage = .complete
-                        }
-                    }
-                } else if composerIsExpected {
-                    scope.gmailFieldDiagnostics = job.composeFieldDiagnostics(page)
-                    if scope.gmailNavigationStage == .waitForTarget {
-                        return waitForGmailPage("Gmail did not show the exact requested draft fields. Review the browser, then choose Resume.")
-                    }
-                    return .init(response: "", decision: .handoff(
-                        "The Gmail draft fields could not be verified. Review the browser, then choose Resume."),
-                        includeInModelHistory: false)
-                }
-                if scope.gmailFlowStage == .waitingForAttachment {
-                    guard let candidate = scope.selectedCandidate,
-                          scope.dispatchedPickerConfirmationCandidateID == candidate.id,
-                          let currentWindow = scope.session.currentWindow,
-                          let attachment = job.attachment,
-                          attachment.candidateID == candidate.id,
-                          attachment.displayName == candidate.displayName,
-                          attachment.byteCount == candidate.byteCount,
-                          try ComputerUseGmailRecipientVerifier.attachmentEvidence(
-                            window: currentWindow.accessibilityElement, application: currentWindow.application,
-                            expected: attachment, standaloneContext: scope.gmailStandaloneComposeContext,
-                            revalidate: { try revalidateComposeRegion(scope.gmailStandaloneComposeContext) }) == .matching else {
-                        scope.gmailWaitCount += 1
-                        if scope.gmailWaitCount <= 3 {
-                            return .init(response: "", action: .wait(0.5), includeInModelHistory: false)
-                        }
-                        return .init(response: "", decision: .handoff(
-                            "Gmail did not show the selected filename and size. Review the draft before continuing."),
-                            includeInModelHistory: false)
-                    }
-                    scope.gmailVerifiedAttachmentCandidateID = candidate.id
-                    scope.gmailWaitCount = 0
-                    scope.gmailFlowStage = job.request.sendRequested ? .send : .saveDraft
-                }
-                if scope.gmailFlowStage == .compose {
-                    scope.gmailFlowStage = job.requiresAttachment ? .attach
-                        : (job.request.sendRequested ? .send : .saveDraft)
-                }
-                @MainActor func waitForGmailProgress(_ message: String) -> ComputerUseDesktopProposal {
-                    scope.gmailWaitCount += 1
-                    if scope.gmailWaitCount <= 3 {
-                        return .init(response: "", action: .wait(0.5), includeInModelHistory: false)
-                    }
-                    return .init(response: "", decision: .handoff(message), includeInModelHistory: false)
-                }
-                @MainActor func beginStandaloneDraftNormalization() -> ComputerUseDesktopProposal {
-                    guard let account = job.request.account,
-                          let draftsURL = ComputerUseGmailAccountDirectory.draftsURL(index: account.index) else {
-                        return .init(response: "", decision: .handoff(
-                            "The selected Gmail Drafts address could not be prepared safely."), includeInModelHistory: false)
-                    }
-                    // Verify the standalone draft is saved through its unique
-                    // Drafts row before completing or sending it.
-                    scope.gmailSavedDraftReopenURL = nil
-                    scope.gmailSavedDraftReopenVerification = true
-                    scope.gmailRecipientsVerified = false
-                    scope.gmailStandaloneComposeContext = nil
-                    scope.gmailFlowStage = .normalizeDrafts
-                    scope.gmailNavigationTargetURL = draftsURL
-                    scope.gmailNavigationStage = .navigateTarget
-                    scope.gmailWaitCount = 0
-                    scope.gmailNavigationWaitCount = 0
-                    return .init(response: "", decision: .refreshObservation, includeInModelHistory: false)
-                }
-                switch scope.gmailFlowStage {
-                case .normalizeDrafts, .waitingForDraftReopen:
-                    return .init(response: "", decision: .handoff(
-                        "Gmail draft recovery could not be verified. Review Drafts before continuing."),
-                        includeInModelHistory: false)
-                case .compose:
-                    return .init(response: "", decision: .handoff("The Gmail compose fields could not be verified."),
-                        includeInModelHistory: false)
-                case .attach:
-                    let attachControl: ComputerUseDefaultBrowserPageReader.Control? = page.controls.first { control in
-                        let isButton = control.role == "AXButton" || control.role == "AXPopUpButton"
-                        let isAttach = control.label.localizedCaseInsensitiveCompare("Attach files") == ComparisonResult.orderedSame
-                        return isButton && isAttach && control.enabled == true
-                    }
-                    guard let attachControl,
-                          let proposal = try clickObservedControl(attachControl, next: .waitingForPicker) else {
-                        return .init(response: "", decision: .handoff(
-                            "Gmail’s Attach files control is not available in the current page."), includeInModelHistory: false)
-                    }
-                    return proposal
-                case .waitingForPicker:
-                    if scope.session.currentFileOpenPanel != nil {
-                        scope.gmailWaitCount = 0
-                        return .init(response: "", decision: .refreshObservation, includeInModelHistory: false)
-                    }
-                    return waitForGmailProgress("Gmail did not open its file chooser. Review the browser, then choose Resume.")
-                case .waitingForAttachment:
-                    guard let candidate = scope.selectedCandidate,
-                          scope.dispatchedPickerConfirmationCandidateID == candidate.id,
-                          job.attachment?.candidateID == candidate.id,
-                          job.verifiesAttachment(page) else {
-                        return waitForGmailProgress("Gmail did not show the selected filename and size. Review the draft before continuing.")
-                    }
-                    scope.gmailVerifiedAttachmentCandidateID = candidate.id
-                    scope.gmailWaitCount = 0
-                    scope.gmailFlowStage = job.request.sendRequested ? .send : .saveDraft
-                case .send:
-                    if scope.gmailStandaloneComposeContext != nil {
-                        return beginStandaloneDraftNormalization()
-                    }
-                    let sendControl: ComputerUseDefaultBrowserPageReader.Control? = page.controls.first { control in
-                        let isSend = control.label == "Send" || control.label.hasPrefix("Send ")
-                        return control.role == "AXButton" && control.enabled == true && isSend
-                    }
-                    guard let sendControl,
-                          let proposal = try clickObservedControl(sendControl, next: .verifySend, isSend: true) else {
-                        return .init(response: "", decision: .handoff("The exact Gmail Send control is not available."),
-                            includeInModelHistory: false)
-                    }
-                    return proposal
-                case .saveDraft:
-                    if scope.gmailStandaloneComposeContext != nil {
-                        return beginStandaloneDraftNormalization()
-                    }
-                    let closeControl: ComputerUseDefaultBrowserPageReader.Control? = page.controls.first { control in
-                        let isClose = control.label == "Close" || control.label == "Save & close"
-                        return control.role == "AXButton" && control.enabled == true && isClose
-                    }
-                    guard let closeControl,
-                          let proposal = try clickObservedControl(closeControl, next: .verifyDraft) else {
-                        return .init(response: "", decision: .handoff("Gmail’s draft close control is not available."),
-                            includeInModelHistory: false)
-                    }
-                    return proposal
-                case .verifySend:
-                    if job.verifiesSend(page) {
-                        scope.gmailFlowStage = .complete
-                        scope.gmailWaitCount = 0
-                    } else { return waitForGmailProgress("Gmail did not confirm the message was sent. Review the page before continuing.") }
-                case .verifyDraft:
-                    guard let account = job.request.account,
-                          let draftsURL = ComputerUseGmailAccountDirectory.draftsURL(index: account.index) else {
-                        return .init(response: "", decision: .handoff(
-                            "The selected Gmail Drafts address could not be prepared safely."), includeInModelHistory: false)
-                    }
-                    scope.gmailSavedDraftReopenURL = nil
-                    scope.gmailSavedDraftReopenVerification = true
-                    scope.gmailRecipientsVerified = false
-                    scope.gmailFlowStage = .normalizeDrafts
-                    scope.gmailNavigationTargetURL = draftsURL
-                    scope.gmailNavigationStage = page.url == draftsURL.absoluteString ? .waitForTarget : .navigateTarget
-                    scope.gmailWaitCount = 0
-                    return .init(response: "", decision: .refreshObservation, includeInModelHistory: false)
-                case .complete:
-                    return .init(response: "", decision: .completionStatus(success: true), includeInModelHistory: false)
-                }
-                if scope.gmailFlowStage == .complete {
-                    return .init(response: "", decision: .completionStatus(success: true), includeInModelHistory: false)
                 }
             }
             guard let nativeControlPlanner else { return try await propose(enriched) }
@@ -2866,29 +723,9 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
                 catch is CancellationError { throw CancellationError() }
                 catch ComputerUseDesktopExecutor.Failure.unsupportedAction { throw ComputerUseDesktopExecutor.Failure.unsupportedAction }
                 catch { throw ComputerUseDesktopExecutor.Failure.scopedSurfaceChanged }
-            }, completeCheck: scopedCompletionCheck, hostCompletionProof: hostCompletionProof,
+            }, completeCheck: scopedCompletionCheck,
             outcomeCheck: scopedOutcomeCheck,
             completionAnswerTransform: { answer in
-                if let job = scope.gmailJob, scope.gmailFlowStage == .complete {
-                    guard let tools = scope.tools else {
-                        throw ComputerUseDesktopExecutor.Failure.completionUnverified
-                    }
-                    try scope.check(nil, tools)
-                    guard scope.session.currentFileOpenPanel == nil else {
-                        throw ComputerUseDesktopExecutor.Failure.completionUnverified
-                    }
-                    let attachment = job.attachment?.displayName ?? scope.selectedCandidate?.displayName
-                    if job.request.sendRequested {
-                        let suffix = attachment.map { " with “\($0)” attached" } ?? ""
-                        return "Sent your Gmail email to \(job.request.to.joined(separator: ", "))\(suffix)."
-                    }
-                    let suffix = attachment.map { " with “\($0)” attached" } ?? ""
-                    return "Saved your Gmail draft to Drafts\(suffix)."
-                }
-                if let upload = scope.webUpload, upload.stage == .complete,
-                   let candidate = scope.selectedCandidate {
-                    return "Uploaded \(candidate.displayName) to \(upload.request.provider.rawValue == "googleDrive" ? "Google Drive" : "Dropbox")."
-                }
                 guard let candidate = scope.selectedCandidate,
                       scope.dispatchedPickerConfirmationCandidateID == candidate.id else {
                     return answer
@@ -2912,231 +749,7 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
             },
             revalidationFailureObserver: revalidationFailureObserver,
             localFileOperationHandler: { try await scope.apply($0) },
-            hostPreparation: {
-                if let upload = scope.webUpload, upload.stage == .driveKeyboardChooseFileUpload {
-                    // If Control-C may already have been posted, inspect only;
-                    // never replay either key after an uncertain macro.
-                    guard !upload.dispatchLatch.siteUploadAttempted else { return }
-                    scope.gmailFieldDiagnostics["webUploadDriveShortcutStage"] = "driveKeyboardChooseFileUpload"
-                    scope.gmailFieldDiagnostics["webUploadDriveShortcutAttempted"] = "false"
-                    scope.gmailFieldDiagnostics["webUploadDriveShortcutPhase"] = "before_first_key"
-                    guard upload.request.provider == .googleDrive,
-                          upload.menuFallbackAttempts == 1,
-                          upload.siteUploadDispatchCount == 0,
-                          let accountLabel = upload.expectedAccountLabel,
-                          let candidateID = scope.selectedCandidate?.id,
-                          let taskID = scope.taskID, let goal = scope.goal,
-                          let tools = scope.tools,
-                          let retainedWindow = scope.session.currentWindow,
-                          retainedWindow.application.bundleIdentifier == "com.apple.Safari",
-                          retainedWindow.application.codeIdentity != nil else {
-                        throw ComputerUseDesktopExecutor.Failure.scopedSurfaceChanged
-                    }
-                    @MainActor func validateDriveShortcutContext() throws {
-                        try Task.checkCancellation()
-                        try tools.requireActive()
-                        try scope.session.validate(taskID: taskID, goal: goal, tools: tools)
-                        guard scope.session.currentFileOpenPanel == nil,
-                              let current = scope.session.currentWindow,
-                              current.id == retainedWindow.id,
-                              current.application == retainedWindow.application,
-                              CFEqual(current.accessibilityElement, retainedWindow.accessibilityElement),
-                              current.application.bundleIdentifier == "com.apple.Safari",
-                              current.application.codeIdentity != nil,
-                              var currentUpload = scope.webUpload,
-                              currentUpload.stage == .driveKeyboardChooseFileUpload,
-                              currentUpload.request.provider == .googleDrive,
-                              currentUpload.expectedAccountLabel == accountLabel,
-                              currentUpload.siteUploadDispatchCount == 0,
-                              scope.selectedCandidate?.id == candidateID else {
-                            throw ComputerUseDesktopExecutor.Failure.scopedSurfaceChanged
-                        }
-                        try scope.verifyAndRecordPreUploadProgressBaseline(&currentUpload,
-                            window: retainedWindow, tools: tools)
-                        try Task.checkCancellation()
-                        try tools.requireActive()
-                        try scope.session.validate(taskID: taskID, goal: goal, tools: tools)
-                        guard scope.session.currentFileOpenPanel == nil,
-                              let current = scope.session.currentWindow,
-                              current.id == retainedWindow.id,
-                              current.application == retainedWindow.application,
-                              CFEqual(current.accessibilityElement, retainedWindow.accessibilityElement) else {
-                            throw ComputerUseDesktopExecutor.Failure.scopedSurfaceChanged
-                        }
-                    }
-                    try Self.performDriveUploadKeyboardSequence(tools: tools,
-                        expectedApplication: retainedWindow.application,
-                        isAttempted: { scope.webUpload?.dispatchLatch.siteUploadAttempted ?? true },
-                        validateContext: validateDriveShortcutContext,
-                        phaseObserver: { scope.gmailFieldDiagnostics["webUploadDriveShortcutPhase"] = $0 },
-                        beginAttempt: {
-                            guard var current = scope.webUpload,
-                                  current.stage == .driveKeyboardChooseFileUpload,
-                                  current.request.provider == .googleDrive,
-                                  current.expectedAccountLabel == accountLabel,
-                                  current.menuFallbackAttempts == 1,
-                                  current.siteUploadDispatchCount == 0,
-                                  current.dispatchLatch.beginSiteUpload() else {
-                                throw ComputerUseDesktopExecutor.Failure.scopedSurfaceChanged
-                            }
-                            scope.webUpload = current
-                            scope.gmailFieldDiagnostics["webUploadDriveShortcutAttempted"] = "true"
-                        })
-                    guard var completed = scope.webUpload,
-                          completed.dispatchLatch.siteUploadAttempted,
-                          completed.stage == .driveKeyboardChooseFileUpload,
-                          completed.siteUploadDispatchCount == 0 else {
-                        throw ComputerUseDesktopExecutor.Failure.scopedSurfaceChanged
-                    }
-                    completed.stage = .waitingForPicker
-                    completed.siteUploadDispatchCount = 1
-                    scope.webUpload = completed
-                    return
-                }
-                let gmailNeedsNavigation = (scope.gmailSetup != nil || scope.gmailJob != nil)
-                    && scope.gmailNavigationStage == .navigateTarget
-                let uploadNavigation: (stage: ComputerUseWebUploadJob.NavigationStage,
-                    provider: ComputerUseWebUploadJob.Provider, url: URL, filename: String?)?
-                if let upload = scope.webUpload {
-                    switch upload.stage {
-                    case .navigateHome:
-                        uploadNavigation = (.home, upload.request.provider, upload.request.provider.homeURL, nil)
-                    case .navigateCollisionSearch:
-                        guard let candidate = scope.selectedCandidate,
-                              let url = ComputerUseWebUploadJob.driveTitleSearchURL(filename: candidate.displayName) else {
-                            throw ComputerUseDesktopExecutor.Failure.scopedSurfaceChanged
-                        }
-                        uploadNavigation = (.collisionSearch, upload.request.provider, url, candidate.displayName)
-                    case .navigateReturnToRoot:
-                        uploadNavigation = (.returnToRoot, upload.request.provider, upload.request.provider.homeURL, nil)
-                    case .navigateFinalSearch:
-                        guard let candidate = scope.selectedCandidate,
-                              let url = ComputerUseWebUploadJob.driveTitleSearchURL(filename: candidate.displayName) else {
-                            throw ComputerUseDesktopExecutor.Failure.scopedSurfaceChanged
-                        }
-                        uploadNavigation = (.finalSearch, upload.request.provider, url, candidate.displayName)
-                    default:
-                        uploadNavigation = nil
-                    }
-                } else { uploadNavigation = nil }
-                guard gmailNeedsNavigation || uploadNavigation != nil else { return }
-                let target = uploadNavigation?.url ?? scope.gmailNavigationTargetURL
-                guard let target else { return }
-                guard let taskID = scope.taskID, let goal = scope.goal, let tools = scope.tools else {
-                    throw Failure.noRetainedWindow
-                }
-                if gmailNeedsNavigation { scope.gmailNavigationStage = .waitForTarget }
-                do {
-                    scope.gmailNavigationPhase = nil
-                    try await scope.session.navigateRetainedSafariTab(to: target, taskID: taskID, goal: goal, tools: tools,
-                        webUploadNavigation: uploadNavigation.map { ($0.stage, $0.provider, $0.filename) },
-                        diagnostic: { value in
-                            guard let phase = value.split(separator: " ", maxSplits: 1).first,
-                                  phase.range(of: #"^phase=[a-z_]+$"#, options: .regularExpression) != nil else { return }
-                            let phaseValue = String(phase)
-                            scope.gmailNavigationPhase = phaseValue
-                            if phaseValue == "phase=ax_address_value_write_latched" {
-                                scope.gmailAddressValueWriteAttemptCount += 1
-                            } else if phaseValue == "phase=ax_address_value_write_completed" {
-                                scope.gmailAddressValueWriteCompletedCount += 1
-                            }
-                        })
-                    if let uploadNavigation, var upload = scope.webUpload {
-                        guard let retained = scope.session.currentWindow,
-                              retained.application.bundleIdentifier == "com.apple.Safari",
-                              retained.application.codeIdentity != nil else {
-                            throw ComputerUseDesktopExecutor.Failure.scopedSurfaceChanged
-                        }
-                        let expectedStage: WebUploadStage
-                        switch uploadNavigation.stage {
-                        case .home: expectedStage = .navigateHome
-                        case .collisionSearch: expectedStage = .navigateCollisionSearch
-                        case .returnToRoot: expectedStage = .navigateReturnToRoot
-                        case .finalSearch: expectedStage = .navigateFinalSearch
-                        }
-                        let originalStage = upload.stage
-                        guard originalStage == expectedStage else {
-                            throw ComputerUseDesktopExecutor.Failure.scopedSurfaceChanged
-                        }
-                        let previousURL: String?
-                        switch uploadNavigation.stage {
-                        case .home:
-                            previousURL = nil
-                        case .collisionSearch:
-                            previousURL = upload.request.provider.homeURL.absoluteString
-                        case .finalSearch:
-                            previousURL = upload.request.provider.homeURL.absoluteString
-                        case .returnToRoot:
-                            guard let filename = scope.selectedCandidate?.displayName,
-                                  let url = ComputerUseWebUploadJob.driveTitleSearchURL(filename: filename) else {
-                                throw ComputerUseDesktopExecutor.Failure.scopedSurfaceChanged
-                            }
-                            previousURL = url.absoluteString
-                        }
-                        try await Self.waitForW2DestinationReady(expectedURL: target.absoluteString,
-                            previousURL: previousURL,
-                            application: retained.application, expectedAccountLabel: upload.expectedAccountLabel,
-                            provider: upload.request.provider, tools: tools,
-                            checkScope: {
-                                guard let currentUpload = scope.webUpload,
-                                      currentUpload.stage == originalStage,
-                                      currentUpload.request.provider == upload.request.provider,
-                                      currentUpload.expectedAccountLabel == upload.expectedAccountLabel else {
-                                    throw ComputerUseDesktopExecutor.Failure.scopedSurfaceChanged
-                                }
-                                do {
-                                    try scope.check(nil, tools)
-                                } catch let failure as ComputerUseDefaultBrowserSession.Failure {
-                                    guard failure == .targetLost,
-                                          scope.session.lastValidationPhaseForDiagnostics == .capture,
-                                          ["focused_retained_metadata_read", "focused_retained_structure_read"]
-                                            .contains(scope.session.lastCaptureReasonForDiagnostics ?? ""),
-                                          scope.session.lastCaptureAXErrorCodeForDiagnostics
-                                            == Int(AXError.cannotComplete.rawValue) else { throw failure }
-                                    return false
-                                }
-                                guard scope.session.currentFileOpenPanel == nil else {
-                                    throw ComputerUseDefaultBrowserSession.Failure.authenticationHandoff
-                                }
-                                guard let current = scope.session.currentWindow,
-                                      current.id == retained.id,
-                                      current.application == retained.application,
-                                      CFEqual(current.accessibilityElement, retained.accessibilityElement) else {
-                                    throw ComputerUseDefaultBrowserSession.Failure.targetLost
-                                }
-                                return true
-                            },
-                            readPage: {
-                                scope.gmailFieldDiagnostics.removeValue(forKey: "webUploadReadFailure")
-                                scope.gmailFieldDiagnostics.removeValue(forKey: "webUploadReadFailureAncestorRoles")
-                                return try scope.pageReader.read(window: retained.accessibilityElement,
-                                    application: retained.application,
-                                    mayAct: { (try? tools.requireActive()) != nil }, mode: .webUploadControls,
-                                    diagnostic: { reason, roles in
-                                        scope.gmailFieldDiagnostics["webUploadReadFailure"] = reason
-                                        scope.gmailFieldDiagnostics["webUploadReadFailureAncestorRoles"] = roles.joined(separator: ",")
-                                    })
-                            }, diagnostic: { reads, scopeRetries, reason, elapsedMs in
-                                scope.gmailFieldDiagnostics["webUploadReadinessReads"] = String(reads)
-                                scope.gmailFieldDiagnostics["webUploadReadinessScopeRetries"] = String(scopeRetries)
-                                scope.gmailFieldDiagnostics["webUploadReadinessLastReason"] = reason
-                                scope.gmailFieldDiagnostics["webUploadReadinessElapsedMs"] = String(elapsedMs)
-                            })
-                        switch uploadNavigation.stage {
-                        case .home: upload.stage = .resolveFile
-                        case .collisionSearch: upload.stage = .checkCollisionSearch
-                        case .returnToRoot: upload.stage = .openUploaderMenu
-                        case .finalSearch: upload.stage = .checkFinalSearch
-                        }
-                        scope.webUpload = upload
-                    }
-                } catch ComputerUseDefaultBrowserSession.Failure.browserAutomationPermissionRequired {
-                    if gmailNeedsNavigation { scope.gmailNavigationStage = .navigateTarget }
-                    throw ComputerUseDefaultBrowserSession.Failure.browserAutomationPermissionRequired
-                }
-            },
             onSuccessfulDispatch: { scope.successfulDispatch($0) },
-            onWillBeginEffect: { scope.willBeginEffect($0) },
             approvalTaskIDProvider: { scope.executionTaskID },
             screenConsentRecognizer: screenConsentRecognizer, finishRun: {
                 // An approval continuation retains its exact proposed action.
@@ -3146,153 +759,6 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
                 if scope.pendingVisualDirective == nil { scope.visualFallbackPending = false }
                 await finishRun()
             })
-    }
-
-    static func waitForW2DestinationReady(
-        expectedURL: String,
-        previousURL: String? = nil,
-        application: ComputerUseApplicationIdentity,
-        expectedAccountLabel: String?,
-        provider: ComputerUseWebUploadJob.Provider,
-        tools: ComputerUseHostTools,
-        checkScope: @MainActor () throws -> Bool,
-        readPage: @MainActor () throws -> ComputerUseDefaultBrowserPageReader.Observation?,
-        diagnostic: (@MainActor (_ reads: Int, _ scopeRetries: Int, _ lastReason: String, _ elapsedMs: Int) -> Void)? = nil
-    ) async throws {
-        let started = ContinuousClock.now
-        var reads = 0
-        var scopeRetries = 0
-        var lastReason = "nil"
-        defer {
-            let elapsed = (ContinuousClock.now - started).components
-            let elapsedMs = Int(max(0, elapsed.seconds * 1_000
-                + elapsed.attoseconds / 1_000_000_000_000_000))
-            diagnostic?(reads, scopeRetries, lastReason, elapsedMs)
-        }
-        let deadline = ContinuousClock.now.advanced(by: .seconds(15))
-        while ContinuousClock.now < deadline {
-            try Task.checkCancellation()
-            try tools.requireActive()
-            guard try checkScope() else {
-                scopeRetries += 1
-                try await Task.sleep(for: .milliseconds(50))
-                continue
-            }
-            guard ContinuousClock.now < deadline else {
-                throw ComputerUseDefaultBrowserSession.Failure.targetLost
-            }
-            reads += 1
-            if let page = try readPage() {
-                guard ContinuousClock.now < deadline else {
-                    throw ComputerUseDefaultBrowserSession.Failure.targetLost
-                }
-                guard page.application == application else {
-                    throw ComputerUseDefaultBrowserSession.Failure.targetLost
-                }
-                if page.webUploadControlsComplete {
-                    if page.url == previousURL, previousURL != expectedURL {
-                        guard let expectedAccountLabel,
-                              webUploadAccountLabel(page, provider: provider) == expectedAccountLabel else {
-                            lastReason = "account_mismatch"
-                            throw ComputerUseDefaultBrowserSession.Failure.authenticationHandoff
-                        }
-                        lastReason = "waiting_previous_page"
-                        try await Task.sleep(for: .milliseconds(50))
-                        continue
-                    }
-                    guard page.url == expectedURL else {
-                        lastReason = "url_unexpected"
-                        throw ComputerUseDefaultBrowserSession.Failure.authenticationHandoff
-                    }
-                    if let expectedAccountLabel {
-                        guard webUploadAccountLabel(page, provider: provider) == expectedAccountLabel else {
-                            lastReason = "account_mismatch"
-                            throw ComputerUseDefaultBrowserSession.Failure.authenticationHandoff
-                        }
-                    }
-                    guard !page.controls.isEmpty else {
-                        lastReason = "controls_empty"
-                        try await Task.sleep(for: .milliseconds(50))
-                        continue
-                    }
-                    try Task.checkCancellation()
-                    try tools.requireActive()
-                    guard try checkScope() else {
-                        try await Task.sleep(for: .milliseconds(50))
-                        continue
-                    }
-                    guard ContinuousClock.now < deadline else {
-                        throw ComputerUseDefaultBrowserSession.Failure.targetLost
-                    }
-                    lastReason = "success"
-                    return
-                }
-                lastReason = "controls_incomplete"
-            } else {
-                lastReason = "nil"
-            }
-            try await Task.sleep(for: .milliseconds(50))
-        }
-        try Task.checkCancellation()
-        try tools.requireActive()
-        throw ComputerUseDefaultBrowserSession.Failure.targetLost
-    }
-
-    private static func webUploadAccountLabel(_ page: ComputerUseDefaultBrowserPageReader.Observation,
-        provider: ComputerUseWebUploadJob.Provider) -> String? {
-        let labels = page.controls.filter { control in
-            guard control.role == "AXButton", !control.label.isEmpty else { return false }
-            switch provider {
-            case .googleDrive: return control.label.hasPrefix("Google Account:")
-            case .dropbox: return control.label.localizedCaseInsensitiveContains("account")
-            }
-        }.map(\.label)
-        return labels.count == 1 ? labels[0] : nil
-    }
-
-    private static func webUploadProgress(_ page: ComputerUseDefaultBrowserPageReader.Observation)
-        -> ComputerUseWebUploadJob.UploadProgress {
-        webUploadProgress(page.exactTextValues)
-    }
-
-    static func webUploadProgress(_ textValues: [String]) -> ComputerUseWebUploadJob.UploadProgress {
-        let values = textValues.map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
-        if values.contains(where: { $0.contains("upload failed") || $0.contains("couldn't upload") }) { return .failed }
-        if values.contains(where: { $0.contains("uploading") || $0.contains("remaining") }) { return .inProgress }
-        if values.contains(where: {
-            $0 == "upload complete" || $0 == "upload complete." || $0 == "uploaded"
-                || isCountedWebUploadCompletionLabel($0)
-        }) {
-            return .complete
-        }
-        return .unknown
-    }
-
-    private static func isCountedWebUploadCompletionLabel(_ value: String) -> Bool {
-        let label = value.hasSuffix(".") ? String(value.dropLast()) : value
-        for (suffix, singular) in [(" upload complete", true), (" uploads complete", false)] {
-            guard label.hasSuffix(suffix) else { continue }
-            let count = label.dropLast(suffix.count)
-            let digits = Array(count.utf8)
-            guard !digits.isEmpty, digits.count <= 6, digits[0] != 48,
-                  digits.allSatisfy({ (48 ... 57).contains($0) }),
-                  let number = Int(String(count)) else { return false }
-            return singular ? number == 1 : number >= 2
-        }
-        return false
-    }
-
-    static func webUploadProgressBaselineIsClean(controlsComplete: Bool, progressValues: [String]) -> Bool {
-        controlsComplete && webUploadProgress(progressValues) == .unknown
-    }
-
-    static func driveUploaderMenuShortcutEligible(
-        controls: [ComputerUseDefaultBrowserPageReader.Control]) -> Bool {
-        let matches = controls.filter {
-            ($0.role == "AXButton" || $0.role == "AXMenuItem")
-                && $0.label.localizedCaseInsensitiveCompare("New") == .orderedSame
-        }
-        return matches.count == 1 && matches[0].enabled == true
     }
 
     private static func focusedEditorProposal(_ plan: ComputerUseDefaultBrowserControlPlan,
@@ -3344,38 +810,6 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
         return .init(proposalAction: proposal, predictedAction: predicted)
     }
 
-    /// Drive's menu item is omitted from Safari's AX tree. This fixed two-key
-    /// host command is the only keyboard fallback; the caller supplies fresh
-    /// retained-page checks for each key and latches before the first effect.
-    static func performDriveUploadKeyboardSequence(
-        tools: ComputerUseHostTools,
-        expectedApplication: ComputerUseApplicationIdentity,
-        isAttempted: @escaping () -> Bool,
-        validateContext: @escaping () throws -> Void,
-        phaseObserver: @escaping (String) -> Void = { _ in },
-        beginAttempt: @escaping () throws -> Void
-    ) throws {
-        guard !isAttempted() else { throw ComputerUseDesktopExecutor.Failure.scopedSurfaceChanged }
-        phaseObserver("before_first_key")
-        try tools.performNativeBrowserHostCommand(.driveOpenNewMenu,
-            expectedApplication: expectedApplication, willBeginEffect: {
-                phaseObserver("first_key_validating")
-                try validateContext()
-                guard !isAttempted() else { throw ComputerUseDesktopExecutor.Failure.scopedSurfaceChanged }
-                try beginAttempt()
-                guard isAttempted() else { throw ComputerUseDesktopExecutor.Failure.scopedSurfaceChanged }
-            })
-        phaseObserver("first_key_returned")
-        phaseObserver("before_second_key")
-        try tools.performNativeBrowserHostCommand(.driveChooseFileUpload,
-            expectedApplication: expectedApplication, willBeginEffect: {
-                phaseObserver("second_key_validating")
-                try validateContext()
-                guard isAttempted() else { throw ComputerUseDesktopExecutor.Failure.scopedSurfaceChanged }
-            })
-        phaseObserver("second_key_returned")
-    }
-
     private static func normalizedPointerAction(center: CGPoint, display: CGRect) throws -> ComputerUseFaraAction {
         guard center.x.isFinite, center.y.isFinite, display.width.isFinite, display.height.isFinite,
               display.width > 0, display.height > 0, display.contains(center) else {
@@ -3423,11 +857,8 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
         }
         do {
             try await scope.prepare(taskID, trustedUserPrompt, tools)
-            if let result = try await prepareGmailJobIfNeeded(trustedUserPrompt, tools: tools) { return result }
-            if let result = try await prepareWebUploadIfNeeded(trustedUserPrompt, tools: tools) { return result }
-            let result = try await desktop.execute(taskID: taskID, prompt: prompt,
+            return try await desktop.execute(taskID: taskID, prompt: prompt,
                 trustedUserPrompt: trustedUserPrompt, tools: tools, progress: progress)
-            return surfacePendingGmailClarification(result, taskID: taskID)
         } catch is CancellationError { throw CancellationError() }
         catch ComputerUseDefaultBrowserSession.Failure.browserAutomationPermissionRequired {
             return .userInterventionRequired("Allow Remote Desktop Host to control Safari in System Settings, then choose Resume.")
@@ -3470,10 +901,7 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
         lastSessionFailureForDiagnostics = nil
         do {
             try await scope.prepare(taskID, originalGoal, tools)
-            if let result = try await prepareGmailJobIfNeeded(originalGoal, tools: tools) { return result }
-            if let result = try await prepareWebUploadIfNeeded(originalGoal, tools: tools) { return result }
-            let result = try await desktop.execute(taskID: taskID, goal: goal, tools: tools, progress: progress)
-            return surfacePendingGmailClarification(result, taskID: taskID)
+            return try await desktop.execute(taskID: taskID, goal: goal, tools: tools, progress: progress)
         } catch is CancellationError { throw CancellationError() }
         catch ComputerUseDefaultBrowserSession.Failure.browserAutomationPermissionRequired {
             return .userInterventionRequired("Allow Remote Desktop Host to control Safari in System Settings, then choose Resume.")
@@ -3571,11 +999,6 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
               scope.clarificationNonce != nil else {
             scope.pendingClarification = nil
             scope.pendingChoiceCandidates.removeAll()
-            scope.pendingGmailRecipientChoiceSet = nil
-            scope.pendingGmailAccountChoiceSet = nil
-            scope.selectedGmailRecipientAddress = nil
-            scope.selectedGmailAccount = nil
-            scope.pendingChoiceKind = nil
             scope.clarificationRetired = true
             throw Failure.invalidFileChoice
         }
@@ -3586,11 +1009,6 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
         guard taskID == nil || scope.executionTaskID == taskID || scope.taskID == taskID else { return }
         scope.pendingClarification = nil
         scope.pendingChoiceCandidates.removeAll()
-        scope.pendingGmailRecipientChoiceSet = nil
-        scope.pendingGmailAccountChoiceSet = nil
-        scope.selectedGmailRecipientAddress = nil
-        scope.selectedGmailAccount = nil
-        scope.pendingChoiceKind = nil
         scope.clarifiedGoal = nil
         scope.routedClarifiedGoal = nil
         scope.clarificationRetired = true
@@ -3616,22 +1034,9 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
         }
         if scope.executionTaskID == taskID {
             guard scope.answerOriginTaskID == originatingTaskID,
-                  scope.clarifiedGoal == goal, scope.selectedChoice == selectedChoice else {
+                  scope.clarifiedGoal == goal, scope.selectedChoice == selectedChoice,
+                  scope.userSelectedCandidateID == selectedChoice.id else {
                 throw Failure.invalidFileChoice
-            }
-            switch scope.pendingChoiceKind {
-            case .some(.gmailRecipient):
-                guard scope.selectedGmailRecipientAddress != nil else { throw Failure.invalidFileChoice }
-            case .some(.gmailAccount):
-                guard let account = scope.selectedGmailAccount,
-                      scope.pendingGmailAccountChoiceSet == nil,
-                      scope.gmailSetup != nil,
-                      scope.selectedChoice?.id == selectedChoice.id,
-                      scope.pendingClarification == nil,
-                      scope.clarificationNonce == nil,
-                      account.email == selectedChoice.detail else { throw Failure.invalidFileChoice }
-            case .some(.file), .none:
-                guard scope.userSelectedCandidateID == selectedChoice.id else { throw Failure.invalidFileChoice }
             }
         } else {
             guard scope.executionTaskID == originatingTaskID,
@@ -3639,58 +1044,17 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
                   pending.goal == goal, pending.choices?.contains(selectedChoice) == true else {
                 throw Failure.invalidFileChoice
             }
-            switch scope.pendingChoiceKind {
-            case .some(.gmailRecipient):
-                guard let choiceSet = scope.pendingGmailRecipientChoiceSet,
-                      let address = choiceSet.address(for: selectedChoice, taskID: originatingTaskID),
-                      let setup = scope.gmailSetup,
-                      let account = scope.selectedGmailAccount else { throw Failure.invalidFileChoice }
-                let job = try ComputerUseGmailJob(request: .init(to: [address], cc: [], bcc: [],
-                    subject: setup.extraction.subject, body: setup.extraction.body,
-                    fileDescription: setup.extraction.fileDescription,
-                    sendRequested: setup.intent.sendRequested, existingDraftURL: gmailExistingDraftURL,
-                    account: account))
-                scope.gmailJob = job
-                scope.gmailFileQuery = setup.extraction.fileQuery
-                scope.gmailSetup = nil
-                scope.gmailFlowStage = .compose
-                scope.gmailWaitCount = 0
-                scope.gmailRecipientsVerified = false
-                scope.gmailNavigationTargetURL = job.composeURL
-                scope.gmailNavigationStage = .navigateTarget
-                scope.selectedGmailRecipientAddress = address
-                scope.pendingGmailRecipientChoiceSet = nil
-            case .some(.gmailAccount):
-                guard let choiceSet = scope.pendingGmailAccountChoiceSet,
-                      let account = choiceSet.account(for: selectedChoice, taskID: originatingTaskID),
-                      scope.gmailSetup != nil,
-                      gmailExistingDraftURL.map({
-                          ComputerUseGmailAccountDirectory.accountIndex(from: $0.absoluteString) == account.index
-                      }) ?? true else { throw Failure.invalidFileChoice }
-                gmailAccountPreferences.remember(account)
-                scope.selectedGmailAccount = account
-                scope.pendingGmailAccountChoiceSet = nil
-                if scope.currentGmailAccountIndex != account.index {
-                    guard let target = ComputerUseGmailAccountDirectory.inboxURL(index: account.index) else {
-                        throw Failure.invalidFileChoice
-                    }
-                    scope.gmailNavigationTargetURL = target
-                    scope.gmailNavigationStage = .navigateTarget
-                }
-            case .some(.file), .none:
-                guard let candidate = scope.pendingChoiceCandidates[selectedChoice.id],
-                      candidate.id == selectedChoice.id else { throw Failure.invalidFileChoice }
-                _ = try scope.resolve(candidate, taskID: rootTaskID)
-                if scope.dispatchedPickerConfirmationCandidateID != candidate.id {
-                    scope.dispatchedPickerConfirmationCandidateID = nil
-                }
-                scope.selectedCandidate = candidate
-                scope.userSelectedCandidateID = candidate.id
-                scope.gmailRecipientsVerified = false
-                if let context = scope.fileContext {
-                    scope.fileContext = .init(query: context.query, page: context.page,
-                        selectedCandidate: candidate, inventoryState: context.inventoryState)
-                }
+            guard let candidate = scope.pendingChoiceCandidates[selectedChoice.id],
+                  candidate.id == selectedChoice.id else { throw Failure.invalidFileChoice }
+            _ = try scope.resolve(candidate, taskID: rootTaskID)
+            if scope.dispatchedPickerConfirmationCandidateID != candidate.id {
+                scope.dispatchedPickerConfirmationCandidateID = nil
+            }
+            scope.selectedCandidate = candidate
+            scope.userSelectedCandidateID = candidate.id
+            if let context = scope.fileContext {
+                scope.fileContext = .init(query: context.query, page: context.page,
+                    selectedCandidate: candidate, inventoryState: context.inventoryState)
             }
             scope.selectedChoice = selectedChoice
             scope.clarifiedGoal = goal
@@ -3702,6 +1066,6 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
         }
         let result = try await execute(taskID: rootTaskID, prompt: rootGoal,
             trustedUserPrompt: rootGoal, tools: tools, progress: progress)
-        return surfacePendingGmailClarification(result, taskID: taskID)
+        return result
     }
 }

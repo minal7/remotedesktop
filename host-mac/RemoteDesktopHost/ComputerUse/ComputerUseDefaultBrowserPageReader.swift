@@ -42,11 +42,6 @@ final class ComputerUseDefaultBrowserPageReader {
         /// Bounded values for ordinary editable controls on the outer page.
         /// Secure/protected controls and nested web areas are excluded.
         let formFieldValues: [FormFieldValue]
-        let webUploadListingRows: [ComputerUseWebUploadJob.ListingRow]
-        /// True only when the bounded W2 control-focused pass finished its
-        /// non-listing traversal. `truncated` remains true when row trees were
-        /// intentionally pruned, so this never claims the listing is complete.
-        let webUploadControlsComplete: Bool
         let controls: [Control]
         /// Safari/Chromium AX trees may omit or flatten iframe contents.
         /// This reader does not claim those contents are complete.
@@ -57,31 +52,18 @@ final class ComputerUseDefaultBrowserPageReader {
         init(id: String, application: ComputerUseApplicationIdentity, url: String, renderedAXText: String,
              controls: [Control], iframeContentMayBeOmitted: Bool, truncated: Bool,
              focusedExpandedMenuHasNoActionableChildren: Bool = false, exactTextValues: [String] = [],
-             formFieldValues: [FormFieldValue] = [],
-             webUploadListingRows: [ComputerUseWebUploadJob.ListingRow] = [],
-             webUploadControlsComplete: Bool = false) {
+             formFieldValues: [FormFieldValue] = []) {
             self.id = id
             self.application = application
             self.url = url
             self.renderedAXText = renderedAXText
             self.exactTextValues = exactTextValues
             self.formFieldValues = formFieldValues
-            self.webUploadListingRows = webUploadListingRows
-            self.webUploadControlsComplete = webUploadControlsComplete
             self.controls = controls
             self.iframeContentMayBeOmitted = iframeContentMayBeOmitted
             self.truncated = truncated
             self.focusedExpandedMenuHasNoActionableChildren = focusedExpandedMenuHasNoActionableChildren
         }
-    }
-
-    /// A bounded read of the selected Google Drive file's Details pane. The
-    /// returned route is origin-and-path only; embedded document query data is
-    /// never surfaced to callers.
-    struct DriveDetailsObservation: Equatable, Sendable {
-        let documentRoute: String
-        let exactTextValues: [String]
-        let complete: Bool
     }
 
     struct Access {
@@ -149,10 +131,8 @@ final class ComputerUseDefaultBrowserPageReader {
         let window: AXUIElement
         let webArea: AXUIElement
         let url: String
-        let mode: ReadMode
         let controls: [String: AXUIElement]
         let controlMetadata: [String: Control]
-        let listingRows: [String: AXUIElement]
     }
 
     private struct OuterPageInventory {
@@ -164,11 +144,8 @@ final class ComputerUseDefaultBrowserPageReader {
 
     private let access: Access
     private var retained: [String: Retained] = [:]
-    private(set) var lastWebUploadControlsDiagnosticForDiagnostics: [String: String] = [:]
     private let contextByteLimit = 8_192
-    /// Each bounded pass visits at most this many nodes. Standard page reads
-    /// share a 750ms deadline; W2 control/listing reads share a 2s deadline.
-    /// Each AX IPC remains configured for at most 0.1s.
+    /// Each bounded pass visits at most this many nodes. Each AX IPC remains configured for at most 0.1s.
     private let nodeLimitPerPass = 256
 
     init(access: Access? = nil) { self.access = access ?? .live }
@@ -467,291 +444,10 @@ final class ComputerUseDefaultBrowserPageReader {
         return url
     }
 
-    enum ReadMode: Equatable { case standard, webUploadControls, webUploadListing }
-
-    /// Reads the Details iframe only when it is uniquely attached to the
-    /// retained Drive search page and its exact selected root-row filename.
-    /// General page reads continue to omit nested web areas.
-    func readDriveDetails(window: AXUIElement,
-                          application: ComputerUseApplicationIdentity,
-                          expectedFileName: String,
-                          mayAct: () -> Bool) throws -> DriveDetailsObservation? {
-        guard !expectedFileName.isEmpty,
-              let expectedSearch = ComputerUseWebUploadJob.driveTitleSearchURL(filename: expectedFileName)?.absoluteString else {
-            return nil
-        }
-        let expectedRowLabels = Set([expectedFileName, ComputerUseWebUploadJob.driveRootLocationLabel])
-        let started = ContinuousClock.now
-        let deadline = started.advanced(by: .seconds(2))
-        var expired = false
-        func check() throws {
-            try Task.checkCancellation()
-            guard mayAct() else { throw ComputerUseHostTools.ToolError.paused }
-            if ContinuousClock.now >= deadline { expired = true }
-        }
-        func value(_ name: String, _ node: AXUIElement) throws -> CFTypeRef? {
-            try check()
-            guard !expired else { return nil }
-            let remaining = ContinuousClock.now.duration(to: deadline).components
-            let remainingSeconds = Float(Double(remaining.seconds)
-                + Double(remaining.attoseconds) / 1_000_000_000_000_000_000)
-            guard remainingSeconds > 0 else { expired = true; return nil }
-            let timeout: Float = name == (kAXWindowsAttribute as String) ? 0.5 : 0.08
-            access.timeout(node, min(timeout, remainingSeconds))
-            let result = access.read(name, node)
-            try check()
-            return expired ? nil : result
-        }
-        func selectedRootRow(_ listing: Observation) throws -> AXUIElement? {
-            guard listing.application == application, listing.url == expectedSearch, !listing.truncated else { return nil }
-            let matches = listing.webUploadListingRows.filter { $0.cellLabels.contains(expectedFileName) }
-            guard matches.count == 1, expectedRowLabels.isSubset(of: Set(matches[0].cellLabels)),
-                  let rowElement = retained[listing.id]?.listingRows[matches[0].rowID],
-                  let selected = try value("AXSelected", rowElement) as? NSNumber,
-                  selected.boolValue else { return nil }
-            return rowElement
-        }
-        func string(_ name: String, _ node: AXUIElement) throws -> String? {
-            guard let raw = try value(name, node) else { return nil }
-            if let text = raw as? String { return text }
-            if let url = raw as? URL { return url.absoluteString }
-            return nil
-        }
-        func children(_ node: AXUIElement) throws -> [AXUIElement]? {
-            guard let raw = try value(kAXChildrenAttribute as String, node),
-                  let result = raw as? [AXUIElement] else { return nil }
-            return result
-        }
-        func hiddenOrProtected(_ node: AXUIElement) throws -> Bool {
-            let role = try string(kAXRoleAttribute as String, node) ?? ""
-            let subrole = try string(kAXSubroleAttribute as String, node) ?? ""
-            return try role == "AXSecureTextField" || subrole == (kAXSecureTextFieldSubrole as String)
-                || (try value("AXProtectedContent", node) as? NSNumber)?.boolValue == true
-                || (try value("AXHidden", node) as? NSNumber)?.boolValue == true
-        }
-        func requiredChildrenRole(_ role: String) -> Bool {
-            ["AXWindow", "AXGroup", "AXSplitGroup", "AXUnknown", "AXScrollArea", "AXTabGroup",
-             "AXToolbar", "AXList", "AXWebArea", "AXLink"].contains(role)
-        }
-        func currentOuter() throws -> (AXUIElement, AXUIElement, String)? {
-            try check()
-            guard let (currentApplication, root) = access.frontmost(), currentApplication == application,
-                  let focusedRaw = try value(kAXFocusedWindowAttribute as String, root),
-                  CFGetTypeID(focusedRaw) == AXUIElementGetTypeID() else { return nil }
-            let focused = unsafeBitCast(focusedRaw, to: AXUIElement.self)
-            guard CFEqual(focused, window),
-                  let windowsRaw = try value(kAXWindowsAttribute as String, root),
-                  let windows = windowsRaw as? [AXUIElement],
-                  windows.filter({ CFEqual($0, window) }).count == 1 else { return nil }
-            let inventory = try discoverOuterPages(in: window, value: value, check: check)
-            guard inventory.complete, inventory.sheetFrames.isEmpty,
-                  let outer = try selectOuterPage(from: inventory, window: window, value: value, check: check),
-                  let rawURL = try string("AXURL", outer) ?? string(kAXDocumentAttribute as String, outer),
-                  rawURL == expectedSearch else { return nil }
-            return (root, outer, rawURL)
-        }
-        guard let beforeListing = try read(window: window, application: application, mayAct: mayAct,
-                                            mode: .webUploadListing),
-              let beforeRow = try selectedRootRow(beforeListing) else { return nil }
-        guard let initial = try currentOuter() else { return nil }
-
-        // Locate one pane beneath the verified outer search page. Listing
-        // branches are irrelevant here and are pruned before their children.
-        var pageQueue: [(AXUIElement, Int)] = [(initial.1, 0)]
-        var pageVisited: [AXUIElement] = []
-        var detailPanes: [AXUIElement] = []
-        var nestedPaneCount = 0
-        var pageComplete = true
-        while !pageQueue.isEmpty, pageVisited.count < 256, !expired {
-            try check()
-            let (node, depth) = pageQueue.removeFirst()
-            guard depth <= 16, !pageVisited.contains(where: { CFEqual($0, node) }) else {
-                pageComplete = false
-                continue
-            }
-            pageVisited.append(node)
-            let role = try string(kAXRoleAttribute as String, node) ?? ""
-            guard !role.isEmpty else { pageComplete = false; continue }
-            if try hiddenOrProtected(node) || role == "AXSheet" { continue }
-            if !CFEqual(node, initial.1), role == "AXWebArea" { continue }
-            if role == "AXGroup",
-               (try string(kAXTitleAttribute as String, node) == "Details Pane"
-                    || string(kAXDescriptionAttribute as String, node) == "Details Pane") {
-                detailPanes.append(node)
-                continue
-            }
-            if ["AXTable", "AXOutline", "AXRow"].contains(role) { continue }
-            guard let nested = try children(node) else {
-                if requiredChildrenRole(role) { pageComplete = false }
-                continue
-            }
-            let room = max(0, 256 - pageVisited.count - pageQueue.count)
-            if nested.count > room { pageComplete = false }
-            pageQueue.append(contentsOf: nested.prefix(room).map { ($0, depth + 1) })
-        }
-        if !pageQueue.isEmpty || expired || !pageComplete || detailPanes.count != 1 || nestedPaneCount != 0 { return nil }
-        let pane = detailPanes[0]
-
-        var paneQueue: [(AXUIElement, Int)] = [(pane, 0)]
-        var paneVisited: [AXUIElement] = []
-        var embeddedPages: [AXUIElement] = []
-        var headingCount = 0
-        var paneHideCount = 0
-        var paneComplete = true
-        while !paneQueue.isEmpty, paneVisited.count < 128, !expired {
-            try check()
-            let (node, depth) = paneQueue.removeFirst()
-            guard depth <= 12, !paneVisited.contains(where: { CFEqual($0, node) }) else {
-                paneComplete = false
-                continue
-            }
-            paneVisited.append(node)
-            let role = try string(kAXRoleAttribute as String, node) ?? ""
-            guard !role.isEmpty else { paneComplete = false; continue }
-            if try hiddenOrProtected(node) || role == "AXSheet" { continue }
-            if !CFEqual(node, pane), role == "AXGroup",
-               (try string(kAXTitleAttribute as String, node) == "Details Pane"
-                    || string(kAXDescriptionAttribute as String, node) == "Details Pane") {
-                nestedPaneCount += 1
-            }
-            if role == "AXHeading",
-               try string(kAXTitleAttribute as String, node)?.hasSuffix(" \(expectedFileName)") == true,
-               (try value(kAXValueAttribute as String, node) as? NSNumber)?.intValue == 2 {
-                headingCount += 1
-            }
-            if role == "AXButton", try string(kAXTitleAttribute as String, node) == "Hide Details" {
-                paneHideCount += 1
-            }
-            if role == "AXWebArea", !CFEqual(node, initial.1) {
-                embeddedPages.append(node)
-                continue
-            }
-            guard let nested = try children(node) else {
-                if requiredChildrenRole(role) { paneComplete = false }
-                continue
-            }
-            let room = max(0, 128 - paneVisited.count - paneQueue.count)
-            if nested.count > room { paneComplete = false }
-            paneQueue.append(contentsOf: nested.prefix(room).map { ($0, depth + 1) })
-        }
-        guard paneQueue.isEmpty, !expired, paneComplete, nestedPaneCount == 0,
-              headingCount == 1, paneHideCount == 1,
-              embeddedPages.count == 1, let embedded = embeddedPages.first else { return nil }
-
-        guard let rawDetailsURL = try string("AXURL", embedded) ?? string(kAXDocumentAttribute as String, embedded),
-              let detailsComponents = URLComponents(string: rawDetailsURL),
-              detailsComponents.scheme?.lowercased() == "https",
-              detailsComponents.host?.lowercased() == "drive.google.com",
-              detailsComponents.port == nil, detailsComponents.user == nil, detailsComponents.password == nil,
-              detailsComponents.path == "/odp/embed" else { return nil }
-
-        var contentQueue: [(AXUIElement, Int, Bool, Bool)] = [(embedded, 0, false, false)]
-        var contentVisited: [AXUIElement] = []
-        var fileDetailsGroups: [AXUIElement] = []
-        var fileDetailsLists: [AXUIElement] = []
-        var exactImages = 0
-        var exactOpenLinks = 0
-        var contentComplete = true
-        while !contentQueue.isEmpty, contentVisited.count < 128, !expired {
-            try check()
-            let (node, depth, insideDetailsSection, insideFileDetails) = contentQueue.removeFirst()
-            guard depth <= 12, !contentVisited.contains(where: { CFEqual($0, node) }) else {
-                contentComplete = false
-                continue
-            }
-            contentVisited.append(node)
-            let role = try string(kAXRoleAttribute as String, node) ?? ""
-            guard !role.isEmpty else { contentComplete = false; continue }
-            if try hiddenOrProtected(node) || role == "AXSheet" { continue }
-            if !CFEqual(node, embedded) && role == "AXWebArea" { contentComplete = false; continue }
-            let detailsSectionNode = try role == "AXGroup"
-                && (try string(kAXTitleAttribute as String, node) == "Details")
-            let fileDetailsNode = try insideDetailsSection && role == "AXGroup"
-                && (try string(kAXTitleAttribute as String, node) == "File details")
-            if fileDetailsNode {
-                fileDetailsGroups.append(node)
-            }
-            if insideFileDetails, role == "AXList", try string(kAXTitleAttribute as String, node) == "File details" {
-                fileDetailsLists.append(node)
-            }
-            if insideDetailsSection, role == "AXImage",
-               (try string(kAXDescriptionAttribute as String, node) == expectedFileName
-                    || string(kAXTitleAttribute as String, node) == expectedFileName) {
-                exactImages += 1
-            }
-            if insideDetailsSection, role == "AXLink",
-               try string(kAXTitleAttribute as String, node) == "Open \(expectedFileName)" {
-                exactOpenLinks += 1
-            }
-            guard let nested = try children(node) else {
-                if requiredChildrenRole(role) { contentComplete = false }
-                continue
-            }
-            let room = max(0, 128 - contentVisited.count - contentQueue.count)
-            if nested.count > room { contentComplete = false }
-            contentQueue.append(contentsOf: nested.prefix(room).map {
-                ($0, depth + 1, insideDetailsSection || detailsSectionNode, insideFileDetails || fileDetailsNode)
-            })
-        }
-        guard contentQueue.isEmpty, !expired, contentComplete,
-              fileDetailsGroups.count == 1, fileDetailsLists.count == 1,
-              exactImages == 1, exactOpenLinks == 1 else { return nil }
-
-        var detailsQueue: [(AXUIElement, Int)] = [(fileDetailsLists[0], 0)]
-        var detailsVisited: [AXUIElement] = []
-        var sizeValues: [String] = []
-        var locationValues: [String] = []
-        var detailsComplete = true
-        while !detailsQueue.isEmpty, detailsVisited.count < 64, !expired {
-            try check()
-            let (node, depth) = detailsQueue.removeFirst()
-            guard depth <= 8, !detailsVisited.contains(where: { CFEqual($0, node) }) else {
-                detailsComplete = false
-                continue
-            }
-            detailsVisited.append(node)
-            let role = try string(kAXRoleAttribute as String, node) ?? ""
-            guard !role.isEmpty else { detailsComplete = false; continue }
-            if try hiddenOrProtected(node) || role == "AXSheet" { continue }
-            if role == "AXStaticText",
-               let text = try string(kAXValueAttribute as String, node)
-                    ?? string(kAXTitleAttribute as String, node)
-                    ?? string(kAXDescriptionAttribute as String, node) {
-                if text.replacingOccurrences(of: "\u{00A0}", with: " ").hasPrefix("Size ") {
-                    sizeValues.append(text)
-                } else if text == "My Drive, show location in the list of files." {
-                    locationValues.append(text)
-                }
-            }
-            guard let nested = try children(node) else {
-                if requiredChildrenRole(role) { detailsComplete = false }
-                continue
-            }
-            let room = max(0, 64 - detailsVisited.count - detailsQueue.count)
-            if nested.count > room { detailsComplete = false }
-            detailsQueue.append(contentsOf: nested.prefix(room).map { ($0, depth + 1) })
-        }
-        guard detailsQueue.isEmpty, !expired, detailsComplete,
-              sizeValues.count == 1, locationValues.count == 1 else { return nil }
-
-        // Re-read the outer listing and authority after the nested document
-        // scan; neither the selected row nor the active page may have changed.
-        guard let afterListing = try read(window: window, application: application, mayAct: mayAct,
-                                           mode: .webUploadListing),
-              let afterRow = try selectedRootRow(afterListing), CFEqual(afterRow, beforeRow),
-              let final = try currentOuter(), CFEqual(final.0, initial.0), CFEqual(final.1, initial.1),
-              final.2 == expectedSearch, !expired else { return nil }
-
-        let safeRoute = "\(detailsComponents.scheme!.lowercased())://\(detailsComponents.host!.lowercased())\(detailsComponents.path)"
-        return .init(documentRoute: safeRoute,
-            exactTextValues: [expectedFileName] + sizeValues + locationValues, complete: true)
-    }
-
     func read(window expectedWindow: AXUIElement,
               application expectedApplication: ComputerUseApplicationIdentity,
-              mayAct: () -> Bool, mode: ReadMode = .standard,
+              mayAct: () -> Bool,
               diagnostic: ((String, [String]) -> Void)? = nil) throws -> Observation? {
-        if mode == .webUploadControls { lastWebUploadControlsDiagnosticForDiagnostics = [:] }
         var focusedAncestorRoles: [String] = []
         let safeRoles: Set<String> = ["AXWindow", "AXWebArea", "AXGroup", "AXTextArea", "AXTextField",
             "AXSecureTextField", "AXButton", "AXComboBox", "AXStaticText", "AXLink", "AXMenuItem", "AXOther"]
@@ -763,7 +459,7 @@ final class ComputerUseDefaultBrowserPageReader {
             diagnostic?(reason, focusedAncestorRoles)
             return nil
         }
-        let pageReadBudget: Duration = mode == .standard ? .milliseconds(750) : .seconds(2)
+        let pageReadBudget: Duration = .milliseconds(750)
         let deadline = ContinuousClock.now.advanced(by: pageReadBudget)
         var expired = false
         func check() throws {
@@ -816,15 +512,8 @@ final class ComputerUseDefaultBrowserPageReader {
         guard let (root, focused) = try currentScope() else { return fail("scope_unavailable") }
         let focusedUIElement = try element(kAXFocusedUIElementAttribute as String, root)
         var truncated = false
-        var controlPassIncomplete = false
-        var webUploadIncompleteReasons = Set<String>()
-        var prunedListingNodeCount = 0
         func markIncomplete(_ reason: String) {
             truncated = true
-            if mode == .webUploadControls {
-                controlPassIncomplete = true
-                webUploadIncompleteReasons.insert(reason)
-            }
         }
         func isPruned(_ node: AXUIElement) throws -> Bool {
             let role = try string(kAXRoleAttribute as String, node) ?? ""
@@ -836,9 +525,7 @@ final class ComputerUseDefaultBrowserPageReader {
         var selectedInventory: OuterPageInventory?
         func discoverOuterWebArea() throws -> AXUIElement? {
             let inventory = try discoverOuterPages(in: focused, value: value, check: check,
-                readOuterMetadata: readOuterMetadataForDiscovery,
-                useBatchedMetadata: (mode == .webUploadControls || mode == .webUploadListing)
-                    && access.readOuterMetadata != nil)
+                readOuterMetadata: readOuterMetadataForDiscovery)
             guard inventory.complete else { markIncomplete("outer_page_incomplete"); return nil }
             selectedInventory = inventory
             return try selectOuterPage(from: inventory, window: focused, value: value, check: check)
@@ -904,42 +591,20 @@ final class ComputerUseDefaultBrowserPageReader {
         var text = "", controls: [Control] = [], controlRefs: [String: AXUIElement] = [:]
         var exactTextValues: [String] = []
         var formFieldValues: [Observation.FormFieldValue] = []
-        var webUploadListingRows: [ComputerUseWebUploadJob.ListingRow] = []
-        var listingRowLabels: [[String]] = []
-        var listingRowRefs: [String: AXUIElement] = [:]
         var formFieldBytes = 0
         var exactTextBytes = 0
-        let isWebUploadRead = mode == .webUploadControls || mode == .webUploadListing
-        let exactTextValueLimit = isWebUploadRead ? 128 : 32
+        let exactTextValueLimit = 32
         let exactTextByteLimit = 4_096
         let formFieldValueLimit = 32
         let formFieldByteLimit = 4_096
-        let controlLimit = isWebUploadRead ? 128 : 32
+        let controlLimit = 32
         var focusedEmptyExpandedMenu: AXUIElement?
         var contextBytes = 0
         // Start at the exact outer page, preserving the normal pruning and
         // inherited-disabled checks while visiting the verified focus branch first.
-        var contentQueue: [(AXUIElement, Bool, Int?)] = [(webArea, false, nil)]
+        var contentQueue: [(AXUIElement, Bool)] = [(webArea, false)]
         var contentVisited: [AXUIElement] = []
         var finalValidationSucceeded = false
-        func recordControlsDiagnostic(complete: Bool) {
-            guard mode == .webUploadControls else { return }
-            let controlsComplete = complete && !expired && contentQueue.isEmpty
-                && contentVisited.count < nodeLimitPerPass && !controlPassIncomplete
-            lastWebUploadControlsDiagnosticForDiagnostics = [
-                "complete": String(controlsComplete),
-                "truncated": String(truncated),
-                "reasons": webUploadIncompleteReasons.sorted().joined(separator: ","),
-                "visited": String(contentVisited.count),
-                "pending": String(contentQueue.count),
-                "controls": String(controls.count),
-                "exact_text": String(exactTextValues.count),
-                "form_fields": String(formFieldValues.count),
-                "context_bytes": String(contextBytes),
-                "pruned_listing_nodes": String(prunedListingNodeCount),
-            ]
-        }
-        defer { recordControlsDiagnostic(complete: finalValidationSucceeded) }
         func bounded(_ chunk: String, to bytes: Int) -> String {
             var result = "", used = 0
             for scalar in chunk.unicodeScalars {
@@ -975,32 +640,12 @@ final class ComputerUseDefaultBrowserPageReader {
             exactTextBytes += byteCount
         }
         while !contentQueue.isEmpty, contentVisited.count < nodeLimitPerPass, !expired {
-            let (node, inheritedDisabled, inheritedRowIndex) = focusedPagePath.isEmpty
+            let (node, inheritedDisabled) = focusedPagePath.isEmpty
                 ? contentQueue.removeFirst() : contentQueue.removeLast()
             if contentVisited.contains(where: { CFEqual($0, node) }) { continue }
             contentVisited.append(node)
             if try isPruned(node) { continue }
             let role = try string(kAXRoleAttribute as String, node) ?? ""
-            if mode == .webUploadControls, ["AXTable", "AXOutline", "AXRow"].contains(role) {
-                // Drive can expose a virtualized table with dozens of rows
-                // before its global account/search controls. This pass is for
-                // those controls only; the ordinary pass still reports full
-                // listing completeness independently.
-                truncated = true
-                prunedListingNodeCount += 1
-                continue
-            }
-            var rowIndex = inheritedRowIndex
-            if role == "AXRow" {
-                if webUploadListingRows.count < 128 {
-                    rowIndex = webUploadListingRows.count
-                    let rowID = UUID().uuidString
-                    webUploadListingRows.append(.init(rowID: rowID, cellLabels: [],
-                        frame: mode == .webUploadListing ? try frame(node) : nil))
-                    listingRowRefs[rowID] = node
-                    listingRowLabels.append([])
-                } else { markIncomplete("listing_row_count") }
-            }
             let nodeEnabled = (try value(kAXEnabledAttribute as String, node) as? NSNumber)?.boolValue
             let effectiveEnabled = inheritedDisabled ? false : nodeEnabled
             // Nested AXWebAreas are iframe/document boundaries: deliberately omit their subtree.
@@ -1008,12 +653,10 @@ final class ComputerUseDefaultBrowserPageReader {
             if role == "AXStaticText", let label = try string(kAXValueAttribute as String, node) ?? string(kAXTitleAttribute as String, node) {
                 appendText(label)
                 appendExactText(label)
-                if let rowIndex, listingRowLabels.indices.contains(rowIndex) { listingRowLabels[rowIndex].append(label) }
             } else if role == "AXCell" {
                 let labels = [try string(kAXValueAttribute as String, node),
                     try string(kAXTitleAttribute as String, node),
                     try string(kAXDescriptionAttribute as String, node)].compactMap { $0 }
-                if let rowIndex, listingRowLabels.indices.contains(rowIndex) { listingRowLabels[rowIndex].append(contentsOf: labels) }
             }
             if role == "AXTextField" || role == "AXTextArea" || role == "AXComboBox",
                (try string(kAXSubroleAttribute as String, node)) != (kAXSecureTextFieldSubrole as String),
@@ -1067,24 +710,7 @@ final class ComputerUseDefaultBrowserPageReader {
                 markIncomplete("control_count")
             }
             if let children = try value(kAXChildrenAttribute as String, node) as? [AXUIElement] {
-                var traversalChildren = children
-                if mode == .webUploadControls {
-                    traversalChildren = []
-                    for child in children {
-                        guard let childRole = try string(kAXRoleAttribute as String, child) else {
-                            // An unclassified child cannot safely be pruned as listing content.
-                            markIncomplete("child_role_unavailable")
-                            traversalChildren.append(child)
-                            continue
-                        }
-                        if ["AXTable", "AXOutline", "AXRow"].contains(childRole) {
-                            truncated = true
-                            prunedListingNodeCount += 1
-                        } else {
-                            traversalChildren.append(child)
-                        }
-                    }
-                }
+                let traversalChildren = children
                 let pathIndex = focusedPagePath.firstIndex(where: { CFEqual($0, node) })
                 let nextFocusedNode = pathIndex.flatMap { index in
                     index + 1 < focusedPagePath.count ? focusedPagePath[index + 1] : nil
@@ -1115,7 +741,7 @@ final class ComputerUseDefaultBrowserPageReader {
                     // Preserve the existing breadth-first ordering and admission
                     // exactly when no verified in-page focus path is available.
                     if traversalChildren.count > room { markIncomplete("queue_capacity") }
-                    contentQueue.append(contentsOf: traversalChildren.prefix(room).map { ($0, inheritedDisabled || (effectiveEnabled == false), rowIndex) })
+                    contentQueue.append(contentsOf: traversalChildren.prefix(room).map { ($0, inheritedDisabled || (effectiveEnabled == false)) })
                 } else {
                     if traversalChildren.count > desiredCount || selectedChildren.count > room { markIncomplete("queue_capacity") }
                     if selectedChildren.count > room {
@@ -1131,16 +757,12 @@ final class ComputerUseDefaultBrowserPageReader {
                     } else {
                         selectedChildren.reverse()
                     }
-                    contentQueue.append(contentsOf: selectedChildren.map { ($0, inheritedDisabled || (effectiveEnabled == false), rowIndex) })
+                    contentQueue.append(contentsOf: selectedChildren.map { ($0, inheritedDisabled || (effectiveEnabled == false)) })
                 }
             }
         }
         if expired { markIncomplete("deadline") }
         if !contentQueue.isEmpty || contentVisited.count >= nodeLimitPerPass { markIncomplete("node_limit") }
-        for index in webUploadListingRows.indices {
-            webUploadListingRows[index] = .init(rowID: webUploadListingRows[index].rowID,
-                cellLabels: listingRowLabels[index], frame: webUploadListingRows[index].frame)
-        }
         try check()
         guard !expired else { return fail("deadline_during_final_validation") }
         guard let (afterRoot, afterWindow) = try currentScope() else {
@@ -1208,19 +830,14 @@ final class ComputerUseDefaultBrowserPageReader {
         // Re-discover the same unique outer page after content collection.
         let finalURL = try string("AXURL", webArea) ?? string(kAXDocumentAttribute as String, webArea)
         guard finalURL == url, !expired else { return fail(expired ? "deadline_during_final_validation" : "outer_page_url_changed") }
-        let controlsComplete = mode == .webUploadControls && !expired && contentQueue.isEmpty
-            && contentVisited.count < nodeLimitPerPass && !controlPassIncomplete
         let observationID = UUID().uuidString
         let observation = Observation(id: observationID, application: expectedApplication, url: url,
             renderedAXText: text, controls: controls, iframeContentMayBeOmitted: true, truncated: truncated,
             focusedExpandedMenuHasNoActionableChildren: focusedExpandedMenuHasNoActionableChildren,
-            exactTextValues: exactTextValues, formFieldValues: formFieldValues,
-            webUploadListingRows: webUploadListingRows,
-            webUploadControlsComplete: controlsComplete)
+            exactTextValues: exactTextValues, formFieldValues: formFieldValues)
         retained[observationID] = Retained(application: expectedApplication, window: expectedWindow,
-            webArea: webArea, url: url, mode: mode, controls: controlRefs,
-            controlMetadata: Dictionary(uniqueKeysWithValues: controls.map { ($0.id, $0) }),
-            listingRows: listingRowRefs)
+            webArea: webArea, url: url, controls: controlRefs,
+            controlMetadata: Dictionary(uniqueKeysWithValues: controls.map { ($0.id, $0) }))
         if retained.count > 32,
            let evictedID = retained.keys.first(where: { $0 != observationID }) {
             retained.removeValue(forKey: evictedID)
@@ -1258,7 +875,7 @@ final class ComputerUseDefaultBrowserPageReader {
               Self.permittedCenterMetadata(originalControl, within: windowBounds) != nil else { return nil }
 
         guard let fresh = try read(window: window, application: original.application,
-                                   mayAct: mayAct, mode: original.mode) else { return nil }
+                                   mayAct: mayAct) else { return nil }
         try Task.checkCancellation()
         guard mayAct() else { throw ComputerUseHostTools.ToolError.paused }
         guard fresh.application == original.application, fresh.url == original.url,
@@ -1274,40 +891,6 @@ final class ComputerUseDefaultBrowserPageReader {
         guard try hitPathAtPoint(center, contains: originalElement, webArea: original.webArea,
                                  window: original.window, mayAct: mayAct) else { return nil }
         return center
-    }
-
-    /// A bounded selection click for a uniquely observed result row. It may
-    /// select that row for read-only Details inspection; it cannot target an
-    /// interactive descendant such as a checkbox, link, or button.
-    func validatedListingRowCenter(observation: Observation, rowID: String,
-                                   requiredLabels: Set<String>, window: AXUIElement,
-                                   windowBounds: CGRect, mayAct: () -> Bool) throws -> CGPoint? {
-        try Task.checkCancellation()
-        guard mayAct(), !requiredLabels.isEmpty,
-              let original = retained[observation.id], original.application == observation.application,
-              CFEqual(original.window, window), original.url == observation.url,
-              let originalElement = original.listingRows[rowID],
-              let originalRow = observation.webUploadListingRows.first(where: { $0.rowID == rowID }),
-              requiredLabels.isSubset(of: Set(originalRow.cellLabels)) else { return nil }
-        guard let fresh = try read(window: window, application: original.application,
-                                   mayAct: mayAct, mode: .webUploadListing),
-              fresh.application == original.application, fresh.url == original.url,
-              let current = retained[fresh.id], current.application == original.application,
-              CFEqual(current.window, window), CFEqual(current.webArea, original.webArea),
-              current.url == original.url else { return nil }
-        let sameReference = current.listingRows.first(where: { CFEqual($0.value, originalElement) })
-        guard let sameReference,
-              let freshRow = fresh.webUploadListingRows.first(where: { $0.rowID == sameReference.key }),
-              requiredLabels.isSubset(of: Set(freshRow.cellLabels)),
-              let frame = freshRow.frame,
-              [windowBounds.minX, windowBounds.minY, windowBounds.width, windowBounds.height,
-               frame.minX, frame.minY, frame.width, frame.height].allSatisfy(\.isFinite),
-              windowBounds.width > 0, windowBounds.height > 0, frame.width > 0, frame.height > 0,
-              windowBounds.contains(frame) else { return nil }
-        let point = CGPoint(x: frame.midX, y: frame.midY)
-        guard try hitPathAtPoint(point, contains: sameReference.value, webArea: original.webArea,
-            window: original.window, mayAct: mayAct, rejectInteractiveDescendants: true) else { return nil }
-        return point
     }
 
     private func hitPathAtPoint(_ point: CGPoint, contains control: AXUIElement, webArea: AXUIElement,

@@ -128,9 +128,6 @@ jobs:
       - name: Run deterministic Computer Use harness tests
         run: python3 -m unittest discover -s host-mac/scripts/tests -p 'test_*.py'
 
-      - name: Run Safari bridge JavaScript tests
-        run: node --test host-mac/scripts/tests/safari_bridge/bridge.test.cjs
-
       - name: Validate reviewed Mac acceptance inventory
         run: |
           python3 host-mac/scripts/verify_test_inventory.py \

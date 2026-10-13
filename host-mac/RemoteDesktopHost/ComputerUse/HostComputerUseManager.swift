@@ -115,10 +115,6 @@ struct ComputerUseApplicationIdentity: Equatable, Hashable, Sendable {
             aliases: ["Reminders", "Apple Reminders"],
             bundleIdentifiers: ["com.apple.reminders"]),
         .init(
-            canonicalName: "Calculator",
-            aliases: ["Calculator"],
-            bundleIdentifiers: ["com.apple.calculator"]),
-        .init(
             canonicalName: "Books",
             aliases: ["Books", "Apple Books"],
             bundleIdentifiers: ["com.apple.iBooksX"]),
@@ -864,11 +860,6 @@ struct ComputerUseApprovalTargetSnapshot: Equatable {
     var frame: CGRect? = nil
 }
 
-struct ComputerUseCalculatorSnapshot: Equatable {
-    let inputValue: String?
-    let expressionValue: String?
-}
-
 /// Privacy-bounded Accessibility evidence used only to decide whether the
 /// person must take over for authentication. Editable field values are never
 /// included. Tests inject this seam without touching the live desktop.
@@ -1399,7 +1390,6 @@ final class ComputerUseHostTools {
         ((ComputerUsePredictedAction) -> Bool)?
     private let accessibilityContextProvider:
         ((ComputerUsePredictedAction) -> String)?
-    private let calculatorSnapshotProvider: (() -> ComputerUseCalculatorSnapshot?)?
     private let mcpFocusedTextSnapshotProvider: (() throws -> ComputerUseMCPFocusedTextSnapshot?)?
     private let authenticationContextProvider:
         (() -> ComputerUseAuthenticationContextSnapshot?)?
@@ -1434,7 +1424,6 @@ final class ComputerUseHostTools {
             ((ComputerUsePredictedAction) -> Bool)? = nil,
         accessibilityContextProvider:
             ((ComputerUsePredictedAction) -> String)? = nil,
-        calculatorSnapshotProvider: (() -> ComputerUseCalculatorSnapshot?)? = nil,
         mcpFocusedTextSnapshotProvider: (() throws -> ComputerUseMCPFocusedTextSnapshot?)? = nil,
         authenticationContextProvider:
             (() -> ComputerUseAuthenticationContextSnapshot?)? = nil,
@@ -1497,7 +1486,6 @@ final class ComputerUseHostTools {
             self.transientSystemOverlayProvider = nil
         }
         self.accessibilityContextProvider = accessibilityContextProvider
-        self.calculatorSnapshotProvider = calculatorSnapshotProvider
         self.mcpFocusedTextSnapshotProvider = mcpFocusedTextSnapshotProvider
         if let authenticationContextProvider {
             self.authenticationContextProvider = authenticationContextProvider
@@ -2108,148 +2096,6 @@ final class ComputerUseHostTools {
             throw ToolError.screenshotUnavailable
         }
         return data
-    }
-
-    /// Reads only Calculator's visible input/result field from its bounded
-    /// Accessibility subtree. The deterministic arithmetic route uses this
-    /// as execution evidence and never reports completion from the injected
-    /// keystrokes alone.
-    func calculatorSnapshot() throws -> ComputerUseCalculatorSnapshot? {
-        guard mayAct() else { throw ToolError.paused }
-        if let calculatorSnapshotProvider {
-            return calculatorSnapshotProvider()
-        }
-        return Self.liveCalculatorSnapshot()
-    }
-
-    private static func liveCalculatorSnapshot() -> ComputerUseCalculatorSnapshot? {
-        guard let application = NSWorkspace.shared.frontmostApplication,
-              application.bundleIdentifier == "com.apple.calculator",
-              !application.isTerminated else {
-            return nil
-        }
-        let root = AXUIElementCreateApplication(application.processIdentifier)
-        var focusedWindowValue: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(
-            root,
-            kAXFocusedWindowAttribute as CFString,
-            &focusedWindowValue) == .success,
-              let focusedWindowValue,
-              CFGetTypeID(focusedWindowValue) == AXUIElementGetTypeID() else {
-            return nil
-        }
-        let focusedWindow = unsafeBitCast(
-            focusedWindowValue,
-            to: AXUIElement.self)
-        guard let inputContainers = calculatorContainers(
-            in: focusedWindow,
-            identifier: "StandardInputView"),
-              inputContainers.count == 1,
-              let expressionContainers = calculatorContainers(
-                in: focusedWindow,
-                identifier: "StandardResultView"),
-              expressionContainers.count <= 1 else {
-            return nil
-        }
-        var inputVisited = 0
-        let inputValue = firstStaticTextValue(
-            in: inputContainers[0],
-            depth: 0,
-            visited: &inputVisited)
-        let expressionValue: String?
-        if let expressionContainer = expressionContainers.first {
-            var expressionVisited = 0
-            expressionValue = firstStaticTextValue(
-                in: expressionContainer,
-                depth: 0,
-                visited: &expressionVisited)
-        } else {
-            expressionValue = nil
-        }
-        guard inputValue != nil else { return nil }
-        return ComputerUseCalculatorSnapshot(
-            inputValue: inputValue,
-            expressionValue: expressionValue)
-    }
-
-    private static func calculatorContainers(
-        in element: AXUIElement,
-        identifier targetIdentifier: String
-    ) -> [AXUIElement]? {
-        var queue: [(AXUIElement, Int)] = [(element, 0)]
-        var index = 0
-        var matches: [AXUIElement] = []
-        while index < queue.count, index < 500 {
-            let (current, depth) = queue[index]
-            index += 1
-            guard depth <= 12 else { continue }
-            if stringAttribute(
-                kAXIdentifierAttribute as CFString,
-                from: current) == targetIdentifier {
-                matches.append(current)
-                guard matches.count <= 1 else { return nil }
-            }
-            var childValue: CFTypeRef?
-            if AXUIElementCopyAttributeValue(
-                current,
-                kAXChildrenAttribute as CFString,
-                &childValue) == .success,
-               let children = childValue as? [AXUIElement] {
-                queue.append(contentsOf: children.prefix(80).map {
-                    ($0, depth + 1)
-                })
-            }
-        }
-        guard index < 500 || index == queue.count else { return nil }
-        return matches
-    }
-
-    private static func firstStaticTextValue(
-        in element: AXUIElement,
-        depth: Int,
-        visited: inout Int
-    ) -> String? {
-        guard depth <= 6, visited < 80 else { return nil }
-        visited += 1
-        let role = stringAttribute(
-            kAXRoleAttribute as CFString,
-            from: element) ?? ""
-        let identifier = stringAttribute(
-            kAXIdentifierAttribute as CFString,
-            from: element) ?? ""
-
-        if role == kAXStaticTextRole as String,
-           let value = stringAttribute(
-               kAXValueAttribute as CFString,
-               from: element),
-           !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            return value
-        }
-        if identifier == "StandardInputView" || identifier == "StandardResultView",
-           let value = stringAttribute(
-               kAXValueAttribute as CFString,
-               from: element),
-           !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            return value
-        }
-
-        var childValue: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(
-            element,
-            kAXChildrenAttribute as CFString,
-            &childValue) == .success,
-              let children = childValue as? [AXUIElement] else {
-            return nil
-        }
-        for child in children.prefix(80) {
-            if let value = firstStaticTextValue(
-                in: child,
-                depth: depth + 1,
-                visited: &visited) {
-                return value
-            }
-        }
-        return nil
     }
 
     private static func stringAttribute(
@@ -5111,11 +4957,6 @@ final class HostComputerUseManager: ObservableObject {
         "AI Computer Use requires an updated iPhone app with ordered task controls. Update Remote Desktop before trying again. No action was taken."
     static let userInterventionGuidance =
         "AI paused because control of the Mac changed. Check the screen, then tap Let AI continue."
-    static func mailAutomationResumeGuidance(
-        for error: RemoteDesktopMailAutomationPreflightError
-    ) -> String {
-        "\(error.localizedDescription) Then choose Resume. The task will be checked again and needs fresh approval."
-    }
     static let connectionEndedResponse =
         "The connection ended before this task finished. It will not resume automatically."
     static let terminalPersistenceFailureResponse =
@@ -8341,15 +8182,6 @@ final class HostComputerUseManager: ObservableObject {
                     } catch is CancellationError {
                         finishUnexpectedCancellationIfCurrent(context: context, token: token)
                         return
-                    } catch let error as RemoteDesktopMailAutomationPreflightError {
-                        guard currentExecutionToken == token else { return }
-                        if Task.isCancelled {
-                            finishUnexpectedCancellationIfCurrent(context: context, token: token)
-                        } else {
-                            pauseForLocalIntervention(context,
-                                guidance: Self.mailAutomationResumeGuidance(for: error))
-                        }
-                        return
                     }
                     try Task.checkCancellation()
                     guard currentExecutionToken == token else { return }
@@ -8628,15 +8460,11 @@ final class HostComputerUseManager: ObservableObject {
                     continuationToken)
                 throw error
             }
-            // Gmail adds host-verified review fields to the existing native
-            // action approval. Its fingerprint and dispatch remain unchanged.
-            let gmailPresentation = (executor as? any ComputerUseGmailApprovalPresenting)?
-                .gmailApprovalPresentation(for: proposedAction)
             let request = ComputerUseApprovalRequest(
                 taskID: envelope.id,
                 message: prepared.message,
-                details: gmailPresentation?.details,
-                confirmLabel: gmailPresentation?.confirmLabel)
+                details: nil,
+                confirmLabel: nil)
             enterApproval(
                 PendingApproval(
                     request: request,

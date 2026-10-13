@@ -5,32 +5,18 @@ typealias MCPClientSessionFactory = @Sendable (
     _ processGeneration: UInt64
 ) -> any MCPClientSessioning
 
-typealias MCPEmbeddedSessionFactory = @Sendable (
-    _ processGeneration: UInt64
-) -> (any MCPClientSessioning)?
-
 actor MCPClientPool {
     private let definition: MCPServerDefinition
     private let binaryValidator: any MCPServerBinaryValidating
     private let mutationLedger: (any MCPMutationCallLedger)?
     private let sessionFactory: MCPClientSessionFactory
-    private let embeddedSessionFactory: MCPEmbeddedSessionFactory
-    private let cloudEmbeddedSessionFactory: MCPEmbeddedSessionFactory
-    private let cloudStorage: RemoteDesktopCloudStorage
-    private let mailAutomationPreflight: any RemoteDesktopMailAutomationPreflighting
-
     private var session: (any MCPClientSessioning)?
     private var identity: MCPProcessIdentity?
-    private var embeddedSession: (any MCPClientSessioning)?
-    private var embeddedIdentity: MCPProcessIdentity?
-    private var cloudEmbeddedSession: (any MCPClientSessioning)?
-    private var cloudEmbeddedIdentity: MCPProcessIdentity?
     private var processGeneration: UInt64 = 0
     private var lifecycleEpoch: UInt64 = 0
     private struct PendingApproval {
         let fingerprint: MCPApprovalFingerprint
         let date: Date
-        let mailAttachments: [RemoteDesktopMailAttachmentSnapshot]?
     }
     private var pendingApprovals: [String: PendingApproval] = [:]
 
@@ -42,14 +28,7 @@ actor MCPClientPool {
             MCPClientSession(
                 validatedBinary: binary,
                 processGeneration: generation)
-        },
-        embeddedSessionFactory: @escaping MCPEmbeddedSessionFactory = { generation in
-            RemoteDesktopMailMCPClientSession(processGeneration: generation)
-        },
-        cloudStorage: RemoteDesktopCloudStorage = .init(),
-        cloudEmbeddedSessionFactory: MCPEmbeddedSessionFactory? = nil,
-        mailAutomationPreflight: any RemoteDesktopMailAutomationPreflighting =
-            SystemRemoteDesktopMailAutomationPreflight()
+        }
     ) {
         precondition(
             MCPServerRegistry.curatedServers.contains(definition),
@@ -58,17 +37,6 @@ actor MCPClientPool {
         self.binaryValidator = binaryValidator
         self.mutationLedger = mutationLedger
         self.sessionFactory = sessionFactory
-        self.embeddedSessionFactory = embeddedSessionFactory
-        self.cloudStorage = cloudStorage
-        self.cloudEmbeddedSessionFactory = cloudEmbeddedSessionFactory ?? { generation in
-            // A6 pauses sync-folder copying. Keep the implementation behind
-            // the experimental flag; it is never advertised for routing.
-            guard ComputerUseFeatureFlags.computerUseV2 else { return nil }
-            return RemoteDesktopCloudStorageMCPClientSession(
-                processGeneration: generation,
-                storage: cloudStorage)
-        }
-        self.mailAutomationPreflight = mailAutomationPreflight
     }
 
     @discardableResult
@@ -88,28 +56,16 @@ actor MCPClientPool {
         let generation = processGeneration
 
         let previous = session
-        let previousEmbedded = embeddedSession
-        let previousCloudEmbedded = cloudEmbeddedSession
         session = nil
         identity = nil
-        embeddedSession = nil
-        embeddedIdentity = nil
-        cloudEmbeddedSession = nil
-        cloudEmbeddedIdentity = nil
         pendingApprovals.removeAll()
         await previous?.stop()
-        await previousEmbedded?.stop()
-        await previousCloudEmbedded?.stop()
-        // These are exact old sessions. Finish retiring both, but do not
-        // publish a candidate after another attempt has acquired ownership.
+        // Retire the exact old session, but do not publish a candidate after
+        // another attempt has acquired ownership.
         try requireCurrentStart(epoch)
 
         let candidate = sessionFactory(validated, generation)
-        let embeddedCandidate = embeddedSessionFactory(generation)
-        let cloudEmbeddedCandidate = cloudEmbeddedSessionFactory(generation)
         session = candidate
-        embeddedSession = embeddedCandidate
-        cloudEmbeddedSession = cloudEmbeddedCandidate
         do {
             let newIdentity = try await candidate.start()
             try requireCurrentStart(epoch)
@@ -118,27 +74,7 @@ actor MCPClientPool {
                   newIdentity.binaryPath == validated.executableURL.path else {
                 throw MCPClientError.cancelled
             }
-            let newEmbeddedIdentity = try await embeddedCandidate?.start()
-            try requireCurrentStart(epoch)
-            if let newEmbeddedIdentity {
-                guard newEmbeddedIdentity.serverID == RemoteDesktopMailMCP.serverID,
-                      newEmbeddedIdentity.processGeneration == generation else {
-                    throw MCPClientError.serverMismatch(
-                        "The embedded Mail MCP identity did not match the signed host.")
-                }
-            }
-            let newCloudEmbeddedIdentity = try await cloudEmbeddedCandidate?.start()
-            try requireCurrentStart(epoch)
-            if let newCloudEmbeddedIdentity {
-                guard newCloudEmbeddedIdentity.serverID == RemoteDesktopCloudStorageMCP.serverID,
-                      newCloudEmbeddedIdentity.processGeneration == generation else {
-                    throw MCPClientError.serverMismatch(
-                        "The embedded cloud-storage MCP identity did not match the signed host.")
-                }
-            }
             identity = newIdentity
-            embeddedIdentity = newEmbeddedIdentity
-            cloudEmbeddedIdentity = newCloudEmbeddedIdentity
             return newIdentity
         } catch {
             // A newer validation attempt can supersede this request without
@@ -147,14 +83,8 @@ actor MCPClientPool {
             if processGeneration == generation {
                 session = nil
                 identity = nil
-                embeddedSession = nil
-                embeddedIdentity = nil
-                cloudEmbeddedSession = nil
-                cloudEmbeddedIdentity = nil
             }
             await candidate.stop()
-            await embeddedCandidate?.stop()
-            await cloudEmbeddedCandidate?.stop()
             throw error
         }
     }
@@ -167,40 +97,8 @@ actor MCPClientPool {
     func allowedTools() async throws -> [MCPAllowedTool] {
         guard let session, let identity else { throw MCPClientError.notRunning }
         let generation = identity.processGeneration
-        let sidecarTools = try await session.listAllowedTools().filter {
-            // The embedded tool name is reserved to the signed host. A future
-            // sidecar cannot impersonate it, and v0.8.2's broken mail_send is
-            // excluded by policy even if a session implementation returns it.
-            $0.serverID == identity.serverID
-                && $0.toolName != RemoteDesktopMailMCP.toolName
-                && $0.toolName != RemoteDesktopCloudStorageMCP.toolName
-                && $0.serverID != RemoteDesktopMailMCP.serverID
-                && $0.serverID != RemoteDesktopCloudStorageMCP.serverID
-                && MCPToolSafetyPolicy.isAllowed($0.toolName)
-        }
-        var tools = sidecarTools
-        if let embeddedSession, let embeddedIdentity {
-            let embeddedTools = try await embeddedSession.listAllowedTools()
-            guard embeddedTools.allSatisfy({
-                $0.serverID == embeddedIdentity.serverID
-                    && $0.toolName == RemoteDesktopMailMCP.toolName
-            }) else {
-                throw MCPClientError.serverMismatch(
-                    "The embedded Mail MCP server advertised an unexpected tool.")
-            }
-            tools.append(contentsOf: embeddedTools)
-        }
-        if let cloudEmbeddedSession, let cloudEmbeddedIdentity {
-            let cloudTools = try await cloudEmbeddedSession.listAllowedTools()
-            guard cloudTools.allSatisfy({
-                $0.serverID == cloudEmbeddedIdentity.serverID
-                    && $0.toolName == RemoteDesktopCloudStorageMCP.toolName
-            }) else {
-                throw MCPClientError.serverMismatch(
-                    "The embedded cloud-storage MCP server advertised an unexpected tool.")
-            }
-            // A6: retained for future OS-level work, deliberately unrouted.
-            _ = cloudTools
+        let tools = try await session.listAllowedTools().filter {
+            $0.serverID == identity.serverID && MCPToolSafetyPolicy.isAllowed($0.toolName)
         }
         guard self.identity?.processGeneration == generation else {
             throw MCPClientError.staleCall
@@ -234,38 +132,9 @@ actor MCPClientPool {
         }
 
         purgeExpiredApprovals()
-        let mailAttachments: [RemoteDesktopMailAttachmentSnapshot]?
-        if validatedCall.toolName == RemoteDesktopMailMCP.toolName {
-            let mail = try RemoteDesktopMailRequest(arguments: validatedCall.arguments)
-            if !mail.attachmentPaths.isEmpty,
-               pendingApprovals.contains(where: {
-                   $0.key != validatedCall.canonicalDigest && $0.value.mailAttachments != nil
-               }) {
-                throw MCPClientError.toolFailed("Only one attachment approval can be pending at a time.")
-            }
-            mailAttachments = mail.attachmentPaths.isEmpty
-                ? nil
-                : try RemoteDesktopMailAttachmentFileReader.snapshot(paths: mail.attachmentPaths)
-        } else {
-            mailAttachments = nil
-        }
-        let fingerprint = MCPApprovalFingerprint(
-            call: validatedCall,
-            mailAttachmentDigest: try mailAttachments.map(RemoteDesktopMailAttachmentFileReader.approvalDigest))
-        if validatedCall.toolName == RemoteDesktopCloudStorageMCP.toolName {
-            let prepared = try await cloudStorage.prepare(arguments: validatedCall.arguments)
-            guard prepared.arguments == validatedCall.arguments else {
-                throw MCPClientError.invalidArguments(
-                    "The cloud-storage action was not bound to the current source and destination.")
-            }
-            try Task.checkCancellation()
-            guard identity?.processGeneration == validatedCall.processGeneration,
-                  cloudEmbeddedIdentity?.processGeneration == validatedCall.processGeneration else {
-                throw MCPClientError.staleCall
-            }
-        }
+        let fingerprint = MCPApprovalFingerprint(call: validatedCall)
         pendingApprovals[validatedCall.canonicalDigest] = PendingApproval(
-            fingerprint: fingerprint, date: Date(), mailAttachments: mailAttachments)
+            fingerprint: fingerprint, date: Date())
         return MCPPreparedApproval(
             call: validatedCall,
             fingerprint: fingerprint,
@@ -285,52 +154,7 @@ actor MCPClientPool {
               fingerprint.matches(call: validatedCall) else {
             throw MCPClientError.approvalMismatch
         }
-        let pending = try approvedPending(for: validatedCall, fingerprint: fingerprint)
-        let isCloudStorage = validatedCall.toolName == RemoteDesktopCloudStorageMCP.toolName
-        let isMail = validatedCall.toolName == RemoteDesktopMailMCP.toolName
-        if isCloudStorage {
-            let refreshed = try await cloudStorage.prepare(arguments: validatedCall.arguments)
-            guard refreshed.arguments == validatedCall.arguments else {
-                throw MCPClientError.approvalMismatch
-            }
-            try Task.checkCancellation()
-            guard identity?.processGeneration == validatedCall.processGeneration,
-                  cloudEmbeddedIdentity?.processGeneration == validatedCall.processGeneration else {
-                throw MCPClientError.staleCall
-            }
-        } else if !isMail {
-            return
-        }
-
-        let epoch = lifecycleEpoch
-        let generation = validatedCall.processGeneration
-        if isMail {
-            try await mailAutomationPreflight.ensureAuthorized()
-        }
-        try Task.checkCancellation()
-        guard lifecycleEpoch == epoch,
-              identity?.processGeneration == generation,
-              (isCloudStorage
-                ? cloudEmbeddedIdentity?.processGeneration == generation
-                : embeddedIdentity?.processGeneration == generation) else {
-            throw MCPClientError.staleCall
-        }
-
-        let (revalidatedCall, _) = try await validate(call)
-        try Task.checkCancellation()
-        guard revalidatedCall == validatedCall,
-              lifecycleEpoch == epoch,
-              identity?.processGeneration == generation,
-              (isCloudStorage
-                ? cloudEmbeddedIdentity?.processGeneration == generation
-                : embeddedIdentity?.processGeneration == generation) else {
-            throw MCPClientError.staleCall
-        }
-        let stillPending = try approvedPending(for: revalidatedCall, fingerprint: fingerprint)
-        guard stillPending.date == pending.date,
-              stillPending.mailAttachments == pending.mailAttachments else {
-            throw MCPClientError.approvalMismatch
-        }
+        _ = try approvedPending(for: validatedCall, fingerprint: fingerprint)
     }
 
     func performApproved(
@@ -349,41 +173,16 @@ actor MCPClientPool {
             throw MCPClientError.approvalMismatch
         }
         pendingApprovals.removeValue(forKey: validatedCall.canonicalDigest)
-        if let mailAttachments = pending.mailAttachments {
-            try RemoteDesktopMailAttachmentFileReader.verifyUnchanged(mailAttachments)
-            guard fingerprint.mailAttachmentDigest
-                    == (try RemoteDesktopMailAttachmentFileReader.approvalDigest(mailAttachments)) else {
-                throw MCPClientError.approvalMismatch
-            }
-            let result = try await performMutation(validatedCall, using: session,
-                approvedMailAttachments: mailAttachments)
-            guard case .object(let receipt)? = result.structuredContent,
-                  receipt["attachment_digest"] == .string(fingerprint.mailAttachmentDigest ?? "") else {
-                throw MCPClientError.approvalMismatch
-            }
-            return result
-        }
-        guard fingerprint.mailAttachmentDigest == nil else {
-            throw MCPClientError.approvalMismatch
-        }
         return try await performMutation(validatedCall, using: session)
     }
 
     func cancelAll() async {
         lifecycleEpoch &+= 1
         let active = session
-        let activeEmbedded = embeddedSession
-        let activeCloudEmbedded = cloudEmbeddedSession
         session = nil
         identity = nil
-        embeddedSession = nil
-        embeddedIdentity = nil
-        cloudEmbeddedSession = nil
-        cloudEmbeddedIdentity = nil
         pendingApprovals.removeAll()
         await active?.stop()
-        await activeEmbedded?.stop()
-        await activeCloudEmbedded?.stop()
     }
 
     /// Stops only the sidecar generation owned by the caller. Cancellation
@@ -398,48 +197,15 @@ actor MCPClientPool {
         _ suppliedCall: MCPToolCall
     ) async throws -> (MCPToolCall, any MCPClientSessioning) {
         guard let rootIdentity = identity else { throw MCPClientError.notRunning }
-        // Tool names are not identities. Bind the signed host's reserved Mail
-        // tool to its embedded server again at execution time so a sidecar
-        // cannot bypass discovery filtering with a crafted call.
-        if suppliedCall.toolName == RemoteDesktopMailMCP.toolName {
-            guard suppliedCall.serverID == RemoteDesktopMailMCP.serverID,
-                  embeddedIdentity?.serverID == RemoteDesktopMailMCP.serverID else {
-                throw MCPClientError.toolNotAllowed(suppliedCall.toolName)
-            }
-        } else if suppliedCall.serverID == RemoteDesktopMailMCP.serverID {
-            throw MCPClientError.toolNotAllowed(suppliedCall.toolName)
-        }
-        if suppliedCall.toolName == RemoteDesktopCloudStorageMCP.toolName {
-            guard suppliedCall.serverID == RemoteDesktopCloudStorageMCP.serverID,
-                  cloudEmbeddedIdentity?.serverID == RemoteDesktopCloudStorageMCP.serverID else {
-                throw MCPClientError.toolNotAllowed(suppliedCall.toolName)
-            }
-        } else if suppliedCall.serverID == RemoteDesktopCloudStorageMCP.serverID {
-            throw MCPClientError.toolNotAllowed(suppliedCall.toolName)
-        }
-        if suppliedCall.serverID == rootIdentity.serverID,
-           suppliedCall.toolName == "mail_send" {
-            throw MCPClientError.toolNotAllowed(suppliedCall.toolName)
-        }
-        let selected: (any MCPClientSessioning, MCPProcessIdentity)
-        if suppliedCall.serverID == rootIdentity.serverID,
-           let session {
-            selected = (session, rootIdentity)
-        } else if let embeddedSession, let embeddedIdentity,
-                  suppliedCall.serverID == embeddedIdentity.serverID {
-            selected = (embeddedSession, embeddedIdentity)
-        } else if let cloudEmbeddedSession, let cloudEmbeddedIdentity,
-                  suppliedCall.serverID == cloudEmbeddedIdentity.serverID {
-            selected = (cloudEmbeddedSession, cloudEmbeddedIdentity)
-        } else {
+        guard suppliedCall.serverID == rootIdentity.serverID,
+              let session else {
             throw MCPClientError.staleCall
         }
-        let (session, selectedIdentity) = selected
-        guard suppliedCall.processGeneration == selectedIdentity.processGeneration else {
+        guard suppliedCall.processGeneration == rootIdentity.processGeneration else {
             throw MCPClientError.staleCall
         }
 
-        let generation = selectedIdentity.processGeneration
+        let generation = rootIdentity.processGeneration
         let tools = try await session.listAllowedTools()
         guard self.identity?.processGeneration == generation else {
             throw MCPClientError.staleCall
@@ -447,16 +213,13 @@ actor MCPClientPool {
         guard let tool = tools.first(where: { $0.toolName == suppliedCall.toolName }) else {
             throw MCPClientError.toolNotAllowed(suppliedCall.toolName)
         }
-        guard tool.serverID == selectedIdentity.serverID,
-              tool.processGeneration == selectedIdentity.processGeneration,
+        guard tool.serverID == rootIdentity.serverID,
+              tool.processGeneration == rootIdentity.processGeneration,
               tool.schemaDigest == suppliedCall.schemaDigest else {
             throw MCPClientError.staleCall
         }
 
         try MCPJSONSchemaValidator.validate(arguments: suppliedCall.arguments, against: tool.inputSchema)
-        if suppliedCall.serverID == RemoteDesktopCloudStorageMCP.serverID {
-            try RemoteDesktopCloudStorage.validateArguments(suppliedCall.arguments)
-        }
         let reconstructed = try tool.makeCall(
             taskID: suppliedCall.taskID,
             arguments: suppliedCall.arguments,
@@ -497,46 +260,10 @@ actor MCPClientPool {
 
     private func performMutation(
         _ call: MCPToolCall,
-        using session: any MCPClientSessioning,
-        approvedMailAttachments: [RemoteDesktopMailAttachmentSnapshot]? = nil
+        using session: any MCPClientSessioning
     ) async throws -> MCPToolResult {
         guard let mutationLedger else {
             throw MCPClientError.mutationLedgerRequired
-        }
-
-        if let approvedMailAttachments, !approvedMailAttachments.isEmpty {
-            guard call.toolName == RemoteDesktopMailMCP.toolName,
-                  session is RemoteDesktopMailMCPClientSession else {
-                throw MCPClientError.approvalMismatch
-            }
-        }
-        if call.toolName == RemoteDesktopCloudStorageMCP.toolName {
-            guard call.serverID == RemoteDesktopCloudStorageMCP.serverID,
-                  session is RemoteDesktopCloudStorageMCPClientSession else {
-                throw MCPClientError.approvalMismatch
-            }
-        }
-
-        // This boundary is reached only after the exact fingerprinted mobile
-        // approval has been consumed. Ask for Automation now, before claiming
-        // the at-most-once mutation, so denial cannot make an unsent email
-        // look ambiguous or poison a later corrected request.
-        if call.toolName == RemoteDesktopMailMCP.toolName {
-            do {
-                try await mailAutomationPreflight.ensureAuthorized()
-            } catch is CancellationError {
-                throw MCPClientError.cancelled
-            } catch let error as MCPClientError {
-                throw error
-            } catch {
-                throw MCPClientError.toolFailed(
-                    SystemRemoteDesktopMailAutomationPreflight.denialMessage)
-            }
-            try Task.checkCancellation()
-            guard identity?.processGeneration == call.processGeneration,
-                  embeddedIdentity?.processGeneration == call.processGeneration else {
-                throw MCPClientError.staleCall
-            }
         }
 
         switch try await mutationLedger.claim(call) {
@@ -549,13 +276,7 @@ actor MCPClientPool {
         }
 
         do {
-            let result: MCPToolResult
-            if let approvedMailAttachments, !approvedMailAttachments.isEmpty,
-               let mailSession = session as? RemoteDesktopMailMCPClientSession {
-                result = try await mailSession.executeApprovedMail(call, attachments: approvedMailAttachments)
-            } else {
-                result = try await session.execute(call)
-            }
+            let result = try await session.execute(call)
             guard identity?.processGeneration == call.processGeneration,
                   !result.isError else {
                 await mutationLedger.markAmbiguous(call)
@@ -599,28 +320,6 @@ actor MCPClientPool {
               let pending = pendingApprovals[call.canonicalDigest],
               pending.fingerprint == fingerprint else {
             throw MCPClientError.approvalMismatch
-        }
-        if call.toolName == RemoteDesktopMailMCP.toolName {
-            let request = try RemoteDesktopMailRequest(arguments: call.arguments)
-            if request.attachmentPaths.isEmpty {
-                guard pending.mailAttachments == nil,
-                      fingerprint.mailAttachmentDigest == nil else {
-                    throw MCPClientError.approvalMismatch
-                }
-            } else {
-                guard let snapshots = pending.mailAttachments,
-                      snapshots.map(\.path) == request.attachmentPaths,
-                      fingerprint.mailAttachmentDigest
-                        == (try RemoteDesktopMailAttachmentFileReader.approvalDigest(snapshots)) else {
-                    throw MCPClientError.approvalMismatch
-                }
-                try RemoteDesktopMailAttachmentFileReader.verifyUnchanged(snapshots)
-            }
-        } else {
-            guard pending.mailAttachments == nil,
-                  fingerprint.mailAttachmentDigest == nil else {
-                throw MCPClientError.approvalMismatch
-            }
         }
         return pending
     }

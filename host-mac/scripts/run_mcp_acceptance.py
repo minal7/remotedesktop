@@ -13,9 +13,6 @@ The runner never prints tool output, because read tools can contain private
 on-device data. All mutations are limited to temporary fixture state and
 the exact prior frontmost application is restored.
 
-The embedded remote_desktop_mail transport is covered by the signed-host
-XCTest suite and the live Mail acceptance flow; this runner records it in the
-matrix but deliberately cannot impersonate that signed in-process server.
 """
 
 from __future__ import annotations
@@ -73,11 +70,10 @@ READ_ONLY_TOOLS = {
 REVERSIBLE_TOOLS = {"focus_window"}
 APPROVAL_TOOLS = {
     "click", "click_menu_path", "perform_element_action", "press_key",
-    "remote_desktop_mail",
     "set_element_attribute", "type_text",
 }
 HOST_EXPOSED_TOOLS = READ_ONLY_TOOLS | REVERSIBLE_TOOLS | APPROVAL_TOOLS
-SIDECAR_EXPOSED_TOOLS = HOST_EXPOSED_TOOLS - {"remote_desktop_mail"}
+SIDECAR_EXPOSED_TOOLS = HOST_EXPOSED_TOOLS
 ACCEPTANCE_BLOCKED_TOOL_REASONS = {
     "browser_close_tab": "pinned helper activates Safari and can close a real tab in the ambient front window",
     "browser_dom_tree": "fails unless Safari's developer-only JavaScript from Apple Events setting is enabled",
@@ -118,7 +114,6 @@ TOOL_POSTCONDITIONS = {
     "query_elements": "regex query returns fixture elements without scanning another PID",
     "read_value": "reads the exact isolated fixture field/status value",
     "reminders_list": "returns a bounded successful reminder-summary shape without logging data",
-    "remote_desktop_mail": "signed-host ledger proves one visible draft and one .invalid send completed",
     "set_element_attribute": "sets AXValue on the fixture and read_value observes it",
     "type_text": "AX typing replaces the focused fixture field with the exact marker",
     "wait_for_ax_notification": "observes the fixture's signaled AXValueChanged event",
@@ -326,7 +321,6 @@ class AcceptanceRunner:
         self._run_fixture_cases()
         self._run_everyday_workflows()
         self._run_private_read_cases()
-        self._verify_mail_live_evidence()
         for name, detail in ACCEPTANCE_BLOCKED_TOOL_REASONS.items():
             self.results[name] = ToolResult(name, "BLOCKED_AFTER_E2E", detail)
         for name in sorted(HOST_EXPOSED_TOOLS):
@@ -1594,36 +1588,6 @@ class AcceptanceRunner:
                 and all(isinstance(name, str) for name in value["names"])
                 and isinstance(value.get("count"), int)
                 and value["count"] == len(value["names"])))
-
-    def _verify_mail_live_evidence(self) -> None:
-        ledger = pathlib.Path.home() / (
-            "Library/Application Support/Remote Desktop Host/Computer Use Model/MCP/"
-            "mutation-ledger.json")
-        expected = {
-            "Email draft opened visibly in Mail for review.",
-            "Mail accepted the approved email for sending.",
-        }
-        try:
-            snapshot = json.loads(ledger.read_text())
-            observed = {
-                entry.get("result", {}).get("text")
-                for entry in snapshot.get("entries", {}).values()
-                if entry.get("serverID") == "com.threadmark.remotedesktop.host.mail-mcp"
-                and entry.get("toolName") == "remote_desktop_mail"
-                and entry.get("status") == "completed"
-                and entry.get("result", {}).get("isError") is False
-            }
-        except (OSError, ValueError, TypeError):
-            observed = set()
-        if expected.issubset(observed):
-            self.semantic_evidence.add("remote_desktop_mail")
-            self.results["remote_desktop_mail"] = ToolResult(
-                "remote_desktop_mail", "PASS",
-                TOOL_POSTCONDITIONS["remote_desktop_mail"])
-        else:
-            self.results["remote_desktop_mail"] = ToolResult(
-                "remote_desktop_mail", "FAIL",
-                "live signed-host draft and .invalid send evidence is incomplete")
 
     def close(self) -> None:
         failure: Exception | None = None

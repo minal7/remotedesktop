@@ -13,63 +13,6 @@ extension MCPPreparedApproval {
     var computerUsePresentation: MCPComputerUseApprovalPresentation {
         let arguments = call.arguments
         switch call.toolName {
-        case RemoteDesktopMailMCP.toolName:
-            let sendsNow = arguments["send_now"]?.boolValue ?? false
-            return MCPComputerUseApprovalPresentation(
-                message: sendsNow
-                    ? "Send this email through Mail on your Mac?"
-                    : "Create this email draft in Mail on your Mac?",
-                details: Self.details([
-                    ("From", "Your default account in Mail"),
-                    ("To", arguments["to"]?.displayValue),
-                    ("CC", arguments["cc"]?.displayValue),
-                    ("BCC", arguments["bcc"]?.displayValue),
-                    ("Subject", arguments["subject"]?.displayValue),
-                    ("Message", arguments["body"]?.displayValue),
-                    ("Attachment 1", arguments["attachment_paths"]?.attachmentPathsValue(at: 0)),
-                    ("Attachment 2", arguments["attachment_paths"]?.attachmentPathsValue(at: 1)),
-                    ("Attachment 3", arguments["attachment_paths"]?.attachmentPathsValue(at: 2)),
-                    ("Attachment 4", arguments["attachment_paths"]?.attachmentPathsValue(at: 3)),
-                    ("Attachment 5", arguments["attachment_paths"]?.attachmentPathsValue(at: 4)),
-                    ("First use", "macOS may ask on your Mac. Choose Allow so Remote Desktop Host can use Mail."),
-                ]),
-                confirmLabel: sendsNow ? "Send email" : "Create draft")
-
-        case RemoteDesktopCloudStorageMCP.toolName:
-            let arguments = call.arguments
-            let sourceName = (arguments["source_path"]?.displayValue)
-                .map { URL(fileURLWithPath: $0).lastPathComponent }
-            let providerID = arguments["provider_id"]?.displayValue
-            let providerLabel: String
-            if providerID == "icloud-drive" {
-                providerLabel = "iCloud Drive"
-            } else if let providerID, providerID.hasPrefix("cloudstorage:") {
-                providerLabel = String(providerID.dropFirst("cloudstorage:".count))
-            } else {
-                providerLabel = "Selected cloud folder"
-            }
-            let folder = arguments["relative_folder"]?.displayValue ?? ""
-            let destinationName = (arguments["destination_path"]?.displayValue)
-                .map { URL(fileURLWithPath: $0).lastPathComponent }
-                ?? sourceName
-            let replacing: Bool
-            if case .some(.string(_)) = arguments["existing_destination_sha256"] {
-                replacing = true
-            } else { replacing = false }
-            let destination = [providerLabel, folder, destinationName]
-                .compactMap { $0 }
-                .filter { !$0.isEmpty }
-                .joined(separator: " › ")
-            return MCPComputerUseApprovalPresentation(
-                message: replacing
-                    ? "Replace this file in cloud storage?"
-                    : "Save a copy to cloud storage?",
-                details: Self.details([
-                    ("File", sourceName),
-                    ("Destination", destination),
-                ]),
-                confirmLabel: replacing ? "Replace file" : "Save copy")
-
         case "imessage_send":
             return MCPComputerUseApprovalPresentation(
                 message: "Send this message from your Mac?",

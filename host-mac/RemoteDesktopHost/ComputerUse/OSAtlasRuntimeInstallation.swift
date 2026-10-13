@@ -310,12 +310,8 @@ final class OSAtlasVisualExecutorLoader: ComputerUseVisualExecutorLoading {
     private let bundle: Bundle
     private let runtime: OSAtlasLlamaRuntime
     private let nativeControlInspectExchange: (@Sendable (Data, Data) -> Void)?
-    private let webJobContentInspectExchange: (@Sendable (Data, Data) -> Void)?
     private let browserRevalidationFailureObserver:
         ComputerUseDefaultBrowserExecutor.RevalidationFailureObserver?
-    private let webUploadCheckpointObserver:
-        ComputerUseDefaultBrowserExecutor.WebUploadCheckpointObserver?
-    private let gmailExistingDraftURL: URL?
     private let faraJournalDirectory: URL
     private let nativeJournalDirectory: URL
 
@@ -324,12 +320,8 @@ final class OSAtlasVisualExecutorLoader: ComputerUseVisualExecutorLoading {
         bundle: Bundle = .main,
         runtime: OSAtlasLlamaRuntime = .shared,
         nativeControlInspectExchange: (@Sendable (Data, Data) -> Void)? = nil,
-        webJobContentInspectExchange: (@Sendable (Data, Data) -> Void)? = nil,
         browserRevalidationFailureObserver:
             ComputerUseDefaultBrowserExecutor.RevalidationFailureObserver? = nil,
-        webUploadCheckpointObserver:
-            ComputerUseDefaultBrowserExecutor.WebUploadCheckpointObserver? = nil,
-        gmailExistingDraftURL: URL? = nil,
         faraJournalDirectory: URL = ComputerUseTaskJournalStore.defaultDirectory
             .deletingLastPathComponent().appendingPathComponent("Fara", isDirectory: true),
         nativeJournalDirectory: URL = ComputerUseTaskJournalStore.defaultDirectory
@@ -339,10 +331,7 @@ final class OSAtlasVisualExecutorLoader: ComputerUseVisualExecutorLoading {
         self.bundle = bundle
         self.runtime = runtime
         self.nativeControlInspectExchange = nativeControlInspectExchange
-        self.webJobContentInspectExchange = webJobContentInspectExchange
         self.browserRevalidationFailureObserver = browserRevalidationFailureObserver
-        self.webUploadCheckpointObserver = webUploadCheckpointObserver
-        self.gmailExistingDraftURL = gmailExistingDraftURL
         self.faraJournalDirectory = faraJournalDirectory
         self.nativeJournalDirectory = nativeJournalDirectory
     }
@@ -369,8 +358,6 @@ final class OSAtlasVisualExecutorLoader: ComputerUseVisualExecutorLoading {
     ) throws -> ComputerUseDefaultBrowserExecutor {
         let runtime = self.runtime
         let nativeControlInspectExchange = self.nativeControlInspectExchange
-        let webJobContentInspectExchange = self.webJobContentInspectExchange
-        let webUploadCheckpointObserver = self.webUploadCheckpointObserver
         let propose: ComputerUseDesktopExecutor.Propose = { input in
             let endpoint = try await runtime.activateFara(resolveInputs())
             return .init(try await runtime.proposeFara(endpoint: endpoint, input: input))
@@ -383,8 +370,6 @@ final class OSAtlasVisualExecutorLoader: ComputerUseVisualExecutorLoading {
         }
         let nativeControlPlanner: ComputerUseDefaultBrowserExecutor.NativeControlPlanner?
         let nativeBootstrapPlanner: ComputerUseDefaultBrowserExecutor.NativeBootstrapPlanner?
-        let gmailContentExtractor: (@MainActor @Sendable (String) async throws -> ComputerUseWebJobContentExtractor.Extraction)?
-        let webUploadContentExtractor: (@MainActor @Sendable (String) async throws -> ComputerUseWebJobContentExtractor.UploadExtraction)?
         if let nativeControlInputs {
             let cachedInputs = NativeControlInputsCache()
             let resolveNativeInputs: @MainActor @Sendable () async throws -> ComputerUseNativeTextRuntimeInputs? = {
@@ -392,21 +377,6 @@ final class OSAtlasVisualExecutorLoader: ComputerUseVisualExecutorLoading {
                 guard let resolved = try await nativeControlInputs() else { return nil }
                 cachedInputs.value = resolved
                 return resolved
-            }
-            gmailContentExtractor = { prompt in
-                guard let inputs = try await resolveNativeInputs() else {
-                    throw OSAtlasLlamaRuntimeError.inactiveSession
-                }
-                let endpoint = try await runtime.activateNativeText(inputs)
-                return try await runtime.extractWebJobContent(endpoint: endpoint, originalRequest: prompt,
-                    inspectExchange: webJobContentInspectExchange)
-            }
-            webUploadContentExtractor = { prompt in
-                guard let inputs = try await resolveNativeInputs() else {
-                    throw OSAtlasLlamaRuntimeError.inactiveSession
-                }
-                let endpoint = try await runtime.activateNativeText(inputs)
-                return try await runtime.extractWebUploadContent(endpoint: endpoint, originalRequest: prompt)
             }
             nativeControlPlanner = { input, page in
                 guard let inputs = try await resolveNativeInputs() else {
@@ -427,18 +397,12 @@ final class OSAtlasVisualExecutorLoader: ComputerUseVisualExecutorLoading {
         } else {
             nativeControlPlanner = nil
             nativeBootstrapPlanner = nil
-            gmailContentExtractor = nil
-            webUploadContentExtractor = nil
         }
         return try ComputerUseDefaultBrowserExecutor(journalDirectory: faraJournalDirectory,
             propose: propose, nativeControlPlanner: nativeControlPlanner,
             nativeBootstrapPlanner: nativeBootstrapPlanner,
             finishRun: { await runtime.shutdown() }, outcomeCheck: outcomeCheck,
-            revalidationFailureObserver: browserRevalidationFailureObserver,
-            gmailContentExtractor: gmailContentExtractor,
-            webUploadContentExtractor: webUploadContentExtractor,
-            webUploadCheckpointObserver: webUploadCheckpointObserver,
-            gmailExistingDraftURL: gmailExistingDraftURL)
+            revalidationFailureObserver: browserRevalidationFailureObserver)
     }
 
     func load(

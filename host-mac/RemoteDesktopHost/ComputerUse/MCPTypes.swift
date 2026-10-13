@@ -291,19 +291,15 @@ struct MCPApprovalFingerprint: Codable, Equatable, Hashable, Sendable {
     let toolName: String
     let canonicalDigest: String
     let schemaDigest: String
-    let mailAttachmentDigest: String?
 
-    init(call: MCPToolCall, mailAttachmentDigest: String? = nil) {
+    init(call: MCPToolCall) {
         serverID = call.serverID
         processGeneration = call.processGeneration
         toolName = call.toolName
         canonicalDigest = call.canonicalDigest
         schemaDigest = call.schemaDigest
-        self.mailAttachmentDigest = mailAttachmentDigest
     }
 
-    /// Attachment bytes are host-prepared approval material, so they augment
-    /// the call identity without changing the canonical MCP call itself.
     func matches(call: MCPToolCall) -> Bool {
         serverID == call.serverID
             && processGeneration == call.processGeneration
@@ -357,69 +353,6 @@ struct MCPApprovedActionResult: Equatable, Sendable {
     let callDigest: String
     let response: String
     let completionPromptDigest: String?
-
-    static func verified(call: MCPToolCall, result: MCPToolResult,
-                         trustedUserPrompt: String) throws -> MCPApprovedActionResult {
-        if call.serverID == RemoteDesktopCloudStorageMCP.serverID,
-           call.toolName == RemoteDesktopCloudStorageMCP.toolName {
-            return try RemoteDesktopCloudStorage.verified(
-                call: call, result: result, trustedUserPrompt: trustedUserPrompt)
-        }
-        guard call.risk == .approvalRequired,
-              call.serverID == RemoteDesktopMailMCP.serverID,
-              call.toolName == RemoteDesktopMailMCP.toolName,
-              !result.isError, !result.wasTruncated,
-              case .object(let content)? = result.structuredContent,
-              let mail = try? RemoteDesktopMailRequest(arguments: call.arguments),
-              case .string(let status)? = content["status"],
-              status == (mail.sendNow ? "accepted_for_sending" : "draft_opened"),
-              Self.hasExpectedAttachmentReceipt(content, mail: mail) else {
-            throw MCPClientError.toolFailed("The approved action returned no matching, complete confirmation. It will not be repeated.")
-        }
-        let response = mail.sendNow
-            ? "Mail accepted the approved email for sending."
-            : "Email draft opened visibly in Mail for review."
-        let provesWholeTask = call.stepEffectID == nil && exactSingleMailRequest(trustedUserPrompt, matches: mail)
-        return .init(callDigest: call.canonicalDigest, response: response,
-            completionPromptDigest: provesWholeTask ? try MCPDigest.sha256(of: .string(trustedUserPrompt)) : nil)
-    }
-
-    private static func hasExpectedAttachmentReceipt(
-        _ content: [String: MCPJSONValue], mail: RemoteDesktopMailRequest
-    ) -> Bool {
-        let expectedNames = mail.attachmentPaths.map { URL(fileURLWithPath: $0).lastPathComponent }
-        guard !expectedNames.isEmpty else { return Set(content.keys) == ["status"] }
-        guard Set(content.keys) == ["status", "attachment_count", "attachment_names", "attachment_digest"],
-              content["attachment_count"] == .integer(expectedNames.count),
-              case .array(let values)? = content["attachment_names"],
-              case .string(let digest)? = content["attachment_digest"],
-              digest.utf8.count == 64,
-              digest.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }) else { return false }
-        return values == expectedNames.map(MCPJSONValue.string)
-    }
-
-    /// A complete literal command supplies a bounded whole-task proof. Other
-    /// natural-language/compound requests retain action-only evidence until a
-    /// task compiler verifies every requested outcome. Approval of the call
-    /// alone cannot erase their remaining requirements.
-    private static func exactSingleMailRequest(_ prompt: String, matches mail: RemoteDesktopMailRequest) -> Bool {
-        guard prompt.utf8.count <= 16_384, mail.cc.isEmpty, mail.bcc.isEmpty,
-              mail.attachmentPaths.isEmpty else { return false }
-        let pattern = #"(?is)^\s*(?:please\s+)?(send|draft)\s+(?:an?\s+)?email\s+to\s+([^\s,;<>"]+@[^\s,;<>"]+)\s+with\s+subject\s+"([^"]*)"\s+and\s+body\s+"([^"]*)"\s*[.!]?\s*$"#
-        guard let expression = try? NSRegularExpression(pattern: pattern),
-              let match = expression.firstMatch(in: prompt, range: NSRange(prompt.startIndex..., in: prompt)) else { return false }
-        let values = (1...4).compactMap { index -> String? in
-            guard let range = Range(match.range(at: index), in: prompt) else { return nil }
-            return String(prompt[range])
-        }
-        guard values.count == 4 else { return false }
-        let action = values[0].lowercased()
-        guard action == "send" || action == "draft" else { return false }
-        return (action == "send") == mail.sendNow
-            && values[1].utf8.elementsEqual(mail.to.utf8)
-            && values[2].utf8.elementsEqual(mail.subject.utf8)
-            && values[3].utf8.elementsEqual(mail.body.utf8)
-    }
 }
 
 /// Persistent implementations must record `.new` before the external call,
