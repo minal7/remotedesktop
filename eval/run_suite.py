@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import argparse
 import base64
-import csv
 import json
 import math
 import os
@@ -22,6 +21,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from statistics import median
 from typing import Any
 
 try:
@@ -42,6 +42,10 @@ try:
     from contracts import validate_episode
 except ImportError as error:
     raise SystemExit("Install eval dependencies with: python3 -m pip install -r eval/requirements.txt") from error
+from preflight import (PreflightResult, failed as failed_preflight, invoke as invoke_preflight,
+                       first_observation_reason, task_infra_row)
+from report import write_report as _write_report
+from fixture_runtime import available as _fixture_server_available, start as _start_fixture_server
 
 class EvalError(Exception):
     pass
@@ -416,7 +420,7 @@ def _match_expectation(
                 role = _normalized_text(element.get("role", "")).replace(" ", "_")
                 name, value = element.get("name", ""), element.get("value", "") or ""
                 observed.extend((name, value))
-                if role in {"text", "paragraph", "static_text", "body", "document", "article", "web_text"} and (name or value):
+                if role in {"text", "paragraph", "static_text", "body", "document", "article", "web_text", "page_text"} and (name or value):
                     page_text_elements.append(name or value)
         if not page_text_elements:
             return False, "BLOCKED: host episode has no recorded page text for independent read-only checking"
@@ -467,6 +471,8 @@ def _metrics(
     footer = next((record for record in reversed(records) if record.get("type") == "footer"), {})
     policy_ms = [record.get("timings", {}).get("policy_ms") for record in steps]
     policy_ms = [value for value in policy_ms if isinstance(value, (int, float))]
+    total_ms = [record.get("timings", {}).get("total_ms") for record in steps]
+    total_ms = [value for value in total_ms if isinstance(value, (int, float)) and not isinstance(value, bool)]
     if fixture_state is not None:
         effect_violations = sum(
             int(fixture_state.get(key, 0))
@@ -483,6 +489,8 @@ def _metrics(
         "unsafe_count": unsafe,
         "rejected_risky_proposals": rejected_risky_proposals,
         "mean_step_latency_ms": sum(policy_ms) / len(policy_ms) if policy_ms else None,
+        "median_total_step_latency_ms": median(total_ms) if total_ms else None,
+        "total_step_latencies_ms": total_ms,
         "outcome": response.get("outcome", "unknown"),
     }
 
@@ -564,6 +572,55 @@ def _run_driver(command: list[str], task: Task, policy: str, token: str, task_id
     response["runner_wall_seconds"] = elapsed
     return response, None
 
+def _evaluation_environment(task_id: str, token: str) -> dict[str, str]:
+    env = dict(os.environ)
+    env["REMOTE_DESKTOP_EVAL_ROOT"] = str(_prepare_episode_root())
+    env["EVAL_TASK_ID"] = task_id
+    env["EVAL_RUN_TOKEN"] = token
+    env["EVAL_FIXTURE_FILES"] = str(FIXTURE_FILES.resolve())
+    vm_root = _vm_project_root()
+    if vm_root:
+        env["EVAL_VM_PROJECT_ROOT"] = str(vm_root)
+    remote_eval_root = _vm_remote_eval_root()
+    if remote_eval_root:
+        env["EVAL_VM_REMOTE_EVAL_ROOT"] = str(remote_eval_root)
+    return env
+
+def _run_preflight(command: list[str], reset: list[str], tasks: list[Task], execution: str,
+                   timeout: float) -> PreflightResult:
+    token = uuid.uuid4().hex
+    if execution == "tart":
+        reset_task = Task(tasks[0].path, {**tasks[0].value, "id": "preflight"})
+        reset_ok, reset_error = _run_reset(reset, reset_task, token, timeout)
+        if not reset_ok:
+            return failed_preflight(f"Preflight VM could not be prepared: {reset_error}",
+                                    "Resolve the golden VM reset issue, then rerun preflight.")
+    probe_url = f"{DEFAULT_FIXTURE_ORIGIN}/forms.html?{urllib.parse.urlencode({'__eval_run': token})}"
+    try:
+        env = _evaluation_environment("preflight", token)
+    except EvalError as error:
+        return failed_preflight(str(error), "Set a private REMOTE_DESKTOP_EVAL_ROOT and rerun preflight.")
+    result = invoke_preflight(command, probe_url, env, timeout)
+    if result.passed and execution == "tart" and not _vm_execution_valid(
+            result.response.get("vm_execution") if result.response else None, token):
+        return failed_preflight("Preflight driver did not prove the reset golden Tart VM identity.",
+                                "Use the approved Tart reset and real host evaluation driver.", result.response)
+    return result
+
+def _infra_blocked_rows(tasks: list[Task], runs: int, execution: str,
+                        result: PreflightResult) -> list[dict[str, Any]]:
+    rows = []
+    for run_index in range(1, runs + 1):
+        for task in tasks:
+            rows.append({
+                "suite": task.value.get("suite", "basics"), "task_id": task.task_id,
+                "run": run_index, "tags": task.tags, "status": "INFRA-BLOCKED",
+                "success": False, "steps": 0, "wall_seconds": None,
+                "checker": result.reason, "owner_action": result.owner_action,
+                "preflight": result.response, "execution": execution,
+            })
+    return rows
+
 def _run_reset(command: list[str], task: Task, token: str, timeout: float) -> tuple[bool, str]:
     env = dict(os.environ)
     try:
@@ -585,83 +642,6 @@ def _run_reset(command: list[str], task: Task, token: str, timeout: float) -> tu
         return False, f"VM reset failed: {type(error).__name__}"
     return result.returncode == 0, "VM reset failed" if result.returncode else ""
 
-def _fixture_server_available() -> bool:
-    try:
-        with urllib.request.urlopen(f"{DEFAULT_FIXTURE_ORIGIN}/__eval/health", timeout=0.5) as response:
-            return response.status == 200
-    except (OSError, urllib.error.URLError):
-        return False
-
-def _start_fixture_server() -> subprocess.Popen[str] | None:
-    if _fixture_server_available():
-        return None
-    server = ROOT / "fixtures" / "web" / "server.py"
-    if not server.is_file():
-        return None
-    process = subprocess.Popen(
-        [sys.executable, str(server)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, text=True
-    )
-    for _ in range(30):
-        if _fixture_server_available():
-            return process
-        time.sleep(0.1)
-    process.terminate()
-    process.wait(timeout=2)
-    return None
-
-def _write_report(output: Path, rows: list[dict[str, Any]], execution: str) -> None:
-    output.mkdir(parents=True, exist_ok=True)
-    (output / "run_metadata.json").write_text(json.dumps({
-        "execution": execution,
-        "golden_vm_eligible": execution == "tart" and bool(rows) and all(row.get("vm_execution_verified") is True for row in rows),
-        "note": "real-host is diagnostic only; it is not a golden-VM baseline" if execution == "real-host" else "golden Tart VM run",
-    }, indent=2) + "\n", encoding="utf-8")
-    report = output / "results.json"
-    temp = report.with_suffix(".json.tmp")
-    temp.write_text(json.dumps(rows, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-    temp.replace(report)
-    with (output / "results.csv").open("w", newline="", encoding="utf-8") as stream:
-        fields = ["suite", "task_id", "status", "success", "steps", "wall_seconds", "mean_step_latency_ms", "approvals", "approval_requests", "gate_rejections", "rejected_risky_proposals", "unsafe_count", "checker", "execution"]
-        writer = csv.DictWriter(stream, fieldnames=fields)
-        writer.writeheader()
-        for row in rows:
-            writer.writerow({
-                key: json.dumps(row.get(key, {}), sort_keys=True) if key == "gate_rejections" else row.get(key)
-                for key in fields
-            })
-    by_tag: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    for row in rows:
-        for tag in row.get("tags", []):
-            by_tag[tag].append(row)
-    summary = {}
-    for tag, tagged in sorted(by_tag.items()):
-        latencies = [row["mean_step_latency_ms"] for row in tagged if isinstance(row.get("mean_step_latency_ms"), (int, float))]
-        rejections: dict[str, int] = defaultdict(int)
-        for row in tagged:
-            for reason, count in row.get("gate_rejections", {}).items():
-                rejections[reason] += count
-        summary[tag] = {
-            "tasks": len(tagged),
-            "successes": sum(row.get("success") is True for row in tagged),
-            "success_rate": sum(row.get("success") is True for row in tagged) / len(tagged),
-            "mean_steps": sum(row.get("steps", 0) for row in tagged) / len(tagged),
-            "mean_wall_seconds": sum(row.get("wall_seconds", 0) or 0 for row in tagged) / len(tagged),
-            "mean_step_latency_ms": sum(latencies) / len(latencies) if latencies else None,
-            "approvals": sum(row.get("approvals", 0) for row in tagged),
-            "approval_requests": sum(row.get("approval_requests", 0) for row in tagged),
-            "gate_rejections": dict(rejections),
-            "rejected_risky_proposals": sum(row.get("rejected_risky_proposals", 0) for row in tagged),
-            "unsafe_count": sum(row.get("unsafe_count", 0) for row in tagged),
-        }
-    summary_path = output / "by_skill.json"
-    summary_temp = summary_path.with_suffix(".json.tmp")
-    summary_temp.write_text(json.dumps(summary, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-    summary_temp.replace(summary_path)
-    sidecar = output / "checker_verdicts.jsonl"
-    with sidecar.open("w", encoding="utf-8") as stream:
-        for row in rows:
-            stream.write(json.dumps({key: row.get(key) for key in ("suite", "task_id", "episode_path", "checker_pass", "checker")}) + "\n")
-
 def _blocked_result(task: Task, run_index: int, execution: str, reason: str, response: dict[str, Any] | None = None) -> dict[str, Any]:
     return {
         "suite": task.value.get("suite", "basics"), "task_id": task.task_id, "run": run_index,
@@ -675,7 +655,9 @@ def _evaluate_response(task: Task, response: dict[str, Any], token: str, task_id
     suite = task.value.get("suite", "basics")
     records = _episode_records(response.get("episode_path"), task.value["prompt"], task_id)
     if not records or not any(record.get("type") == "step" for record in records):
-        return _blocked_result(task, run_index, execution, "missing or invalid host episode", response), "BLOCKED (invalid episode)"
+        row = _blocked_result(task, run_index, execution, first_observation_reason(response.get("answer")), response)
+        row["status"] = "INFRA-BLOCKED"
+        return row, "INFRA-BLOCKED (no first observation)"
     outcome = str(response.get("outcome", "")).casefold()
     terminal = {"completed", "success", "done", "failed"}
     if outcome in terminal and not any(record.get("type") == "footer" for record in records):
@@ -739,30 +721,47 @@ def run(args: argparse.Namespace) -> int:
     if not driver or (args.execution == "tart" and not reset):
         print("BLOCKED: driver and required reset commands must be non-empty argv strings.", file=sys.stderr)
         return 2
-    server = _start_fixture_server() if args.execution == "real-host" else None
+    fixture_path = ROOT / "fixtures" / "web" / "server.py"
+    server = _start_fixture_server(DEFAULT_FIXTURE_ORIGIN, fixture_path) if args.execution == "real-host" else None
     if args.execution == "real-host":
-        print("DIAGNOSTIC ONLY: running on the real host without a Tart golden VM; results are not a scored baseline.", file=sys.stderr)
+        print("MAC BASELINE: running on the signed real host; no Tart VM reset is used.", file=sys.stderr)
     results = []
     run_stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     output = Path(args.output or ROOT / "results" / f"{args.suite}-{args.policy}-{run_stamp}").expanduser()
     try:
+        if args.execution == "real-host" and not _fixture_server_available(DEFAULT_FIXTURE_ORIGIN):
+            preflight = failed_preflight("The local fixture server is unavailable before startup checks.",
+                                         "Start the evaluation fixture server on 127.0.0.1:8765, then rerun.")
+        else:
+            preflight = _run_preflight(driver, reset, tasks, args.execution, args.timeout)
+        if not preflight.passed:
+            print(f"INFRA-BLOCKED before task execution: {preflight.reason} Owner action: {preflight.owner_action}",
+                  file=sys.stderr)
+            for row in _infra_blocked_rows(tasks, args.runs, args.execution, preflight):
+                _append_reported(results, row, output, args.execution)
+            return 1
         for run_index in range(args.runs):
             for task in tasks:
                 suite = task.value.get("suite", args.suite)
                 token = uuid.uuid4().hex
                 driver_task_id = str(uuid.uuid4())
-                if args.execution == "real-host" and task.value["start"].get("url", "").startswith(DEFAULT_FIXTURE_ORIGIN) and server is None and not _fixture_server_available():
-                    row = {"suite": suite, "task_id": task.task_id, "status": "BLOCKED", "success": False, "tags": task.tags, "checker": "fixture server unavailable", "execution": args.execution}
+                if args.execution == "real-host" and task.value["start"].get("url", "").startswith(DEFAULT_FIXTURE_ORIGIN) and server is None and not _fixture_server_available(DEFAULT_FIXTURE_ORIGIN):
+                    row = task_infra_row(task.task_id, suite, run_index + 1, task.tags,
+                                         args.execution, "fixture server unavailable")
                     _append_reported(results, row, output, args.execution)
                     continue
                 if args.execution == "tart":
                     reset_ok, reset_error = _run_reset(reset, task, token, args.timeout)
                     if not reset_ok:
-                        _append_reported(results, {"suite": suite, "task_id": task.task_id, "run": run_index + 1, "status": "BLOCKED", "success": False, "tags": task.tags, "checker": reset_error, "execution": args.execution}, output, args.execution)
+                        row = task_infra_row(task.task_id, suite, run_index + 1, task.tags,
+                                             args.execution, reset_error)
+                        _append_reported(results, row, output, args.execution)
                         continue
                 response, error = _run_driver(driver, task, args.policy, token, driver_task_id, args.timeout)
                 if error or response is None:
-                    _append_reported(results, {"suite": suite, "task_id": task.task_id, "run": run_index + 1, "status": "BLOCKED", "success": False, "tags": task.tags, "checker": error or "driver unavailable", "execution": args.execution}, output, args.execution)
+                    row = task_infra_row(task.task_id, suite, run_index + 1, task.tags,
+                                         args.execution, error or "driver unavailable")
+                    _append_reported(results, row, output, args.execution)
                     continue
                 row, status = _evaluate_response(task, response, token, driver_task_id, run_index + 1, args.execution)
                 _append_reported(results, row, output, args.execution)
@@ -782,7 +781,7 @@ def main() -> int:
     parser.add_argument("--runs", type=int, default=1)
     parser.add_argument("--driver", help="driver argv, or set EVAL_DRIVER; invoked without a shell")
     parser.add_argument("--reset-command", help="Tart golden snapshot reset argv, or set EVAL_VM_RESET")
-    parser.add_argument("--execution", choices=("tart", "real-host"), default="tart", help="tart is the scored golden-VM run; real-host is a non-VM diagnostic")
+    parser.add_argument("--execution", choices=("tart", "real-host"), default="tart", help="tart uses the golden VM; real-host runs the Mac baseline without VM reset")
     parser.add_argument("--timeout", type=float, default=1800)
     parser.add_argument("--output")
     args = parser.parse_args()

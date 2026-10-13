@@ -315,7 +315,8 @@ class TaskAndCheckerTests(unittest.TestCase):
         checker = {"type": "page_text", "expect": {"contains": ["Seine"]}}
         records = [{"type": "step", "observation": {
             "task": "Find Seine", "surface": {"kind": "web", "url": "https://example.test", "title": "Paris"},
-            "elements": [{"id": 1, "role": "paragraph", "name": "The Seine runs through Paris", "value": None}],
+            "elements": [{"id": 0, "role": "page_text", "name": "The Seine runs through Paris",
+                          "value": None, "state": ["visible", "read_only"]}],
         }}]
         self.assertTrue(run_suite._match_expectation(None, checker, records, "The Seine is in Paris.")[0])
         records[0]["observation"]["elements"] = []
@@ -368,12 +369,98 @@ class TaskAndCheckerTests(unittest.TestCase):
 
         row = {"suite": "basics", "task_id": "one", "status": "PASS", "success": True,
                "steps": 2, "wall_seconds": 1.0, "mean_step_latency_ms": 25.0,
+               "median_total_step_latency_ms": 9.0, "total_step_latencies_ms": [5, 9, 13],
                "approvals": 0, "approval_requests": 0, "gate_rejections": {},
                "unsafe_count": 0, "checker": "matched", "tags": ["click"], "answer": "done"}
         with TemporaryDirectory() as directory:
             run_suite._write_report(Path(directory), [row], "tart")
             self.assertTrue((Path(directory) / "results.csv").is_file())
             self.assertIn("click", (Path(directory) / "by_skill.json").read_text())
+            summary = json.loads((Path(directory) / "by_skill.json").read_text())["click"]
+            self.assertEqual(summary["median_total_step_latency_ms"], 9)
+
+    def test_preflight_rejects_missing_or_incomplete_real_host_proof(self) -> None:
+        from preflight import evaluate
+
+        good = {
+            "operation": "preflight", "real_host_app": True, "outcome": "ready",
+            "checks": [{"name": name, "status": "passed", "detail": "ok"}
+                       for name in ("host_process", "accessibility", "screen_recording",
+                                    "safari_helper", "safari_extension", "model")],
+            "safari_extension_status": "enabled",
+            "safari_ping_count": 100, "safari_ping_p95_ms": 2.5, "model_status": "loaded",
+        }
+        self.assertTrue(evaluate(good).passed)
+        missing_ping = {**good, "safari_ping_count": 99}
+        self.assertFalse(evaluate(missing_ping).passed)
+        malformed_check = {**good, "checks": [{"status": "passed"}]}
+        self.assertFalse(evaluate(malformed_check).passed)
+        blocked = {**good, "outcome": "infra_blocked", "blocked_reason": "helper pending",
+                   "owner_action": "Allow the helper"}
+        result = evaluate(blocked)
+        self.assertFalse(result.passed)
+        self.assertEqual(result.reason, "helper pending")
+        self.assertEqual(result.owner_action, "Allow the helper")
+
+    def test_preflight_abort_writes_infra_rows_without_running_tasks(self) -> None:
+        from tempfile import TemporaryDirectory
+        from preflight import failed
+
+        with TemporaryDirectory() as directory, \
+             patch.object(run_suite, "_start_fixture_server", return_value=None), \
+             patch.object(run_suite, "_fixture_server_available", return_value=True), \
+             patch.object(run_suite, "_run_preflight", return_value=failed("Screen Recording denied", "Grant Screen Recording")), \
+             patch.object(run_suite, "_run_driver", side_effect=AssertionError("tasks must not start")):
+            args = type("Args", (), {
+                "suite": "smoke", "driver": "fake-driver", "reset_command": None,
+                "execution": "real-host", "timeout": 1, "runs": 1, "policy": "fara15-4b",
+                "output": directory,
+            })()
+            self.assertEqual(run_suite.run(args), 1)
+            rows = json.loads((Path(directory) / "results.json").read_text())
+            self.assertEqual(len(rows), len(run_suite.smoke_tasks()))
+            self.assertTrue(all(row["status"] == "INFRA-BLOCKED" for row in rows))
+            metadata = json.loads((Path(directory) / "run_metadata.json").read_text())
+            self.assertEqual(metadata["evaluated_task_runs"], 0)
+            self.assertEqual(metadata["infra_blocked_task_runs"], len(rows))
+
+    def test_missing_first_observation_is_infra_but_recorded_model_failure_is_fail(self) -> None:
+        task = run_suite.load_tasks("basics")[0]
+        response = {"task_id": str(uuid.uuid4()), "outcome": "failed", "answer": "",
+                    "episode_path": "/tmp/unused.jsonl", "wall_seconds": 1, "real_host_app": True}
+        task_id = response["task_id"]
+        with patch.object(run_suite, "_episode_records", return_value=[]):
+            response["answer"] = "bridge binding failed before observation"
+            absent, _ = run_suite._evaluate_response(task, response, "a" * 32, task_id, 1, "real-host")
+        self.assertEqual(absent["status"], "INFRA-BLOCKED")
+        self.assertIn("bridge binding failed", absent["checker"])
+        records = [{"type": "step", "step": 0, "timings": {"total_ms": 12}},
+                   {"type": "footer", "outcome": "failed", "approvals": []}]
+        with patch.object(run_suite, "_episode_records", return_value=records), \
+             patch.object(run_suite, "_match_expectation", return_value=(False, "model stopped")):
+            failed_row, _ = run_suite._evaluate_response(task, response, "a" * 32, task_id, 1, "real-host")
+        self.assertEqual(failed_row["status"], "FAIL")
+        self.assertEqual(failed_row["median_total_step_latency_ms"], 12)
+
+    def test_infra_rows_are_excluded_from_skill_denominators(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        rows = [
+            {"task_id": "passed", "status": "PASS", "success": True, "tags": ["reading"],
+             "steps": 1, "wall_seconds": 1, "mean_step_latency_ms": 3,
+             "median_total_step_latency_ms": 8, "approvals": 0, "approval_requests": 0,
+             "gate_rejections": {}, "unsafe_count": 0},
+            {"task_id": "infra", "status": "INFRA-BLOCKED", "success": False, "tags": ["reading"],
+             "steps": 0},
+        ]
+        with TemporaryDirectory() as directory:
+            run_suite._write_report(Path(directory), rows, "real-host")
+            summary = json.loads((Path(directory) / "by_skill.json").read_text())["reading"]
+        self.assertEqual(summary["scheduled_tasks"], 2)
+        self.assertEqual(summary["tasks"], 1)
+        self.assertEqual(summary["infra_blocked"], 1)
+        self.assertEqual(summary["success_rate"], 1.0)
+        self.assertEqual(summary["median_total_step_latency_ms"], 8)
 
 
 if __name__ == "__main__":

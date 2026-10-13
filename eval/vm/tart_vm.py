@@ -308,6 +308,25 @@ def _safe_task_response(response: Any, request: dict[str, Any]) -> dict[str, Any
     return response
 
 
+def _safe_preflight_response(response: Any) -> dict[str, Any]:
+    required = {"operation", "real_host_app", "outcome", "checks"}
+    if not isinstance(response, dict) or not required <= response.keys():
+        raise Blocked("guest app returned an invalid preflight response")
+    if response["operation"] != "preflight" or response["real_host_app"] is not True:
+        raise Blocked("guest response did not prove the real host preflight")
+    if response["outcome"] not in {"ready", "infra_blocked"} or not isinstance(response["checks"], list):
+        raise Blocked("guest preflight fields have invalid types")
+    if response["outcome"] == "infra_blocked":
+        if not all(isinstance(response.get(key), str) and response[key]
+                   for key in ("blocked_reason", "owner_action")):
+            raise Blocked("blocked guest preflight omitted its reason or owner action")
+    else:
+        ready_fields = {"safari_extension_status", "safari_ping_count", "safari_ping_p95_ms", "model_status"}
+        if not ready_fields <= response.keys():
+            raise Blocked("ready guest preflight omitted Safari or model status")
+    return response
+
+
 def _episode_guest_path(config: Config, request: dict[str, Any], response: dict[str, Any]) -> str:
     path = Path(response["episode_path"])
     task_id = request.get("task_id")
@@ -370,7 +389,13 @@ def drive(config: Config, run: Run = invoke, *, request_text: str | None = None)
             request = json.loads(request_text)
         except json.JSONDecodeError as error:
             raise Blocked("driver input must be one JSON request") from error
-        if not isinstance(request, dict) or not isinstance(request.get("task_id"), str):
+        if not isinstance(request, dict):
+            raise Blocked("driver input request is invalid")
+        if request.get("operation") == "preflight":
+            if set(request) != {"operation", "probe_url"} or not isinstance(request.get("probe_url"), str):
+                raise Blocked("preflight input request is invalid")
+            return _drive_preflight(config, request_text, request, run)
+        if not isinstance(request.get("task_id"), str):
             raise Blocked("driver input request is invalid")
         address_result = checked(run, ["tart", "ip", config.vm_name], "VM address", env=tart_env(config))
         address = address_result.stdout.strip()
@@ -394,6 +419,23 @@ def drive(config: Config, run: Run = invoke, *, request_text: str | None = None)
         return response
     finally:
         cleanup_vm(config, run)
+
+
+def _drive_preflight(config: Config, request_text: str, request: dict[str, Any], run: Run) -> dict[str, Any]:
+    address_result = checked(run, ["tart", "ip", config.vm_name], "VM address", env=tart_env(config))
+    address = address_result.stdout.strip()
+    _ssh_host(address)
+    app_command = f"REMOTE_DESKTOP_EVAL_ROOT={shlex.quote(config.remote_eval_root)} {APP_COMMAND}"
+    app_result = checked(run, remote(config, address, app_command), "real host preflight",
+                         input_text=request_text, timeout=1800)
+    try:
+        response = _safe_preflight_response(json.loads(app_result.stdout))
+    except json.JSONDecodeError as error:
+        raise Blocked("guest app stdout was not one preflight JSON object") from error
+    response["vm_execution"] = {"engine": "tart", "golden": GOLDEN_NAME,
+                                "vm_name": config.vm_name, "run_token": config.token,
+                                "reset_state": "verified"}
+    return response
 
 
 def main(argv: list[str] | None = None) -> int:

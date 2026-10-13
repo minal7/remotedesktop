@@ -27,6 +27,9 @@ struct RemoteDesktopHostApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
 
     init() {
+        if let exitCode = HostRelaunch.runIfRequested() {
+            Darwin.exit(exitCode)
+        }
         if let exitCode = HostCommandLine.runIfNeeded() {
             Darwin.exit(exitCode)
         }
@@ -64,6 +67,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var terminationTask: Task<Void, Never>?
     private var terminationState: TerminationState = .idle
     private var relaunchAfterShutdown = false
+    private var rejectedDuplicateInstance = false
+    private var ownsSingleInstanceLease = false
+    // Keep the lock beyond applicationWillTerminate; the OS may still have the
+    // old process alive while the replacement helper waits for its exit.
+    private static var processSingleInstanceLease: HostSingleInstanceLease?
     private(set) var didEnterProductionLaunchPath = false
     private(set) var didInstallStatusItem = false
 
@@ -117,6 +125,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             // activate on the user's desktop. Explicit native UI tests may
             // create their own isolated windows under one stable policy.
             NSApp.setActivationPolicy(HostRuntimeContext.allowsNativeTestWindows ? .accessory : .prohibited)
+            return
+        }
+        do {
+            let bundleIdentifier = Bundle.main.bundleIdentifier ?? ""
+            guard let lease = try HostSingleInstance.acquire(bundleIdentifier: bundleIdentifier) else {
+                rejectedDuplicateInstance = true
+                NSLog("RemoteDesktopHost is already running for this user")
+                NSApp.setActivationPolicy(.prohibited)
+                NSApp.terminate(nil)
+                return
+            }
+            Self.processSingleInstanceLease = lease
+            ownsSingleInstanceLease = true
+        } catch {
+            rejectedDuplicateInstance = true
+            NSLog("RemoteDesktopHost could not acquire its single-instance lock: \(error)")
+            NSApp.setActivationPolicy(.prohibited)
+            NSApp.terminate(nil)
             return
         }
         didEnterProductionLaunchPath = true
@@ -176,7 +202,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        guard HostRuntimeContext.shouldInstallVisibleChrome else { return }
+        guard HostRuntimeContext.shouldInstallVisibleChrome,
+              ownsSingleInstanceLease else { return }
         terminationSignalSource?.cancel()
         terminationSignalSource = nil
         Darwin.signal(SIGTERM, SIG_DFL)
@@ -193,6 +220,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     func applicationShouldTerminate(
         _ sender: NSApplication
     ) -> NSApplication.TerminateReply {
+        if rejectedDuplicateInstance { return .terminateNow }
         guard HostRuntimeContext.shouldInstallVisibleChrome else {
             return .terminateNow
         }
@@ -216,7 +244,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             await HostTerminationSequence.finish(
                 session: self.session,
                 relaunchAfterShutdown: self.relaunchAfterShutdown,
-                launchReplacement: { self.launchReplacementHost() })
+                launchReplacement: { self.startReplacementHost() })
             self.terminationState = .readyToTerminate
             sender.terminate(nil)
         }
@@ -381,14 +409,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         NSApp.terminate(nil)
     }
 
-    private func launchReplacementHost() {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/open")
-        process.arguments = ["-n", Bundle.main.bundlePath]
+    private func startReplacementHost() {
         do {
-            try process.run()
+            try HostRelaunch.startAfterExit(bundleURL: Bundle.main.bundleURL)
         } catch {
-            NSLog("RemoteDesktopHost could not restart itself: \(error.localizedDescription)")
+            NSLog("RemoteDesktopHost could not schedule its restart: \(error.localizedDescription)")
         }
     }
 

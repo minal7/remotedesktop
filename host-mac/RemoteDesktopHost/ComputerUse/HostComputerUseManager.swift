@@ -5986,6 +5986,7 @@ final class HostComputerUseManager: ObservableObject {
                 if let receipt = await installer.currentInstallation() {
                     guard !Task.isCancelled, !isShuttingDown else { return }
                     do {
+                        _ = try SafariBridgeHelperService.ensureRegistered()
                         executor = try generalAgentFactory(receipt)
                         modelState = .ready(runtimeName: executor!.runtimeName)
                     } catch { modelState = .error(error.localizedDescription) }
@@ -7758,6 +7759,8 @@ final class HostComputerUseManager: ObservableObject {
             guard let self else { return }
             defer { setupTask = nil }
             do {
+                _ = try SafariBridgeHelperService.ensureRegistered()
+                try Task.checkCancellation()
                 let receipt = try await installer.install { [weak self] update in self?.consumeInstallerUpdate(update) }
                 try Task.checkCancellation()
                 executor = try factory(receipt)

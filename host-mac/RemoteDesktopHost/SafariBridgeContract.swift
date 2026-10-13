@@ -8,7 +8,7 @@ enum SafariBridgeOperation: String, Codable, CaseIterable {
 enum SafariBridgeStatus: String, Codable { case ok, error }
 
 enum SafariBridgeError: String, Codable, CaseIterable {
-    case bridgeUnavailable, helperNotRegistered, helperRequiresApproval, invalidPayload
+    case bridgeUnavailable, helperMissingFromBundle, helperNotRegistered, helperRequiresApproval, invalidPayload
     case unauthorizedTask, staleTask, wrongTab, missingPageAccess, tabNotFound
     case operationFailed, unsupported, targetGone, targetChanged, targetCovered
     case disabledTarget, credentialHandoff, inactiveTab, fileInjectionUnsupported

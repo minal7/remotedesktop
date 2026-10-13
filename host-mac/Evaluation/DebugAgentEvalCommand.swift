@@ -22,9 +22,21 @@ enum DebugAgentEvalCommand {
         }
         do {
             let data = input.readDataToEndOfFile()
-            let request = try AgentEvalRequest.decodeStrict(data)
-            let response = try await DebugAgentEvalSession(request: request).run()
-            let encoded = try JSONEncoder().encode(response)
+            let root = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+            let encoded: Data
+            if root?["operation"] as? String == "preflight" {
+                let response: AgentEvalPreflightResponse
+                if let request = try? AgentEvalPreflightRequest.decodeStrict(data) {
+                    response = await AgentEvalPreflight.run(request)
+                } else {
+                    response = .invalidRequest()
+                }
+                encoded = try JSONEncoder().encode(response)
+            } else {
+                let request = try AgentEvalRequest.decodeStrict(data)
+                let response = try await DebugAgentEvalSession(request: request).run()
+                encoded = try JSONEncoder().encode(response)
+            }
             output.write(encoded)
             output.write(Data([0x0A]))
             return 0

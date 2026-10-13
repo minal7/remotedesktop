@@ -19,25 +19,29 @@ final class SafariBridgeTransport {
     }
 
     func startTask(taskToken: String, registerHelperIfNeeded: Bool = false) async throws {
+        // Keep the old argument for source compatibility; shared registration
+        // now runs for every bridge task, independent of who starts it.
+        _ = registerHelperIfNeeded
         guard SafariBridgeTaskBindings.isValidTaskToken(taskToken) else {
             throw SafariBridgeTransportFailure.taskRejected
         }
-        let helperService = SMAppService.agent(plistName: "LaunchAgent.plist")
-        if registerHelperIfNeeded, helperService.status == .notRegistered {
-            do { try helperService.register() }
-            catch { /* Report the resulting public service status below. */ }
-        }
-        switch helperService.status {
-        case .enabled:
-            break
-        case .requiresApproval:
-            throw SafariBridgeTransportFailure.unavailable(.helperRequiresApproval)
-        case .notRegistered:
-            throw SafariBridgeTransportFailure.unavailable(.helperNotRegistered)
-        case .notFound:
-            throw SafariBridgeTransportFailure.unavailable(.helperNotRegistered)
-        @unknown default:
-            throw SafariBridgeTransportFailure.unavailable(.bridgeUnavailable)
+        do {
+            _ = try SafariBridgeHelperService.ensureRegistered()
+        } catch let failure as SafariBridgeHelperServiceError {
+            switch failure {
+            case .helperMissingFromBundle:
+                throw SafariBridgeTransportFailure.unavailable(.helperMissingFromBundle)
+            case .helperNotRegistered:
+                throw SafariBridgeTransportFailure.unavailable(.helperNotRegistered)
+            case .helperRequiresApproval:
+                throw SafariBridgeTransportFailure.unavailable(.helperRequiresApproval)
+            case .statusUnavailable:
+                throw SafariBridgeTransportFailure.unavailable(.bridgeUnavailable)
+            case let .registrationFailed(domain, code):
+                throw NSError(domain: domain, code: code, userInfo: [
+                    NSLocalizedDescriptionKey: failure.localizedDescription,
+                ])
+            }
         }
         let connection = SafariBridgeHostXPC.connection()
         let remote = try proxy(connection)

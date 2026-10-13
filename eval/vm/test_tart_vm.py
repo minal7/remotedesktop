@@ -218,6 +218,34 @@ class TartVMTests(unittest.TestCase):
             self.assertIn(["tart", "delete", self.config.vm_name], commands)
             self.assertFalse(self.config.state_path.exists())
 
+    def test_preflight_accepts_swift_omitted_nil_fields_and_adds_vm_proof(self) -> None:
+        runner = RecordingRunner()
+        runner.response = json.dumps({
+            "operation": "preflight", "real_host_app": True, "outcome": "ready",
+            "checks": [{"name": name, "status": "passed", "detail": "ok"}
+                       for name in ("host_process", "accessibility", "screen_recording",
+                                    "safari_helper", "safari_extension", "model")],
+            "safari_extension_status": "enabled", "safari_ping_count": 100,
+            "safari_ping_p95_ms": 1.25, "model_status": "loaded",
+        })
+        request = {"operation": "preflight", "probe_url": "http://127.0.0.1:8765/forms.html?__eval_run=" + self.config.token}
+        with patch.object(tart_vm, "RUN_ROOT", self.run_root):
+            tart_vm._write_state(self.config, 123)
+            result = tart_vm.drive(self.config, runner, request_text=json.dumps(request))
+        self.assertEqual(result["outcome"], "ready")
+        self.assertEqual(result["vm_execution"]["run_token"], self.config.token)
+        self.assertFalse(any(call[0][0] == "scp" for call in runner.calls))
+        self.assertFalse(self.config.state_path.exists())
+
+    def test_blocked_preflight_can_omit_unavailable_optional_statuses(self) -> None:
+        response = {
+            "operation": "preflight", "real_host_app": True, "outcome": "infra_blocked",
+            "checks": [{"name": "host_process", "status": "passed", "detail": "ok"},
+                       {"name": "accessibility", "status": "blocked", "detail": "denied"}],
+            "blocked_reason": "Accessibility denied", "owner_action": "Grant Accessibility",
+        }
+        self.assertEqual(tart_vm._safe_preflight_response(response), response)
+
 
 if __name__ == "__main__":
     unittest.main()
