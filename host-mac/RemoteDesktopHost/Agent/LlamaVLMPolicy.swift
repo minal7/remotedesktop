@@ -100,7 +100,7 @@ final class LlamaVLMPolicy: AgentPolicy {
         }
         self.transport = transport
         self.model = model
-        self.promptVersion = model == .fara15_4b ? "v1-fara-native-tool" : "v1-ui-tars-native-tool"
+        self.promptVersion = model == .fara15_4b ? "v1-fara-native-content" : "v1-ui-tars-native-tool"
         self.prompt = Self.nativePrompt(prompt, model: model)
         self.actionSchema = try Self.nativeToolSchema(model: model)
     }
@@ -228,7 +228,21 @@ final class LlamaVLMPolicy: AgentPolicy {
         try AgentPolicyActionSchema.schema(for: model)
     }
 
-    private static func nativePrompt(_ base: String, model: AgentPolicyModel) -> String {
+    static func nativePrompt(_ base: String, model: AgentPolicyModel) -> String {
+        if model == .fara15_4b {
+            let official4BIdentity = """
+            You are Fara, a computer use agent (CUA) specialized for web browsers. You are developed by Microsoft AI Frontiers. You assist users with completing and automating tasks that require the use of a web browser.
+
+            The model was trained in the timeframe of January - April 2026. You can effectively perform tasks even beyond this range by accessing the web browser and using the latest information on the live web. But your knowledge cutoff is limited to early 2026, so you may not be aware of events or developments that occurred after that time, without explicitly browsing and searching for the latest information on the web.
+
+            This edition of the model was trained using SFT on top of Qwen3.5-4B, using a synthetic data mixture generated and developed by Microsoft AI Frontiers.
+            """
+            let official = ComputerUseFaraModel.officialSystemPrompt
+            guard let criticalPoints = official.range(of: "A critical point is a situation") else {
+                return official4BIdentity
+            }
+            return official4BIdentity + "\n\n" + String(official[criticalPoints.lowerBound...])
+        }
         let policy = base.components(separatedBy: "\nAction schema:").first ?? base
         let adapted = policy
             .replacingOccurrences(of: "Return exactly one JSON action matching the schema below, with no commentary or extra keys.",

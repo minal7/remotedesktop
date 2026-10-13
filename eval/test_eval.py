@@ -506,10 +506,15 @@ class TaskAndCheckerTests(unittest.TestCase):
             "active_environment": "pixel", "policy": "fara15-4b",
             "checks": [{"name": name, "status": "passed", "detail": "ok"}
                        for name in ("host_process", "accessibility", "screen_recording",
-                                    "pixel_environment", "model")],
+                                    "pixel_environment", "model", "trust")],
             "model_status": "loaded",
+            "trusted_surfaces": [{"kind": "app", "identity": "com.apple.Safari"},
+                                 {"kind": "web", "identity": "http://127.0.0.1:8765"}],
+            "trust_store_path": "/Users/test/Library/Application Support/RemoteDesktopHost/AgentTrust",
         }
-        self.assertTrue(evaluate(good).passed)
+        seeds = [{"kind": "app", "identity": "Safari"},
+                 {"kind": "web", "identity": "http://127.0.0.1:8765"}]
+        self.assertTrue(evaluate(good, trust_seeds=seeds).passed)
         mismatch = {**good, "policy": "ui-tars15-7b"}
         self.assertFalse(evaluate(mismatch, "fara15-4b").passed)
         bad_environment = {**good, "active_environment": "safari"}
@@ -625,6 +630,9 @@ class TaskAndCheckerTests(unittest.TestCase):
             self.assertEqual(row["policy"], "ui-tars15-7b")
             self.assertEqual(row["crop_mode"], "full-display")
             self.assertEqual(row["approval_requests"], approval_requests)
+            self.assertEqual(row["answer"], answer)
+            self.assertEqual(row["driver_task_id"], task_id)
+            self.assertEqual(row["wall_seconds"], 1.5)
 
     def test_terminal_footer_mismatch_stays_blocked_and_failed_output_is_gave_up(self) -> None:
         task = run_suite.load_tasks("native")[0]

@@ -19,6 +19,14 @@ final class PixelEnvironmentTests: XCTestCase {
         XCTAssertNil(PixelGeometry.point(CGPoint(x: 100, y: 2), imageSize: CGSize(width: 100, height: 100), screenBounds: bounds))
     }
 
+    func testFinitePointMappingDoesNotAddASecondImageBoundsGuard() throws {
+        let mapped = try XCTUnwrap(PixelEnvironment.mapPoint(CGPoint(x: 120, y: -10),
+            imageSize: CGSize(width: 100, height: 100),
+            screenBounds: CGRect(x: 0, y: 0, width: 100, height: 100)))
+        XCTAssertEqual(mapped.x, 120, accuracy: 0.001)
+        XCTAssertEqual(mapped.y, -10, accuracy: 0.001)
+    }
+
     func testContentCropAndResizePreserveScreenMapping() throws {
         let source = try XCTUnwrap(CGImage(width: 800, height: 600, bitsPerComponent: 8, bitsPerPixel: 32,
             bytesPerRow: 3200, space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue),
@@ -66,8 +74,35 @@ final class PixelEnvironmentTests: XCTestCase {
         let rebound = PixelElementMark(id: 9, role: "AXButton", name: "Upload",
             screenRect: moved.screenRect, state: ["visible"], inView: true)
         XCTAssertEqual(PixelTargetRebinding.find(expected, in: [rebound])?.id, 9)
+        let frameElement = AgentElement(id: 9, role: "AXButton", name: "Upload", value: nil,
+            state: ["visible"], bbox: .init(x: 300, y: 400, width: 50, height: 24), inView: true)
+        let reboundFrameElement = try PixelActionRebinding.rebind(expected, in: [frameElement])
+        XCTAssertEqual(reboundFrameElement.id, expected.id)
+        XCTAssertEqual(reboundFrameElement.bbox, frameElement.bbox)
+        let point = try PixelScreenTargetResolver.point(for: expected, in: [rebound])
+        XCTAssertEqual(point.x, moved.screenRect.midX)
+        XCTAssertEqual(point.y, moved.screenRect.midY)
+
+        XCTAssertThrowsError(try PixelActionRebinding.rebind(expected, in: [])) { error in
+            XCTAssertEqual(error as? AgentEnvironmentError, .targetGone)
+        }
+        XCTAssertThrowsError(try PixelScreenTargetResolver.point(for: expected, in: [])) { error in
+            XCTAssertEqual(error as? AgentEnvironmentError, .targetGone)
+        }
         let changed = PixelElementMark(id: 4, role: "AXTextField", name: "Upload",
             screenRect: moved.screenRect, state: ["visible"], inView: true)
         XCTAssertNil(PixelTargetRebinding.find(expected, in: [changed]))
+        XCTAssertThrowsError(try PixelScreenTargetResolver.point(for: expected, in: [changed])) { error in
+            XCTAssertEqual(error as? AgentEnvironmentError, .targetGone)
+        }
+        let secure = PixelElementMark(id: 4, role: "AXButton", name: "Upload",
+            screenRect: moved.screenRect, state: ["visible", "secure"], inView: true)
+        XCTAssertThrowsError(try PixelScreenTargetResolver.point(for: expected, in: [secure])) { error in
+            XCTAssertEqual(error as? AgentEnvironmentError, .credentialHandoff)
+        }
+    }
+
+    func testFailedOCRProducesNoTargetLabel() {
+        XCTAssertNil(SystemBarriers.targetLabel(screenshot: "not-base64", x: 12, y: 20))
     }
 }

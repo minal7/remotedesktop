@@ -5,6 +5,18 @@ from __future__ import annotations
 from typing import Any
 
 
+def with_response_fields(
+    row: dict[str, Any], response: dict[str, Any] | None,
+) -> dict[str, Any]:
+    if response is None:
+        return row
+    for field in ("answer", "task_id", "wall_seconds"):
+        if field in response:
+            target = "driver_task_id" if field == "task_id" else field
+            row[target] = response[field]
+    return row
+
+
 def with_integrity_metrics(
     row: dict[str, Any], response: dict[str, Any], task_id: str,
     metrics: dict[str, Any], records: list[dict[str, Any]],

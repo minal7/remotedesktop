@@ -6633,6 +6633,48 @@ final class ComputerUseTests: XCTestCase {
         XCTAssertTrue(executor.cancelledVisualApprovals.isEmpty)
     }
 
+    func test_agentApprovalWireIdentityResumesOnlyItsTaskAndRequest() async throws {
+        let fixture = AdapterFixture(replies: [[
+            .click(target: .element(id: 1), button: nil, count: nil),
+            .done(answer: "Finished")
+        ]])
+        let adapter = AgentCapabilityAdapter(executor: fixture.executor)
+        let channel = FakeHostComputerUseChannel(), ledgerURL = temporaryLedgerURL()
+        defer { try? FileManager.default.removeItem(at: ledgerURL.deletingLastPathComponent()) }
+        let manager = HostComputerUseManager(experimentalEnabled: { true }, injector: InputInjector(),
+            executor: ComputerUseCapabilityExecutor(agentAdapter: adapter),
+            taskLedger: ComputerUseTaskLedger(fileURL: ledgerURL), allowsExternalServices: false,
+            channelFactory: { _ in channel })
+        defer { manager.stop() }
+        let prompt = makeEnvelope(kind: .prompt, body: "Press the submit button")
+        manager.authorizePeer(senderID: prompt.senderID)
+        XCTAssertTrue(manager.handle(prompt, channel: channel))
+        await waitUntil { if case .awaitingApproval = manager.activity { true } else { false } }
+        await waitUntil { await channel.sentMessages().contains { $0.kind == .approvalRequest } }
+
+        let sent = await channel.sentMessages()
+        let cardEnvelope = try XCTUnwrap(sent.first { $0.kind == .approvalRequest })
+        let card = try ComputerUseApprovalRequest.decodeBody(cardEnvelope.body)
+        XCTAssertEqual(UUID(uuidString: card.requestID), fixture.executor.activeLoop?.pendingStep?.approval.id)
+        XCTAssertNotNil(manager.debugPendingAgentApproval(taskID: prompt.id, requestID: card.requestID))
+        XCTAssertNil(manager.debugPendingAgentApproval(taskID: "another-task", requestID: card.requestID))
+
+        let wrong = ComputerUseApprovalResponse(requestID: UUID().uuidString, approved: true,
+            taskID: prompt.id, appliedControlRevision: card.appliedControlRevision,
+            hostControlEpoch: card.hostControlEpoch)
+        XCTAssertTrue(manager.handle(makeEnvelope(kind: .approvalResponse, body: try wrong.encodedBody()), channel: channel))
+        try await Task.sleep(for: .milliseconds(30))
+        XCTAssertTrue(fixture.environments[0].executed.isEmpty)
+
+        let accepted = ComputerUseApprovalResponse(requestID: card.requestID, approved: true,
+            taskID: prompt.id, appliedControlRevision: card.appliedControlRevision,
+            hostControlEpoch: card.hostControlEpoch)
+        XCTAssertTrue(manager.handle(makeEnvelope(kind: .approvalResponse, body: try accepted.encodedBody()), channel: channel))
+        await waitUntil { manager.activity == .idle && fixture.environments[0].executed.count == 1 }
+        XCTAssertEqual(fixture.environments[0].executed.count, 1)
+        XCTAssertEqual(fixture.policies[0].proposalCount, 2)
+    }
+
     func test_changedVisualApprovalTargetReplansModelButKeepsTrustedPromptStable() async throws {
         let proposedAction = ComputerUsePredictedAction.key(
             usage: 0x28,

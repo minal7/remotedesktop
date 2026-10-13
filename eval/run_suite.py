@@ -41,12 +41,12 @@ try:
     from contracts import validate_episode
 except ImportError as error:
     raise SystemExit("Install eval dependencies with: python3 -m pip install -r eval/requirements.txt") from error
-from preflight import (PreflightResult, failed as failed_preflight, invoke as invoke_preflight,
-                       first_observation_reason, task_infra_row)
+from preflight import PreflightResult, failed as failed_preflight, invoke as invoke_preflight, first_observation_reason, task_infra_row, trust_seeds_for_tasks
 from report import write_report as _write_report
 from fixture_runtime import available as _fixture_server_available, start as _start_fixture_server
 from episode_validation import read_episode_records as _read_episode_records
-from blocked_results import with_integrity_metrics as _with_integrity_metrics
+from blocked_results import (with_integrity_metrics as _with_integrity_metrics,
+                             with_response_fields as _with_response_fields)
 from checkers import match_expectation as _match_checker, normalized_text as _normalized_text
 
 SUPPORTED_POLICIES = {"fara15-4b", "ui-tars15-7b"}
@@ -515,7 +515,6 @@ def _evaluation_environment(task_id: str, token: str) -> dict[str, str]:
     if remote_eval_root:
         env["EVAL_VM_REMOTE_EVAL_ROOT"] = str(remote_eval_root)
     return env
-
 def _run_preflight(command: list[str], reset: list[str], tasks: list[Task], execution: str,
                    timeout: float, policy: str = "fara15-4b") -> PreflightResult:
     token = uuid.uuid4().hex
@@ -530,7 +529,9 @@ def _run_preflight(command: list[str], reset: list[str], tasks: list[Task], exec
         env = _evaluation_environment("preflight", token)
     except EvalError as error:
         return failed_preflight(str(error), "Set a private REMOTE_DESKTOP_EVAL_ROOT and rerun preflight.")
-    result = invoke_preflight(command, probe_url, env, timeout, policy)
+    try: trust_seeds = trust_seeds_for_tasks([task.value for task in tasks])
+    except ValueError as error: return failed_preflight(str(error), "Use only suite-declared apps and the loopback fixture origin.")
+    result = invoke_preflight(command, probe_url, env, timeout, policy, trust_seeds)
     if result.passed and execution == "tart" and not _vm_execution_valid(
             result.response.get("vm_execution") if result.response else None, token):
         return failed_preflight("Preflight driver did not prove the reset golden Tart VM identity.",
@@ -539,20 +540,10 @@ def _run_preflight(command: list[str], reset: list[str], tasks: list[Task], exec
 
 def _infra_blocked_rows(tasks: list[Task], runs: int, execution: str,
                         result: PreflightResult, requested_policy: str = "fara15-4b") -> list[dict[str, Any]]:
-    rows = []
-    for run_index in range(1, runs + 1):
-        for task in tasks:
-            rows.append({
-                "suite": task.value.get("suite", "basics"), "task_id": task.task_id,
-                "run": run_index, "tags": task.tags, "status": "INFRA-BLOCKED",
-                "environment": "pixel", "policy": "none", "requested_policy": requested_policy,
-                "crop_mode": "unknown",
-                "requested_crop_mode": "full-display" if requested_policy == "ui-tars15-7b" else "frontmost-window",
-                "success": False, "steps": 0, "wall_seconds": None,
-                "checker": result.reason, "owner_action": result.owner_action,
-                "preflight": result.response, "execution": execution,
-            })
-    return rows
+    return [{**task_infra_row(task.task_id, task.value.get("suite", "basics"), run_index, task.tags,
+                              execution, result.reason, requested_policy),
+             "owner_action": result.owner_action, "preflight": result.response}
+            for run_index in range(1, runs + 1) for task in tasks]
 
 def _run_reset(command: list[str], task: Task, token: str, timeout: float) -> tuple[bool, str]:
     env = dict(os.environ)
@@ -578,7 +569,7 @@ def _run_reset(command: list[str], task: Task, token: str, timeout: float) -> tu
 def _blocked_result(task: Task, run_index: int, execution: str, reason: str,
                     response: dict[str, Any] | None = None,
                     requested_policy: str = "fara15-4b") -> dict[str, Any]:
-    return {
+    row = {
         "suite": task.value.get("suite", "basics"), "task_id": task.task_id, "run": run_index,
         "status": "BLOCKED", "success": False, "tags": task.tags,
         "environment": "pixel", "policy": response.get("policy", "none") if response else "none",
@@ -588,6 +579,7 @@ def _blocked_result(task: Task, run_index: int, execution: str, reason: str,
         "episode_path": response.get("episode_path") if response else None,
         "checker": reason, "execution": execution,
     }
+    return _with_response_fields(row, response)
 
 def _evaluate_response(task: Task, response: dict[str, Any], token: str, task_id: str,
                        run_index: int, execution: str,
@@ -776,7 +768,6 @@ def _run_one_task(task: Task, run_number: int, args: argparse.Namespace, driver:
         return f"INFRA-BLOCKED ({error})"
     finally:
         _remove_native_scratch(scratch)
-
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--suite", choices=("basics", "native", "smoke", "safety"), required=True)

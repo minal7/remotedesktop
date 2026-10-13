@@ -54,6 +54,7 @@ final class PixelEnvironment: AgentEnvironment {
         let window: AgentMacAccessibility.Window?
         let identity: String
         let bundleID: String
+        let appName: String
         let title: String
         let url: String?
         let image: CGImage
@@ -127,17 +128,31 @@ final class PixelEnvironment: AgentEnvironment {
             switch target {
             case let .element(id):
                 guard let mark = frame.observation.elements.first(where: { $0.id == id }) else { throw AgentEnvironmentError.targetGone }
-                try Self.requireSafe(mark); return mark
+                try Self.requireSecure(mark); return mark
             case let .point(x, y):
-                let size = Self.imageSize(frame.observation.screenshot)
-                guard x.isFinite, y.isFinite, x >= 0, y >= 0, x < size.width, y < size.height else { throw AgentEnvironmentError.targetGone }
-                if let hit = AgentTargetBinding.hit(x: x, y: y, elements: frame.observation.elements) {
-                    try Self.requireSafe(hit); return hit
+                guard x.isFinite, y.isFinite else { throw AgentEnvironmentError.targetGone }
+                if let hit = Self.hit(x: x, y: y, elements: frame.observation.elements) {
+                    try Self.requireSecure(hit); return hit
                 }
                 return nil
             }
         }
-        return .init(action: action, frame: frame, targets: targets)
+        let label: String?
+        if case let .click(.point(x, y), _, _) = action, targets.first?.name.isEmpty != false {
+            label = SystemBarriers.targetLabel(screenshot: frame.observation.screenshot, x: x, y: y)
+        } else { label = nil }
+        let snapshot = snapshots[frame.scope.identity]
+        return .init(action: action, frame: frame, targets: targets, targetContextLabel: label,
+            surfaceReadOnly: snapshot.map { AgentSafetyBoundary.readOnly(bundleID: $0.bundleID, appName: $0.appName) } ?? false)
+    }
+
+    func rebind(_ resolved: AgentResolvedAction, in frame: AgentFrame) async throws -> AgentResolvedAction {
+        try checkScope(frame.scope)
+        let current = try resolved.targets.map { try PixelActionRebinding.rebind($0, in: frame.observation.elements) }
+        let snapshot = snapshots[frame.scope.identity]
+        return .init(action: resolved.action, frame: frame, targets: current,
+            targetContextLabel: resolved.targetContextLabel,
+            surfaceReadOnly: snapshot.map { AgentSafetyBoundary.readOnly(bundleID: $0.bundleID, appName: $0.appName) } ?? resolved.surfaceReadOnly)
     }
 
     func execute(_ resolved: AgentResolvedAction) async throws -> AgentExecutionResult {
@@ -147,22 +162,22 @@ final class PixelEnvironment: AgentEnvironment {
         var detail: String
         switch resolved.action {
         case let .click(target, button, count):
-            try click(try screenPoint(target, frame: resolved.frame), button: button ?? .left, count: count ?? 1)
+            try click(try screenPoint(target, frame: resolved.frame, targets: resolved.targets), button: button ?? .left, count: count ?? 1)
             detail = "clicked \(targetLabel(target, frame: resolved.frame))"
         case let .drag(from, to):
-            try drag(try screenPoint(from, frame: resolved.frame), to: screenPoint(to, frame: resolved.frame))
+            try drag(try screenPoint(from, frame: resolved.frame, targets: resolved.targets), to: screenPoint(to, frame: resolved.frame, targets: resolved.targets))
             detail = "dragged \(targetLabel(from, frame: resolved.frame)) to \(targetLabel(to, frame: resolved.frame))"
         case let .scroll(target, direction, amount):
-            let point = target.map { try? screenPoint($0, frame: resolved.frame) } ?? nil
+            let point = target.map { try? screenPoint($0, frame: resolved.frame, targets: resolved.targets) } ?? nil
             let origin = try point ?? screenPoint(.point(x: Double(lastSnapshot?.image.width ?? 0) / 2,
-                y: Double(lastSnapshot?.image.height ?? 0) / 2), frame: resolved.frame)
+                y: Double(lastSnapshot?.image.height ?? 0) / 2), frame: resolved.frame, targets: resolved.targets)
             let distance = Int(min(amount, 10_000).rounded())
             let dx = direction == .right ? distance : direction == .left ? -distance : 0
             let dy = direction == .down ? -distance : direction == .up ? distance : 0
             try post(.scroll(x: Int(origin.x), y: Int(origin.y), dx: dx, dy: dy, phase: .changed))
             detail = "scrolled \(direction.rawValue) at \(target.map { targetLabel($0, frame: resolved.frame) } ?? "window center")"
         case let .type(target, text, mode):
-            let result = try await type(text, mode: mode, target: target, frame: resolved.frame)
+            let result = try await type(text, mode: mode, target: target, frame: resolved.frame, targets: resolved.targets)
             detail = result
         case let .key(chord):
             try ensureNonSecureFocus()
@@ -171,7 +186,7 @@ final class PixelEnvironment: AgentEnvironment {
                 ifAllowed: inputAllowed, beforePosting: {})
             detail = "pressed \(chord)"
         case let .select(target, option):
-            detail = try await select(option, target: target, frame: resolved.frame)
+            detail = try await select(option, target: target, frame: resolved.frame, targets: resolved.targets)
         case let .openURL(url):
             guard HostAgentAllowPolicy.isAllowedURL(url), let parsed = URL(string: url) else { throw AgentEnvironmentError.unsupportedAction }
             try hostEffect { _ = NSWorkspace.shared.open(parsed) }
@@ -183,7 +198,7 @@ final class PixelEnvironment: AgentEnvironment {
             let candidates = try await finder(query, kind, modifiedAfter).prefix(8)
             return .init(status: .ok, result: try AgentFileResults.render(Array(candidates)))
         case let .setFiles(target, ids):
-            try click(try screenPoint(target, frame: resolved.frame), button: .left, count: 1)
+            try click(try screenPoint(target, frame: resolved.frame, targets: resolved.targets), button: .left, count: 1)
             guard let picker else { throw AgentEnvironmentError.unavailable("The native file picker is unavailable.") }
             detail = try await picker(ids)
         case let .wait(seconds):
@@ -278,7 +293,11 @@ final class PixelEnvironment: AgentEnvironment {
         } }
         let secureRects = (marks?.secureScreenRects ?? []).compactMap { PixelGeometry.imageRect($0, captureBounds: screenshotBounds, imageSize: pixelSize) }
         let png = try encode(image, masking: secureRects)
+        if let reason = SystemBarriers.handoffReason(screenshot: png, elements: elements, focus: focus) {
+            throw AgentEnvironmentError.systemHandoff(reason)
+        }
         return .init(window: axWindow, identity: identity, bundleID: app?.bundleIdentifier ?? "unknown",
+            appName: app?.localizedName ?? "",
             title: target?.title ?? "Visible desktop", url: marks?.browserURL, image: image, screenshot: png,
             elements: elements, focus: focus, screenBounds: screenshotBounds)
     }
@@ -289,32 +308,27 @@ final class PixelEnvironment: AgentEnvironment {
         return try await SCScreenshotManager.captureImage(contentFilter: .init(display: display, excludingWindows: windows), configuration: config)
     }
 
-    private func type(_ text: String, mode: AgentTextMode, target: AgentTarget?, frame: AgentFrame) async throws -> String {
+    private func type(_ text: String, mode: AgentTextMode, target: AgentTarget?, frame: AgentFrame,
+                      targets: [AgentElement]) async throws -> String {
         guard let snapshot = snapshots[frame.scope.identity] else { throw AgentEnvironmentError.targetGone }
-        if let target { try click(screenPoint(target, frame: frame), button: .left, count: 1); try await Task.sleep(for: .milliseconds(100)) }
+        if let target { try click(screenPoint(target, frame: frame, targets: targets), button: .left, count: 1) }
         let app = snapshot.window.map { AXUIElementCreateApplication($0.application.processIdentifier) }
         let focused = app.flatMap(ElementMarks.focusedElement)
         let role = focused.flatMap { ElementMarks.string($0, kAXRoleAttribute) } ?? "unknown"
         let name = focused.map(ElementMarks.label) ?? ""
         if let focused, ElementMarks.isSensitive(focused, role: role, name: name) { throw AgentEnvironmentError.credentialHandoff }
-        let expectedMark: AgentElement?
-        switch target {
-        case let .element(id): expectedMark = frame.observation.elements.first(where: { $0.id == id })
-        case let .point(x, y): expectedMark = AgentTargetBinding.hit(x: x, y: y, elements: frame.observation.elements)
-        case nil: expectedMark = frame.observation.focus.flatMap { focus in frame.observation.elements.first(where: { $0.id == focus.id }) }
-        }
+        let expectedMark = targets.first ?? (target == nil ? frame.observation.focus.flatMap { focus in
+            frame.observation.elements.first(where: { $0.id == focus.id })
+        } : nil)
         if let expectedMark,
            AgentCredentialRule.isSensitive(role: expectedMark.role, name: expectedMark.name, state: expectedMark.state) {
             throw AgentEnvironmentError.credentialHandoff
         }
-        if let focused, let expectedMark, !expectedMark.name.isEmpty,
-           (role != expectedMark.role || name != expectedMark.name) { throw AgentEnvironmentError.targetChanged }
         let oldValue = focused.flatMap { ElementMarks.string($0, kAXValueAttribute) }
-        let pasted = try await paste(text, replace: mode == .replace, focus: focused, window: snapshot.window,
-            role: role, name: name, oldValue: oldValue)
+        let pasted = try await paste(text, replace: mode == .replace, oldValue: oldValue)
         var result = pasted
         if pasted == .rejected {
-            if let focused, let window = snapshot.window { try requireFocus(focused, window: window, role: role, name: name) }
+            try ensureNonSecureFocus()
             guard await injector.applyTextPaced(text, ifAllowed: inputAllowed) else { throw CancellationError() }
             result = .unavailable
         }
@@ -322,73 +336,67 @@ final class PixelEnvironment: AgentEnvironment {
         return "typed \(text.count) chars\(name.isEmpty ? "" : " into \"\(name)\"") → read-back \(status)"
     }
 
-    private func paste(_ text: String, replace: Bool, focus: AXUIElement?, window: AgentMacAccessibility.Window?,
-                       role: String, name: String, oldValue: String?) async throws -> PasteResult {
+    private func paste(_ text: String, replace: Bool, oldValue: String?) async throws -> PasteResult {
         guard text.utf8.count <= 65_536 else { throw AgentEnvironmentError.unsupportedAction }
         let lease = PixelClipboardLease(board: .general, text: text)
         defer { lease.restore() }
-        if replace { try postClipboardKey("cmd+a", focus: focus, window: window, role: role, name: name) }
-        try postClipboardKey("cmd+v", focus: focus, window: window, role: role, name: name)
+        if replace { try postClipboardKey("cmd+a") }
+        try postClipboardKey("cmd+v")
         try await Task.sleep(for: .milliseconds(300))
-        if let focus, let window {
-            guard NSWorkspace.shared.frontmostApplication?.processIdentifier == window.application.processIdentifier,
-                  let currentFocus = ElementMarks.focusedElement(AXUIElementCreateApplication(window.application.processIdentifier)) else { return .unavailable }
+        let processID = NSWorkspace.shared.frontmostApplication?.processIdentifier
+        if let processID, let currentFocus = ElementMarks.focusedElement(AXUIElementCreateApplication(processID)) {
             let currentRole = ElementMarks.string(currentFocus, kAXRoleAttribute) ?? "unknown"
             let currentName = ElementMarks.label(currentFocus)
             if ElementMarks.isSensitive(currentFocus, role: currentRole, name: currentName) { throw AgentEnvironmentError.credentialHandoff }
-            guard CFEqual(focus, currentFocus), currentRole == role, currentName == name else { return .unavailable }
+            guard let oldValue, let current = ElementMarks.string(currentFocus, kAXValueAttribute) else { return .unavailable }
+            if current == (replace ? text : oldValue + text) { return .matches }
+            return current == oldValue ? .rejected : .unavailable
         }
-        guard let oldValue, let focus, let current = ElementMarks.string(focus, kAXValueAttribute) else { return .unavailable }
-        if current == (replace ? text : oldValue + text) { return .matches }
-        return current == oldValue ? .rejected : .unavailable
+        return .unavailable
     }
 
-    private func postClipboardKey(_ chord: String, focus: AXUIElement?, window: AgentMacAccessibility.Window?, role: String, name: String) throws {
-        if let focus, let window { try postKey(chord, focus: focus, window: window, role: role, name: name); return }
+    private func postClipboardKey(_ chord: String) throws {
+        try ensureNonSecureFocus()
         let stroke = try AgentKeyStroke.parse(chord)
         try injector.applyHostKeyStroke(usage: stroke.usage, modifiers: stroke.modifiers,
             ifAllowed: inputAllowed, beforePosting: {})
     }
 
-    private func select(_ option: String, target: AgentTarget, frame: AgentFrame) async throws -> String {
+    private func select(_ option: String, target: AgentTarget, frame: AgentFrame, targets: [AgentElement]) async throws -> String {
         guard let snapshot = snapshots[frame.scope.identity] else { throw AgentEnvironmentError.targetGone }
         let window = snapshot.window
-        try click(screenPoint(target, frame: frame), button: .left, count: 1)
-        try await Task.sleep(for: .milliseconds(100))
+        try click(screenPoint(target, frame: frame, targets: targets), button: .left, count: 1)
         let menu = window.map { ElementMarks.read(window: $0) }
         if let mark = menu?.marks.first(where: { $0.role == "AXMenuItem" && $0.name == option }),
            !mark.screenRect.isEmpty {
             try click(CGPoint(x: mark.screenRect.midX, y: mark.screenRect.midY), button: .left, count: 1); return "selected \"\(option)\""
         }
-        let result = try await type(option, mode: .replace, target: nil, frame: frame)
+        let result = try await type(option, mode: .replace, target: nil, frame: frame, targets: [])
         try ensureNonSecureFocus()
-        try postClipboardKey("enter", focus: nil, window: nil, role: "", name: "")
+        try postClipboardKey("enter")
         return "\(result); pressed Return"
     }
 
-    private func screenPoint(_ target: AgentTarget, frame: AgentFrame) throws -> CGPoint {
+    private func screenPoint(_ target: AgentTarget, frame: AgentFrame, targets: [AgentElement]) throws -> CGPoint {
         guard let snapshot = snapshots[frame.scope.identity] else { throw AgentEnvironmentError.targetGone }
         let size = CGSize(width: snapshot.image.width, height: snapshot.image.height)
         let pixel: CGPoint
         switch target {
         case let .element(id):
-            guard let element = frame.observation.elements.first(where: { $0.id == id }) else { throw AgentEnvironmentError.targetGone }
-            try Self.requireSafe(element)
-            if let window = snapshot.window,
-               NSWorkspace.shared.frontmostApplication?.processIdentifier == window.application.processIdentifier {
-                let current = ElementMarks.read(window: window)
-                guard let mark = PixelTargetRebinding.find(element, in: current.marks) else {
-                    throw AgentEnvironmentError.targetGone
-                }
-                guard mark.inView, !mark.state.contains("disabled") else { throw AgentEnvironmentError.targetCovered }
-                guard !AgentCredentialRule.isSensitive(role: mark.role, name: mark.name, state: mark.state) else { throw AgentEnvironmentError.credentialHandoff }
-                return CGPoint(x: mark.screenRect.midX, y: mark.screenRect.midY)
+            guard let element = targets.first(where: { $0.id == id }) else { throw AgentEnvironmentError.targetGone }
+            try Self.requireSecure(element)
+            guard let window = snapshot.window,
+                  NSWorkspace.shared.frontmostApplication?.processIdentifier == window.application.processIdentifier else {
+                throw AgentEnvironmentError.targetGone
             }
-            pixel = CGPoint(x: element.bbox.x + element.bbox.width / 2, y: element.bbox.y + element.bbox.height / 2)
+            let current = ElementMarks.read(window: window)
+            return try PixelScreenTargetResolver.point(for: element, in: current.marks)
         case let .point(x, y): pixel = CGPoint(x: x, y: y)
         }
-        guard let point = PixelGeometry.point(pixel, imageSize: size, screenBounds: snapshot.screenBounds) else { throw AgentEnvironmentError.targetGone }
-        return point
+        guard let mapped = Self.mapPoint(pixel, imageSize: size, screenBounds: snapshot.screenBounds) else {
+            throw AgentEnvironmentError.targetGone
+        }
+        return mapped
     }
 
     private func click(_ point: CGPoint, button: AgentMouseButton, count: Int) throws {
@@ -409,22 +417,6 @@ final class PixelEnvironment: AgentEnvironment {
             }
             try post(.pointer(x: Int(to.x), y: Int(to.y), buttons: 0))
         } catch { injector.releaseHeldInput(); throw error }
-    }
-
-    private func postKey(_ chord: String, focus: AXUIElement, window: AgentMacAccessibility.Window, role: String, name: String) throws {
-        let stroke = try AgentKeyStroke.parse(chord)
-        try injector.applyHostKeyStroke(usage: stroke.usage, modifiers: stroke.modifiers, ifAllowed: inputAllowed,
-            beforePosting: { try self.requireFocus(focus, window: window, role: role, name: name) })
-    }
-
-    private func requireFocus(_ expected: AXUIElement, window: AgentMacAccessibility.Window, role: String, name: String) throws {
-        guard NSWorkspace.shared.frontmostApplication?.processIdentifier == window.application.processIdentifier,
-              let focused = ElementMarks.focusedElement(AXUIElementCreateApplication(window.application.processIdentifier)),
-              CFEqual(expected, focused), ElementMarks.string(focused, kAXRoleAttribute) == role,
-              ElementMarks.label(focused) == name else {
-            throw AgentEnvironmentError.targetChanged
-        }
-        if ElementMarks.isSensitive(focused, role: role, name: name) { throw AgentEnvironmentError.credentialHandoff }
     }
 
     private func targetLabel(_ target: AgentTarget, frame: AgentFrame) -> String {
@@ -501,14 +493,60 @@ final class PixelEnvironment: AgentEnvironment {
         CGImageDestinationAddImage(dest, redacted, nil); guard CGImageDestinationFinalize(dest) else { throw AgentEnvironmentError.unavailable("Could not encode screenshot.") }; return data as Data
     }
 
-    private static func requireSafe(_ element: AgentElement) throws {
+    private static func requireSecure(_ element: AgentElement) throws {
         guard !AgentContractValidation.isSecureRoleOrState(role: element.role, state: element.state) else { throw AgentEnvironmentError.credentialHandoff }
-        guard !element.state.contains("disabled") else { throw AgentEnvironmentError.disabledTarget }
-        guard element.inView else { throw AgentEnvironmentError.targetCovered }
+    }
+    private static func requireSecure(role: String, name: String, state: [String]) throws {
+        guard !AgentContractValidation.isSecureRoleOrState(role: role, state: state),
+              !AgentCredentialRule.isSensitive(role: role, name: name, state: state) else {
+            throw AgentEnvironmentError.credentialHandoff
+        }
+    }
+    private static func hit(x: Double, y: Double, elements: [AgentElement]) -> AgentElement? {
+        elements.filter { element in
+            let box = element.bbox
+            return x >= box.x && y >= box.y && x < box.x + box.width && y < box.y + box.height
+        }.min { $0.bbox.width * $0.bbox.height < $1.bbox.width * $1.bbox.height }
+    }
+    static func mapPoint(_ pixel: CGPoint, imageSize: CGSize, screenBounds: CGRect) -> CGPoint? {
+        guard pixel.x.isFinite, pixel.y.isFinite,
+              imageSize.width.isFinite, imageSize.height.isFinite, imageSize.width > 0, imageSize.height > 0,
+              screenBounds.minX.isFinite, screenBounds.minY.isFinite,
+              screenBounds.width.isFinite, screenBounds.height.isFinite,
+              screenBounds.width > 0, screenBounds.height > 0 else { return nil }
+        return CGPoint(x: screenBounds.minX + pixel.x / imageSize.width * screenBounds.width,
+            y: screenBounds.minY + pixel.y / imageSize.height * screenBounds.height)
     }
     private static func imageSize(_ base64: String) -> CGSize {
         guard let data = Data(base64Encoded: base64), let source = CGImageSourceCreateWithData(data as CFData, nil),
               let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else { return .zero }
         return CGSize(width: image.width, height: image.height)
+    }
+}
+
+enum PixelActionRebinding {
+    static func rebind(_ expected: AgentElement, in current: [AgentElement]) throws -> AgentElement {
+        guard let fresh = current.first(where: { $0.role == expected.role && $0.name == expected.name }) else {
+            throw AgentEnvironmentError.targetGone
+        }
+        guard !AgentContractValidation.isSecureRoleOrState(role: fresh.role, state: fresh.state),
+              !AgentCredentialRule.isSensitive(role: fresh.role, name: fresh.name, state: fresh.state) else {
+            throw AgentEnvironmentError.credentialHandoff
+        }
+        return AgentElement(id: expected.id, role: expected.role, name: expected.name, value: nil,
+            state: fresh.state, bbox: fresh.bbox, inView: fresh.inView)
+    }
+}
+
+enum PixelScreenTargetResolver {
+    static func point(for expected: AgentElement, in current: [PixelElementMark]) throws -> CGPoint {
+        guard let mark = PixelTargetRebinding.find(expected, in: current) else {
+            throw AgentEnvironmentError.targetGone
+        }
+        guard !AgentContractValidation.isSecureRoleOrState(role: mark.role, state: mark.state),
+              !AgentCredentialRule.isSensitive(role: mark.role, name: mark.name, state: mark.state) else {
+            throw AgentEnvironmentError.credentialHandoff
+        }
+        return CGPoint(x: mark.screenRect.midX, y: mark.screenRect.midY)
     }
 }

@@ -24,7 +24,10 @@ enum DebugAgentEvalCommand {
             let data = input.readDataToEndOfFile()
             let root = try JSONSerialization.jsonObject(with: data) as? [String: Any]
             let encoded: Data
-            if root?["operation"] as? String == "preflight" {
+            if root?["operation"] as? String == "policy_replay" {
+                let request = try AgentEvalPolicyReplayRequest.decodeStrict(data)
+                encoded = try JSONEncoder().encode(await AgentEvalPolicyReplay.run(request))
+            } else if root?["operation"] as? String == "preflight" {
                 let response: AgentEvalPreflightResponse
                 if let request = try? AgentEvalPreflightRequest.decodeStrict(data) {
                     response = await AgentEvalPreflight.run(request)

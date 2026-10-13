@@ -19,7 +19,7 @@ enum AgentHostFactory {
         let fileRoots: [URL]?
         let storageDirectory: URL?
 
-        init(maxSteps: Int = 40, initialSurface: InitialSurface? = nil,
+        init(maxSteps: Int = 30, initialSurface: InitialSurface? = nil,
              fileRoots: [URL]? = nil, storageDirectory: URL? = nil,
              policy: AgentPolicyModel = .fara15_4b) {
             self.maxSteps = maxSteps
@@ -59,9 +59,7 @@ enum AgentHostFactory {
             }
         })
         let support = TrajectoryRecorder.defaultRoot.deletingLastPathComponent()
-        let trustDirectory = configuration.storageDirectory?.appendingPathComponent("AgentTrust", isDirectory: true)
-            ?? support.appendingPathComponent("AgentTrust", isDirectory: true)
-        let trust = try PersistentAgentTrustStore(directory: trustDirectory)
+        let trust = try persistentTrustStore()
         let taskExecutor = AgentTaskExecutor { taskID, prompt in
             let pixelMetadata = configuration.storageDirectory?.appendingPathComponent("pixel-metadata.json")
             let files = AgentFileCatalog(authorizedRoots: configuration.fileRoots)
@@ -98,5 +96,17 @@ enum AgentHostFactory {
                 recorder: recorder, journal: journal)
         }
         return ComputerUseCapabilityExecutor(agentAdapter: AgentCapabilityAdapter(executor: taskExecutor))
+    }
+
+    static func persistentTrustStore() throws -> PersistentAgentTrustStore {
+        try persistentTrustStore(directory: persistentTrustDirectory())
+    }
+
+    static func persistentTrustStore(directory: URL) throws -> PersistentAgentTrustStore {
+        try PersistentAgentTrustStore(directory: directory)
+    }
+
+    static func persistentTrustDirectory() -> URL {
+        TrajectoryRecorder.defaultRoot.deletingLastPathComponent().appendingPathComponent("AgentTrust", isDirectory: true)
     }
 }

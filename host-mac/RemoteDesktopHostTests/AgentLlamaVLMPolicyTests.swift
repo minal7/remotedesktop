@@ -13,12 +13,14 @@ final class AgentLlamaVLMPolicyTests: XCTestCase {
 
         let output = try await policy.propose(observation)
 
-        XCTAssertEqual(policy.promptVersion, "v1-fara-native-tool")
+        XCTAssertEqual(policy.promptVersion, "v1-fara-native-content")
         XCTAssertEqual(output.rawOutput, raw)
         XCTAssertEqual(output.action, .click(target: .point(x: 1, y: 2), button: nil, count: nil))
         let input = try XCTUnwrap(transport.inputs.first)
-        XCTAssertTrue(input.prompt.contains("Use find_files to obtain file IDs"))
-        XCTAssertTrue(input.prompt.contains("Call Fara's native computer_use tool exactly once"))
+        XCTAssertTrue(input.prompt.contains("Qwen3.5-4B"))
+        XCTAssertTrue(input.prompt.contains("A critical point is a situation"))
+        XCTAssertTrue(input.prompt.contains("<tools>"))
+        XCTAssertTrue(input.prompt.contains("<tool_call>"))
         XCTAssertEqual(input.actionSchema, schema)
         XCTAssertEqual(input.screenshotPNG, png)
         XCTAssertTrue(input.observationJSON.contains(#""elements":[{"bbox":[1,2,30,12]"#))
@@ -44,23 +46,22 @@ final class AgentLlamaVLMPolicyTests: XCTestCase {
         }
     }
 
-    func testNativeToolEnvelopeRepresentsEveryCanonicalActionExactly() throws {
+    func testFaraXMLProposalMapsSupportedActionsWithoutInventingInput() throws {
         let cases: [(String, String)] = [
             (#"{"action":"left_click","coordinate":[120,45]}"#, #"{"type":"click","target":{"x":120,"y":45}}"#),
             (#"{"action":"right_click","coordinate":[120,45]}"#, #"{"type":"click","target":{"x":120,"y":45},"button":"right"}"#),
-            (#"{"action":"type","text":"sample","mode":"append"}"#, #"{"type":"type","text":"sample","mode":"append"}"#),
+            (#"{"action":"type","text":"sample","coordinate":[700,800]}"#, #"{"type":"type","text":"sample","mode":"append"}"#),
             (#"{"action":"key","keys":["CTRL","L"]}"#, #"{"type":"key","chord":"CTRL+L"}"#),
             (#"{"action":"scroll","pixels":40}"#, #"{"type":"scroll","direction":"up","amount":40}"#),
-            (#"{"action":"select_option","coordinate":[2,3],"option":"Choice"}"#, #"{"type":"select","target":{"x":2,"y":3},"option":"Choice"}"#),
-            (#"{"action":"left_click_drag","start_coordinate":[1,2],"coordinate":[8,9]}"#, #"{"type":"drag","from":{"x":1,"y":2},"to":{"x":8,"y":9}}"#),
+            (#"{"action":"hscroll","pixels":-40}"#, #"{"type":"scroll","direction":"left","amount":40}"#),
+            (#"{"action":"left_click_drag","coordinate":[8,9]}"#, #"{"type":"fail","reason":"This host action contract requires both drag endpoints; Fara supplied only the destination."}"#),
             (#"{"action":"visit_url","url":"https://example.test/"}"#, #"{"type":"open_url","url":"https://example.test/"}"#),
-            (#"{"action":"open_app","name":"Example Editor"}"#, #"{"type":"open_app","name":"Example Editor"}"#),
-            (#"{"action":"find_files","query":"sample","kind":"text"}"#, #"{"type":"find_files","query":"sample","kind":"text"}"#),
-            (#"{"action":"set_files","coordinate":[3,4],"file_ids":["file-1"]}"#, #"{"type":"set_files","target":{"x":3,"y":4},"file_ids":["file-1"]}"#),
             (#"{"action":"wait","time":1}"#, #"{"type":"wait","seconds":1}"#),
-            (#"{"action":"ask_user_question","question":"Choose one","choices":["A","B"]}"#, #"{"type":"ask_user","question":"Choose one","choices":["A","B"]}"#),
+            (#"{"action":"ask_user_question","question":"Choose one"}"#, #"{"type":"ask_user","question":"Choose one"}"#),
+            (#"{"action":"web_search","query":"weather"}"#, #"{"type":"fail","reason":"Search is unavailable in the current computer-use action contract."}"#),
+            (#"{"action":"read_page_answer_question","question":"What is shown?"}"#, #"{"type":"fail","reason":"Page-reading actions are unavailable in the current computer-use action contract."}"#),
+            (#"{"action":"pause_and_memorize_fact","fact":"remember this"}"#, #"{"type":"fail","reason":"Memory actions are unavailable in the current computer-use action contract."}"#),
             (#"{"action":"terminate","answer":"Complete"}"#, #"{"type":"done","answer":"Complete"}"#),
-            (#"{"action":"fail","reason":"Unavailable"}"#, #"{"type":"fail","reason":"Unavailable"}"#),
         ]
         for (native, expected) in cases {
             let raw = try completion(arguments: native)
@@ -138,7 +139,11 @@ final class AgentLlamaVLMPolicyTests: XCTestCase {
         let horizontalAction = try FaraPolicyAdapter.canonicalActionJSON(fromCompletion: horizontal, imageSize: (2_000, 1_000))
         XCTAssertEqual(try JSONSerialization.jsonObject(with: Data(horizontalAction.utf8)) as? NSDictionary,
                        try JSONSerialization.jsonObject(with: Data(#"{"type":"scroll","direction":"right","amount":1000}"#.utf8)) as? NSDictionary)
-        let invalid = try completion(arguments: #"{"action":"left_click","coordinate":[1000,10]}"#)
+        let edgeBoundary = try completion(arguments: #"{"action":"left_click","coordinate":[1000,1000]}"#)
+        let edgeBoundaryAction = try FaraPolicyAdapter.canonicalActionJSON(fromCompletion: edgeBoundary, imageSize: (2_000, 1_000))
+        XCTAssertEqual(try JSONSerialization.jsonObject(with: Data(edgeBoundaryAction.utf8)) as? NSDictionary,
+                       try JSONSerialization.jsonObject(with: Data(#"{"type":"click","target":{"x":1999,"y":999}}"#.utf8)) as? NSDictionary)
+        let invalid = try completion(arguments: #"{"action":"left_click","coordinate":[1001,10]}"#)
         XCTAssertThrowsError(try FaraPolicyAdapter.canonicalActionJSON(fromCompletion: invalid, imageSize: (2_000, 1_000)))
     }
 
@@ -212,9 +217,9 @@ final class AgentLlamaVLMPolicyTests: XCTestCase {
         XCTAssertEqual(OSAtlasLlamaResourceProfile.fara.maximumResidentMemoryBytes, 4 * 1_024 * 1_024 * 1_024)
     }
 
-    func testRequestUsesNativeRequiredToolGrammarAndAuthenticatedLoopbackOnly() throws {
+    func testFaraUsesPlainCompletionContentAndAuthenticatedLoopbackOnly() throws {
         let (_, observation, png, schema) = try fixture(transport: RecordingAgentVLMTransport(response: ""))
-        let input = AgentVLMRequestInput(prompt: try promptText(),
+        let input = AgentVLMRequestInput(prompt: LlamaVLMPolicy.nativePrompt(try promptText(), model: .fara15_4b),
             observationJSON: try LlamaVLMPolicy.observationJSON(observation),
             screenshotPNG: png, actionSchema: schema)
         let endpoint = OSAtlasLlamaEndpoint(generation: 1, variant: nil,
@@ -224,17 +229,17 @@ final class AgentLlamaVLMPolicyTests: XCTestCase {
         XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer unit-test-token")
         let body = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(request.httpBody)) as? [String: Any])
         XCTAssertEqual(body["model"] as? String, ComputerUseFaraRuntimeInputs.modelAlias)
-        XCTAssertEqual(body["tool_choice"] as? String, "required")
-        XCTAssertEqual(body["parallel_tool_calls"] as? Bool, false)
+        XCTAssertNil(body["tools"])
+        XCTAssertNil(body["tool_choice"])
+        XCTAssertNil(body["parallel_tool_calls"])
         XCTAssertNil(body["response_format"])
-        let tools = try XCTUnwrap(body["tools"] as? [[String: Any]])
-        XCTAssertEqual(tools.count, 1)
-        let function = try XCTUnwrap(tools[0]["function"] as? [String: Any])
-        XCTAssertEqual(function["name"] as? String, "computer_use")
-        let parameters = try XCTUnwrap(function["parameters"])
-        XCTAssertEqual(try JSONSerialization.jsonObject(with: JSONSerialization.data(withJSONObject: parameters)) as? NSDictionary,
-                       try JSONSerialization.jsonObject(with: schema) as? NSDictionary)
+        XCTAssertEqual(body["reasoning_format"] as? String, "none")
         let messages = try XCTUnwrap(body["messages"] as? [[String: Any]])
+        let system = try XCTUnwrap(messages[0]["content"] as? String)
+        XCTAssertTrue(system.contains("Qwen3.5-4B"))
+        XCTAssertTrue(system.contains("<tools>"))
+        XCTAssertTrue(system.contains("\"name\": \"computer_use\""))
+        XCTAssertTrue(system.contains("<tool_call>"))
         let content = try XCTUnwrap(messages[1]["content"] as? [[String: Any]])
         XCTAssertEqual(content.compactMap { $0["type"] as? String }, ["text", "image_url"])
         XCTAssertFalse((content[0]["text"] as? String ?? "").contains(png.base64EncodedString()))
@@ -257,6 +262,22 @@ final class AgentLlamaVLMPolicyTests: XCTestCase {
                 baseURL: URL(string: url)!, bearerToken: "token")
             XCTAssertThrowsError(try OSAtlasLlamaHTTPClient.makeAgentActionRequest(endpoint: rejected, input: input))
         }
+    }
+
+    func testFaraResponseUsesMessageContentAndNeverReasoningContent() throws {
+        let action = #"<tool_call>{"name":"computer_use","arguments":{"action":"wait","time":1}}</tool_call>"#
+        let envelope: [String: Any] = ["choices": [["message": [
+            "role": "assistant", "content": action,
+            "reasoning_content": #"<tool_call>{"name":"computer_use","arguments":{"action":"terminate","answer":"wrong"}}</tool_call>"#,
+        ]]]]
+        let bytes = try JSONSerialization.data(withJSONObject: envelope)
+        XCTAssertEqual(try OSAtlasLlamaHTTPClient.responseText(from: bytes), action)
+
+        let reasoningOnly: [String: Any] = ["choices": [["message": [
+            "role": "assistant", "content": "", "reasoning_content": action,
+        ]]]]
+        XCTAssertThrowsError(try OSAtlasLlamaHTTPClient.responseText(from:
+            JSONSerialization.data(withJSONObject: reasoningOnly)))
     }
 
     func testInvalidPNGAndObservationAreRejectedBeforeTransport() async throws {
@@ -293,22 +314,12 @@ final class AgentLlamaVLMPolicyTests: XCTestCase {
 
     private func completion(arguments: String, toolName: String = "computer_use", extraCalls: Bool = false,
                             content: String = "") throws -> String {
-        let function: [String: Any] = ["name": toolName, "arguments": arguments]
-        let call: [String: Any] = ["id": "call-1", "type": "function", "function": function]
-        var toolCalls: [[String: Any]] = [call]
-        if extraCalls { toolCalls.append(call) }
-        let message: [String: Any] = ["role": "assistant", "content": content, "tool_calls": toolCalls]
-        let body: [String: Any] = ["model": ComputerUseFaraRuntimeInputs.modelAlias,
-            "choices": [["finish_reason": "tool_calls", "message": message]]]
-        let data = try JSONSerialization.data(withJSONObject: body, options: [.sortedKeys, .withoutEscapingSlashes])
-        return try XCTUnwrap(String(data: data, encoding: .utf8))
+        let call = "<tool_call>{\"name\":\"\(toolName)\",\"arguments\":\(arguments)}</tool_call>"
+        return [content, call, extraCalls ? call : nil].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: "\n")
     }
 
     private func completionWithoutToolCall(content: String) throws -> String {
-        let body: [String: Any] = ["model": ComputerUseFaraRuntimeInputs.modelAlias,
-            "choices": [["finish_reason": "stop", "message": ["role": "assistant", "content": content]]]]
-        let data = try JSONSerialization.data(withJSONObject: body, options: [.sortedKeys, .withoutEscapingSlashes])
-        return try XCTUnwrap(String(data: data, encoding: .utf8))
+        content
     }
 
     private func uiTarsCompletion(_ content: String) throws -> String {

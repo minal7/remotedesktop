@@ -241,7 +241,7 @@ final class AgentCapabilityAdapter: ComputerUseTaskAwareExecuting, ComputerUseTe
 
     private static func scope(questionID: UUID) -> String {
         let digest = SHA256.hash(data: Data(questionID.uuidString.lowercased().utf8))
-        return "agent-question-v1:" + digest.map { String(format: "%02x", $0) }.joined()
+        return digest.map { String(format: "%02x", $0) }.joined()
     }
 
     private static func progressText(for result: AgentLoopResult) -> String {

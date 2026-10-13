@@ -9074,7 +9074,7 @@ final class HostComputerUseManager: ObservableObject {
                 throw AgentLoopError.noMatchingApproval
             }
             let action = String(decoding: try JSONEncoder().encode(request.action), as: UTF8.self)
-            let presentation = ComputerUseApprovalRequest(taskID: envelope.id,
+            let presentation = ComputerUseApprovalRequest(requestID: request.id.uuidString, taskID: envelope.id,
                 message: request.reason,
                 details: [.init(label: "Action", value: action), .init(label: "Fingerprint", value: request.fingerprint)]
                     + request.reviewFields.map { .init(label: $0.label, value: $0.value) })

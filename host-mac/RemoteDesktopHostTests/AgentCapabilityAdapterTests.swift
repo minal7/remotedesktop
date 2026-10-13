@@ -58,6 +58,27 @@ final class AgentCapabilityAdapterTests: XCTestCase {
         } catch { XCTAssertEqual(error as? AgentCapabilityAdapter.AdapterError, .invalidClarification) }
     }
 
+    func testClarificationScopeMatchesTheExisting64HexStoreContract() async throws {
+        let fixture = AdapterFixture(replies: [[.askUser(question: "Which option?", choices: nil)]])
+        let adapter = AgentCapabilityAdapter(executor: fixture.executor)
+        _ = try await adapter.execute(taskID: "scope-root", prompt: "Ignored",
+            trustedUserPrompt: "Choose one", tools: hostTools(), progress: { _ in })
+        let clarification = try XCTUnwrap(adapter.clarification(taskID: "scope-root"))
+        XCTAssertEqual(clarification.scope.count, 64)
+        let hex = CharacterSet(charactersIn: "0123456789abcdef")
+        XCTAssertTrue(clarification.scope.unicodeScalars.allSatisfy(hex.contains))
+
+        let store = ComputerUseTextClarificationStore()
+        let request = ComputerUseEnvelope(senderID: "peer", targetID: "host", pairingCode: "123456",
+            sessionID: "session", kind: .prompt, body: "{}")
+        let reference = try store.issue(goal: clarification.goal, question: clarification.question,
+            scope: clarification.scope, for: request)
+        let answer = ComputerUseEnvelope(senderID: request.senderID, targetID: request.targetID,
+            pairingCode: request.pairingCode, sessionID: request.sessionID, kind: .prompt, body: "{}")
+        let resolved = try store.consume(reference, answer: "First", scope: clarification.scope, for: answer)
+        XCTAssertEqual(resolved.userTurns, ["Choose one", "First"])
+    }
+
     func testApprovalAfterClarificationStaysWithRootTaskAndAnswerAlias() async throws {
         let fixture = AdapterFixture(replies: [[
             .askUser(question: "Proceed?", choices: ["Continue"]),
@@ -159,7 +180,7 @@ final class AgentCapabilityAdapterTests: XCTestCase {
 }
 
 @MainActor
-private final class AdapterFixture {
+final class AdapterFixture {
     private var replies: [[AgentAction]]
     private let secureObservationIndex: Int?
     private let trustedWeb: Bool
@@ -190,7 +211,7 @@ private final class AdapterFixture {
 }
 
 @MainActor
-private final class AdapterPolicy: AgentPolicy {
+final class AdapterPolicy: AgentPolicy {
     private var replies: [AgentAction]
     private(set) var proposalCount = 0
     private(set) var observations: [AgentObservation] = []
@@ -211,7 +232,7 @@ private final class AdapterPolicy: AgentPolicy {
 }
 
 @MainActor
-private final class AdapterEnvironment: AgentEnvironment {
+final class AdapterEnvironment: AgentEnvironment {
     private let taskID: String
     private let secureObservationIndex: Int?
     private var observationCount = 0
@@ -258,7 +279,7 @@ private final class AdapterEnvironment: AgentEnvironment {
 }
 
 @MainActor
-private final class AdapterTrustStore: AgentTrustStore {
+final class AdapterTrustStore: AgentTrustStore {
     private let trustedWeb: Bool
     init(trustedWeb: Bool) { self.trustedWeb = trustedWeb }
     func isTrusted(kind: AgentScope.Kind, identity: String) throws -> Bool { kind == .web && trustedWeb }
@@ -266,19 +287,19 @@ private final class AdapterTrustStore: AgentTrustStore {
 }
 
 @MainActor
-private final class AdapterAllowPolicy: AgentAllowPolicy {
+final class AdapterAllowPolicy: AgentAllowPolicy {
     func decision(for action: AgentAction, in scope: AgentScope) -> AgentAccessDecision { .allowed }
     func resolvedTrustIdentity(for action: AgentAction, in scope: AgentScope) -> AgentTrustIdentity? { nil }
 }
 
 @MainActor
-private final class AdapterRecorder: AgentRecording {
+final class AdapterRecorder: AgentRecording {
     func record(_ step: AgentEpisodeStep) throws {}
     func finish(_ footer: AgentEpisodeFooter) throws {}
 }
 
 @MainActor
-private final class AdapterJournal: AgentEffectJournaling {
+final class AdapterJournal: AgentEffectJournaling {
     func begin(step: Int, fingerprint: String) throws {}
     func verify(step: Int, fingerprint: String) throws {}
     func markUncertain(step: Int, fingerprint: String) throws {}

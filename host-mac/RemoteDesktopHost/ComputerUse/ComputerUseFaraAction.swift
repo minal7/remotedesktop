@@ -52,8 +52,8 @@ enum ComputerUseFaraAction: Equatable, Sendable {
 
     private static func decodeMessage(_ content: String, allowsFractionalLocatedScroll: Bool) throws -> Self {
         // The official Fara agent emits narrative followed by one tool call.
-        // Use llama.cpp's reasoning_format=none to preserve that wire format;
-        // never search the transport's separate reasoning field for actions.
+        // The transport passes only message.content; reasoning_content is never
+        // searched for or used to recover an action.
         guard content.utf8.count <= 32_768,
               let start = content.range(of: "<tool_call>") else { throw Failure.invalidResponse }
         let narrative = content[..<start.lowerBound]

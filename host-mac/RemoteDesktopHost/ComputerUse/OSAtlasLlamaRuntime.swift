@@ -1559,8 +1559,16 @@ actor OSAtlasLlamaRuntime {
                 let data = try await server.transport.complete(request: request)
                 try Task.checkCancellation()
                 guard active?.endpoint == endpoint else { throw OSAtlasLlamaRuntimeError.inactiveSession }
-                guard data.count <= FaraPolicyAdapter.maximumCompletionBytes,
-                      let completion = String(data: data, encoding: .utf8), !completion.isEmpty else {
+                guard data.count <= FaraPolicyAdapter.maximumCompletionBytes else {
+                    throw OSAtlasLlamaRuntimeError.invalidResponse
+                }
+                if input.model == .fara15_4b {
+                    // Fara's native XML tool-call protocol is ordinary assistant
+                    // message content. Deliberately ignore reasoning_content and
+                    // OpenAI function-call envelopes.
+                    return try OSAtlasLlamaHTTPClient.responseText(from: data)
+                }
+                guard let completion = String(data: data, encoding: .utf8), !completion.isEmpty else {
                     throw OSAtlasLlamaRuntimeError.invalidResponse
                 }
                 return completion
@@ -2762,9 +2770,6 @@ enum OSAtlasLlamaHTTPClient {
             throw OSAtlasLlamaRuntimeError.invalidResponse
         }
         try ComputerUseFaraModel.validatePNG(input.screenshotPNG)
-        guard let schema = try JSONSerialization.jsonObject(with: input.actionSchema) as? [String: Any] else {
-            throw OSAtlasLlamaRuntimeError.invalidResponse
-        }
         guard input.priorScreenshotsPNG.count <= 2 else { throw OSAtlasLlamaRuntimeError.invalidVisionInput }
         for image in input.priorScreenshotsPNG { try ComputerUseFaraModel.validatePNG(image) }
         var request = URLRequest(url: endpoint.baseURL.appendingPathComponent("v1/chat/completions"))
@@ -2785,16 +2790,6 @@ enum OSAtlasLlamaHTTPClient {
             "temperature": 0, "max_tokens": agentMaximumCompletionTokens, "stream": false,
             "reasoning_format": "none",
         ]
-        if input.model == .fara15_4b {
-            let tool = ["type": "function", "function": [
-                "name": "computer_use",
-                "description": input.toolDescription,
-                "parameters": schema,
-            ]] as [String: Any]
-            body["tools"] = [tool]
-            body["tool_choice"] = "required"
-            body["parallel_tool_calls"] = false
-        }
         request.httpBody = try JSONSerialization.data(withJSONObject: body,
             options: [.sortedKeys, .withoutEscapingSlashes])
         guard let body = request.httpBody, body.count <= 9 * 1_024 * 1_024 else {
@@ -2862,9 +2857,8 @@ enum OSAtlasLlamaHTTPClient {
 
     /// b9992's `/apply-template` runs the same
     /// `oaicompat_chat_params_parse` path as `/v1/chat/completions`. Reusing
-    /// the exact completion body therefore includes tools, required tool
-    /// choice, `parallel_tool_calls: false`, and every sampling/request field
-    /// in the selected model's chat-template render.
+    /// the exact completion body keeps its system prompt, images, and sampling
+    /// fields identical to the request sent to the model.
     static func makeSemanticTemplateRequest(
         from completionRequest: URLRequest
     ) throws -> URLRequest {

@@ -22,18 +22,26 @@ final class AgentLoopTests: XCTestCase {
         XCTAssertEqual(policy.stopCount, 1)
     }
 
-    func testMalformedOutputIsFedBackOnceThenFailsAndRecordsBothRawReplies() async throws {
-        let environment = TestEnvironment(frames: [webFrame(), webFrame()])
-        let policy = TestPolicy([.malformed("not JSON"), .malformed("still malformed")])
+    func testThreeMalformedOutputsAskTheUserAndKeepRejectionHistory() async throws {
+        let environment = TestEnvironment(frames: [webFrame(), webFrame(), webFrame(), webFrame()])
+        let policy = TestPolicy([.malformed("not JSON"), .malformed("still malformed"),
+                                 .malformed("third malformed"), .action(.done(answer: "Recovered"))])
         let recorder = TestRecorder()
         let loop = try makeLoop(environment: environment, policy: policy, recorder: recorder, journal: TestJournal())
 
         let result = try await loop.run()
-        guard case .failed(let reason) = result else { return XCTFail("Expected malformed-output failure") }
-        XCTAssertTrue(reason.contains("malformed output twice"))
-        XCTAssertEqual(recorder.steps.map(\.rawModelOutput), ["not JSON", "still malformed"])
+        guard case .askUser(let question) = result else { return XCTFail("Expected a handoff after three rejections") }
+        XCTAssertTrue(question.question.contains("last three actions"))
+        XCTAssertEqual(recorder.steps.map(\.rawModelOutput), ["not JSON", "still malformed", "third malformed"])
         XCTAssertTrue(recorder.steps.allSatisfy { $0.action == nil && $0.gate.decision == .rejected })
-        XCTAssertEqual(recorder.footer?.outcome, "failed")
+        XCTAssertEqual(recorder.steps.map(\.step), [0, 1, 2])
+        XCTAssertNil(recorder.footer)
+        let resumed = try await loop.resume(answer: "Please continue")
+        XCTAssertEqual(resumed, .completed(answer: "Recovered"))
+        let rejection = "rejected: Invalid output"
+        XCTAssertTrue(policy.observations[1].history.map(\.result).contains(rejection))
+        XCTAssertEqual(policy.observations[2].history.map(\.result).filter { $0 == rejection }.count, 2)
+        XCTAssertEqual(policy.observations[3].history.map(\.result).filter { $0 == rejection }.count, 3)
     }
 
     func testStaleTargetRejectionIsRecordedAndReturnedInTheNextObservation() async throws {
@@ -48,7 +56,8 @@ final class AgentLoopTests: XCTestCase {
         XCTAssertEqual(result, .completed(answer: "Recovered"))
         XCTAssertEqual(recorder.steps.count, 2)
         XCTAssertEqual(recorder.steps[0].gate.decision, .rejected)
-        XCTAssertTrue(environment.lastContext?.history.last?.result.contains("no longer present") == true)
+        XCTAssertTrue(environment.lastContext?.history.last?.result.contains("Target resolution rejected") == true)
+        XCTAssertTrue(environment.lastContext?.history.last?.result.contains("targetGone") == true)
     }
 
     func testPixelFrontmostWindowChangeRebindsToRealFreshScope() async throws {
@@ -133,6 +142,49 @@ final class AgentLoopTests: XCTestCase {
         XCTAssertEqual(environment.stopCount, 1)
     }
 
+    func testDeclinedApprovalIsFedBackAndDoesNotExecuteOrGrantTrust() async throws {
+        let frame = webFrame(elements: [button(id: 1, name: "Submit")])
+        let environment = TestEnvironment(frames: [frame, frame])
+        let policy = TestPolicy([.action(.click(target: .element(id: 1), button: nil, count: nil)),
+                                 .action(.done(answer: "Stopped safely"))])
+        let recorder = TestRecorder()
+        let loop = try makeLoop(environment: environment, policy: policy, recorder: recorder,
+                                journal: TestJournal())
+        guard case .pendingApproval(let approval) = try await loop.run() else {
+            return XCTFail("Expected approval")
+        }
+        let result = try await loop.resume(approvalID: approval.id, approved: false)
+        XCTAssertEqual(result, .completed(answer: "Stopped safely"))
+        XCTAssertTrue(environment.executed.isEmpty)
+        XCTAssertEqual(environment.lastContext?.history.last?.result, "rejected: user declined")
+        XCTAssertEqual(recorder.steps.map(\.gate.decision), [.needsApproval, .rejected, .allowed])
+        XCTAssertEqual(recorder.footer?.approvals, [])
+    }
+
+    func testDeclinedApprovalDoesNotRebindVanishedTargetOrChangedSurface() async throws {
+        let original = webFrame(elements: [button(id: 1, name: "Submit")])
+        let changedScope = AgentScope(taskID: "task-1", kind: .app, identity: "another-window")
+        let changedSurface = AgentFrame(observation: observation(surface: .app(bundleID: "com.example.editor", title: nil)),
+                                        scope: changedScope)
+        let environment = TestEnvironment(frames: [original, changedSurface], followsFrontmostSurface: true)
+        let policy = TestPolicy([.action(.click(target: .element(id: 1), button: nil, count: nil)),
+                                 .action(.done(answer: "Declined safely"))])
+        let recorder = TestRecorder()
+        let loop = try makeLoop(environment: environment, policy: policy, recorder: recorder,
+                                journal: TestJournal())
+
+        guard case .pendingApproval(let approval) = try await loop.run() else {
+            return XCTFail("Expected a pending approval")
+        }
+        let result = try await loop.resume(approvalID: approval.id, approved: false)
+
+        XCTAssertEqual(result, .completed(answer: "Declined safely"))
+        XCTAssertEqual(environment.executed.count, 0)
+        XCTAssertEqual(recorder.steps.map(\.gate.decision), [.needsApproval, .rejected, .allowed])
+        XCTAssertEqual(recorder.steps[1].observation.surface, original.observation.surface)
+        XCTAssertEqual(environment.lastContext?.history.last?.result, "rejected: user declined")
+    }
+
     func testApprovalAtStepLimitFailsWithoutExecutingOrExceedingBudget() async throws {
         let target = webFrame(elements: [button(id: 1, name: "Submit")])
         let environment = TestEnvironment(frames: [target, target])
@@ -183,22 +235,25 @@ final class AgentLoopTests: XCTestCase {
         XCTAssertEqual(environment.observedScopes, [appScope, appScope, webScope])
     }
 
-    func testEffectErrorMarksJournalUncertainAndDoesNotReplay() async throws {
-        let environment = TestEnvironment(frames: [webFrame(elements: [button(id: 1, name: "Continue")])],
+    func testOrdinaryLowRiskEffectErrorIsRecordedAndPolicyMayRecoverWithoutReplay() async throws {
+        let frame = webFrame(elements: [button(id: 1, name: "Continue")])
+        let environment = TestEnvironment(frames: [frame, frame],
                                           executeError: AgentEnvironmentError.unavailable("input failed"))
-        let policy = TestPolicy([.action(.click(target: .element(id: 1), button: nil, count: nil))])
+        let policy = TestPolicy([.action(.click(target: .element(id: 1), button: nil, count: nil)),
+                                 .action(.done(answer: "Recovered"))])
         let recorder = TestRecorder()
         let journal = TestJournal()
         let loop = try makeLoop(environment: environment, policy: policy, recorder: recorder,
                                 journal: journal, trustedWeb: true)
 
         let result = try await loop.run()
-        guard case .failed = result else { return XCTFail("Expected an uncertain failure") }
+        XCTAssertEqual(result, .completed(answer: "Recovered"))
         XCTAssertEqual(journal.begun.count, 1)
-        XCTAssertEqual(journal.uncertain.count, 1)
-        XCTAssertTrue(journal.verified.isEmpty)
+        XCTAssertEqual(journal.verified.count, 1)
+        XCTAssertTrue(journal.uncertain.isEmpty)
         XCTAssertEqual(environment.executed.count, 1)
-        XCTAssertEqual(recorder.footer?.outcome, "uncertain")
+        XCTAssertEqual(recorder.footer?.outcome, "success")
+        XCTAssertTrue(recorder.steps[0].execution.result.contains("Attempted; environment error"))
     }
 
     func testPixelReadbackMismatchIsRecordedAndPolicyCanRecoverWithoutReplay() async throws {
@@ -251,6 +306,56 @@ final class AgentLoopTests: XCTestCase {
         XCTAssertTrue(environment.lastContext?.history.last?.result.contains("Credential fields are blocked") == true)
         XCTAssertEqual(recorder.steps.count, 2)
         XCTAssertEqual(recorder.footer?.outcome, "success")
+    }
+
+    func testExecutionCredentialHandoffStopsBeforeASecondModelAction() async throws {
+        let frame = webFrame(elements: [button(id: 1, name: "Continue")])
+        let environment = TestEnvironment(frames: [frame, frame],
+                                          executeError: AgentEnvironmentError.credentialHandoff)
+        let policy = TestPolicy([.action(.click(target: .element(id: 1), button: nil, count: nil)),
+                                 .action(.done(answer: "Resumed after owner handoff"))])
+        let recorder = TestRecorder()
+        let journal = TestJournal()
+        let loop = try makeLoop(environment: environment, policy: policy, recorder: recorder,
+                                journal: journal, trustedWeb: true)
+
+        let handoff = try await loop.run()
+        guard case .handoff(let reason) = handoff else { return XCTFail("Expected credential handoff") }
+        XCTAssertTrue(reason.contains("Credential entry requires the owner"))
+        XCTAssertFalse(loop.didFinish)
+        XCTAssertEqual(recorder.steps.count, 1)
+        XCTAssertEqual(recorder.steps[0].execution.status, .notExecuted)
+        XCTAssertEqual(environment.executed.count, 1)
+        XCTAssertEqual(journal.verified.count, 1)
+
+        let resumed = try await loop.run()
+        XCTAssertEqual(resumed, .completed(answer: "Resumed after owner handoff"))
+        XCTAssertEqual(environment.executed.count, 1)
+        XCTAssertEqual(recorder.steps.count, 2)
+    }
+
+    func testHighRiskEnvironmentErrorIsUncertainAndNeverRetried() async throws {
+        let frame = webFrame(elements: [button(id: 1, name: "Submit")])
+        let environment = TestEnvironment(frames: [frame, frame, frame],
+                                          executeError: AgentEnvironmentError.unavailable("input outcome unknown"))
+        let policy = TestPolicy([.action(.click(target: .element(id: 1), button: nil, count: nil)),
+                                 .action(.done(answer: "Must not run after uncertain submit"))])
+        let recorder = TestRecorder()
+        let journal = TestJournal()
+        let loop = try makeLoop(environment: environment, policy: policy, recorder: recorder,
+                                journal: journal, trustedWeb: true)
+
+        guard case .pendingApproval(let approval) = try await loop.run() else {
+            return XCTFail("Expected high-risk approval")
+        }
+        let result = try await loop.resume(approvalID: approval.id, approved: true)
+
+        guard case .failed(let reason) = result else { return XCTFail("Expected uncertain failure") }
+        XCTAssertTrue(reason.contains("uncertain"))
+        XCTAssertEqual(environment.executed.count, 1)
+        XCTAssertEqual(journal.uncertain.count, 1)
+        XCTAssertTrue(journal.verified.isEmpty)
+        XCTAssertEqual(recorder.footer?.outcome, "uncertain")
     }
 
     func testRecorderFailureAfterVerifiedEffectMakesLoopTerminalWithoutReplaying() async throws {
@@ -315,6 +420,12 @@ final class AgentLoopTests: XCTestCase {
         XCTAssertEqual(environment.executed.count, 1)
     }
 
+    func testMaximumLoopBudgetClampsLegacyFortyStepRequestsToThirty() throws {
+        let loop = try makeLoop(environment: TestEnvironment(frames: [webFrame()]),
+            policy: TestPolicy([]), recorder: TestRecorder(), journal: TestJournal(), maxSteps: 40)
+        XCTAssertEqual(loop.maxSteps, 30)
+    }
+
     private func makeLoop(environment: TestEnvironment, policy: TestPolicy, recorder: TestRecorder,
                           journal: TestJournal, trustedWeb: Bool = false,
                           appIdentity: String? = nil, maxSteps: Int = 40) throws -> AgentLoop {
@@ -350,9 +461,11 @@ private final class TestPolicy: AgentPolicy {
     enum Reply { case action(AgentAction), malformed(String) }
     let promptVersion = "test-v1"
     private var replies: [Reply]
+    private(set) var observations: [AgentObservation] = []
     private(set) var stopCount = 0
     init(_ replies: [Reply]) { self.replies = replies }
     func propose(_ observation: AgentObservation) async throws -> AgentPolicyOutput {
+        observations.append(observation)
         guard !replies.isEmpty else { return .init(rawOutput: "", action: nil, rejectionReason: "No reply") }
         switch replies.removeFirst() {
         case .action(let action): return .init(rawOutput: "action:\(action.type)", action: action, rejectionReason: nil)
@@ -389,9 +502,13 @@ private final class TestEnvironment: AgentEnvironment {
 
     func observe(_ context: AgentObservationContext) async throws -> AgentFrame {
         lastContext = context
-        let frame = frames[min(observeIndex, frames.count - 1)]
-        observeIndex += 1; observedScopes.append(frame.scope)
-        return frame
+        let source = frames[min(observeIndex, frames.count - 1)]
+        observeIndex += 1; observedScopes.append(source.scope)
+        let frameObservation = source.observation
+        let observation = AgentObservation(task: context.task, surface: frameObservation.surface,
+            screenshot: frameObservation.screenshot, elements: frameObservation.elements,
+            focus: frameObservation.focus, history: context.history, budget: context.budget)
+        return AgentFrame(observation: observation, scope: source.scope)
     }
 
     func resolve(_ action: AgentAction, in frame: AgentFrame) async throws -> AgentResolvedAction {
