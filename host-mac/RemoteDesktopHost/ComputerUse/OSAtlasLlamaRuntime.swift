@@ -252,6 +252,12 @@ struct OSAtlasLlamaResourceProfile: Equatable, Sendable {
         minimumLaunchMemoryBytes: 4 * 1_024 * 1_024 * 1_024,
         minimumInferenceMemoryBytes: 1 * 1_024 * 1_024 * 1_024)
 
+    static let agentVision = OSAtlasLlamaResourceProfile(
+        tier: .compact, contextSize: 16_384, logicalBatchSize: 512, physicalBatchSize: 128,
+        maximumResidentMemoryBytes: 12 * 1_024 * 1_024 * 1_024,
+        minimumLaunchMemoryBytes: 8 * 1_024 * 1_024 * 1_024,
+        minimumInferenceMemoryBytes: 2 * 1_024 * 1_024 * 1_024)
+
     let tier: Tier
     let contextSize: Int
     let logicalBatchSize: Int
@@ -536,6 +542,20 @@ struct OSAtlasLlamaLaunchConfiguration: Equatable, Sendable {
         routerPresetFile = nil
         self.authenticationFile = authenticationFile
         trainedVisionAlias = ComputerUseFaraRuntimeInputs.modelAlias
+    }
+
+    init(agentVisionInputs: AgentVisionRuntimeInputs, port: UInt16, bearerToken: String,
+         authenticationFile: OSAtlasLlamaPrivateFile) {
+        executableURL = agentVisionInputs.llamaServerURL
+        workingDirectoryURL = agentVisionInputs.llamaServerURL.deletingLastPathComponent()
+        modelFirstSplitURL = agentVisionInputs.modelURL
+        multimodalProjectorURL = agentVisionInputs.projectorURL
+        self.port = port
+        self.bearerToken = bearerToken
+        resourceProfile = .agentVision
+        routerPresetFile = nil
+        self.authenticationFile = authenticationFile
+        trainedVisionAlias = agentVisionInputs.runtimeAlias
     }
 
     init(holoInputs: ComputerUseHoloRuntimeInputs, port: UInt16, bearerToken: String,
@@ -1043,6 +1063,7 @@ actor OSAtlasLlamaRuntime {
         case visual(OSAtlasLlamaRuntimeInputs)
         case nativeText(ComputerUseNativeTextRuntimeInputs)
         case fara(ComputerUseFaraRuntimeInputs)
+        case agentVision(AgentVisionRuntimeInputs)
         case holo(ComputerUseHoloRuntimeInputs)
         case router(
             visual: OSAtlasLlamaRuntimeInputs,
@@ -1052,7 +1073,7 @@ actor OSAtlasLlamaRuntime {
             switch self {
             case .visual(let inputs), .router(let inputs, _):
                 return inputs
-            case .nativeText, .fara, .holo:
+            case .nativeText, .fara, .agentVision, .holo:
                 return nil
             }
         }
@@ -1067,12 +1088,23 @@ actor OSAtlasLlamaRuntime {
             return nil
         }
 
+        var agentVision: AgentVisionRuntimeInputs? {
+            if case .agentVision(let inputs) = self { return inputs }
+            return nil
+        }
+
+        var agentPolicyModel: AgentPolicyModel? {
+            if let inputs = agentVision { return inputs.model }
+            if fara != nil { return .fara15_4b }
+            return nil
+        }
+
         var holo: ComputerUseHoloRuntimeInputs? {
             if case .holo(let inputs) = self { return inputs }
             return nil
         }
 
-        var isTrainedVision: Bool { fara != nil || holo != nil }
+        var isTrainedVision: Bool { fara != nil || agentVision != nil || holo != nil }
 
         var isRouter: Bool {
             if case .router = self { return true }
@@ -1199,6 +1231,21 @@ actor OSAtlasLlamaRuntime {
         try await activateResolved(.fara(inputs))
     }
 
+    func activateAgentVision(_ inputs: AgentVisionRuntimeInputs) async throws -> OSAtlasLlamaEndpoint {
+        try await activateResolved(.agentVision(inputs))
+    }
+
+    func ensureAgentVisionReady(_ inputs: AgentVisionRuntimeInputs) async -> String? {
+        do {
+            _ = try await activateAgentVision(inputs)
+            await shutdown()
+            return nil
+        } catch {
+            await shutdown()
+            return String(describing: error)
+        }
+    }
+
     func activateHolo(_ inputs: ComputerUseHoloRuntimeInputs) async throws -> OSAtlasLlamaEndpoint {
         try await activateResolved(.holo(inputs))
     }
@@ -1250,6 +1297,8 @@ actor OSAtlasLlamaRuntime {
             try Self.validateNativeTextInputs(textInputs)
         } else if let faraInputs = inputs.fara {
             try Self.validateFaraInputs(faraInputs)
+        } else if let agentVisionInputs = inputs.agentVision {
+            try Self.validateAgentVisionInputs(agentVisionInputs)
         } else if let holoInputs = inputs.holo {
             try Self.validateTrainedVisionInputs(modelURL: holoInputs.modelURL, projectorURL: holoInputs.projectorURL,
                 llamaServerURL: holoInputs.llamaServerURL, modelFileName: ComputerUseHoloRuntimeInputs.modelFileName,
@@ -1415,7 +1464,7 @@ actor OSAtlasLlamaRuntime {
     func proposeFara(endpoint: OSAtlasLlamaEndpoint, input: ComputerUseFaraModel.Input) async throws -> ComputerUseFaraModel.Proposal {
         let lease = try await acquireModelAccessLease()
         defer { releaseModelAccessLease(lease) }
-        guard let server = active, server.endpoint == endpoint, server.inputs.fara != nil else {
+        guard let server = active, server.endpoint == endpoint, server.inputs.isTrainedVision else {
             throw OSAtlasLlamaRuntimeError.inactiveSession
         }
         do {
@@ -1482,12 +1531,13 @@ actor OSAtlasLlamaRuntime {
         }
     }
 
-    /// Runs one tool-schema-constrained Agent action through the active Fara
-    /// worker. It holds the shared model lease through token counting and completion.
+    /// Runs one native policy action through the active vision worker. It holds
+    /// the shared model lease through token counting and completion.
     func completeAgentAction(endpoint: OSAtlasLlamaEndpoint, input: AgentVLMRequestInput) async throws -> String {
         let lease = try await acquireModelAccessLease()
         defer { releaseModelAccessLease(lease) }
-        guard let server = active, server.endpoint == endpoint, server.inputs.fara != nil else {
+        guard let server = active, server.endpoint == endpoint,
+              server.inputs.agentPolicyModel == input.model else {
             throw OSAtlasLlamaRuntimeError.inactiveSession
         }
         do {
@@ -1498,7 +1548,8 @@ actor OSAtlasLlamaRuntime {
                 let exactTokens = try await server.transport.exactInputTokenCount(completionRequest: request)
                 try Task.checkCancellation()
                 guard active?.endpoint == endpoint else { throw OSAtlasLlamaRuntimeError.inactiveSession }
-                let reservedTokens = ComputerUseFaraModel.contextImageTokensPerScreenshot
+                let imageCount = input.priorScreenshotsPNG.count + 1
+                let reservedTokens = imageCount * ComputerUseFaraModel.contextImageTokensPerScreenshot
                     + OSAtlasLlamaHTTPClient.agentMaximumCompletionTokens
                     + ComputerUseFaraModel.contextSafetyReserveTokens
                 guard exactTokens > 0, exactTokens <= server.resourceProfile.contextSize - reservedTokens else {
@@ -2207,7 +2258,8 @@ actor OSAtlasLlamaRuntime {
             do {
                 try await stopActiveServerUnserialized()
                 try validateActivation(epoch: expectedActivationEpoch)
-                let resourceProfile = try resourceProfileForLaunch(nativeText: inputs.nativeText != nil, trainedVision: inputs.isTrainedVision)
+                let resourceProfile = try resourceProfileForLaunch(nativeText: inputs.nativeText != nil,
+                    trainedVision: inputs.isTrainedVision, agentVision: inputs.agentVision != nil)
                 let port = try portProvider.availableLoopbackPort()
                 let token = tokenProvider.bearerToken()
                 guard !token.isEmpty else {
@@ -2221,6 +2273,11 @@ actor OSAtlasLlamaRuntime {
                     let authentication = try OSAtlasLlamaPrivateFile.authentication(token: token)
                     pendingAuthenticationFile = authentication
                     configuration = .init(faraInputs: faraInputs, port: port, bearerToken: token, authenticationFile: authentication)
+                } else if let agentVisionInputs = inputs.agentVision {
+                    let authentication = try OSAtlasLlamaPrivateFile.authentication(token: token)
+                    pendingAuthenticationFile = authentication
+                    configuration = .init(agentVisionInputs: agentVisionInputs, port: port,
+                        bearerToken: token, authenticationFile: authentication)
                 } else if let holoInputs = inputs.holo {
                     let authentication = try OSAtlasLlamaPrivateFile.authentication(token: token)
                     pendingAuthenticationFile = authentication
@@ -2448,7 +2505,8 @@ actor OSAtlasLlamaRuntime {
         lifecycleTransition?.task.cancel()
     }
 
-    private func resourceProfileForLaunch(nativeText: Bool = false, trainedVision: Bool = false) throws -> OSAtlasLlamaResourceProfile {
+    private func resourceProfileForLaunch(nativeText: Bool = false, trainedVision: Bool = false,
+        agentVision: Bool = false) throws -> OSAtlasLlamaResourceProfile {
         let snapshot = try resourceSnapshot()
         guard !trainedVision || snapshot.physicalMemoryBytes >= 16 * 1_024 * 1_024 * 1_024 else {
             throw OSAtlasLlamaRuntimeError.insufficientPhysicalMemory
@@ -2460,7 +2518,8 @@ actor OSAtlasLlamaRuntime {
         }
         // Text always uses the measured 4K context and a single 4 GiB process
         // ceiling. This budget is not a claim of physical 8 GiB qualification.
-        let profile: OSAtlasLlamaResourceProfile = trainedVision ? .fara : nativeText ? .compact : hardwareProfile
+        let visionProfile: OSAtlasLlamaResourceProfile = agentVision ? .agentVision : .fara
+        let profile: OSAtlasLlamaResourceProfile = trainedVision ? visionProfile : nativeText ? .compact : hardwareProfile
         guard snapshot.reclaimableMemoryBytes >= profile.minimumLaunchMemoryBytes else {
             throw OSAtlasLlamaRuntimeError.insufficientAvailableMemory
         }
@@ -2564,6 +2623,21 @@ actor OSAtlasLlamaRuntime {
     private static func validateFaraInputs(_ inputs: ComputerUseFaraRuntimeInputs) throws {
         try validateTrainedVisionInputs(modelURL: inputs.modelURL, projectorURL: inputs.projectorURL, llamaServerURL: inputs.llamaServerURL,
             modelFileName: ComputerUseFaraRuntimeInputs.modelFileName, projectorFileName: ComputerUseFaraRuntimeInputs.projectorFileName)
+    }
+
+    private static func validateAgentVisionInputs(_ inputs: AgentVisionRuntimeInputs) throws {
+        let modelName: String
+        let projectorName: String
+        switch inputs.model {
+        case .fara15_4b:
+            modelName = ComputerUseFaraRuntimeInputs.modelFileName
+            projectorName = ComputerUseFaraRuntimeInputs.projectorFileName
+        case .uiTars15_7b:
+            modelName = "UI-TARS-1.5-7B.Q4_K_M.gguf"
+            projectorName = "UI-TARS-1.5-7B.mmproj-f16.gguf"
+        }
+        try validateTrainedVisionInputs(modelURL: inputs.modelURL, projectorURL: inputs.projectorURL,
+            llamaServerURL: inputs.llamaServerURL, modelFileName: modelName, projectorFileName: projectorName)
     }
 
     private static func validateTrainedVisionInputs(modelURL: URL, projectorURL: URL, llamaServerURL: URL,
@@ -2691,27 +2765,38 @@ enum OSAtlasLlamaHTTPClient {
         guard let schema = try JSONSerialization.jsonObject(with: input.actionSchema) as? [String: Any] else {
             throw OSAtlasLlamaRuntimeError.invalidResponse
         }
+        guard input.priorScreenshotsPNG.count <= 2 else { throw OSAtlasLlamaRuntimeError.invalidVisionInput }
+        for image in input.priorScreenshotsPNG { try ComputerUseFaraModel.validatePNG(image) }
         var request = URLRequest(url: endpoint.baseURL.appendingPathComponent("v1/chat/completions"))
         request.httpMethod = "POST"
-        request.timeoutInterval = 45
+        request.timeoutInterval = 60
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("Bearer " + endpoint.bearerToken, forHTTPHeaderField: "Authorization")
-        let userContent: [[String: Any]] = [
-            ["type": "text", "text": "Observation JSON (screenshot attached separately):\n" + input.observationJSON],
-            ["type": "image_url", "image_url": ["url": "data:image/png;base64," + input.screenshotPNG.base64EncodedString()]],
-        ]
-        let tool = ["type": "function", "function": [
-            "name": "computer_use",
-            "description": "Invoke this native computer_use function exactly once. Its arguments must be the flat JSON action matching the supplied schema; do not return the action as bare assistant content. Point coordinates use the attached screenshot's pixel space, with origin at its top left. Type actions state replace or append explicitly. The host checks scope and approvals.",
-            "parameters": schema,
-        ]] as [String: Any]
-        request.httpBody = try JSONSerialization.data(withJSONObject: [
-            "model": ComputerUseFaraRuntimeInputs.modelAlias,
+        var userContent: [[String: Any]] = [["type": "text", "text":
+            "Observation JSON (current screenshot attached last):\n" + input.observationJSON +
+            (input.priorScreenshotsPNG.isEmpty ? "" : "\nEarlier screenshots follow chronologically, then the current screenshot.")]]
+        for image in input.priorScreenshotsPNG + [input.screenshotPNG] {
+            userContent.append(["type": "image_url", "image_url": ["url":
+                "data:image/png;base64," + image.base64EncodedString()]])
+        }
+        var body: [String: Any] = [
+            "model": input.modelAlias,
             "messages": [["role": "system", "content": input.prompt], ["role": "user", "content": userContent]],
-            "tools": [tool], "tool_choice": "required", "parallel_tool_calls": false,
             "temperature": 0, "max_tokens": agentMaximumCompletionTokens, "stream": false,
             "reasoning_format": "none",
-        ], options: [.sortedKeys, .withoutEscapingSlashes])
+        ]
+        if input.model == .fara15_4b {
+            let tool = ["type": "function", "function": [
+                "name": "computer_use",
+                "description": input.toolDescription,
+                "parameters": schema,
+            ]] as [String: Any]
+            body["tools"] = [tool]
+            body["tool_choice"] = "required"
+            body["parallel_tool_calls"] = false
+        }
+        request.httpBody = try JSONSerialization.data(withJSONObject: body,
+            options: [.sortedKeys, .withoutEscapingSlashes])
         guard let body = request.httpBody, body.count <= 9 * 1_024 * 1_024 else {
             throw OSAtlasLlamaRuntimeError.invalidResponse
         }

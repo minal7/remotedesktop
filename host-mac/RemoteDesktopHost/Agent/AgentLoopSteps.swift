@@ -106,6 +106,10 @@ extension AgentLoop {
         guard scope.taskID == taskID else {
             throw AgentEnvironmentError.scopeChanged
         }
+        if environment.followsFrontmostSurface {
+            boundScope = scope
+            return
+        }
         if let boundScope {
             if scope == boundScope { return }
             guard let transition, let observation,
@@ -357,6 +361,9 @@ extension AgentLoop {
                     reason: "The environment did not confirm the action: \(execution.result)", cancelled: false)
             }
             if began {
+                if environment.followsFrontmostSurface {
+                    try await Task.sleep(for: .milliseconds(300))
+                }
                 nextFrame = try await environment.observe(observationContext())
                 try verifySurfaceKind(nextFrame!)
                 try bindOrVerifyScope(nextFrame!.scope,

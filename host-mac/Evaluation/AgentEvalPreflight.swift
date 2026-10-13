@@ -7,23 +7,39 @@ import Security
 struct AgentEvalPreflightRequest: Decodable {
     let operation: String
     let probeURL: String
+    let policy: String
 
     private enum CodingKeys: String, CodingKey, CaseIterable {
         case operation
         case probeURL = "probe_url"
+        case policy
     }
 
     static func decodeStrict(_ data: Data) throws -> Self {
         guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-              Set(object.keys) == ["operation", "probe_url"],
+              Set(object.keys).isSubset(of: ["operation", "probe_url", "policy"]),
+              ["operation", "probe_url"].allSatisfy({ object[$0] != nil }),
               object["operation"] as? String == "preflight",
               let url = object["probe_url"] as? String else {
             throw AgentEvalWireError.invalidRequest
         }
         let request = try JSONDecoder().decode(Self.self, from: data)
-        guard request.operation == "preflight" else { throw AgentEvalWireError.invalidRequest }
+        guard request.operation == "preflight", AgentPolicyModel(rawValue: request.policy) != nil else {
+            throw AgentEvalWireError.invalidRequest
+        }
         try Self.validateProbeURL(url)
         return request
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        guard Set(container.allKeys).isSubset(of: Set(CodingKeys.allCases)),
+              container.contains(.operation), container.contains(.probeURL) else {
+            throw AgentEvalWireError.invalidRequest
+        }
+        operation = try container.decode(String.self, forKey: .operation)
+        probeURL = try container.decode(String.self, forKey: .probeURL)
+        policy = try container.decodeIfPresent(String.self, forKey: .policy) ?? "fara15-4b"
     }
 
     private static func validateProbeURL(_ value: String) throws {
@@ -49,19 +65,16 @@ struct AgentEvalPreflightResponse: Encodable, Equatable {
     let checks: [AgentEvalPreflightCheck]
     let blockedReason: String?
     let ownerAction: String?
-    let safariExtensionStatus: String?
-    let safariPingCount: Int?
-    let safariPingP95Milliseconds: Double?
+    let activeEnvironment = "pixel"
+    let policy: String
     let modelStatus: String?
 
     private enum CodingKeys: String, CodingKey {
-        case operation, outcome, checks
+        case operation, outcome, checks, policy
         case realHostApp = "real_host_app"
         case blockedReason = "blocked_reason"
         case ownerAction = "owner_action"
-        case safariExtensionStatus = "safari_extension_status"
-        case safariPingCount = "safari_ping_count"
-        case safariPingP95Milliseconds = "safari_ping_p95_ms"
+        case activeEnvironment = "active_environment"
         case modelStatus = "model_status"
     }
 
@@ -69,25 +82,17 @@ struct AgentEvalPreflightResponse: Encodable, Equatable {
         .init(outcome: "infra_blocked", checks: [
             .init(name: "request", status: "blocked", detail: "The preflight request was invalid."),
         ], blockedReason: "The preflight request did not match the required protocol.",
-           ownerAction: "Update the evaluation runner to send operation=preflight and a loopback fixture probe_url.",
-           safariExtensionStatus: nil, safariPingCount: nil,
-           safariPingP95Milliseconds: nil, modelStatus: nil)
+           ownerAction: "Update the evaluation runner to send a loopback fixture probe_url and supported policy.",
+           policy: "none", modelStatus: nil)
     }
-}
-
-struct AgentEvalSafariProbeResult: Equatable {
-    let extensionStatus: String
-    let sampleCount: Int
-    let p95Milliseconds: Double
 }
 
 struct AgentEvalPreflightDependencies {
     let signedHostCheck: @MainActor () -> Bool
     let accessibilityCheck: @MainActor () -> Bool
     let screenRecordingCheck: @MainActor () -> Bool
-    let helperCheck: @MainActor () throws -> String
-    let safariProbe: @MainActor (String) async throws -> AgentEvalSafariProbeResult
-    let modelCheck: @MainActor () async -> String?
+    let pixelReadinessCheck: @MainActor () async -> PixelEnvironmentReadiness
+    let modelCheck: @MainActor (AgentPolicyModel) async -> String?
 }
 
 enum AgentEvalPreflight {
@@ -102,67 +107,45 @@ enum AgentEvalPreflight {
         var checks: [AgentEvalPreflightCheck] = []
         guard dependencies.signedHostCheck() else {
             return blocked("host_process", "The running host app signature could not be verified.",
-                "Launch the signed Remote Desktop Host app build, then rerun preflight.", checks: checks)
+                "Launch the signed Remote Desktop Host app build, then rerun preflight.", checks: checks, policy: request.policy)
         }
         checks.append(.init(name: "host_process", status: "passed",
             detail: "PID \(ProcessInfo.processInfo.processIdentifier) is running as the signed Remote Desktop Host app."))
 
         guard dependencies.accessibilityCheck() else {
-            return blocked("accessibility", "Accessibility or input control permission is unavailable.",
-                "Grant Accessibility to Remote Desktop Host in System Settings > Privacy & Security, then rerun preflight.", checks: checks)
+            return blocked("accessibility", "Accessibility permission is unavailable.",
+                "Grant Accessibility to Remote Desktop Host in System Settings > Privacy & Security, then rerun preflight.",
+                checks: checks, policy: request.policy)
         }
-        checks.append(.init(name: "accessibility", status: "passed", detail: "Accessibility and input control are available."))
+        checks.append(.init(name: "accessibility", status: "passed", detail: "Accessibility is available."))
 
         guard dependencies.screenRecordingCheck() else {
             return blocked("screen_recording", "Screen Recording permission is unavailable.",
-                "Grant Screen Recording to Remote Desktop Host in System Settings > Privacy & Security, then rerun preflight.", checks: checks)
+                "Grant Screen Recording to Remote Desktop Host in System Settings > Privacy & Security, then rerun preflight.",
+                checks: checks, policy: request.policy)
         }
         checks.append(.init(name: "screen_recording", status: "passed", detail: "Screen Recording is available."))
 
-        do {
-            let status = try dependencies.helperCheck()
-            guard status == "enabled" else {
-                return blocked("safari_helper", "Safari Bridge helper status is \(status).",
-                    "Enable the Remote Desktop Host helper in System Settings > General > Login Items & Extensions, then rerun preflight.", checks: checks)
-            }
-            checks.append(.init(name: "safari_helper", status: "passed", detail: status))
-        } catch let error as SafariBridgeHelperServiceError {
-            let reason = "\(error.localizedDescription) (status: \(SafariBridgeHelperService.statusName))"
-            return blocked("safari_helper", reason,
-                helperOwnerAction(error), checks: checks)
-        } catch {
-            return blocked("safari_helper", "The bundled Safari Bridge helper is unavailable.",
-                "Enable the Remote Desktop Host helper in System Settings > General > Login Items & Extensions, then rerun preflight.", checks: checks)
+        let pixel = await dependencies.pixelReadinessCheck()
+        guard pixel.ready, pixel.activeBackend == "pixel" else {
+            return blocked("pixel_environment", pixel.detail,
+                "Make Pixel screenshot capture and Accessibility available, then rerun preflight.",
+                checks: checks, policy: request.policy)
         }
+        checks.append(.init(name: "pixel_environment", status: "passed", detail: pixel.detail))
 
-        let probe: AgentEvalSafariProbeResult
-        do {
-            probe = try await dependencies.safariProbe(request.probeURL)
-        } catch {
-            return blocked("safari_extension", "Safari bound-tab health probe failed: \(error.localizedDescription)",
-                "Enable the Remote Desktop Host extension in Safari > Settings > Extensions and allow it on the local fixture page, then rerun preflight.", checks: checks,
-                extensionStatus: "unknown")
+        guard let model = AgentPolicyModel(rawValue: request.policy) else {
+            return blocked("model", "The requested local model policy is unsupported.",
+                "Select fara15-4b or ui-tars15-7b, then rerun preflight.", checks: checks, policy: request.policy)
         }
-        guard probe.extensionStatus == "enabled", probe.sampleCount == 100,
-              probe.p95Milliseconds.isFinite, probe.p95Milliseconds >= 0 else {
-            return blocked("safari_extension", "Safari extension state or ping results were incomplete.",
-                "Enable the Remote Desktop Host extension in Safari > Settings > Extensions and allow it on the local fixture page, then rerun preflight.", checks: checks,
-                extensionStatus: probe.extensionStatus, pingCount: probe.sampleCount,
-                pingP95: probe.p95Milliseconds)
+        if let modelFailure = await dependencies.modelCheck(model) {
+            return blocked("model", "The local \(model.rawValue) runtime did not become ready: \(modelFailure)",
+                "Complete setup for the selected local model in the signed host app, then rerun preflight.",
+                checks: checks, policy: request.policy, modelStatus: "failed")
         }
-        checks.append(.init(name: "safari_extension", status: "passed",
-            detail: "Enabled; 100 bound-tab pings completed (p95 \(probe.p95Milliseconds) ms)."))
-
-        if let modelFailure = await dependencies.modelCheck() {
-            return blocked("model", "The local Fara model runtime did not become ready: \(modelFailure)",
-                "Complete Fara model setup in the signed Remote Desktop Host app, then rerun preflight.", checks: checks,
-                extensionStatus: probe.extensionStatus, pingCount: probe.sampleCount,
-                pingP95: probe.p95Milliseconds, modelStatus: "failed")
-        }
-        checks.append(.init(name: "model", status: "passed", detail: "Local Fara model loaded and passed its runtime health check."))
+        checks.append(.init(name: "model", status: "passed", detail: "Selected local model loaded and passed its runtime health check."))
         return .init(outcome: "ready", checks: checks, blockedReason: nil, ownerAction: nil,
-            safariExtensionStatus: probe.extensionStatus, safariPingCount: probe.sampleCount,
-            safariPingP95Milliseconds: probe.p95Milliseconds, modelStatus: "loaded")
+            policy: model.rawValue, modelStatus: "loaded")
     }
 
     @MainActor
@@ -172,13 +155,8 @@ enum AgentEvalPreflight {
             signedHostCheck: isSignedHost,
             accessibilityCheck: { permissions.accessibilityGranted() },
             screenRecordingCheck: { permissions.screenRecordingGranted() },
-            helperCheck: { try SafariBridgeHelperService.ensureRegistered() },
-            safariProbe: { url in
-                let report = try await SafariBridgeHealthProbe.run(testURL: url, sampleCount: 100)
-                return .init(extensionStatus: report.extensionStatus,
-                    sampleCount: report.sampleCount, p95Milliseconds: report.p95Milliseconds)
-            },
-            modelCheck: startAndStopFaraRuntime)
+            pixelReadinessCheck: { await PixelEnvironment.readiness() },
+            modelCheck: ensureModelReady)
     }
 
     private static func isSignedHost() -> Bool {
@@ -191,47 +169,39 @@ enum AgentEvalPreflight {
     }
 
     @MainActor
-    private static func startAndStopFaraRuntime() async -> String? {
-        let installer = ComputerUseInstaller()
-        guard let receipt = await installer.currentInstallation() else {
-            return "No verified Fara installation receipt is available."
-        }
+    private static func ensureModelReady(_ model: AgentPolicyModel) async -> String? {
         do {
+            let installer = ComputerUseInstaller()
+            let receipt = model == .fara15_4b ? await installer.currentInstallation() : nil
             let runtimeDirectory = try OSAtlasVisualExecutorLoader.bundledRuntimeDirectoryURL(in: .main)
-            let package = try OSAtlasRuntimeInputResolver().resolveAvailablePackage(receipt: receipt,
+            let inputs = try AgentVisionRuntimeInputs.resolve(model: model, faraInputs: try faraInputs(receipt, model: model,
+                runtimeDirectory: runtimeDirectory),
+                modelRootURL: HostComputerUseManager.modelDirectoryURL.appendingPathComponent("Models", isDirectory: true),
                 runtimeDirectoryURL: runtimeDirectory, enclosingBundleURL: Bundle.main.bundleURL)
-            guard case .fara(let inputs) = package else { return "The installed runtime package is not Fara 1.5." }
-            let runtime = OSAtlasLlamaRuntime.shared
-            _ = try await runtime.activateFara(inputs)
-            await runtime.shutdown()
-            return nil
+            return await OSAtlasLlamaRuntime.shared.ensureAgentVisionReady(inputs)
         } catch {
             await OSAtlasLlamaRuntime.shared.shutdown()
             return error.localizedDescription
         }
     }
 
-    private static func helperOwnerAction(_ error: SafariBridgeHelperServiceError) -> String {
-        switch error {
-        case .helperRequiresApproval:
-            "System Settings → General → Login Items & Extensions → allow Remote Desktop Host"
-        case .helperMissingFromBundle:
-            "Rebuild or reinstall the signed Remote Desktop Host app with its bundled Safari Bridge helper."
-        case .registrationFailed:
-            "Send the registration failure domain and code to the app developer for diagnosis, then reinstall the signed host app."
-        case .helperNotRegistered, .statusUnavailable:
-            "Enable or register the Remote Desktop Host helper in System Settings > General > Login Items & Extensions, then rerun preflight."
+    private static func faraInputs(_ receipt: ComputerUseInstallationReceipt?, model: AgentPolicyModel,
+                                   runtimeDirectory: URL) throws -> ComputerUseFaraRuntimeInputs? {
+        guard model == .fara15_4b else { return nil }
+        guard let receipt,
+              case let .fara(inputs) = try OSAtlasRuntimeInputResolver().resolveAvailablePackage(
+                receipt: receipt, runtimeDirectoryURL: runtimeDirectory, enclosingBundleURL: Bundle.main.bundleURL) else {
+            throw OSAtlasRuntimeInstallationError.invalidReceipt
         }
+        return inputs
     }
 
     private static func blocked(_ name: String, _ reason: String, _ action: String,
-                                checks: [AgentEvalPreflightCheck], extensionStatus: String? = nil,
-                                pingCount: Int? = nil, pingP95: Double? = nil,
+                                checks: [AgentEvalPreflightCheck], policy: String,
                                 modelStatus: String? = nil) -> AgentEvalPreflightResponse {
-        let failed = AgentEvalPreflightCheck(name: name, status: "blocked", detail: reason)
-        return .init(outcome: "infra_blocked", checks: checks + [failed], blockedReason: reason,
-            ownerAction: action, safariExtensionStatus: extensionStatus,
-            safariPingCount: pingCount, safariPingP95Milliseconds: pingP95, modelStatus: modelStatus)
+        .init(outcome: "infra_blocked", checks: checks + [
+            .init(name: name, status: "blocked", detail: reason),
+        ], blockedReason: reason, ownerAction: action, policy: policy, modelStatus: modelStatus)
     }
 }
 #endif

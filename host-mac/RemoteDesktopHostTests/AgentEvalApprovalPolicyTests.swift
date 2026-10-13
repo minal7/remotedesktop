@@ -78,6 +78,21 @@ final class AgentEvalApprovalPolicyTests: XCTestCase {
         }
     }
 
+    func testNativeStartApprovalIsBoundToResolvedStartAppAndLowOrMediumRisk() throws {
+        let request = try appRequest(start: "TextEdit")
+        let allowed = candidate(request: request,
+            action: .type(target: nil, text: "Draft", mode: .replace), riskTier: "medium", currentURL: nil,
+            currentApp: "com.apple.TextEdit", expectedApp: "com.apple.TextEdit")
+        XCTAssertTrue(AgentEvalApprovalPolicy.permits(allowed, request: request))
+        XCTAssertFalse(AgentEvalApprovalPolicy.permits(candidate(request: request, riskTier: "high",
+            currentURL: nil, currentApp: "com.apple.TextEdit", expectedApp: "com.apple.TextEdit"), request: request))
+        XCTAssertFalse(AgentEvalApprovalPolicy.permits(candidate(request: request, riskTier: "low",
+            currentURL: nil, currentApp: "com.apple.finder", expectedApp: "com.apple.TextEdit"), request: request))
+        let unapproved = try appRequest(start: "TextEdit", flags: [:])
+        XCTAssertFalse(AgentEvalApprovalPolicy.permits(candidate(request: unapproved, riskTier: "medium",
+            currentURL: nil, currentApp: "com.apple.TextEdit", expectedApp: "com.apple.TextEdit"), request: unapproved))
+    }
+
     private func makeRequest(start: String, flags: [String: Bool]) throws -> AgentEvalRequest {
         var value: [String: Any] = ["task_id": "eval-task", "prompt": "Read the current page",
             "start": ["url": start], "max_steps": 10, "policy": "fara15-4b"]
@@ -85,16 +100,25 @@ final class AgentEvalApprovalPolicyTests: XCTestCase {
         return try AgentEvalRequest.decodeStrict(JSONSerialization.data(withJSONObject: value))
     }
 
+    private func appRequest(start: String, flags: [String: Bool] = ["allow_start_interaction": true]) throws -> AgentEvalRequest {
+        var value: [String: Any] = ["task_id": "eval-task", "prompt": "Read the current page",
+            "start": ["app": start], "max_steps": 10, "policy": "fara15-4b"]
+        if !flags.isEmpty { value["approval_policy"] = flags }
+        return try AgentEvalRequest.decodeStrict(JSONSerialization.data(withJSONObject: value))
+    }
+
     private func candidate(request: AgentEvalRequest, action: AgentAction = .key(chord: "Enter"),
                            riskTier: String = "high", currentURL: String? = nil,
                            approvalScope: String = "tab-id", resolvedScope: String = "tab-id",
                            fingerprint: String = String(repeating: "a", count: 64),
+                           currentApp: String? = nil, expectedApp: String? = nil,
                            targetRoles: [String] = [], hasSensitiveTarget: Bool = false,
                            hasSyntheticFileRoot: Bool = false) -> AgentEvalApprovalCandidate {
         AgentEvalApprovalCandidate(taskID: request.taskID, requestID: UUID().uuidString,
             fingerprint: fingerprint, approvalScope: approvalScope, resolvedScope: resolvedScope,
-            riskTier: riskTier, action: action, currentURL: currentURL ?? request.start.url!,
-            expectedURL: request.start.url!, targetRoles: targetRoles,
+            riskTier: riskTier, action: action, currentURL: currentURL ?? request.start.url,
+            expectedURL: request.start.url, currentApp: currentApp, expectedApp: expectedApp,
+            targetRoles: targetRoles,
             hasSensitiveTarget: hasSensitiveTarget, hasSyntheticFileRoot: hasSyntheticFileRoot)
     }
 }

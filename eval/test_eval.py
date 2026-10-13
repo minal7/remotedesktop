@@ -117,8 +117,55 @@ class TaskAndCheckerTests(unittest.TestCase):
         self.assertEqual(len(safety), 15)
         self.assertEqual(len(smoke), 20)
         self.assertEqual(len({task.task_id for task in smoke}), 20)
-        self.assertIn("web-basic-060", {task.task_id for task in smoke})
+        self.assertEqual(sum(task.value["surface"] == "web" for task in smoke), 12)
+        self.assertEqual(sum(task.value["surface"] == "app" for task in smoke), 8)
+        self.assertEqual({task.task_id for task in smoke if task.value["surface"] == "app"},
+                         {f"native-{index:03d}" for index in range(1, 9)})
+        self.assertNotIn("web-basic-060", {task.task_id for task in smoke})
         self.assertTrue(all(task.value["max_steps"] <= 40 for task in basics + safety))
+
+    def test_native_tasks_are_scoped_to_owned_scratch_and_have_distinct_checkers(self) -> None:
+        native = run_suite.load_tasks("native")
+        self.assertEqual(len(native), 8)
+        self.assertTrue(all(task.value["surface"] == "app" for task in native))
+        self.assertEqual(len({task.value["prompt"] for task in native}), 8)
+        self.assertTrue(all(task.value["approval_policy"] == {"allow_start_interaction": True} for task in native))
+        unsafe = {**native[0].value, "setup": {"folders": ["../../Documents"]}}
+        with self.assertRaises(run_suite.EvalError):
+            run_suite.validate_task(unsafe, Path("native-unsafe.yaml"))
+
+    def test_native_scratch_is_per_task_and_checkers_reject_paths_outside_it(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        task = next(task for task in run_suite.load_tasks("native") if task.task_id == "native-001")
+        home = os.environ.get("HOME")
+        with TemporaryDirectory() as directory:
+            os.environ["HOME"] = directory
+            try:
+                scratch = run_suite._native_scratch_directory(task.task_id, "run-token")
+                materialized = run_suite._materialize_native_task(task, scratch)
+                self.assertIn(str(scratch), materialized.value["prompt"])
+                target = scratch / "Meeting.txt"
+                target.write_text("Meeting notes for Monday\n", encoding="utf-8")
+                passed, _ = run_suite._match_expectation(None, materialized.value["checker"], [], "", scratch)
+                self.assertTrue(passed)
+                outside = {"type": "file_text", "expect": {"path": str(Path(directory) / "outside.txt"), "equals": "x"}}
+                self.assertFalse(run_suite._match_expectation(None, outside, [], "", scratch)[0])
+                run_suite._remove_native_scratch(scratch)
+                self.assertFalse(scratch.exists())
+                self.assertTrue((Path(directory) / "AgentEval").is_dir())
+            finally:
+                if home is None:
+                    os.environ.pop("HOME", None)
+                else:
+                    os.environ["HOME"] = home
+
+    def test_read_only_notes_checker_requires_notes_surface(self) -> None:
+        task = next(task for task in run_suite.load_tasks("native") if task.task_id == "native-008")
+        checker = task.value["checker"]
+        records = [{"type": "step", "observation": {"surface": {"kind": "app", "app": "com.apple.Notes"}}}]
+        self.assertTrue(run_suite._match_expectation(None, checker, records, "Notes is open.")[0])
+        self.assertFalse(run_suite._match_expectation(None, checker, [], "Notes is open.")[0])
 
     def test_unsafe_web_urls_and_task_shape_rejected(self) -> None:
         path = Path("unsafe.yaml")
@@ -164,7 +211,7 @@ class TaskAndCheckerTests(unittest.TestCase):
             "approval_policy": {"allow_start_interaction": True},
         }
         self.assertTrue(run_suite.validate_task(value, Path("public.yaml")))
-        response = {"task_id": "driver-id", "outcome": "done", "answer": "", "episode_path": "/tmp/eval.jsonl", "wall_seconds": 0.1, "real_host_app": True}
+        response = {"task_id": "driver-id", "outcome": "done", "answer": "", "episode_path": "/tmp/eval.jsonl", "wall_seconds": 0.1, "real_host_app": True, "environment": "pixel", "policy": "fara15-4b"}
         with patch.object(run_suite.subprocess, "run", return_value=type("Process", (), {"returncode": 0, "stdout": json.dumps(response)})()) as invoke, \
              patch.object(run_suite, "_prepare_episode_root", return_value=Path("/tmp/eval-root")), \
              patch.object(run_suite, "_vm_project_root", return_value=None), \
@@ -216,6 +263,7 @@ class TaskAndCheckerTests(unittest.TestCase):
             "import json,os,sys; request=json.load(sys.stdin); "
             "print(json.dumps({'task_id':request['task_id'],'outcome':'blocked','answer':'',"
             "'episode_path':'/tmp/episode.jsonl','wall_seconds':0,'real_host_app':True,"
+            "'environment':'pixel','policy':request['policy'],"
             "'run_token':os.environ['EVAL_RUN_TOKEN'],'eval_task':os.environ['EVAL_TASK_ID'],"
             "'eval_root':os.environ['REMOTE_DESKTOP_EVAL_ROOT']}))"
         )
@@ -371,6 +419,8 @@ class TaskAndCheckerTests(unittest.TestCase):
                "steps": 2, "wall_seconds": 1.0, "mean_step_latency_ms": 25.0,
                "median_total_step_latency_ms": 9.0, "total_step_latencies_ms": [5, 9, 13],
                "approvals": 0, "approval_requests": 0, "gate_rejections": {},
+               "median_observe_latency_ms": 4.0, "median_model_latency_ms": 25.0,
+               "median_execute_latency_ms": 3.0, "failure_class": None, "crop_mode": "unknown",
                "unsafe_count": 0, "checker": "matched", "tags": ["click"], "answer": "done"}
         with TemporaryDirectory() as directory:
             run_suite._write_report(Path(directory), [row], "tart")
@@ -384,15 +434,17 @@ class TaskAndCheckerTests(unittest.TestCase):
 
         good = {
             "operation": "preflight", "real_host_app": True, "outcome": "ready",
+            "active_environment": "pixel", "policy": "fara15-4b",
             "checks": [{"name": name, "status": "passed", "detail": "ok"}
                        for name in ("host_process", "accessibility", "screen_recording",
-                                    "safari_helper", "safari_extension", "model")],
-            "safari_extension_status": "enabled",
-            "safari_ping_count": 100, "safari_ping_p95_ms": 2.5, "model_status": "loaded",
+                                    "pixel_environment", "model")],
+            "model_status": "loaded",
         }
         self.assertTrue(evaluate(good).passed)
-        missing_ping = {**good, "safari_ping_count": 99}
-        self.assertFalse(evaluate(missing_ping).passed)
+        mismatch = {**good, "policy": "ui-tars15-7b"}
+        self.assertFalse(evaluate(mismatch, "fara15-4b").passed)
+        bad_environment = {**good, "active_environment": "safari"}
+        self.assertFalse(evaluate(bad_environment).passed)
         malformed_check = {**good, "checks": [{"status": "passed"}]}
         self.assertFalse(evaluate(malformed_check).passed)
         blocked = {**good, "outcome": "infra_blocked", "blocked_reason": "helper pending",
@@ -427,20 +479,41 @@ class TaskAndCheckerTests(unittest.TestCase):
     def test_missing_first_observation_is_infra_but_recorded_model_failure_is_fail(self) -> None:
         task = run_suite.load_tasks("basics")[0]
         response = {"task_id": str(uuid.uuid4()), "outcome": "failed", "answer": "",
-                    "episode_path": "/tmp/unused.jsonl", "wall_seconds": 1, "real_host_app": True}
+                    "episode_path": "/tmp/unused.jsonl", "wall_seconds": 1, "real_host_app": True,
+                    "environment": "pixel", "policy": "fara15-4b"}
         task_id = response["task_id"]
         with patch.object(run_suite, "_episode_records", return_value=[]):
             response["answer"] = "bridge binding failed before observation"
             absent, _ = run_suite._evaluate_response(task, response, "a" * 32, task_id, 1, "real-host")
         self.assertEqual(absent["status"], "INFRA-BLOCKED")
         self.assertIn("bridge binding failed", absent["checker"])
-        records = [{"type": "step", "step": 0, "timings": {"total_ms": 12}},
+        records = [{"type": "step", "step": 0, "timings": {"total_ms": 12, "observation_ms": 2,
+                    "policy_ms": 7, "execution_ms": 3}},
                    {"type": "footer", "outcome": "failed", "approvals": []}]
         with patch.object(run_suite, "_episode_records", return_value=records), \
              patch.object(run_suite, "_match_expectation", return_value=(False, "model stopped")):
             failed_row, _ = run_suite._evaluate_response(task, response, "a" * 32, task_id, 1, "real-host")
         self.assertEqual(failed_row["status"], "FAIL")
         self.assertEqual(failed_row["median_total_step_latency_ms"], 12)
+        self.assertEqual(failed_row["median_observe_latency_ms"], 2)
+        self.assertEqual(failed_row["median_model_latency_ms"], 7)
+        self.assertEqual(failed_row["median_execute_latency_ms"], 3)
+
+    def test_observed_pending_and_clarification_outcomes_keep_failure_classes(self) -> None:
+        task = run_suite.load_tasks("native")[0]
+        task_id = str(uuid.uuid4())
+        records = [{"type": "step", "step": 0, "gate": {"decision": "needs_approval"},
+                    "execution": {"status": "not_executed"}, "timings": {}}]
+        for outcome, expected in (("pending_approval", "gate-blocked"),
+                                  ("ask_user", "asked-unnecessarily")):
+            response = {"task_id": task_id, "outcome": outcome, "answer": "Waiting for the owner",
+                        "episode_path": "/tmp/unused.jsonl", "wall_seconds": 1,
+                        "real_host_app": True, "environment": "pixel", "policy": "fara15-4b"}
+            with patch.object(run_suite, "_episode_records", return_value=records), \
+                 patch.object(run_suite, "_match_expectation", return_value=(False, "not completed")):
+                row, _ = run_suite._evaluate_response(task, response, "a" * 32, task_id, 1, "real-host")
+            self.assertEqual(row["status"], "BLOCKED")
+            self.assertEqual(row["failure_class"], expected)
 
     def test_infra_rows_are_excluded_from_skill_denominators(self) -> None:
         from tempfile import TemporaryDirectory

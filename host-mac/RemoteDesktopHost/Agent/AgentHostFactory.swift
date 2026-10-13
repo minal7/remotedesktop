@@ -14,13 +14,16 @@ enum AgentHostFactory {
 
     struct Configuration: Equatable {
         let maxSteps: Int
+        let policy: AgentPolicyModel
         let initialSurface: InitialSurface?
         let fileRoots: [URL]?
         let storageDirectory: URL?
 
         init(maxSteps: Int = 40, initialSurface: InitialSurface? = nil,
-             fileRoots: [URL]? = nil, storageDirectory: URL? = nil) {
+             fileRoots: [URL]? = nil, storageDirectory: URL? = nil,
+             policy: AgentPolicyModel = .fara15_4b) {
             self.maxSteps = maxSteps
+            self.policy = policy
             self.initialSurface = initialSurface
             self.fileRoots = fileRoots
             self.storageDirectory = storageDirectory
@@ -34,9 +37,15 @@ enum AgentHostFactory {
             throw ConfigurationError.invalidMaxSteps
         }
         let directory = try OSAtlasVisualExecutorLoader.bundledRuntimeDirectoryURL(in: bundle)
-        let package = try OSAtlasRuntimeInputResolver().resolveAvailablePackage(receipt: receipt,
+        let faraInputs: ComputerUseFaraRuntimeInputs?
+        if configuration.policy == .fara15_4b {
+            faraInputs = try OSAtlasRuntimeInputResolver().resolveFara(receipt: receipt,
+                runtimeDirectoryURL: directory, enclosingBundleURL: bundle.bundleURL)
+        } else { faraInputs = nil }
+        let runtimeInputs = try AgentVisionRuntimeInputs.resolve(model: configuration.policy,
+            faraInputs: faraInputs,
+            modelRootURL: HostComputerUseManager.modelDirectoryURL.appendingPathComponent("Models", isDirectory: true),
             runtimeDirectoryURL: directory, enclosingBundleURL: bundle.bundleURL)
-        guard case let .fara(inputs) = package else { throw OSAtlasLlamaRuntimeError.invalidLocalInstallation }
         let registry = AgentAppRegistry(openHandler: { url in
             try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
                 do {
@@ -54,31 +63,28 @@ enum AgentHostFactory {
             ?? support.appendingPathComponent("AgentTrust", isDirectory: true)
         let trust = try PersistentAgentTrustStore(directory: trustDirectory)
         let taskExecutor = AgentTaskExecutor { taskID, prompt in
+            let pixelMetadata = configuration.storageDirectory?.appendingPathComponent("pixel-metadata.json")
             let files = AgentFileCatalog(authorizedRoots: configuration.fileRoots)
             let picker = AgentNativeFilePicker(catalog: files, injector: injector, mayAct: mayAct)
             let finder: AgentWebFileFinder = { query, kind, after in
                 try await files.find(query: query, kind: kind, modifiedAfter: after)
             }
-            let makeMac: AgentEnvironments.MacFactory = {
-                MacEnvironment(taskID: taskID, backend: AgentNativeBackend(injector: injector, registry: registry,
-                    allowed: mayAct, finder: finder, picker: { try await picker.select($0) }))
-            }
-            let makeWeb: AgentEnvironments.WebFactory = { url in
-                WebEnvironment(taskID: taskID, task: prompt, startURL: url, finder: finder,
-                    fileResolver: { try await files.resolve($0) }, mayAct: mayAct)
-            }
-            let start: any AgentEnvironment
+            let pixel: PixelEnvironment
             switch configuration.initialSurface {
-            case .web(let url): start = try makeWeb(url)
+            case .web(let url):
+                pixel = PixelEnvironment(taskID: taskID, injector: injector, registry: registry,
+                    allowed: mayAct, finder: finder, picker: { try await picker.select($0) }, startURL: url,
+                    capturePreference: configuration.policy.capturePreference, metadataURL: pixelMetadata)
             case .app(let name):
                 try await registry.open(registry.resolve(name))
-                start = try makeMac()
-            case nil: start = try makeMac()
+                pixel = PixelEnvironment(taskID: taskID, injector: injector, registry: registry,
+                    allowed: mayAct, finder: finder, picker: { try await picker.select($0) },
+                    capturePreference: configuration.policy.capturePreference, metadataURL: pixelMetadata)
+            case nil:
+                pixel = PixelEnvironment(taskID: taskID, injector: injector, registry: registry,
+                    allowed: mayAct, finder: finder, picker: { try await picker.select($0) },
+                    capturePreference: configuration.policy.capturePreference, metadataURL: pixelMetadata)
             }
-            let environments = AgentEnvironments(start: start, makeWeb: makeWeb,
-                makeMac: makeMac, openApp: { name in
-                try await registry.open(registry.resolve(name))
-            })
             let recordingRoot = configuration.storageDirectory?.appendingPathComponent("episodes", isDirectory: true)
                 ?? TrajectoryRecorder.defaultRoot
             let recorder = try TrajectoryRecorder(root: recordingRoot, episodeID: taskID)
@@ -86,8 +92,8 @@ enum AgentHostFactory {
                 directory: configuration.storageDirectory?.appendingPathComponent("AgentEffects", isDirectory: true)
                     ?? support.appendingPathComponent("AgentEffects", isDirectory: true))
             return try AgentLoop(taskID: taskID, prompt: prompt, maxSteps: configuration.maxSteps,
-                environment: environments,
-                policy: LlamaVLMPolicy(runtimeInputs: inputs, bundle: bundle),
+                environment: pixel,
+                policy: LlamaVLMPolicy(runtimeInputs: runtimeInputs, bundle: bundle),
                 gate: AgentActionGate(trustStore: trust, allowPolicy: HostAgentAllowPolicy(registry: registry)),
                 recorder: recorder, journal: journal)
         }

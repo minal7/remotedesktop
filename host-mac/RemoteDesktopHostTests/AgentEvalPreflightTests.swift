@@ -7,110 +7,83 @@ import XCTest
 final class AgentEvalPreflightTests: XCTestCase {
     private let probeURL = "http://127.0.0.1:8765/forms.html?__eval_run=0123456789abcdef0123456789abcdef"
 
-    func testRequestRequiresExactLoopbackProbeShape() throws {
+    func testRequestRequiresExactLoopbackProbeAndSupportedPolicy() throws {
         let request = try AgentEvalPreflightRequest.decodeStrict(requestData())
         XCTAssertEqual(request.operation, "preflight")
         XCTAssertEqual(request.probeURL, probeURL)
+        XCTAssertEqual(request.policy, "fara15-4b")
         XCTAssertThrowsError(try AgentEvalPreflightRequest.decodeStrict(
             Data("{\"operation\":\"preflight\",\"probe_url\":\"https://example.test\"}".utf8)))
         XCTAssertThrowsError(try AgentEvalPreflightRequest.decodeStrict(
             Data("{\"operation\":\"preflight\",\"probe_url\":\"http://127.0.0.1/\",\"task_id\":\"x\"}".utf8)))
+        XCTAssertThrowsError(try AgentEvalPreflightRequest.decodeStrict(
+            Data("{\"operation\":\"preflight\",\"probe_url\":\"http://127.0.0.1/\",\"policy\":\"unknown\"}".utf8)))
     }
 
-    func testPermissionFailureStopsBeforeHelperSafariOrModel() async throws {
+    func testPermissionFailureStopsBeforePixelOrModel() async throws {
         let request = try AgentEvalPreflightRequest.decodeStrict(requestData())
         var laterCheckCalled = false
         let dependencies = AgentEvalPreflightDependencies(
             signedHostCheck: { true }, accessibilityCheck: { false }, screenRecordingCheck: { true },
-            helperCheck: { laterCheckCalled = true; return "enabled" },
-            safariProbe: { _ in laterCheckCalled = true; return .init(extensionStatus: "enabled", sampleCount: 100, p95Milliseconds: 1) },
-            modelCheck: { laterCheckCalled = true; return nil })
+            pixelReadinessCheck: { laterCheckCalled = true; return .init(ready: true, detail: "ok") },
+            modelCheck: { _ in laterCheckCalled = true; return nil })
         let response = await AgentEvalPreflight.run(request, dependencies: dependencies)
         XCTAssertEqual(response.outcome, "infra_blocked")
-        XCTAssertEqual(response.blockedReason, "Accessibility or input control permission is unavailable.")
+        XCTAssertEqual(response.checks.map(\.name), ["host_process", "accessibility"])
+        XCTAssertEqual(response.checks.last?.status, "blocked")
         XCTAssertTrue(response.ownerAction?.contains("Accessibility") == true)
         XCTAssertFalse(response.ownerAction?.contains("Input Monitoring") == true)
-        XCTAssertEqual(response.checks.map(\.name), ["host_process", "accessibility"])
+        XCTAssertEqual(response.activeEnvironment, "pixel")
         XCTAssertFalse(laterCheckCalled)
     }
 
-    func testHelperApprovalUsesExactOwnerActionAndStopsLaterChecks() async throws {
-        let request = try AgentEvalPreflightRequest.decodeStrict(requestData())
-        var laterCheckCalled = false
-        let dependencies = AgentEvalPreflightDependencies(
-            signedHostCheck: { true }, accessibilityCheck: { true }, screenRecordingCheck: { true },
-            helperCheck: { throw SafariBridgeHelperServiceError.helperRequiresApproval },
-            safariProbe: { _ in
-                laterCheckCalled = true
-                return .init(extensionStatus: "enabled", sampleCount: 100, p95Milliseconds: 1)
-            },
-            modelCheck: { laterCheckCalled = true; return nil })
-        let response = await AgentEvalPreflight.run(request, dependencies: dependencies)
-        XCTAssertEqual(response.outcome, "infra_blocked")
-        XCTAssertEqual(response.checks.last?.name, "safari_helper")
-        XCTAssertEqual(response.ownerAction, SafariBridgeHelperServiceError.helperRequiresApproval.localizedDescription)
-        XCTAssertTrue(response.blockedReason?.contains("status:") == true)
-        XCTAssertFalse(laterCheckCalled)
-    }
-
-    func testHelperFailureStopsBeforeSafariOrModel() async throws {
-        let request = try AgentEvalPreflightRequest.decodeStrict(requestData())
-        var laterCheckCalled = false
-        let dependencies = AgentEvalPreflightDependencies(
-            signedHostCheck: { true }, accessibilityCheck: { true }, screenRecordingCheck: { true },
-            helperCheck: { throw SafariBridgeHelperServiceError.registrationFailed(domain: "Test", code: 7) },
-            safariProbe: { _ in
-                laterCheckCalled = true
-                return .init(extensionStatus: "enabled", sampleCount: 100, p95Milliseconds: 1)
-            },
-            modelCheck: { laterCheckCalled = true; return nil })
-        let response = await AgentEvalPreflight.run(request, dependencies: dependencies)
-        XCTAssertEqual(response.outcome, "infra_blocked")
-        XCTAssertEqual(response.checks.last?.name, "safari_helper")
-        XCTAssertTrue(response.blockedReason?.contains("Test, code 7") == true)
-        XCTAssertTrue(response.blockedReason?.contains("status:") == true)
-        XCTAssertTrue(response.ownerAction?.contains("developer") == true)
-        XCTAssertFalse(laterCheckCalled)
-    }
-
-    func testSuccessfulPreflightRequiresBoundTabPingsAndRuntimeHealth() async throws {
-        let request = try AgentEvalPreflightRequest.decodeStrict(requestData())
-        var probedURL: String?
-        let dependencies = AgentEvalPreflightDependencies(
-            signedHostCheck: { true }, accessibilityCheck: { true }, screenRecordingCheck: { true },
-            helperCheck: { "enabled" },
-            safariProbe: { url in
-                probedURL = url
-                return .init(extensionStatus: "enabled", sampleCount: 100, p95Milliseconds: 12.5)
-            },
-            modelCheck: { nil })
-        let response = await AgentEvalPreflight.run(request, dependencies: dependencies)
-        XCTAssertEqual(probedURL, probeURL)
-        XCTAssertEqual(response.outcome, "ready")
-        XCTAssertEqual(response.checks.map(\.status), ["passed", "passed", "passed", "passed", "passed", "passed"])
-        XCTAssertEqual(response.safariPingCount, 100)
-        XCTAssertEqual(response.safariPingP95Milliseconds, 12.5)
-        XCTAssertEqual(response.modelStatus, "loaded")
-    }
-
-    func testSafariProbeFailureStopsBeforeStartingModel() async throws {
+    func testPixelReadinessFailureStopsBeforeModel() async throws {
         let request = try AgentEvalPreflightRequest.decodeStrict(requestData())
         var modelStarted = false
         let dependencies = AgentEvalPreflightDependencies(
             signedHostCheck: { true }, accessibilityCheck: { true }, screenRecordingCheck: { true },
-            helperCheck: { "enabled" },
-            safariProbe: { _ in throw TestFailure.probe },
-            modelCheck: { modelStarted = true; return nil })
+            pixelReadinessCheck: { .init(ready: false, detail: "capture unavailable") },
+            modelCheck: { _ in modelStarted = true; return nil })
         let response = await AgentEvalPreflight.run(request, dependencies: dependencies)
         XCTAssertEqual(response.outcome, "infra_blocked")
-        XCTAssertEqual(response.checks.last?.name, "safari_extension")
+        XCTAssertEqual(response.checks.last?.name, "pixel_environment")
+        XCTAssertEqual(response.checks.last?.status, "blocked")
         XCTAssertFalse(modelStarted)
     }
 
-    private func requestData() -> Data {
-        Data("{\"operation\":\"preflight\",\"probe_url\":\"\(probeURL)\"}".utf8)
+    func testSuccessfulPreflightChecksSelectedModelRuntimeHealth() async throws {
+        let request = try AgentEvalPreflightRequest.decodeStrict(requestData(policy: "ui-tars15-7b"))
+        var checkedModel: AgentPolicyModel?
+        let dependencies = AgentEvalPreflightDependencies(
+            signedHostCheck: { true }, accessibilityCheck: { true }, screenRecordingCheck: { true },
+            pixelReadinessCheck: { .init(ready: true, detail: "Pixel ready") },
+            modelCheck: { model in checkedModel = model; return nil })
+        let response = await AgentEvalPreflight.run(request, dependencies: dependencies)
+        XCTAssertEqual(checkedModel, .uiTars15_7b)
+        XCTAssertEqual(response.outcome, "ready")
+        XCTAssertEqual(response.activeEnvironment, "pixel")
+        XCTAssertEqual(response.policy, "ui-tars15-7b")
+        XCTAssertEqual(response.modelStatus, "loaded")
+        XCTAssertEqual(response.checks.map(\.name),
+            ["host_process", "accessibility", "screen_recording", "pixel_environment", "model"])
+        XCTAssertTrue(response.checks.allSatisfy { $0.status == "passed" })
     }
 
-    private enum TestFailure: Error { case probe }
+    func testModelFailureIsReportedWithoutClaimingReadiness() async throws {
+        let request = try AgentEvalPreflightRequest.decodeStrict(requestData())
+        let dependencies = AgentEvalPreflightDependencies(
+            signedHostCheck: { true }, accessibilityCheck: { true }, screenRecordingCheck: { true },
+            pixelReadinessCheck: { .init(ready: true, detail: "Pixel ready") },
+            modelCheck: { _ in "server health check failed" })
+        let response = await AgentEvalPreflight.run(request, dependencies: dependencies)
+        XCTAssertEqual(response.outcome, "infra_blocked")
+        XCTAssertEqual(response.checks.last?.name, "model")
+        XCTAssertEqual(response.modelStatus, "failed")
+        XCTAssertTrue(response.blockedReason?.contains("server health check failed") == true)
+    }
+
+    private func requestData(policy: String = "fara15-4b") -> Data {
+        Data("{\"operation\":\"preflight\",\"probe_url\":\"\(probeURL)\",\"policy\":\"\(policy)\"}".utf8)
+    }
 }
 #endif

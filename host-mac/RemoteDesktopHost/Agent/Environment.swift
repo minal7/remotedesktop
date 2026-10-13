@@ -31,6 +31,8 @@ struct AgentResolvedAction {
 
 @MainActor
 protocol AgentEnvironment: AnyObject {
+    /// Pixel input follows the frontmost surface, whose window identity may change between frames.
+    var followsFrontmostSurface: Bool { get }
     func observe(_ context: AgentObservationContext) async throws -> AgentFrame
     /// Re-observe and resolve element identities; reject gone/changed/covered targets.
     func resolve(_ action: AgentAction, in frame: AgentFrame) async throws -> AgentResolvedAction
@@ -42,6 +44,7 @@ protocol AgentEnvironment: AnyObject {
 }
 
 extension AgentEnvironment {
+    var followsFrontmostSurface: Bool { false }
     func suspend() async {}
     func resume() async throws {}
 }

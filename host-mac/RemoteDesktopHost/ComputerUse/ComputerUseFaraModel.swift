@@ -960,6 +960,20 @@ enum ComputerUseFaraModel {
     static func validatePNG(_ data: Data) throws {
         try ComputerUseModelImagePolicy.validatePNG(data)
     }
+
+    static func pngDimensions(_ data: Data) throws -> (width: Int, height: Int) {
+        try validatePNG(data)
+        guard data.count >= 24 else { throw OSAtlasLlamaRuntimeError.invalidVisionInput }
+        func value(_ start: Int) -> Int {
+            (Int(data[start]) << 24) | (Int(data[start + 1]) << 16)
+                | (Int(data[start + 2]) << 8) | Int(data[start + 3])
+        }
+        let width = value(16), height = value(20)
+        guard width > 0, height > 0, width <= 16_384, height <= 16_384 else {
+            throw OSAtlasLlamaRuntimeError.invalidVisionInput
+        }
+        return (width, height)
+    }
 }
 
 // Official prompt: microsoft/fara a675d6d61c41c47ae87bacefeab22caad18e3e84.

@@ -1,0 +1,8 @@
+id: "native-008"
+surface: app
+start: {"app":"Notes"}
+approval_policy: {"allow_start_interaction":true}
+prompt: "Open Notes and leave its main window active. Do not create, edit, delete, or share any note. Tell me that Notes is open."
+checker: {"type":"app_surface","expect":{"bundle_id":"com.apple.Notes","answer_contains":["Notes"]}}
+max_steps: 8
+tags: ["native","notes","read-only"]

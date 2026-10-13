@@ -11,6 +11,7 @@ struct ComputerUseArtifactManifest: Codable, Equatable, Sendable {
         case base4B = "os-atlas-base-4b"
         case nativeText4B = "qwen35-native-text-4b"
         case fara15_4B = "fara15-4b"
+        case uiTars15_7B = "ui-tars15-7b"
         case holo31_4B = "holo31-4b"
     }
 
@@ -100,6 +101,26 @@ struct ComputerUseArtifactManifest: Codable, Equatable, Sendable {
                 downloadURL: URL(string: "https://huggingface.co/bartowski/Fara1.5-4B-GGUF/resolve/b97f335231e01efbbad37bb89b5310340fc10735/mmproj-Fara1.5-4B-f16.gguf")!)],
         minimumMemoryBytes: 16 * 1_024 * 1_024 * 1_024)
     static let current = fara15
+
+    /// Community GGUF conversion of the official UI-TARS 1.5-7B checkpoint.
+    /// The immutable conversion revision and blob hashes pin the data files;
+    /// execution remains in the signed bundled llama.cpp runtime.
+    static let uiTars15 = ComputerUseArtifactManifest(
+        installationVersion: "ui-tars15-7b-q4-k-m-b9992",
+        modelVariant: .uiTars15_7B,
+        modelRepository: "mradermacher/UI-TARS-1.5-7B-GGUF",
+        modelRevision: "bd33135be0c6a564eeac241c7cd985b9f779e057",
+        modelArtifacts: [
+            .init(kind: .textModelShard, fileName: "UI-TARS-1.5-7B.Q4_K_M.gguf",
+                byteCount: 4_683_073_856,
+                sha256: "3233f143243135ef458a3e18894c4d6883d384abcef23367a538a3a78003009b",
+                downloadURL: URL(string: "https://huggingface.co/mradermacher/UI-TARS-1.5-7B-GGUF/resolve/bd33135be0c6a564eeac241c7cd985b9f779e057/UI-TARS-1.5-7B.Q4_K_M.gguf")!),
+            .init(kind: .visionProjector, fileName: "UI-TARS-1.5-7B.mmproj-f16.gguf",
+                byteCount: 1_354_162_880,
+                sha256: "45fff9aa4ee4dcab82ad668e681b5ce0e061eb52a7dca26ddb8922435c567a8f",
+                downloadURL: URL(string: "https://huggingface.co/mradermacher/UI-TARS-1.5-7B-GGUF/resolve/bd33135be0c6a564eeac241c7cd985b9f779e057/UI-TARS-1.5-7B.mmproj-f16.gguf")!)
+        ],
+        minimumMemoryBytes: 16 * 1_024 * 1_024 * 1_024)
 
     /// Native desktop candidate. Selection remains explicit until whole-task
     /// and whole-app resource qualification is complete.

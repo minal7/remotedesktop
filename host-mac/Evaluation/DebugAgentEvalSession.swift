@@ -144,8 +144,15 @@ final class DebugAgentEvalSession {
         guard pending.approval.taskID == request.taskID,
               pending.approval.id.uuidString == approval.requestID,
               pending.approval.action == pending.resolved.action,
-              case .web(let currentURL, _) = pending.resolved.frame.observation.surface,
-              let expectedURL = request.start.url else { return false }
+              request.start.url != nil || request.start.app != nil else { return false }
+        let surface = pending.resolved.frame.observation.surface
+        let currentURL: String?
+        let currentApp: String?
+        switch surface {
+        case .web(let url, _): currentURL = url; currentApp = nil
+        case .app(let bundleID, _): currentURL = nil; currentApp = bundleID
+        }
+        let expectedApp = request.start.app.flatMap { try? AgentAppRegistry().resolve($0).bundleID }
         return AgentEvalApprovalPolicy.permits(.init(
             taskID: pending.approval.taskID,
             requestID: pending.approval.id.uuidString,
@@ -155,7 +162,9 @@ final class DebugAgentEvalSession {
             riskTier: pending.approval.riskTier.rawValue,
             action: pending.resolved.action,
             currentURL: currentURL,
-            expectedURL: expectedURL,
+            expectedURL: request.start.url,
+            currentApp: currentApp,
+            expectedApp: expectedApp,
             targetRoles: pending.resolved.targets.map(\.role),
             hasSensitiveTarget: hasSensitiveTarget(pending),
             hasSyntheticFileRoot: request.hasSyntheticFileRoot), request: request)
@@ -206,9 +215,13 @@ final class DebugAgentEvalSession {
     }
 
     private func makeResult(outcome: String, answer: String) -> AgentEvalResponse {
+        let requestedCropMode = request.policy == "ui-tars15-7b" ? "full-display" : "frontmost-window"
+        let metadataURL = runStore.directory.appendingPathComponent("pixel-metadata.json")
+        let cropMode = AgentEvalPixelMetadata.actualCropMode(from: try? Data(contentsOf: metadataURL))
         return AgentEvalResponse(taskID: request.taskID, outcome: outcome, answer: answer,
             episodePath: runStore.episodePath,
-            wallSeconds: max(0, ProcessInfo.processInfo.systemUptime - startedAt))
+            wallSeconds: max(0, ProcessInfo.processInfo.systemUptime - startedAt),
+            policy: request.policy, cropMode: cropMode, requestedCropMode: requestedCropMode)
     }
 
 }

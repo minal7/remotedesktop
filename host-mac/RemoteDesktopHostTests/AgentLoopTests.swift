@@ -51,6 +51,27 @@ final class AgentLoopTests: XCTestCase {
         XCTAssertTrue(environment.lastContext?.history.last?.result.contains("no longer present") == true)
     }
 
+    func testPixelFrontmostWindowChangeRebindsToRealFreshScope() async throws {
+        let firstScope = AgentScope(taskID: "task-1", kind: .web, identity: "window-1")
+        let nextScope = AgentScope(taskID: "task-1", kind: .web, identity: "window-2")
+        let first = webFrame(scope: firstScope, elements: [button(id: 1, name: "Continue")])
+        let next = webFrame(scope: nextScope)
+        let environment = TestEnvironment(frames: [first, next, next], followsFrontmostSurface: true)
+        let policy = TestPolicy([.action(.click(target: .element(id: 1), button: nil, count: nil)),
+                                 .action(.done(answer: "Recovered in the new window"))])
+        let recorder = TestRecorder()
+        let loop = try makeLoop(environment: environment, policy: policy, recorder: recorder,
+                                journal: TestJournal(), trustedWeb: true)
+
+        let result = try await loop.run()
+
+        XCTAssertEqual(result, .completed(answer: "Recovered in the new window"))
+        XCTAssertEqual(environment.executed.count, 1)
+        XCTAssertEqual(environment.observedScopes, [firstScope, nextScope])
+        XCTAssertEqual(recorder.steps.map(\.gate.decision), [.allowed, .allowed])
+        XCTAssertEqual(recorder.steps[1].observation.surface, next.observation.surface)
+    }
+
     func testAskUserReturnsTypedQuestionAndAcceptedAnswerContinuesTask() async throws {
         let environment = TestEnvironment(frames: [webFrame(), webFrame()])
         let policy = TestPolicy([.action(.askUser(question: "Which option?", choices: ["A", "B"])),
@@ -178,6 +199,27 @@ final class AgentLoopTests: XCTestCase {
         XCTAssertTrue(journal.verified.isEmpty)
         XCTAssertEqual(environment.executed.count, 1)
         XCTAssertEqual(recorder.footer?.outcome, "uncertain")
+    }
+
+    func testPixelReadbackMismatchIsRecordedAndPolicyCanRecoverWithoutReplay() async throws {
+        let mismatch = AgentExecutionResult(status: .ok, result: "typed 1 char → read-back unavailable or differs")
+        let environment = TestEnvironment(frames: [webFrame(), webFrame(), webFrame()],
+                                          executionResult: mismatch, followsFrontmostSurface: true)
+        let policy = TestPolicy([.action(.type(target: nil, text: "x", mode: .replace)),
+                                 .action(.done(answer: "The follow-up observation was reviewed"))])
+        let recorder = TestRecorder()
+        let journal = TestJournal()
+        let loop = try makeLoop(environment: environment, policy: policy, recorder: recorder,
+                                journal: journal, trustedWeb: true)
+
+        let result = try await loop.run()
+
+        XCTAssertEqual(result, .completed(answer: "The follow-up observation was reviewed"))
+        XCTAssertEqual(environment.executed.map(\.action.type), ["type"])
+        XCTAssertEqual(recorder.steps.count, 2)
+        XCTAssertTrue(recorder.steps[0].execution.result.contains("read-back unavailable or differs"))
+        XCTAssertEqual(journal.verified.count, 1)
+        XCTAssertTrue(journal.uncertain.isEmpty)
     }
 
     func testCredentialHandoffIsRecordedNonterminalAndFeedsRejectionBackToPolicy() async throws {
@@ -324,7 +366,9 @@ private final class TestPolicy: AgentPolicy {
 private final class TestEnvironment: AgentEnvironment {
     private let frames: [AgentFrame]
     private let executeError: Error?
+    private let executionResult: AgentExecutionResult?
     private let blockExecution: Bool
+    var followsFrontmostSurface: Bool
     private var continuation: CheckedContinuation<AgentExecutionResult, Error>?
     private var observeIndex = 0
     private(set) var executed: [AgentResolvedAction] = []
@@ -335,8 +379,12 @@ private final class TestEnvironment: AgentEnvironment {
     private(set) var executionStarted = false
     private(set) var lastContext: AgentObservationContext?
 
-    init(frames: [AgentFrame], executeError: Error? = nil, blockExecution: Bool = false) {
-        self.frames = frames; self.executeError = executeError; self.blockExecution = blockExecution
+    init(frames: [AgentFrame], executeError: Error? = nil, executionResult: AgentExecutionResult? = nil,
+         blockExecution: Bool = false,
+         followsFrontmostSurface: Bool = false) {
+        self.frames = frames; self.executeError = executeError; self.executionResult = executionResult
+        self.blockExecution = blockExecution
+        self.followsFrontmostSurface = followsFrontmostSurface
     }
 
     func observe(_ context: AgentObservationContext) async throws -> AgentFrame {
@@ -363,6 +411,7 @@ private final class TestEnvironment: AgentEnvironment {
             return try await withCheckedThrowingContinuation { continuation = $0 }
         }
         if let executeError { throw executeError }
+        if let executionResult { return executionResult }
         return .init(status: .ok, result: "Executed")
     }
 

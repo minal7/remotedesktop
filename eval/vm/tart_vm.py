@@ -298,32 +298,35 @@ def _guest_state(config: Config, address: str, run: Run) -> dict[str, Any] | Non
 
 
 def _safe_task_response(response: Any, request: dict[str, Any]) -> dict[str, Any]:
-    required = {"task_id", "outcome", "answer", "episode_path", "wall_seconds", "real_host_app"}
+    required = {"task_id", "outcome", "answer", "episode_path", "wall_seconds", "real_host_app", "environment", "policy"}
     if not isinstance(response, dict) or not required <= response.keys():
         raise Blocked("guest app returned an invalid response object")
     if response["task_id"] != request.get("task_id") or response["real_host_app"] is not True:
         raise Blocked("guest response did not match the real host app request")
+    if response["environment"] != "pixel" or response["policy"] != request.get("policy"):
+        raise Blocked("guest response environment or policy did not match the request")
     if not all(isinstance(response[key], str) for key in ("outcome", "answer", "episode_path")):
         raise Blocked("guest app response fields have invalid types")
     return response
 
 
 def _safe_preflight_response(response: Any) -> dict[str, Any]:
-    required = {"operation", "real_host_app", "outcome", "checks"}
+    required = {"operation", "real_host_app", "outcome", "checks", "active_environment", "policy"}
     if not isinstance(response, dict) or not required <= response.keys():
         raise Blocked("guest app returned an invalid preflight response")
     if response["operation"] != "preflight" or response["real_host_app"] is not True:
         raise Blocked("guest response did not prove the real host preflight")
     if response["outcome"] not in {"ready", "infra_blocked"} or not isinstance(response["checks"], list):
         raise Blocked("guest preflight fields have invalid types")
+    if response["active_environment"] != "pixel" or response["policy"] not in {"fara15-4b", "ui-tars15-7b", "none"}:
+        raise Blocked("guest preflight model or environment is invalid")
     if response["outcome"] == "infra_blocked":
         if not all(isinstance(response.get(key), str) and response[key]
                    for key in ("blocked_reason", "owner_action")):
             raise Blocked("blocked guest preflight omitted its reason or owner action")
     else:
-        ready_fields = {"safari_extension_status", "safari_ping_count", "safari_ping_p95_ms", "model_status"}
-        if not ready_fields <= response.keys():
-            raise Blocked("ready guest preflight omitted Safari or model status")
+        if response.get("model_status") != "loaded":
+            raise Blocked("ready guest preflight omitted model readiness")
     return response
 
 
@@ -392,7 +395,9 @@ def drive(config: Config, run: Run = invoke, *, request_text: str | None = None)
         if not isinstance(request, dict):
             raise Blocked("driver input request is invalid")
         if request.get("operation") == "preflight":
-            if set(request) != {"operation", "probe_url"} or not isinstance(request.get("probe_url"), str):
+            if (set(request) - {"operation", "probe_url", "policy"}
+                    or not isinstance(request.get("probe_url"), str)
+                    or request.get("policy", "fara15-4b") not in {"fara15-4b", "ui-tars15-7b"}):
                 raise Blocked("preflight input request is invalid")
             return _drive_preflight(config, request_text, request, run)
         if not isinstance(request.get("task_id"), str):
@@ -432,6 +437,8 @@ def _drive_preflight(config: Config, request_text: str, request: dict[str, Any],
         response = _safe_preflight_response(json.loads(app_result.stdout))
     except json.JSONDecodeError as error:
         raise Blocked("guest app stdout was not one preflight JSON object") from error
+    if response["policy"] != request.get("policy", "fara15-4b"):
+        raise Blocked("guest preflight policy did not match the request")
     response["vm_execution"] = {"engine": "tart", "golden": GOLDEN_NAME,
                                 "vm_name": config.vm_name, "run_token": config.token,
                                 "reset_state": "verified"}

@@ -100,7 +100,7 @@ struct AgentEvalRequest: Decodable {
               }),
               !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               prompt.utf8.count <= ComputerUsePromptRequest.maximumPromptLength,
-              (1...40).contains(maxSteps), policy == "fara15-4b" else {
+              (1...40).contains(maxSteps), Self.supportedPolicies.contains(policy) else {
             throw AgentEvalWireError.invalidRequest
         }
         if let url = start.url { try Self.validateStartURL(url) }
@@ -116,7 +116,8 @@ struct AgentEvalRequest: Decodable {
         else if let app = start.app { surface = .app(app) }
         else { surface = nil }
         return .init(maxSteps: maxSteps, initialSurface: surface,
-            fileRoots: Self.syntheticFileRoots, storageDirectory: storageDirectory)
+            fileRoots: Self.syntheticFileRoots, storageDirectory: storageDirectory,
+            policy: AgentPolicyModel(rawValue: policy) ?? .fara15_4b)
     }
 
     var allowsFixtureCommit: Bool { approvalPolicy?.allowFixtureCommit == true }
@@ -141,6 +142,8 @@ struct AgentEvalRequest: Decodable {
         let root = resources.appendingPathComponent("files", isDirectory: true)
         return FileManager.default.fileExists(atPath: root.path) ? [root] : []
     }
+
+    private static let supportedPolicies = ["fara15-4b", "ui-tars15-7b"]
 }
 
 struct AgentEvalResponse: Encodable {
@@ -149,13 +152,35 @@ struct AgentEvalResponse: Encodable {
     let answer: String
     let episodePath: String
     let wallSeconds: Double
+    let environment = "pixel"
+    let policy: String
+    let cropMode: String
+    let requestedCropMode: String
     let realHostApp = true
 
     private enum CodingKeys: String, CodingKey {
         case taskID = "task_id", outcome, answer
         case episodePath = "episode_path"
         case wallSeconds = "wall_seconds"
+        case environment, policy
+        case cropMode = "crop_mode"
+        case requestedCropMode = "requested_crop_mode"
         case realHostApp = "real_host_app"
+    }
+}
+
+enum AgentEvalPixelMetadata {
+    private static let cropModes: Set<String> = ["frontmost-window", "full-display"]
+
+    static func actualCropMode(from data: Data?) -> String {
+        guard let data,
+              let root = try? JSONSerialization.jsonObject(with: data),
+              let values = root as? [String: Any],
+              Set(values.keys) == Set(["active_backend", "crop_mode"]),
+              let backend = values["active_backend"] as? String, backend == "pixel",
+              let cropMode = values["crop_mode"] as? String,
+              cropModes.contains(cropMode) else { return "unknown" }
+        return cropMode
     }
 }
 

@@ -9,8 +9,10 @@ struct AgentEvalApprovalCandidate {
     let resolvedScope: String
     let riskTier: String
     let action: AgentAction
-    let currentURL: String
-    let expectedURL: String
+    let currentURL: String?
+    let expectedURL: String?
+    var currentApp: String? = nil
+    var expectedApp: String? = nil
     let targetRoles: [String]
     let hasSensitiveTarget: Bool
     let hasSyntheticFileRoot: Bool
@@ -23,12 +25,8 @@ enum AgentEvalApprovalPolicy {
               UUID(uuidString: candidate.requestID) != nil,
               candidate.approvalScope == candidate.resolvedScope,
               isFingerprint(candidate.fingerprint),
-              origin(candidate.currentURL) == origin(candidate.expectedURL),
-              origin(candidate.expectedURL) != nil,
               !candidate.hasSensitiveTarget else { return false }
-        let fixture = isApprovedFixtureOrigin(candidate.expectedURL)
-        guard fixture, isApprovedFixtureOrigin(candidate.currentURL),
-              request.allowsFixtureInteraction else { return false }
+        guard isApprovedSurface(candidate, request: request) else { return false }
         if candidate.riskTier == "high" {
             guard request.allowsFixtureCommit else { return false }
             switch candidate.action {
@@ -40,11 +38,28 @@ enum AgentEvalApprovalPolicy {
         }
         guard ["low", "medium"].contains(candidate.riskTier) else { return false }
         if case .openURL(let destination) = candidate.action {
-            return origin(destination) == origin(candidate.expectedURL)
+            guard let expectedURL = candidate.expectedURL else { return false }
+            return origin(destination) == origin(expectedURL)
         }
         if case .openApp = candidate.action { return false }
         if case .setFiles = candidate.action { return false }
         return true
+    }
+
+    private static func isApprovedSurface(_ candidate: AgentEvalApprovalCandidate,
+                                          request: AgentEvalRequest) -> Bool {
+        if let currentURL = candidate.currentURL, let expectedURL = candidate.expectedURL {
+            return origin(currentURL) == origin(expectedURL) && origin(expectedURL) != nil
+                && isApprovedFixtureOrigin(expectedURL) && isApprovedFixtureOrigin(currentURL)
+                && request.allowsFixtureInteraction
+        }
+        guard let currentApp = candidate.currentApp, let expectedApp = candidate.expectedApp,
+              currentApp == expectedApp, request.start.app != nil, request.allowsStartInteraction,
+              ["low", "medium"].contains(candidate.riskTier) else { return false }
+        switch candidate.action {
+        case .click, .type, .key, .scroll, .select, .wait: return true
+        default: return false
+        }
     }
 
     private static func isFingerprint(_ value: String) -> Bool {

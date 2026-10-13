@@ -1,0 +1,9 @@
+id: "native-007"
+surface: app
+start: {"app":"Finder"}
+approval_policy: {"allow_start_interaction":true}
+setup: {"folders":["Drafts"]}
+prompt: "In Finder, open {eval_dir} and rename the folder Drafts to Final. Do not move or delete any other item."
+checker: {"type":"folder_exists","expect":{"path":"{eval_dir}/Final","absent_paths":["{eval_dir}/Drafts"]}}
+max_steps: 14
+tags: ["native","finder","rename"]

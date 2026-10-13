@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 
 enum OSAtlasRuntimeInstallationError: Error, LocalizedError, Equatable {
     case invalidReceipt
@@ -139,6 +140,50 @@ struct OSAtlasRuntimeInputResolver {
         return ComputerUseHoloRuntimeInputs(modelURL: directory.appendingPathComponent(ComputerUseHoloRuntimeInputs.modelFileName),
             projectorURL: directory.appendingPathComponent(ComputerUseHoloRuntimeInputs.projectorFileName),
             llamaServerURL: try resolveBundledExecutable(runtimeDirectoryURL: runtimeDirectoryURL, enclosingBundleURL: enclosingBundleURL))
+    }
+
+    /// Resolves the separately pinned UI-TARS package without consulting or
+    /// mutating the active Fara installation receipt.
+    func resolveUITARS15(modelRootURL: URL, runtimeDirectoryURL: URL,
+                         enclosingBundleURL: URL) throws -> AgentVisionRuntimeInputs {
+        let manifest = ComputerUseArtifactManifest.uiTars15
+        let directory = modelRootURL.appendingPathComponent(manifest.installationVersion, isDirectory: true).standardizedFileURL
+        guard manifest.modelVariant == .uiTars15_7B, manifest.modelArtifacts.count == 2,
+              isStrictDirectory(directory), contains(modelRootURL.standardizedFileURL, directory) else {
+            throw OSAtlasRuntimeInstallationError.invalidReceipt
+        }
+        var resolved: [String: URL] = [:]
+        for artifact in manifest.modelArtifacts {
+            let url = directory.appendingPathComponent(artifact.fileName)
+            guard contains(directory, url),
+                  let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey]),
+                  values.isRegularFile == true, values.isSymbolicLink != true,
+                  Int64(values.fileSize ?? -1) == artifact.byteCount,
+                  try Self.sha256(file: url) == artifact.sha256 else {
+                throw OSAtlasRuntimeInstallationError.invalidModelArtifact(artifact.fileName)
+            }
+            resolved[artifact.fileName] = url
+        }
+        guard let model = resolved["UI-TARS-1.5-7B.Q4_K_M.gguf"],
+              let projector = resolved["UI-TARS-1.5-7B.mmproj-f16.gguf"] else {
+            throw OSAtlasRuntimeInstallationError.invalidReceipt
+        }
+        return AgentVisionRuntimeInputs(model: .uiTars15_7b, modelURL: model,
+            projectorURL: projector,
+            llamaServerURL: try resolveBundledExecutable(runtimeDirectoryURL: runtimeDirectoryURL,
+                                                          enclosingBundleURL: enclosingBundleURL))
+    }
+
+    private static func sha256(file url: URL) throws -> String {
+        let handle = try FileHandle(forReadingFrom: url)
+        defer { try? handle.close() }
+        var digest = SHA256()
+        while true {
+            let chunk = try handle.read(upToCount: 1_048_576) ?? Data()
+            if chunk.isEmpty { break }
+            digest.update(data: chunk)
+        }
+        return digest.finalize().map { String(format: "%02x", $0) }.joined()
     }
 
     private func resolveTrainedVisionDirectory(receipt: ComputerUseInstallationReceipt,

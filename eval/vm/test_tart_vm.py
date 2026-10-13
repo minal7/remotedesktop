@@ -177,11 +177,12 @@ class TartVMTests(unittest.TestCase):
         guest_run = str(uuid.uuid4()).upper()
         guest_episode = (Path(self.config.remote_eval_root) / guest_run / "episodes" /
                          "123e4567-e89b-12d3-a456-426614174000" / "episode.jsonl")
-        request = {"task_id": "123e4567-e89b-12d3-a456-426614174000", "prompt": "Read the visible value."}
+        request = {"task_id": "123e4567-e89b-12d3-a456-426614174000", "prompt": "Read the visible value.", "policy": "fara15-4b"}
         runner.guest_task_id = request["task_id"]
         runner.response = json.dumps({"task_id": request["task_id"], "outcome": "completed",
                                       "answer": "A visible value", "episode_path": str(guest_episode),
-                                      "wall_seconds": 1.25, "real_host_app": True})
+                                      "wall_seconds": 1.25, "real_host_app": True,
+                                      "environment": "pixel", "policy": "fara15-4b"})
         runner.state = json.dumps({"url": "http://127.0.0.1:8765/forms.html", "updated_at": 1.0,
                                    "elements": {}, "submit_count": 0, "delete_count": 0,
                                    "share_count": 0, "secure_nonempty_count": 0})
@@ -222,13 +223,14 @@ class TartVMTests(unittest.TestCase):
         runner = RecordingRunner()
         runner.response = json.dumps({
             "operation": "preflight", "real_host_app": True, "outcome": "ready",
+            "active_environment": "pixel", "policy": "fara15-4b",
             "checks": [{"name": name, "status": "passed", "detail": "ok"}
                        for name in ("host_process", "accessibility", "screen_recording",
-                                    "safari_helper", "safari_extension", "model")],
-            "safari_extension_status": "enabled", "safari_ping_count": 100,
-            "safari_ping_p95_ms": 1.25, "model_status": "loaded",
+                                    "pixel_environment", "model")],
+            "model_status": "loaded",
         })
-        request = {"operation": "preflight", "probe_url": "http://127.0.0.1:8765/forms.html?__eval_run=" + self.config.token}
+        request = {"operation": "preflight", "probe_url": "http://127.0.0.1:8765/forms.html?__eval_run=" + self.config.token,
+                   "policy": "fara15-4b"}
         with patch.object(tart_vm, "RUN_ROOT", self.run_root):
             tart_vm._write_state(self.config, 123)
             result = tart_vm.drive(self.config, runner, request_text=json.dumps(request))
@@ -240,6 +242,7 @@ class TartVMTests(unittest.TestCase):
     def test_blocked_preflight_can_omit_unavailable_optional_statuses(self) -> None:
         response = {
             "operation": "preflight", "real_host_app": True, "outcome": "infra_blocked",
+            "active_environment": "pixel", "policy": "fara15-4b",
             "checks": [{"name": "host_process", "status": "passed", "detail": "ok"},
                        {"name": "accessibility", "status": "blocked", "detail": "denied"}],
             "blocked_reason": "Accessibility denied", "owner_action": "Grant Accessibility",

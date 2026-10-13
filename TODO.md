@@ -1,10 +1,13 @@
-| Phase | Status | Suite result | Blocker |
+| Step | Status | Suite result | Next / blocker |
 | --- | --- | --- | --- |
-| 0 — Freeze and branch | committed (`4b153a1`) | Snapshot recorded; prior focused baseline was 46/48. | None |
-| 1 — Shared contracts | committed (`0a6c834`) | Xcode 7/7, Python 13/13, shared corpus 58 cases. | None |
-| 2 — Single general loop | committed (`86c13bb`); compiled and tested | Xcode 102/102; Python 13/13; existing harness 136/136; bridge Node 15/15. | Real-host Safari bridge and model end-to-end remain unverified. |
-| 3 — Remove obsolete pipelines | pending; one Luna ticket per deletion group, then build + smoke | Not run. | Fix bridge startup and rerun the real-host smoke first; preserve all Safari bridge/helper/extension files. |
-| 4 — General evaluation | bridge diagnosis; signed build green on Xcode 27; preflight and duplicate-launch fixes in progress | First real-host smoke: 20 infra-blocked before observation; no model capability score. Installed preflight passes signature, Accessibility, and Screen Recording; helper status is notFound despite verified packaging. | ≤30-minute experiment: verify packaged plist and executable before first registration. Register a verified but previously unseen service; retain distinct missing-package, registration-error, and approval states. Then prove enabled helper/extension and 100-ping p95 and rerun 20 tasks; VM setup deferred. |
-| 5 — Policy baseline | pending | Not run. | Phase 4 baseline data. |
-| 6 — Training pipeline | pending | Not run. | Owner approval of model, teacher terms, and GPU budget. |
-| 7 — Product integration | pending | Not run. | First promoted model. |
+| Checkpoint | committed (`61c848b`); signed build green on Xcode 27 | Swift 31/31; Python 35/35. Previous Safari smoke: 20 infra-blocked before observation, no model score. | Controlling plan: frontier-harness-plan.md. Safari parked; no more bridge work. |
+| 1 — PixelEnvironment | implemented, compiled, synthetic tests green; live acceptance in step 2 | Signed Xcode27 build green (84.65s); focused Swift60/60 (15.14s), Python39/39; no skips. | Width1280 crops, AX≤300ms, paste/restore, generic picker; both adapters use one loop/schema. File search retains the existing generic catalog pending HostTools simplification. |
+| 2 — First model numbers | running next on this Mac, one resident model at a time | smoke-20: 12 web fixtures +8 native, Fara then UI-TARS; not yet measured. | UI-TARS Q4_K_M/f16 pair SHA256 verified. Native coordinates mapped per model; 32GB baseline does not qualify16GB. |
+| 3 — Thin ActionGate / loop | pending after baseline | Not run. | Semantic approvals, no pixel/pre-keystroke checks; rerun smoke. |
+| 4 — Cleanup D1–D4 | pending; one Luna ticket per group | Build +full unit tests +smoke after each. | No deletions before first real model numbers. |
+| 5 — Top2 generic failure classes | pending | Not run. | Improve observation/actions/adapters, never task-specific code. |
+| 6 — Cleanup D5–D8 / rename / CI | pending | Not run. | Park Safari branch, archive audits, LocalModel rename, lint; Agent≤2500,total≤15000,files≤800. |
+| 7 — Full suites / demo trials | pending | web80,native30,safety15; demo5×3. | Same local harness and recorded episodes. |
+| 8 — Model recommendation | pending | smoke20+native30,3runs/model. | Owner approves model pick. |
+| 9 — Demo v0 | pending | iPhone+Mac video and suite table. | Owner present for test Gmail sign-in check. |
+| 10 — Training | pending; general-agent-plan.md governs training only | Not run. | Owner approves teacher terms,GPU budget and training start. |

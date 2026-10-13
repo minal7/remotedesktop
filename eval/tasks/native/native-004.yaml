@@ -1,0 +1,8 @@
+id: "native-004"
+surface: app
+start: {"app":"TextEdit"}
+approval_policy: {"allow_start_interaction":true}
+prompt: "Create a plain-text document containing the exact sentence: The review starts at 10 AM. Save it to {eval_dir}/Review.txt."
+checker: {"type":"file_text","expect":{"path":"{eval_dir}/Review.txt","equals":"The review starts at 10 AM.\n"}}
+max_steps: 14
+tags: ["native","textedit","type","save"]

@@ -65,12 +65,33 @@ final class AgentEvalWireTests: XCTestCase {
 
     func testResponseProvesRealHostAndKeepsRunnerWireNames() throws {
         let response = AgentEvalResponse(taskID: "t", outcome: "completed", answer: "Done",
-            episodePath: "/tmp/episode.jsonl", wallSeconds: 1.25)
+            episodePath: "/tmp/episode.jsonl", wallSeconds: 1.25,
+            policy: "fara15-4b", cropMode: "unknown", requestedCropMode: "frontmost-window")
         let value = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(response)) as? [String: Any])
         XCTAssertEqual(value["task_id"] as? String, "t")
         XCTAssertEqual(value["real_host_app"] as? Bool, true)
         XCTAssertEqual(value["episode_path"] as? String, "/tmp/episode.jsonl")
         XCTAssertEqual(value["wall_seconds"] as? Double, 1.25)
+        XCTAssertEqual(value["environment"] as? String, "pixel")
+        XCTAssertEqual(value["policy"] as? String, "fara15-4b")
+        XCTAssertEqual(value["crop_mode"] as? String, "unknown")
+        XCTAssertEqual(value["requested_crop_mode"] as? String, "frontmost-window")
+    }
+
+    func testPixelCropMetadataAcceptsOnlyKnownBackendAndModes() {
+        XCTAssertEqual(AgentEvalPixelMetadata.actualCropMode(from: Data(
+            #"{"active_backend":"pixel","crop_mode":"frontmost-window"}"#.utf8)), "frontmost-window")
+        XCTAssertEqual(AgentEvalPixelMetadata.actualCropMode(from: Data(
+            #"{"active_backend":"pixel","crop_mode":"full-display"}"#.utf8)), "full-display")
+        for invalid in [
+            #"{"active_backend":"safari","crop_mode":"frontmost-window"}"#,
+            #"{"active_backend":"pixel","crop_mode":"window"}"#,
+            #"{"active_backend":"pixel","crop_mode":"full-display","extra":true}"#,
+            "not json"
+        ] {
+            XCTAssertEqual(AgentEvalPixelMetadata.actualCropMode(from: Data(invalid.utf8)), "unknown")
+        }
+        XCTAssertEqual(AgentEvalPixelMetadata.actualCropMode(from: nil), "unknown")
     }
 
     private func decode(_ json: String) throws -> AgentEvalRequest {
