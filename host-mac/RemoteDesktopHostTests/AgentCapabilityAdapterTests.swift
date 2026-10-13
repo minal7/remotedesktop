@@ -68,7 +68,7 @@ final class AgentCapabilityAdapterTests: XCTestCase {
         let hex = CharacterSet(charactersIn: "0123456789abcdef")
         XCTAssertTrue(clarification.scope.unicodeScalars.allSatisfy(hex.contains))
 
-        let store = ComputerUseTextClarificationStore()
+        let store = ComputerUseClarificationStore()
         let request = ComputerUseEnvelope(senderID: "peer", targetID: "host", pairingCode: "123456",
             sessionID: "session", kind: .prompt, body: "{}")
         let reference = try store.issue(goal: clarification.goal, question: clarification.question,

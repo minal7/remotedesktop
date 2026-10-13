@@ -125,13 +125,13 @@ final class ComputerUseCapabilityExecutorTests: XCTestCase {
 
     func testNativeErrorCannotReplayGoalThroughDesktopAndSameIDCannotChangeGoal() async throws {
         var loads = 0
-        var nativeFailure: any Error = ComputerUseTextEditError.deliveryUncertain
+        var nativeFailure: any Error = CocoaError(.fileReadUnknown)
         let executor = ComputerUseCapabilityExecutor(nativeExecution: { _, _, _ in
             throw nativeFailure
         }, desktopFactory: { _ in loads += 1; return RoutingDesktopFixture() })
-        // An error with this name can also originate in response decoding,
-        // snapshot validation or preflight. It is not a no-effect decline.
-        let failures: [any Error] = [ComputerUseTextEditError.deliveryUncertain,
+        // A native failure is never a no-effect decline, regardless of its
+        // source or concrete error type.
+        let failures: [any Error] = [CocoaError(.fileReadUnknown),
             ComputerUseDesktopExecutor.Failure.unsupportedAction, ComputerUseDesktopExecutor.Failure.changedScreen]
         for failure in failures {
             nativeFailure = failure
@@ -140,8 +140,13 @@ final class ComputerUseCapabilityExecutorTests: XCTestCase {
                     tools: tools(), progress: { _ in })
                 XCTFail("A native error must not fall back")
             } catch {
-                if let expected = failure as? ComputerUseTextEditError { XCTAssertEqual(error as? ComputerUseTextEditError, expected) }
-                else { XCTAssertEqual(error as? ComputerUseDesktopExecutor.Failure, failure as? ComputerUseDesktopExecutor.Failure) }
+                if failure is CocoaError {
+                    XCTAssertEqual((error as NSError).domain, (failure as NSError).domain)
+                    XCTAssertEqual((error as NSError).code, (failure as NSError).code)
+                } else {
+                    XCTAssertEqual(error as? ComputerUseDesktopExecutor.Failure,
+                        failure as? ComputerUseDesktopExecutor.Failure)
+                }
             }
         }
         do {

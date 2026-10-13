@@ -11,206 +11,6 @@ import FoundationModels
 @MainActor
 final class ComputerUseMobileInitiationTests: XCTestCase {
 
-    private struct ManagedNativeModelCandidateDescriptor: Decodable {
-        let label: String
-        let modelPath: String
-        let modelSHA256: String
-        let modelBytes: Int64
-    }
-
-    private struct ManagedNativeModelCandidate {
-        let descriptor: ManagedNativeModelCandidateDescriptor
-        let inputs: ComputerUseNativeTextRuntimeInputs
-    }
-
-    private enum ManagedNativeModelCandidateError: Error {
-        case invalidDescriptor
-        case invalidModelFile
-        case modelHashMismatch
-    }
-
-    func testManagedNativeModelCandidateAcceptsPinnedLocalFixtureAndUsesSignedRuntime() throws {
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("ManagedNativeCandidateValid-" + UUID().uuidString)
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: directory) }
-        let model = directory.appendingPathComponent("fixture.gguf")
-        let payload = Data("small pinned model fixture".utf8)
-        try payload.write(to: model)
-        let descriptorPath = try writeManagedNativeModelCandidateDescriptor(directory: directory,
-            label: "fixture-model", modelPath: model.path, modelSHA256: Self.sha256(payload), modelBytes: payload.count)
-        let signedRuntime = directory.appendingPathComponent("signed-runtime/llama-server")
-        let candidate = try managedNativeModelCandidate(descriptorPath: descriptorPath, llamaServerURL: signedRuntime)
-        XCTAssertEqual(candidate.descriptor.label, "fixture-model")
-        XCTAssertEqual(candidate.descriptor.modelPath, model.path)
-        XCTAssertEqual(candidate.descriptor.modelSHA256, Self.sha256(payload))
-        XCTAssertEqual(candidate.descriptor.modelBytes, Int64(payload.count))
-        XCTAssertEqual(candidate.inputs.modelURL, model.standardizedFileURL)
-        XCTAssertEqual(candidate.inputs.expectedModelFileName, model.lastPathComponent)
-        XCTAssertEqual(candidate.inputs.llamaServerURL, signedRuntime.standardizedFileURL,
-            "Candidate selection must retain the installed signed runtime executable")
-    }
-
-    func testManagedNativeModelCandidateRejectsByteAndHashMismatch() throws {
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("ManagedNativeCandidateMismatch-" + UUID().uuidString)
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: directory) }
-        let model = directory.appendingPathComponent("fixture.gguf")
-        let payload = Data("fixture bytes".utf8)
-        try payload.write(to: model)
-        let wrongHash = String(repeating: "0", count: 64)
-        for (name, hash, bytes) in [("bytes", Self.sha256(payload), payload.count + 1),
-                                    ("hash", wrongHash, payload.count)] {
-            let descriptorPath = try writeManagedNativeModelCandidateDescriptor(directory: directory,
-                label: name, modelPath: model.path, modelSHA256: hash, modelBytes: bytes)
-            XCTAssertThrowsError(try managedNativeModelCandidate(descriptorPath: descriptorPath,
-                llamaServerURL: directory.appendingPathComponent("llama-server")), name)
-        }
-    }
-
-    func testManagedNativeModelCandidateRejectsMalformedDescriptors() throws {
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("ManagedNativeCandidateMalformed-" + UUID().uuidString)
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: directory) }
-        let model = directory.appendingPathComponent("fixture.gguf")
-        let payload = Data("fixture bytes".utf8)
-        try payload.write(to: model)
-        let valid: [String: Any] = ["label": "fixture", "modelPath": model.path,
-            "modelSHA256": Self.sha256(payload), "modelBytes": payload.count]
-        let cases: [(String, [String: Any])] = [
-            ("extra key", valid.merging(["extra": true]) { _, new in new }),
-            ("relative model path", ["label": "fixture", "modelPath": "fixture.gguf",
-                "modelSHA256": Self.sha256(payload), "modelBytes": payload.count]),
-            ("uppercase digest", ["label": "fixture", "modelPath": model.path,
-                "modelSHA256": Self.sha256(payload).uppercased(), "modelBytes": payload.count]),
-            ("zero byte count", ["label": "fixture", "modelPath": model.path,
-                "modelSHA256": Self.sha256(payload), "modelBytes": 0]),
-            ("boolean byte count", ["label": "fixture", "modelPath": model.path,
-                "modelSHA256": Self.sha256(payload), "modelBytes": true])
-        ]
-        for (name, object) in cases {
-            let descriptorPath = directory.appendingPathComponent("\(name.replacingOccurrences(of: " ", with: "-" )).json")
-            try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]).write(to: descriptorPath)
-            XCTAssertThrowsError(try managedNativeModelCandidate(descriptorPath: descriptorPath.path,
-                llamaServerURL: directory.appendingPathComponent("llama-server")), name)
-        }
-    }
-
-    // Diagnostic compatibility only: makeRequest/decode retain the earlier
-    // monolithic wire format for captured exchange replay; production propose
-    // uses separate goal interpretation and retained page-decision requests.
-    // Diagnostic compatibility only: this exports/replays the previous
-    // monolithic makeRequest/decode exchange, not production propose parity.
-
-    private func managedNativeModelCandidate(descriptorPath: String,
-                                             llamaServerURL: URL) throws -> ManagedNativeModelCandidate {
-        let descriptorFile = try FileHandle(forReadingFrom: URL(fileURLWithPath: descriptorPath))
-        let descriptorData: Data
-        do {
-            guard let boundedData = try descriptorFile.read(upToCount: 4 * 1024 + 1), boundedData.count <= 4 * 1024 else {
-                try? descriptorFile.close()
-                throw ManagedNativeModelCandidateError.invalidDescriptor
-            }
-            descriptorData = boundedData
-            try descriptorFile.close()
-        } catch {
-            try? descriptorFile.close()
-            throw error
-        }
-        let expectedKeys = Set(["label", "modelPath", "modelSHA256", "modelBytes"])
-        guard let object = try JSONSerialization.jsonObject(with: descriptorData) as? [String: Any],
-              Set(object.keys) == expectedKeys else {
-            throw ManagedNativeModelCandidateError.invalidDescriptor
-        }
-        let descriptor = try JSONDecoder().decode(ManagedNativeModelCandidateDescriptor.self, from: descriptorData)
-        let digestBytes = Array(descriptor.modelSHA256.utf8)
-        guard !descriptor.label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-              (descriptor.modelPath as NSString).isAbsolutePath,
-              digestBytes.count == 64,
-              digestBytes.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }),
-              descriptor.modelBytes > 0, descriptor.modelBytes <= Int64(Int.max) else {
-            throw ManagedNativeModelCandidateError.invalidDescriptor
-        }
-        let modelURL = URL(fileURLWithPath: descriptor.modelPath).standardizedFileURL
-        let values = try modelURL.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey])
-        guard values.isRegularFile == true, values.isSymbolicLink != true,
-              Int64(values.fileSize ?? -1) == descriptor.modelBytes else {
-            throw ManagedNativeModelCandidateError.invalidModelFile
-        }
-        let file = try FileHandle(forReadingFrom: modelURL)
-        defer { try? file.close() }
-        var hasher = SHA256()
-        while let chunk = try file.read(upToCount: 1_048_576), !chunk.isEmpty {
-            hasher.update(data: chunk)
-        }
-        let actualHash = hasher.finalize().map { String(format: "%02x", $0) }.joined()
-        guard actualHash == descriptor.modelSHA256 else { throw ManagedNativeModelCandidateError.modelHashMismatch }
-        return ManagedNativeModelCandidate(descriptor: descriptor,
-            inputs: ComputerUseNativeTextRuntimeInputs(modelURL: modelURL, llamaServerURL: llamaServerURL,
-                expectedModelFileName: modelURL.lastPathComponent))
-    }
-
-    private nonisolated static func safeNativeResponseProjection(_ responseData: Data) -> [String: Any] {
-        guard let root = try? JSONSerialization.jsonObject(with: responseData) as? [String: Any] else {
-            return ["responseUTF8Bytes": responseData.count]
-        }
-        var result: [String: Any] = [:]
-        if let model = root["model"] { result["model"] = model }
-        if let usage = root["usage"] { result["usage"] = usage }
-        let choices = root["choices"] as? [[String: Any]] ?? []
-        result["choices"] = choices.map { choice -> [String: Any] in
-            var projected: [String: Any] = [:]
-            if let finishReason = choice["finish_reason"] { projected["finish_reason"] = finishReason }
-            if let message = choice["message"] as? [String: Any] {
-                var projectedMessage: [String: Any] = [:]
-                if let content = message["content"] as? String {
-                    let contentData = Data(content.utf8)
-                    if let value = try? JSONSerialization.jsonObject(with: contentData),
-                       value is [String: Any] || value is [Any] {
-                        projectedMessage["content"] = value
-                    } else {
-                        projectedMessage["contentUTF8Bytes"] = contentData.count
-                    }
-                }
-                if let calls = message["tool_calls"] as? [[String: Any]] {
-                    projectedMessage["tool_calls"] = calls.compactMap { call -> [String: Any]? in
-                        guard let function = call["function"] as? [String: Any],
-                              let name = function["name"] as? String else { return nil }
-                        var safeFunction: [String: Any] = ["name": name]
-                        if let rawArguments = function["arguments"] as? String {
-                            safeFunction["arguments"] = rawArguments
-                        } else if let arguments = function["arguments"] {
-                            safeFunction["arguments"] = arguments
-                        }
-                        return ["function": safeFunction]
-                    }
-                }
-                projected["message"] = projectedMessage
-            }
-            return projected
-        }
-        return result
-    }
-
-    private func writeManagedNativeModelCandidateDescriptor(directory: URL, label: String,
-                                                              modelPath: String, modelSHA256: String,
-                                                              modelBytes: Int) throws -> String {
-        let url = directory.appendingPathComponent("candidate-\(UUID().uuidString).json")
-        let data = try JSONSerialization.data(withJSONObject: ["label": label, "modelPath": modelPath,
-            "modelSHA256": modelSHA256, "modelBytes": modelBytes], options: [.sortedKeys])
-        try data.write(to: url, options: .withoutOverwriting)
-        return url.path
-    }
-
-    private func writeExchangeArtifact(_ data: Data, to path: String) throws {
-        let url = URL(fileURLWithPath: path)
-        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try data.write(to: url, options: .withoutOverwriting)
-    }
-
-    private static func sha256(_ data: Data) -> String {
-        SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
-    }
-
     func testNativeFileNameFilterFindsLateTargetBeforeMatchingCandidateCap() async throws {
         let parent = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         let directory = parent.appendingPathComponent("Downloads", isDirectory: true)
@@ -284,23 +84,19 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
         XCTFail("Timed out waiting for the structured capability; modelState=\(String(reflecting: manager.modelState)), capability=\(manager.capability.state) (\(manager.capability.detail)), activity=\(String(reflecting: manager.activity)), needsAdditionalSetup=\(manager.needsAdditionalSetup)")
     }
 
-    func testSetupCannotReplaceRunningOrPausedNativeTask() async throws {
+    func testSetupCannotReplaceRunningOrPausedTask() async throws {
         let fixture = try makeFixture(markerPresent: false)
         defer { try? FileManager.default.removeItem(at: fixture.parent) }
-        let nativeInstaller = MobileInitiationModelInstaller(receipt: nativeReceipt)
         let visual = MobileInitiationVisualLoader()
         let channel = MobileInitiationTestChannel()
         var calls = 0
         var release = false
-        let native = ComputerUseCapabilityExecutor(nativeExecution: { _, _, _ in
+        let executor = MobileInitiationReadyExecutor(beforeCompletion: {
             calls += 1
             while !release { try await Task.sleep(for: .milliseconds(10)) }
-            return .completed("verified")
         })
-        let manager = HostComputerUseManager(experimentalEnabled: { true }, injector: InputInjector(), executor: native,
+        let manager = HostComputerUseManager(experimentalEnabled: { true }, injector: InputInjector(), executor: executor,
             installer: MobileInitiationModelInstaller(receipt: mobileInitiationModelReceipt()),
-            nativeTextInstaller: nativeInstaller,
-
             visualExecutorLoader: visual, taskLedger: ComputerUseTaskLedger(fileURL: fixture.ledger),
             channelFactory: { _ in channel })
         defer { release = true; manager.stop() }
@@ -324,8 +120,6 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
         let failures = await channel.setupProgress()
         XCTAssertEqual(failures.filter { $0.phase == .failed }.count, 2)
         XCTAssertEqual(manager.activity, .paused)
-        let installs = await nativeInstaller.installCallCount()
-        XCTAssertEqual(installs, 0)
         XCTAssertEqual(visual.loadCount, 0)
         XCTAssertEqual(calls, 1)
         release = true
@@ -342,41 +136,39 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
     func testNewPromptDuringAdditionalSetupIsTerminalWithoutExecutionOrLaterReplay() async throws {
         let fixture = try makeFixture(markerPresent: false)
         defer { try? FileManager.default.removeItem(at: fixture.parent) }
-        let nativeInstaller = MobileInitiationModelInstaller(receipt: nativeReceipt)
+        let installer = MobileInitiationModelInstaller(receipt: mobileInitiationModelReceipt())
         let channel = MobileInitiationTestChannel()
-        var calls = 0
-        var loadStarted = false
-        var releaseLoad = false
-        let native = ComputerUseCapabilityExecutor(nativeExecution: { _, _, _ in
-            calls += 1; return .completed("verified")
+        var calls = 0, loadStarted = false, releaseLoad = false
+        let executor = MobileInitiationReadyExecutor(beforeCompletion: { calls += 1 })
+        let visual = MobileInitiationVisualLoader(executor: executor, beforeLoad: {
+            loadStarted = true
+            while !releaseLoad { try await Task.sleep(for: .milliseconds(10)) }
         })
-        let manager = HostComputerUseManager(experimentalEnabled: { true }, injector: InputInjector(), executor: native,
-            installer: MobileInitiationModelInstaller(receipt: mobileInitiationModelReceipt()),
-            nativeTextInstaller: nativeInstaller, nativeTextLoader: { _, _, _ in
-                loadStarted = true
-                while !releaseLoad { try await Task.sleep(for: .milliseconds(10)) }
-                return native
-            },
-            visualExecutorLoader: MobileInitiationVisualLoader(throwsLoadFailure: true),
+        let manager = HostComputerUseManager(experimentalEnabled: { true }, injector: InputInjector(),
+            installer: installer, visualExecutorLoader: visual,
             taskLedger: ComputerUseTaskLedger(fileURL: fixture.ledger), channelFactory: { _ in channel })
         defer { releaseLoad = true; manager.stop() }
         manager.start(pairingCode: "123456")
         manager.authorizePeer(senderID: "IOS-PEER")
-        XCTAssertTrue(manager.handle(try setupEnvelope(requestID: "upgrade"), channel: channel))
+        XCTAssertTrue(manager.handle(try setupEnvelope(requestID: "setup-before-new-prompt"), channel: channel))
         await waitUntil { loadStarted }
         XCTAssertEqual(manager.capability.state, .installing,
-                       "Discovery must reflect that setup currently owns the executor")
-        let blocked = nativeTestPrompt(id: "prompt-during-upgrade")
+            "The shared setup pipeline must report that setup currently owns executor activation")
+
+        let blocked = nativeTestPrompt(id: "prompt-during-setup")
         XCTAssertTrue(manager.handle(blocked, channel: channel))
-        let rejected = await waitForTaskUpdate(channel: channel, taskID: blocked.id, outcome: .userInterventionRequired)
+        let rejected = await waitForTaskUpdate(channel: channel, taskID: blocked.id,
+            outcome: .userInterventionRequired)
         XCTAssertTrue(rejected?.text.contains("setup is still running") == true)
         XCTAssertEqual(calls, 0)
+
         releaseLoad = true
-        _ = await waitForSetupProgress(channel: channel)
+        _ = await waitForSetupProgress(channel: channel, terminalPhase: .ready)
         XCTAssertEqual(manager.capability.state, .ready)
         XCTAssertTrue(manager.handle(blocked, channel: channel))
-        XCTAssertEqual(calls, 0, "Completing setup cannot auto-run a previously rejected task ID")
-        let fresh = nativeTestPrompt(id: "new-prompt-after-upgrade")
+        XCTAssertEqual(calls, 0, "Completing setup cannot replay a task rejected during setup")
+
+        let fresh = nativeTestPrompt(id: "new-prompt-after-setup")
         XCTAssertTrue(manager.handle(fresh, channel: channel))
         _ = await waitForTaskUpdate(channel: channel, taskID: fresh.id, outcome: .taskCompleted)
         XCTAssertEqual(calls, 1)
@@ -398,269 +190,6 @@ final class ComputerUseMobileInitiationTests: XCTestCase {
         }
         XCTFail("Timed out waiting for the exact task outcome")
         return nil
-    }
-
-    func testInstalledNativeFormsActivateWithoutHelperVisualModelOrDownloads() async throws {
-        let fixture = try makeFixture(markerPresent: false)
-        defer { try? FileManager.default.removeItem(at: fixture.parent) }
-        let nativeInstaller = MobileInitiationModelInstaller(receipt: nativeReceipt, alreadyInstalled: true)
-        let visualInstaller = MobileInitiationModelInstaller(receipt: mobileInitiationModelReceipt())
-        let visual = MobileInitiationVisualLoader()
-        var nativeLoads = 0
-        let manager = HostComputerUseManager(experimentalEnabled: { true }, injector: InputInjector(), installer: visualInstaller,
-            nativeTextInstaller: nativeInstaller, nativeTextLoader: { receipt, _, _ in
-                XCTAssertEqual(receipt.modelVariant, .nativeText4B)
-                nativeLoads += 1
-                return ComputerUseCapabilityExecutor(nativeExecution: { _, _, _ in .completed("verified") })
-            }, visualExecutorLoader: visual,
-            taskLedger: ComputerUseTaskLedger(fileURL: fixture.ledger),
-            channelFactory: { _ in MobileInitiationTestChannel() })
-        await waitUntil { manager.capability.state == .ready }
-        XCTAssertEqual(nativeLoads, 1)
-        XCTAssertTrue(manager.needsAdditionalSetup)
-        XCTAssertTrue(manager.capability.detail.contains("Form editing"))
-        XCTAssertEqual(visual.loadCount, 0)
-        let nativeInstalls = await nativeInstaller.installCallCount()
-        let visualInstalls = await visualInstaller.installCallCount()
-        XCTAssertEqual(nativeInstalls + visualInstalls, 0)
-        await manager.shutdown()
-    }
-
-    func testInstalledNativeCapabilityLoadsVisualExecutorOnDesktopUse() async throws {
-        let fixture = try makeFixture(markerPresent: false)
-        defer { try? FileManager.default.removeItem(at: fixture.parent) }
-        let visual = MobileInitiationVisualLoader()
-        var coordinator: ComputerUseCapabilityExecutor?
-        let manager = HostComputerUseManager(experimentalEnabled: { true }, injector: InputInjector(),
-            installer: MobileInitiationModelInstaller(receipt: mobileInitiationModelReceipt(), alreadyInstalled: true),
-            nativeTextInstaller: MobileInitiationModelInstaller(receipt: nativeReceipt, alreadyInstalled: true),
-            nativeTextLoader: { _, _, _ in
-                let result = ComputerUseCapabilityExecutor(nativeExecution: { _, _, _ in nil })
-                coordinator = result
-                return result
-            }, visualExecutorLoader: visual,
-taskLedger: ComputerUseTaskLedger(fileURL: fixture.ledger),
-            channelFactory: { _ in MobileInitiationTestChannel() })
-        await waitUntil { manager.capability.state == .ready }
-        XCTAssertEqual(visual.loadCount, 0)
-        XCTAssertFalse(manager.needsAdditionalSetup)
-        let executor = try XCTUnwrap(coordinator)
-        let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { false })
-        _ = try await executor.execute(taskID: "desktop", prompt: "Open an app.",
-            trustedUserPrompt: "Open an app.", tools: tools, progress: { _ in })
-        XCTAssertEqual(visual.loadCount, 1)
-        await manager.shutdown()
-    }
-
-    func testPassiveNativePreparationDoesNotLoadRuntimeOrCommitActivationButExplicitSetupDoes() async throws {
-        do {
-            let fixture = try makeFixture(markerPresent: false)
-            defer { try? FileManager.default.removeItem(at: fixture.parent) }
-            let native = MobileInitiationModelInstaller(receipt: nativeReceipt, alreadyInstalled: true)
-            let visual = MobileInitiationVisualLoader()
-            let channel = MobileInitiationTestChannel()
-            var preparations = 0, runtimeLoads = 0, nativeExecutions = 0
-            let makeNative = {
-                ComputerUseCapabilityExecutor(nativeExecution: { _, _, _ in nativeExecutions += 1; return nil })
-            }
-            let manager = HostComputerUseManager(experimentalEnabled: { true }, injector: InputInjector(),
-                installer: MobileInitiationModelInstaller(receipt: mobileInitiationModelReceipt()),
-                nativeTextInstaller: native, nativeTextLoader: { _, _, _ in runtimeLoads += 1; return makeNative() },
-                nativeTextPreparer: { _, _, _ in preparations += 1; return makeNative() },
-                visualExecutorLoader: visual, taskLedger: ComputerUseTaskLedger(fileURL: fixture.ledger), channelFactory: { _ in channel })
-            manager.start(pairingCode: "123456")
-            await waitForCapabilityReady(manager)
-            XCTAssertEqual(preparations, 1)
-            XCTAssertEqual(runtimeLoads, 0, "Passive startup only prepares a capability")
-            let passiveActivations = await native.recordedSuccessfulActivations()
-            XCTAssertTrue(passiveActivations.isEmpty, "Preparation cannot certify that a model loaded")
-            XCTAssertEqual(visual.loadCount, 0)
-            XCTAssertTrue(manager.handle(try setupEnvelope(requestID: "verify-model-runtime"), channel: channel))
-            let progress = await waitForSetupProgress(channel: channel, terminalPhase: .ready)
-            XCTAssertTrue(progress.contains { $0.phase == .ready })
-            XCTAssertEqual(runtimeLoads, 1, "Explicit setup must still validate the installed native runtime")
-            let setupActivations = await native.recordedSuccessfulActivations()
-            XCTAssertEqual(setupActivations, [nativeReceipt])
-            XCTAssertEqual(nativeExecutions, 0)
-            await manager.shutdown()
-        }
-    }
-
-    func testNativePreparationFailureDoesNotActivateOrDownloadWithoutNativeExecutor() async throws {
-        for requestDuringPreparation in [false, true] {
-            let fixture = try makeFixture(markerPresent: false)
-            defer { try? FileManager.default.removeItem(at: fixture.parent) }
-            let native = MobileInitiationModelInstaller(receipt: nativeReceipt, alreadyInstalled: true)
-            let visual = MobileInitiationVisualLoader()
-            let channel = MobileInitiationTestChannel()
-                var preparations = 0, runtimeLoads = 0
-            var releasePreparation = false
-            let manager = HostComputerUseManager(experimentalEnabled: { true }, injector: InputInjector(),
-                installer: MobileInitiationModelInstaller(receipt: mobileInitiationModelReceipt()),
-                nativeTextInstaller: native, nativeTextLoader: { _, _, _ in
-                    runtimeLoads += 1
-                    return ComputerUseCapabilityExecutor(nativeExecution: { _, _, _ in XCTFail("Invalid native capability executed"); return nil })
-                }, nativeTextPreparer: { _, _, _ in
-                    preparations += 1
-                    while !releasePreparation { try await Task.sleep(for: .milliseconds(10)) }
-                    throw CocoaError(.fileReadCorruptFile)
-                },
-
-                visualExecutorLoader: visual, taskLedger: ComputerUseTaskLedger(fileURL: fixture.ledger), channelFactory: { _ in channel })
-            defer { releasePreparation = true; manager.stop() }
-            manager.start(pairingCode: "123456")
-            await waitUntil { preparations == 1 }
-            if requestDuringPreparation {
-                XCTAssertTrue(manager.handle(try setupEnvelope(requestID: "native-preparation-failed"), channel: channel))
-            }
-            releasePreparation = true
-            await waitUntil {
-                if case .error = manager.modelState { return true }
-                return false
-            }
-            guard case .error = manager.modelState else {
-                return XCTFail("A failed native preparation cannot leave the host ready without an executor")
-            }
-            if requestDuringPreparation {
-                let progress = await waitForSetupProgress(channel: channel)
-                XCTAssertTrue(progress.contains { $0.phase == .failed })
-                XCTAssertFalse(progress.contains { $0.phase == .ready })
-            }
-            let installCount = await native.installCallCount()
-            XCTAssertEqual(installCount, 0, "A failed passive preparation cannot start a download loop")
-            XCTAssertEqual(preparations, 1); XCTAssertEqual(runtimeLoads, 0)
-            XCTAssertEqual(manager.capability.state, .setupRequired,
-                "Passive preparation cannot supply an active executor")
-            XCTAssertTrue(manager.needsAdditionalSetup)
-            let activations = await native.recordedSuccessfulActivations()
-            XCTAssertTrue(activations.isEmpty); XCTAssertEqual(visual.loadCount, 0)
-            await manager.shutdown()
-        }
-    }
-
-    func testVisualSetupFailureKeepsNewlyInstalledNativeCapabilityAvailable() async throws {
-        let fixture = try makeFixture(markerPresent: false)
-        defer { try? FileManager.default.removeItem(at: fixture.parent) }
-        let visual = MobileInitiationVisualLoader(throwsLoadFailure: true)
-        let channel = MobileInitiationTestChannel()
-        let manager = HostComputerUseManager(experimentalEnabled: { true }, injector: InputInjector(),
-            installer: MobileInitiationModelInstaller(receipt: mobileInitiationModelReceipt()),
-            nativeTextInstaller: MobileInitiationModelInstaller(receipt: nativeReceipt), nativeTextLoader: { _, _, _ in
-                ComputerUseCapabilityExecutor(nativeExecution: { _, _, _ in nil })
-            }, visualExecutorLoader: visual, taskLedger: ComputerUseTaskLedger(fileURL: fixture.ledger), channelFactory: { _ in channel })
-        manager.start(pairingCode: "123456")
-        XCTAssertTrue(manager.handle(try setupEnvelope(requestID: "visual-load-fails"), channel: channel))
-        let progress = await waitForSetupProgress(channel: channel)
-        XCTAssertFalse(progress.contains { $0.phase == .ready })
-        XCTAssertTrue(manager.needsAdditionalSetup)
-        XCTAssertEqual(manager.capability.state, .ready)
-        XCTAssertTrue(manager.capability.detail.contains("Form editing"))
-        XCTAssertEqual(visual.loadCount, 1, "Retained native capability cannot retry the failed visual activation")
-        await manager.shutdown()
-    }
-
-    func testFailedPassiveActivationTerminatesPendingFullSetupRequest() async throws {
-        let fixture = try makeFixture(markerPresent: false)
-        defer { try? FileManager.default.removeItem(at: fixture.parent) }
-        let native = MobileInitiationModelInstaller(receipt: nativeReceipt, alreadyInstalled: true)
-        let channel = MobileInitiationTestChannel()
-        var loadStarted = false
-        var releaseLoad = false
-        let manager = HostComputerUseManager(experimentalEnabled: { true }, injector: InputInjector(),
-            installer: MobileInitiationModelInstaller(receipt: mobileInitiationModelReceipt()),
-            nativeTextInstaller: native, nativeTextLoader: { _, _, _ in
-                loadStarted = true
-                while !releaseLoad { try await Task.sleep(for: .milliseconds(10)) }
-                throw CocoaError(.fileReadCorruptFile)
-            }, visualExecutorLoader: MobileInitiationVisualLoader(),
-            taskLedger: ComputerUseTaskLedger(fileURL: fixture.ledger), channelFactory: { _ in channel })
-        defer { releaseLoad = true; manager.stop() }
-        manager.start(pairingCode: "123456")
-        await waitUntil { loadStarted }
-        XCTAssertTrue(manager.handle(try setupEnvelope(requestID: "request-during-activation"), channel: channel))
-        releaseLoad = true
-        let progress = await waitForSetupProgress(channel: channel)
-        XCTAssertTrue(progress.contains { $0.requestID == "request-during-activation" && $0.phase == .failed })
-        XCTAssertFalse(progress.contains { $0.phase == .ready })
-        XCTAssertEqual(manager.capability.state, .setupRequired)
-        let installs = await native.installCallCount()
-        XCTAssertEqual(installs, 0, "Failed passive activation cannot loop into unattended downloads")
-        await manager.shutdown()
-    }
-
-    func testPartialNativeActivationNeverCompletesExplicitFullSetup() async throws {
-        for requestDuringActivation in [false, true] {
-            let fixture = try makeFixture(markerPresent: false)
-            defer { try? FileManager.default.removeItem(at: fixture.parent) }
-            let nativeInstaller = MobileInitiationModelInstaller(receipt: nativeReceipt, alreadyInstalled: true)
-            let channel = MobileInitiationTestChannel()
-            var loadCount = 0
-            var releaseInitialLoad = false
-            let visual = MobileInitiationVisualLoader(throwsLoadFailure: true)
-            let manager = HostComputerUseManager(experimentalEnabled: { true }, injector: InputInjector(),
-                installer: MobileInitiationModelInstaller(receipt: mobileInitiationModelReceipt()),
-                nativeTextInstaller: nativeInstaller, nativeTextLoader: { _, _, _ in
-                    loadCount += 1
-                    while !releaseInitialLoad { try await Task.sleep(for: .milliseconds(10)) }
-                    return ComputerUseCapabilityExecutor(nativeExecution: { _, _, _ in .completed("verified") })
-                },
-                visualExecutorLoader: visual,
-                taskLedger: ComputerUseTaskLedger(fileURL: fixture.ledger),
-                channelFactory: { _ in channel })
-            defer { releaseInitialLoad = true; manager.stop() }
-            manager.start(pairingCode: "123456")
-            await waitUntil { loadCount == 1 }
-            if !requestDuringActivation {
-                releaseInitialLoad = true
-                await waitUntil { manager.capability.state == .ready }
-            }
-            XCTAssertTrue(manager.handle(try setupEnvelope(requestID: "finish-all-setup"), channel: channel))
-            releaseInitialLoad = true
-            let progress = await waitForSetupProgress(channel: channel)
-            XCTAssertFalse(progress.contains { $0.phase == .ready },
-                           "A partial native capability must never send terminal full-setup success")
-            XCTAssertTrue(progress.contains { $0.phase == .failed })
-            let installs = await nativeInstaller.installCallCount()
-            XCTAssertEqual(installs, 1, "The explicit request must actually enter full setup")
-            XCTAssertEqual(visual.loadCount, 1)
-            XCTAssertEqual(loadCount, 2)
-            XCTAssertEqual(manager.capability.state, .ready)
-            XCTAssertTrue(manager.needsAdditionalSetup)
-            await manager.shutdown()
-        }
-    }
-
-    func testVisualSetupFailurePreservesVerifiedNativeCapability() async throws {
-        let fixture = try makeFixture(markerPresent: false)
-        defer { try? FileManager.default.removeItem(at: fixture.parent) }
-        let nativeInstaller = MobileInitiationModelInstaller(receipt: nativeReceipt)
-        let channel = MobileInitiationTestChannel()
-        let visual = MobileInitiationVisualLoader(throwsLoadFailure: true)
-        let manager = HostComputerUseManager(experimentalEnabled: { true }, injector: InputInjector(),
-            installer: MobileInitiationModelInstaller(receipt: mobileInitiationModelReceipt()),
-            nativeTextInstaller: nativeInstaller, nativeTextLoader: { _, _, _ in
-                ComputerUseCapabilityExecutor(nativeExecution: { _, _, _ in .completed("verified") })
-            }, visualExecutorLoader: visual,
-            taskLedger: ComputerUseTaskLedger(fileURL: fixture.ledger), channelFactory: { _ in channel })
-        manager.start(pairingCode: "123456")
-        XCTAssertTrue(manager.handle(try setupEnvelope(requestID: "native-partial"), channel: channel))
-        let progress = await waitForSetupProgress(channel: channel, terminalPhase: .failed)
-        XCTAssertTrue(progress.contains { $0.phase == .failed })
-        XCTAssertEqual(visual.loadCount, 1, "This fixture must reach the intended visual activation failure")
-        XCTAssertEqual(manager.capability.state, .ready)
-        XCTAssertTrue(manager.needsAdditionalSetup)
-        let nativeInstalls = await nativeInstaller.installCallCount()
-        XCTAssertEqual(nativeInstalls, 1)
-        let activations = await nativeInstaller.recordedSuccessfulActivations()
-        XCTAssertEqual(activations, [nativeReceipt])
-        let fractions = progress.compactMap(\.fractionCompleted)
-        for (earlier, later) in zip(fractions, fractions.dropFirst()) { XCTAssertLessThanOrEqual(earlier, later) }
-        await manager.shutdown()
-    }
-
-    private var nativeReceipt: ComputerUseInstallationReceipt {
-        ComputerUseInstallationReceipt(installationVersion: ComputerUseArtifactManifest.nativeTextV2.installationVersion,
-            modelVariant: .nativeText4B, modelDirectory: "/test/native-text", installedAt: Date(timeIntervalSince1970: 0))
     }
 
     func testMobileRequestInstallsModelActivatesOSAtlasAndPublishesContinuousProgress() async throws {
@@ -1178,15 +707,21 @@ private final class MobileInitiationVisualLoader: ComputerUseVisualExecutorLoadi
     private var activeLoads = 0
     private let throwsCancellation: Bool
     private let throwsLoadFailure: Bool
+    private let executor: (any ComputerUseExecuting)?
+    private let beforeLoad: @MainActor () async throws -> Void
 
     var loadCount: Int { loadedReceipts.count }
 
     init(
         throwsCancellation: Bool = false,
-        throwsLoadFailure: Bool = false
+        throwsLoadFailure: Bool = false,
+        executor: (any ComputerUseExecuting)? = nil,
+        beforeLoad: @escaping @MainActor () async throws -> Void = {}
     ) {
         self.throwsCancellation = throwsCancellation
         self.throwsLoadFailure = throwsLoadFailure
+        self.executor = executor
+        self.beforeLoad = beforeLoad
     }
 
     func load(
@@ -1198,10 +733,10 @@ private final class MobileInitiationVisualLoader: ComputerUseVisualExecutorLoadi
         maximumConcurrentLoads = max(maximumConcurrentLoads, activeLoads)
         defer { activeLoads -= 1 }
         progress("Starting OS-Atlas Pro test runtime…")
+        try await beforeLoad()
         if throwsCancellation { throw CancellationError() }
         if throwsLoadFailure { throw CocoaError(.fileReadCorruptFile) }
-        return MobileInitiationReadyExecutor(
-            runtimeName: "OS-Atlas Pro test runtime")
+        return executor ?? MobileInitiationReadyExecutor(runtimeName: "OS-Atlas Pro test runtime")
     }
 
     func deactivate() async {
@@ -1213,9 +748,12 @@ private final class MobileInitiationVisualLoader: ComputerUseVisualExecutorLoadi
 private final class MobileInitiationReadyExecutor: ComputerUseExecuting {
     let isReady = true
     let runtimeName: String
+    private let beforeCompletion: @MainActor () async throws -> Void
 
-    init(runtimeName: String = "Test local model") {
+    init(runtimeName: String = "Test local model",
+         beforeCompletion: @escaping @MainActor () async throws -> Void = {}) {
         self.runtimeName = runtimeName
+        self.beforeCompletion = beforeCompletion
     }
 
     func execute(
@@ -1223,7 +761,8 @@ private final class MobileInitiationReadyExecutor: ComputerUseExecuting {
         tools: ComputerUseHostTools,
         progress: @escaping (String) -> Void
     ) async throws -> ComputerUseExecutionResult {
-        .completed("Done")
+        try await beforeCompletion()
+        return .completed("verified")
     }
 }
 

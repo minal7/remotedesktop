@@ -4,7 +4,7 @@ import Foundation
 /// Presents the general agent through the existing host task and clarification
 /// APIs while retaining the loop's original task identity across answer tasks.
 @MainActor
-final class AgentCapabilityAdapter: ComputerUseTaskAwareExecuting, ComputerUseTextClarificationContinuing {
+final class AgentCapabilityAdapter: ComputerUseTaskAwareExecuting, ComputerUseClarificationContinuing {
     private struct PendingQuestion {
         let rootTaskID: String
         var hostTaskID: String
@@ -24,7 +24,6 @@ final class AgentCapabilityAdapter: ComputerUseTaskAwareExecuting, ComputerUseTe
     }
 
     let isReady = true
-    let supportsNativeTextTasks = true
     let requiresMacControlHelper = false
     let hasAdditionalSetup = false
     let runtimeName = "General Agent"
@@ -93,7 +92,7 @@ final class AgentCapabilityAdapter: ComputerUseTaskAwareExecuting, ComputerUseTe
         return present(result, rootTaskID: executionTaskID, hostTaskID: taskID)
     }
 
-    func clarification(taskID: String) throws -> ComputerUseNativeTextExecutor.Clarification? {
+    func clarification(taskID: String) throws -> ComputerUseClarificationQuestion? {
         guard let pending = pendingQuestion, pending.hostTaskID == taskID else { return nil }
         let choices = try pending.question.choices.map { labels in
             try labels.enumerated().map { index, label in
@@ -102,7 +101,7 @@ final class AgentCapabilityAdapter: ComputerUseTaskAwareExecuting, ComputerUseTe
             }
         }
         try ComputerUseClarificationChoice.validate(choices)
-        return ComputerUseNativeTextExecutor.Clarification(
+        return ComputerUseClarificationQuestion(
             taskID: taskID,
             goal: pending.goal,
             question: pending.question.question,

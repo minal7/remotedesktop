@@ -77,25 +77,6 @@ struct ComputerUseNativeTextRuntimeInputs: Equatable, Sendable {
     }
 }
 
-struct ComputerUseRuntimeTextGoalPlanner: ComputerUseTextGoalPlanning {
-    let inputs: ComputerUseNativeTextRuntimeInputs
-    var runtime: OSAtlasLlamaRuntime = .shared
-    var allowFieldCopy = false
-
-    func propose(prompt: String, fields: [ComputerUseTextField]) async throws -> ComputerUseTextGoalProposal {
-        let endpoint = try await runtime.activateNativeText(inputs)
-        return try await runtime.proposeNativeText(endpoint: endpoint, prompt: prompt, fields: fields, allowFieldCopy: allowFieldCopy)
-    }
-
-    func propose(goal: ComputerUseUnresolvedTextGoal, fields: [ComputerUseTextField]) async throws -> ComputerUseTextGoalProposal {
-        guard goal.userTurns.count > 1 else { return try await propose(prompt: goal.userTurns[0], fields: fields) }
-        guard !allowFieldCopy else { return .unsupported }
-        let endpoint = try await runtime.activateNativeText(inputs)
-        return try await runtime.proposeNativeText(endpoint: endpoint, prompt: goal.userTurns[0], fields: fields,
-            clarificationGoal: goal)
-    }
-}
-
 struct OSAtlasLlamaEndpoint: Equatable, Sendable {
     let generation: UInt64
     /// Nil for the independent text planner; never label it as OS-Atlas.
@@ -1548,59 +1529,6 @@ actor OSAtlasLlamaRuntime {
     /// Holds the owner's model lease across template/tokenization, inference
     /// and strict decoding. Callers supply a goal and field snapshot, never a
     /// raw model request or a second independently owned server.
-    func proposeNativeText(
-        endpoint: OSAtlasLlamaEndpoint,
-        prompt: String,
-        fields: [ComputerUseTextField],
-        contract: ComputerUseLocalTextGoalPlanner.Contract = .candidateV2,
-        allowFieldCopy: Bool = false,
-        inspectProposal: (@Sendable (Data) -> Void)? = nil,
-        clarificationGoal: ComputerUseUnresolvedTextGoal? = nil
-    ) async throws -> ComputerUseTextGoalProposal {
-        let lease = try await acquireModelAccessLease()
-        defer { releaseModelAccessLease(lease) }
-        guard let server = active, server.endpoint == endpoint,
-              server.inputs.nativeText != nil else {
-            throw OSAtlasLlamaRuntimeError.inactiveSession
-        }
-        do {
-            guard !allowFieldCopy || contract == .candidateV2 else { throw ComputerUseLocalTextPlanError.invalidResponse }
-            if let clarificationGoal {
-                guard !allowFieldCopy, contract.supportsClarificationInput,
-                      prompt.utf8.elementsEqual(clarificationGoal.userTurns[0].utf8) else {
-                    throw ComputerUseLocalTextPlanError.invalidResponse
-                }
-            }
-            try validateResources(minimumReclaimableBytes:
-                server.resourceProfile.minimumInferenceMemoryBytes)
-            let connection = try ComputerUseTextModelConnection(baseURL: endpoint.baseURL, bearerToken: endpoint.bearerToken,
-                modelAlias: ComputerUseNativeTextRuntimeInputs.modelAlias)
-            let primary = ComputerUseLocalTextGoalPlanner(connection: connection,
-                transport: server.transport, contract: contract, inspectProposal: inspectProposal)
-            let planner: any ComputerUseTextGoalPlanning = allowFieldCopy
-                ? ComputerUseFieldCopyFallbackPlanner(primary: primary,
-                    fieldCopy: ComputerUseLocalTextGoalPlanner(connection: connection, transport: server.transport,
-                        contract: .fieldCopyV7, inspectProposal: inspectProposal))
-                : primary
-            let proposal = try await withTaskCancellationHandler {
-                if let clarificationGoal { return try await planner.propose(goal: clarificationGoal, fields: fields) }
-                return try await planner.propose(prompt: prompt, fields: fields)
-            } onCancel: {
-                Task { await self.cancel(endpoint: endpoint) }
-            }
-            try Task.checkCancellation()
-            guard active?.endpoint == endpoint else {
-                throw OSAtlasLlamaRuntimeError.inactiveSession
-            }
-            return proposal
-        } catch {
-            if active?.endpoint == endpoint {
-                try await stopActiveServerUnserialized()
-            }
-            throw error
-        }
-    }
-
     /// Keeps the native model lease through exact token counting, inference
     /// and strict goal decoding. A goal proposal cannot authorize any effect.
     func proposeDefaultBrowserControl(endpoint: OSAtlasLlamaEndpoint,

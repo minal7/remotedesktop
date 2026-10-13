@@ -1649,7 +1649,7 @@ final class ComputerUseTests: XCTestCase {
 
         let newTools = makeTools()
         for tools in [oldTools, newTools] {
-            XCTAssertThrowsError(try tools.perform(.typeText("new task")))
+            XCTAssertThrowsError(try tools.perform(.key(usage: 0x2B, modifiers: 0)))
             do { _ = try await tools.openApplication(named: "Notes"); XCTFail("An unsettled native open must block another open") }
             catch ComputerUseHostTools.ToolError.paused {}
         }
@@ -1658,18 +1658,18 @@ final class ComputerUseTests: XCTestCase {
         XCTAssertThrowsError(try ComputerUseApplicationOpenOperation.beginNativeOpen())
 
         nativeCallback()
-        try newTools.perform(.typeText("new task"))
-        XCTAssertEqual(actions, [.typeText("new task")])
+        try newTools.perform(.key(usage: 0x2B, modifiers: 0))
+        XCTAssertEqual(actions, [.key(usage: 0x2B, modifiers: 0)])
         let replacement = try ComputerUseApplicationOpenOperation.beginNativeOpen()
         defer { ComputerUseApplicationOpenOperation.finishNativeOpen(replacement) }
         nativeCallback()
-        XCTAssertThrowsError(try oldTools.perform(.typeText("stale callback")),
+        XCTAssertThrowsError(try oldTools.perform(.key(usage: 0x2B, modifiers: 0)),
             "An old native callback must not release a later open's lease")
         ComputerUseApplicationOpenOperation.finishNativeOpen(replacement)
         userAllowsActions = false
-        XCTAssertThrowsError(try newTools.perform(.typeText("paused")),
+        XCTAssertThrowsError(try newTools.perform(.key(usage: 0x2B, modifiers: 0)),
             "Finishing native work must never reopen a closed user action gate")
-        XCTAssertEqual(actions, [.typeText("new task")])
+        XCTAssertEqual(actions, [.key(usage: 0x2B, modifiers: 0)])
     }
 
     func test_visualOpenAppRejectsPathsAndPausedAutomationBeforeOpening() async {
@@ -2306,22 +2306,6 @@ final class ComputerUseTests: XCTestCase {
         XCTAssertEqual(scrolls.count, 1)
         XCTAssertEqual(scrolls.first?.horizontalScrollDelta, 75)
         XCTAssertEqual(scrolls.first?.verticalScrollDelta, -360)
-    }
-
-    func test_computerUseTextPreservesEmojiAndSupplementaryUnicode() throws {
-        let events = CapturedCGEventStore()
-        let tools = ComputerUseHostTools(
-            injector: InputInjector(eventPoster: { events.append($0) }),
-            mayAct: { true })
-        let expected = "Dinner at 7 🍕 — bring 𐐷"
-
-        try tools.perform(.typeText(expected))
-
-        let observed = events.values()
-            .filter { $0.type == .keyDown }
-            .compactMap(\.unicodeText)
-            .joined()
-        XCTAssertEqual(observed, expected)
     }
 
     func test_computerUseDragInterpolatesHeldPointerPath() throws {
@@ -3611,7 +3595,7 @@ final class ComputerUseTests: XCTestCase {
             let ledgerURL = temporaryLedgerURL()
             defer { try? FileManager.default.removeItem(at: ledgerURL.deletingLastPathComponent()) }
             let manager = HostComputerUseManager(experimentalEnabled: { true }, injector: InputInjector(), executor: executor,
-                taskLedger: ComputerUseTaskLedger(fileURL: ledgerURL), textClarifications: ComputerUseTextClarificationStore(now: { now }),
+                taskLedger: ComputerUseTaskLedger(fileURL: ledgerURL), textClarifications: ComputerUseClarificationStore(now: { now }),
                 allowsExternalServices: false, channelFactory: { _ in channel })
             defer { manager.stop() }
             let prompt = makeEnvelope(id: "q", kind: .prompt, body: "Put blue in a field.")
@@ -6274,7 +6258,7 @@ final class ComputerUseTests: XCTestCase {
                 XCTAssertEqual(fixture.manager.localTaskControls?.ownerID, controls.ownerID)
                 XCTAssertEqual(fixture.manager.localTaskControls?.phase, .paused)
                 do {
-                    try oldTools.perform(.typeText("stale task input"))
+                    try oldTools.perform(.key(usage: 0x2B, modifiers: 0))
                     XCTFail("Expected closed action gate")
                 } catch {
                     guard let error = error as? ComputerUseHostTools.ToolError, case .paused = error else { return XCTFail("Expected closed action gate") }
@@ -6344,7 +6328,7 @@ final class ComputerUseTests: XCTestCase {
         XCTAssertEqual(fixture.manager.activity, .paused); XCTAssertEqual(executor.callCount, 1)
         XCTAssertEqual(fixture.manager.localTaskControls?.ownerID, controls.ownerID)
         XCTAssertFalse(fixture.manager.blockActionsForUserIntervention(), "An abandoned reservation cannot remain pending")
-        XCTAssertThrowsError(try oldTools.perform(.typeText("unready stale input"))) {
+        XCTAssertThrowsError(try oldTools.perform(.key(usage: 0x2B, modifiers: 0))) {
             guard let error = $0 as? ComputerUseHostTools.ToolError, case .paused = error else { return XCTFail("Expected closed action gate") }
         }
         executor.ready = true
@@ -9908,10 +9892,10 @@ private final class HandoffSuspendingVisualApprovalExecutor:
 }
 
 @MainActor
-final class ScopedClarificationTestExecutor: ComputerUseExecuting, ComputerUseTextClarificationContinuing {
+final class ScopedClarificationTestExecutor: ComputerUseExecuting, ComputerUseClarificationContinuing {
     var isReady = true
     let runtimeName = "Scoped clarification fixture"
-    var pending: ComputerUseNativeTextExecutor.Clarification?
+    var pending: ComputerUseClarificationQuestion?
     var normalPrompts: [String] = []
     var answers: [(taskID: String, origin: String, goal: ComputerUseUnresolvedTextGoal)] = []
     var choicesForQuestion: [ComputerUseClarificationChoice]?
@@ -9930,7 +9914,7 @@ final class ScopedClarificationTestExecutor: ComputerUseExecuting, ComputerUseTe
         try beforeQuestion?()
         return try question(taskID: taskID, goal: ComputerUseUnresolvedTextGoal(userRequest: trustedUserPrompt))
     }
-    func clarification(taskID: String) throws -> ComputerUseNativeTextExecutor.Clarification? {
+    func clarification(taskID: String) throws -> ComputerUseClarificationQuestion? {
         pending?.taskID == taskID ? pending : nil
     }
     func invalidateClarification(taskID: String?) {
@@ -9951,7 +9935,7 @@ final class ScopedClarificationTestExecutor: ComputerUseExecuting, ComputerUseTe
         selectedChoices.append(selectedChoice)
         if let selectedChoice {
             guard pending?.choices?.contains(selectedChoice) == true else {
-                throw ComputerUseTextClarificationStore.Failure.invalidChoice
+                throw ComputerUseClarificationStore.Failure.invalidChoice
             }
         }
         return try await continueClarification(taskID: taskID, originatingTaskID: originatingTaskID, goal: goal, progress: progress)
@@ -10176,7 +10160,7 @@ private final class CancellationIgnoringToolExecutor: ComputerUseExecuting {
 
         actionAttempted = true
         do {
-            try tools.perform(.typeText("must-not-be-injected"))
+            try tools.perform(.key(usage: 0x2B, modifiers: 0))
         } catch ComputerUseHostTools.ToolError.paused {
             actionWasBlocked = true
         }
@@ -10223,7 +10207,7 @@ private final class StopJoinProbeExecutor: ComputerUseExecuting {
             }
             staleActionAttempted = true
             do {
-                try tools.perform(.typeText("must-not-be-injected"))
+                try tools.perform(.key(usage: 0x2B, modifiers: 0))
             } catch ComputerUseHostTools.ToolError.paused {
                 staleActionWasBlocked = true
             }

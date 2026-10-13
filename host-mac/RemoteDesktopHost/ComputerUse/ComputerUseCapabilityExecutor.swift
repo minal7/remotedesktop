@@ -9,28 +9,6 @@ protocol ComputerUseClarifiedGoalExecuting {
                  progress: @escaping (String) -> Void) async throws -> ComputerUseExecutionResult
 }
 
-@MainActor
-protocol ComputerUseTextClarificationContinuing {
-    func clarification(taskID: String) throws -> ComputerUseNativeTextExecutor.Clarification?
-    func continueClarification(taskID: String, originatingTaskID: String, goal: ComputerUseUnresolvedTextGoal,
-                               progress: @escaping (String) -> Void) async throws -> ComputerUseExecutionResult
-    func continueClarification(taskID: String, originatingTaskID: String, goal: ComputerUseUnresolvedTextGoal,
-                               selectedChoice: ComputerUseClarificationChoice?,
-                               progress: @escaping (String) -> Void) async throws -> ComputerUseExecutionResult
-    func invalidateClarification(taskID: String?)
-}
-
-extension ComputerUseTextClarificationContinuing {
-    /// Existing continuations still accept ordinary text answers. A typed
-    /// catalog selection must be explicitly supported, never silently dropped.
-    func continueClarification(taskID: String, originatingTaskID: String, goal: ComputerUseUnresolvedTextGoal,
-                               selectedChoice: ComputerUseClarificationChoice?,
-                               progress: @escaping (String) -> Void) async throws -> ComputerUseExecutionResult {
-        guard selectedChoice == nil else { throw ComputerUseTextClarificationStore.Failure.invalidChoice }
-        return try await continueClarification(taskID: taskID, originatingTaskID: originatingTaskID, goal: goal, progress: progress)
-    }
-}
-
 /// A native decline is not permission to enter visual execution.
 /// The restriction must remain attached to a task across Resume.
 @MainActor
@@ -45,7 +23,7 @@ protocol ComputerUseNativeOnlyExecuting {
 /// to reconstruct and replay the goal through another executor.
 @MainActor
 final class ComputerUseCapabilityExecutor: ComputerUseTaskAwareExecuting,
-    ComputerUseVisualApprovalContinuing, ComputerUseTextClarificationContinuing,
+    ComputerUseVisualApprovalContinuing, ComputerUseClarificationContinuing,
     ComputerUseNativeOnlyExecuting, ComputerUseClarifiedGoalExecuting {
     typealias NativeExecution = @MainActor (String, String, @escaping (String) -> Void) async throws -> ComputerUseExecutionResult?
     typealias DesktopFactory = @MainActor (@escaping (String) -> Void) async throws -> any ComputerUseExecuting
@@ -53,7 +31,7 @@ final class ComputerUseCapabilityExecutor: ComputerUseTaskAwareExecuting,
     enum RoutingError: Error, Equatable { case taskChanged, missingContinuation, alreadyExecuting }
     private enum Route { case native, desktop }
     private let nativeExecution: NativeExecution
-    private let nativeClarification: ComputerUseNativeTextExecutor?
+    private let nativeClarification: (any ComputerUseClarificationContinuing)?
     private var desktopFactory: DesktopFactory?
     private var desktopIncludesVisualControl: Bool
     private var taskID: String?
@@ -66,7 +44,7 @@ final class ComputerUseCapabilityExecutor: ComputerUseTaskAwareExecuting,
     let agentAdapter: AgentCapabilityAdapter?
 
     init(nativeExecution: @escaping NativeExecution, desktopFactory: DesktopFactory? = nil,
-         desktopIncludesVisualControl: Bool = true, nativeClarification: ComputerUseNativeTextExecutor? = nil) {
+         desktopIncludesVisualControl: Bool = true, nativeClarification: (any ComputerUseClarificationContinuing)? = nil) {
         self.nativeExecution = nativeExecution
         self.agentAdapter = nil
         self.nativeClarification = nativeClarification
@@ -82,14 +60,7 @@ final class ComputerUseCapabilityExecutor: ComputerUseTaskAwareExecuting,
         self.desktopIncludesVisualControl = false
     }
 
-    convenience init(native: ComputerUseNativeTextExecutor, desktopFactory: DesktopFactory? = nil) {
-        self.init(nativeExecution: { taskID, prompt, progress in
-            try await native.execute(taskID: taskID, prompt: prompt, progress: progress)
-        }, desktopFactory: desktopFactory, nativeClarification: native)
-    }
-
     let isReady = true
-    let supportsNativeTextTasks = true
     var hasAdditionalSetup: Bool { agentAdapter == nil && (desktopFactory == nil || !desktopIncludesVisualControl) }
     var readyDetail: String {
         if let agentAdapter { return agentAdapter.readyDetail }
@@ -146,13 +117,13 @@ final class ComputerUseCapabilityExecutor: ComputerUseTaskAwareExecuting,
         guard let originalGoal = goal.userTurns.first,
               !originalGoal.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               originalGoal.utf8.count <= 8_192 else { throw RoutingError.taskChanged }
-        let digest = ComputerUseTextTaskContract.digest(goal.taskIdentityText)
+        let digest = ComputerUseTaskJournalStore.digest(goal.taskIdentityText)
         if self.taskID == taskID {
             guard route == .desktop, promptDigest == digest, routedClarifiedGoal == goal else {
                 throw RoutingError.taskChanged
             }
         } else {
-            nativeClarification?.invalidateClarification()
+            nativeClarification?.invalidateClarification(taskID: self.taskID)
             desktop = nil
             self.taskID = taskID
             promptDigest = digest
@@ -197,7 +168,7 @@ final class ComputerUseCapabilityExecutor: ComputerUseTaskAwareExecuting,
         isExecuting = true
         defer { isExecuting = false }
         try Task.checkCancellation()
-        let digest = ComputerUseTextTaskContract.digest(currentUserPrompt)
+        let digest = ComputerUseTaskJournalStore.digest(currentUserPrompt)
         if self.taskID == taskID {
             guard promptDigest == digest else { throw RoutingError.taskChanged }
             // A restricted attempt cannot reconstruct a task already owned
@@ -207,7 +178,7 @@ final class ComputerUseCapabilityExecutor: ComputerUseTaskAwareExecuting,
                 nativeOnlyTask = true
             }
         } else {
-            nativeClarification?.invalidateClarification()
+            nativeClarification?.invalidateClarification(taskID: self.taskID)
             desktop = nil
             self.taskID = taskID
             promptDigest = digest
@@ -244,11 +215,11 @@ final class ComputerUseCapabilityExecutor: ComputerUseTaskAwareExecuting,
         return result
     }
 
-    func clarification(taskID: String) throws -> ComputerUseNativeTextExecutor.Clarification? {
+    func clarification(taskID: String) throws -> ComputerUseClarificationQuestion? {
         if let agentAdapter { return try agentAdapter.clarification(taskID: taskID) }
         guard self.taskID == taskID else { return nil }
         if route == .native { return try nativeClarification?.clarification(taskID: taskID) }
-        if route == .desktop { return try (desktop as? any ComputerUseTextClarificationContinuing)?.clarification(taskID: taskID) }
+        if route == .desktop { return try (desktop as? any ComputerUseClarificationContinuing)?.clarification(taskID: taskID) }
         return nil
     }
 
@@ -256,7 +227,7 @@ final class ComputerUseCapabilityExecutor: ComputerUseTaskAwareExecuting,
         if let agentAdapter { agentAdapter.invalidateClarification(taskID: taskID); return }
         if taskID == nil || taskID == self.taskID { routedClarifiedGoal = nil }
         nativeClarification?.invalidateClarification(taskID: taskID)
-        (desktop as? any ComputerUseTextClarificationContinuing)?.invalidateClarification(taskID: taskID)
+        (desktop as? any ComputerUseClarificationContinuing)?.invalidateClarification(taskID: taskID)
     }
 
     func continueClarification(taskID: String, originatingTaskID: String, goal: ComputerUseUnresolvedTextGoal,
@@ -266,8 +237,8 @@ final class ComputerUseCapabilityExecutor: ComputerUseTaskAwareExecuting,
                 goal: goal, progress: progress)
         }
         guard !isExecuting else { throw RoutingError.alreadyExecuting }
-        guard route == .native && nativeClarification != nil || route == .desktop && desktop is any ComputerUseTextClarificationContinuing else { throw RoutingError.missingContinuation }
-        let digest = ComputerUseTextTaskContract.digest(goal.taskIdentityText)
+        guard route == .native && nativeClarification != nil || route == .desktop && desktop is any ComputerUseClarificationContinuing else { throw RoutingError.missingContinuation }
+        let digest = ComputerUseTaskJournalStore.digest(goal.taskIdentityText)
         if self.taskID == taskID {
             guard promptDigest == digest else { throw RoutingError.taskChanged }
         } else {
@@ -284,7 +255,7 @@ final class ComputerUseCapabilityExecutor: ComputerUseTaskAwareExecuting,
         let result: ComputerUseExecutionResult
         if route == .native, let native = nativeClarification {
             result = try await native.continueClarification(taskID: taskID, originatingTaskID: originatingTaskID, goal: goal, progress: progress)
-        } else if let continuing = desktop as? any ComputerUseTextClarificationContinuing {
+        } else if let continuing = desktop as? any ComputerUseClarificationContinuing {
             result = try await continuing.continueClarification(taskID: taskID, originatingTaskID: originatingTaskID, goal: goal, progress: progress)
         } else { throw RoutingError.missingContinuation }
         if route == .desktop { routedClarifiedGoal = goal }
@@ -303,12 +274,12 @@ final class ComputerUseCapabilityExecutor: ComputerUseTaskAwareExecuting,
                 goal: goal, progress: progress)
         }
         guard !isExecuting else { throw RoutingError.alreadyExecuting }
-        guard route != .native else { throw ComputerUseTextClarificationStore.Failure.invalidChoice }
+        guard route != .native else { throw ComputerUseClarificationStore.Failure.invalidChoice }
         guard route == .desktop,
-              let continuing = desktop as? any ComputerUseTextClarificationContinuing else {
+              let continuing = desktop as? any ComputerUseClarificationContinuing else {
             throw RoutingError.missingContinuation
         }
-        let digest = ComputerUseTextTaskContract.digest(goal.taskIdentityText)
+        let digest = ComputerUseTaskJournalStore.digest(goal.taskIdentityText)
         if self.taskID == taskID {
             guard promptDigest == digest else { throw RoutingError.taskChanged }
         } else {
@@ -367,7 +338,7 @@ final class ComputerUseCapabilityExecutor: ComputerUseTaskAwareExecuting,
 /// it. The same loaded executor handles resume and approval continuation; a
 /// continuation never performs another load or enters the planner again.
 @MainActor
-final class ComputerUseDeferredVisualExecutor: ComputerUseTaskAwareExecuting, ComputerUseVisualApprovalContinuing, ComputerUseTextClarificationContinuing {
+final class ComputerUseDeferredVisualExecutor: ComputerUseTaskAwareExecuting, ComputerUseVisualApprovalContinuing, ComputerUseClarificationContinuing {
     typealias Loader = @MainActor @Sendable (@escaping (String) -> Void) async throws -> any ComputerUseExecuting
     typealias Abandon = @MainActor @Sendable (any ComputerUseExecuting) async -> Void
     private let loader: Loader?
@@ -387,20 +358,20 @@ final class ComputerUseDeferredVisualExecutor: ComputerUseTaskAwareExecuting, Co
     var runtimeName: String { isReady ? "Visual control is available on demand" : "Visual control needs setup" }
     var readyDetail: String { runtimeName }
 
-    func clarification(taskID: String) throws -> ComputerUseNativeTextExecutor.Clarification? {
+    func clarification(taskID: String) throws -> ComputerUseClarificationQuestion? {
         guard self.taskID == taskID else { return nil }
-        return try (loaded as? any ComputerUseTextClarificationContinuing)?.clarification(taskID: taskID)
+        return try (loaded as? any ComputerUseClarificationContinuing)?.clarification(taskID: taskID)
     }
 
     func invalidateClarification(taskID: String?) {
-        (loaded as? any ComputerUseTextClarificationContinuing)?.invalidateClarification(taskID: taskID)
+        (loaded as? any ComputerUseClarificationContinuing)?.invalidateClarification(taskID: taskID)
     }
 
     func continueClarification(taskID: String, originatingTaskID: String, goal: ComputerUseUnresolvedTextGoal,
                                progress: @escaping (String) -> Void) async throws -> ComputerUseExecutionResult {
         guard !isExecuting else { throw ComputerUseCapabilityExecutor.RoutingError.alreadyExecuting }
-        guard let continuing = loaded as? any ComputerUseTextClarificationContinuing else { throw ComputerUseCapabilityExecutor.RoutingError.missingContinuation }
-        let digest = ComputerUseTextTaskContract.digest(goal.taskIdentityText)
+        guard let continuing = loaded as? any ComputerUseClarificationContinuing else { throw ComputerUseCapabilityExecutor.RoutingError.missingContinuation }
+        let digest = ComputerUseTaskJournalStore.digest(goal.taskIdentityText)
         if self.taskID == taskID {
             guard promptDigest == digest else { throw ComputerUseCapabilityExecutor.RoutingError.taskChanged }
         } else {
@@ -433,7 +404,7 @@ final class ComputerUseDeferredVisualExecutor: ComputerUseTaskAwareExecuting, Co
         isExecuting = true
         defer { isExecuting = false }
         try Task.checkCancellation()
-        let digest = ComputerUseTextTaskContract.digest(currentUserPrompt)
+        let digest = ComputerUseTaskJournalStore.digest(currentUserPrompt)
         if self.taskID == taskID, promptDigest != digest {
             throw ComputerUseCapabilityExecutor.RoutingError.taskChanged
         }
@@ -488,44 +459,5 @@ final class ComputerUseDeferredVisualExecutor: ComputerUseTaskAwareExecuting, Co
     func cancelVisualApprovalContinuation(_ continuation: ComputerUseVisualApprovalContinuation) {
         guard continuation.taskID == taskID else { return }
         (loaded as? any ComputerUseVisualApprovalContinuing)?.cancelVisualApprovalContinuation(continuation)
-    }
-}
-
-@MainActor
-enum ComputerUseNativeTextExecutorLoader {
-    /// Preparation alone never certifies runtime activation. Passive startup
-    /// prepares the planner without occupying a worker; the runtime text
-    /// planner activates it only when it needs a proposal.
-    static func prepare(receipt: ComputerUseInstallationReceipt, tools: ComputerUseHostTools,
-                        bundle: Bundle = .main, runtime: OSAtlasLlamaRuntime = .shared,
-                        journalDirectory: URL = ComputerUseTextStepStore.defaultDirectory,
-                        progress: @escaping (String) -> Void) async throws -> ComputerUseCapabilityExecutor {
-        try await load(receipt: receipt, tools: tools, bundle: bundle, runtime: runtime,
-            journalDirectory: journalDirectory, activateRuntime: false, progress: progress)
-    }
-
-    static func load(receipt: ComputerUseInstallationReceipt, tools: ComputerUseHostTools,
-                     bundle: Bundle = .main, runtime: OSAtlasLlamaRuntime = .shared,
-                     journalDirectory: URL = ComputerUseTextStepStore.defaultDirectory,
-                     activateRuntime: Bool = true,
-                     progress: @escaping (String) -> Void) async throws -> ComputerUseCapabilityExecutor {
-        try Task.checkCancellation()
-        progress(activateRuntime ? "Loading local computer use…" : "Preparing local form editing…")
-        let directory = try OSAtlasVisualExecutorLoader.bundledRuntimeDirectoryURL(in: bundle)
-        let inputs = try OSAtlasRuntimeInputResolver(manifest: .nativeTextV2).resolveNativeText(
-            receipt: receipt, runtimeDirectoryURL: directory, enclosingBundleURL: bundle.bundleURL)
-        if activateRuntime {
-            let endpoint = try await runtime.activateNativeText(inputs)
-            do { try Task.checkCancellation() }
-            catch { await runtime.cancel(endpoint: endpoint); throw error }
-        } else {
-            try Task.checkCancellation()
-        }
-        let native = tools.makeNativeTextExecutor(
-            planner: ComputerUseRuntimeTextGoalPlanner(inputs: inputs, runtime: runtime),
-            journalDirectory: journalDirectory)
-        return ComputerUseCapabilityExecutor(nativeExecution: { taskID, prompt, progress in
-            return try await native.execute(taskID: taskID, prompt: prompt, progress: progress)
-        }, nativeClarification: native)
     }
 }

@@ -80,9 +80,6 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
     private struct Observation {
         let image: ComputerUseDesktopImage
         let fingerprint: ComputerUsePlanningStateFingerprint
-        let focusedTextFrame: CGRect?
-        let focusedEditor: String?
-        let focusedTextState: ComputerUseNativeTextState?
         let nativeControls: ComputerUseNativeControls?
     }
     private final class Approval {
@@ -207,128 +204,34 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
     private func waitForPostActionSurface(_ observation: Observation, tools: ComputerUseHostTools) async throws {
         try await Task.sleep(for: .milliseconds(100))
         guard surfaceScopeCheck != nil else { return }
-        let scopeDeadline = ContinuousClock.now.advanced(by: .seconds(3))
-        func scopedFailure(_ stage: String) -> Failure {
-            lastRevalidationDiagnostic = ["blockedAt": stage]
-            return .scopedSurfaceChanged
-        }
-        func checkActiveApplication(_ stage: String) throws {
-            try Task.checkCancellation(); try tools.requireActive()
+        let deadline = ContinuousClock.now.advanced(by: .seconds(3))
+        while true {
+            try Task.checkCancellation()
+            try tools.requireActive()
             let app = tools.frontmostApplicationSnapshot()
             guard app.identity == observation.fingerprint.frontmostApplicationIdentity,
-                  app.policyName == observation.fingerprint.frontmostApplication else { throw scopedFailure(stage) }
-        }
-        func currentScopeIsValid(activeBefore: String, activeAfter: String) throws -> Bool {
-            try checkActiveApplication(activeBefore)
-            do { try checkScopedSurface() }
-            catch Failure.scopedSurfaceChanged { return false }
-            try checkActiveApplication(activeAfter)
-            return true
-        }
-        func waitForScopeRecovery(_ stage: String) async throws {
-            while true {
-                guard ContinuousClock.now < scopeDeadline else { throw scopedFailure(stage) }
-                if try currentScopeIsValid(activeBefore: "\(stage)-active-app-before-check",
-                                           activeAfter: "\(stage)-active-app-after-check") {
-                    guard ContinuousClock.now < scopeDeadline else { throw scopedFailure(stage) }
-                    return
-                }
-                guard ContinuousClock.now < scopeDeadline else { throw scopedFailure(stage) }
-                try await Task.sleep(for: .milliseconds(100))
+                  app.policyName == observation.fingerprint.frontmostApplication else {
+                lastRevalidationDiagnostic = ["blockedAt": "post-action-active-app"]
+                throw Failure.scopedSurfaceChanged
             }
-        }
-        func freshEditorSample(_ stage: String) async throws -> (token: String?, recovered: Bool) {
-            var recovered = false
-            while true {
-                if try !currentScopeIsValid(activeBefore: "\(stage)-active-app-before-editor-sample",
-                                            activeAfter: "\(stage)-active-app-before-editor-sample-check") {
-                    recovered = true
-                    try await waitForScopeRecovery("\(stage)-scope-recovery-deadline")
-                    continue
-                }
-                let token = try tools.nativeFocusedEditorObservation()?.stabilityToken
-                if try currentScopeIsValid(activeBefore: "\(stage)-active-app-before-post-sample-check",
-                                           activeAfter: "\(stage)-active-app-after-post-sample-check") {
-                    return (token, recovered)
-                }
-                recovered = true
-                try await waitForScopeRecovery("\(stage)-scope-recovery-deadline")
-            }
-        }
-        while true {
-            try checkActiveApplication("scope-wait-active-app-before-check")
             do { try checkScopedSurface() }
             catch Failure.scopedSurfaceChanged {
-                guard ContinuousClock.now < scopeDeadline else { throw scopedFailure("scope-wait-deadline") }
-                // A native sheet can briefly leave AX focus unavailable. Wait
-                // for the existing scope to validate; never replay the input
-                // or ask the model to act on the transitional surface.
+                guard ContinuousClock.now < deadline else {
+                    lastRevalidationDiagnostic = ["blockedAt": "post-action-scope-deadline"]
+                    throw Failure.scopedSurfaceChanged
+                }
                 try await Task.sleep(for: .milliseconds(100))
                 continue
             }
-            try checkActiveApplication("scope-wait-active-app-after-check")
-            break
-        }
-
-        let settleStarted = ContinuousClock.now
-        let initialSample = try await freshEditorSample("initial-editor-sample")
-        let currentToken = initialSample.token
-
-        // A newly focused native field may appear after this first sample, and
-        // can emit delayed AX title/ancestry events. Settle the exact observed
-        // identity before asking the model to plan, even when this sample is unchanged.
-        let settleDeadline = ContinuousClock.now.advanced(by: .seconds(3))
-        var lastToken = currentToken
-        var quietSince = ContinuousClock.now
-        var sampleCount = 1
-        var tokenChangeCount = 0
-        var nilSampleCount = currentToken == nil ? 1 : 0
-        while ContinuousClock.now < settleDeadline {
-            try await Task.sleep(for: .milliseconds(250))
-            let sample = try await freshEditorSample("settle-editor-sample")
-            let token = sample.token
-            sampleCount += 1
-            if token == nil { nilSampleCount += 1 }
-            if token != lastToken {
-                tokenChangeCount += 1
-                lastToken = token
-                quietSince = ContinuousClock.now
-            } else if sample.recovered {
-                // A lost scope invalidates the earlier token and quiet time,
-                // even when the newly sampled editor looks unchanged.
-                lastToken = token
-                quietSince = ContinuousClock.now
-            } else if ContinuousClock.now - quietSince >= .seconds(1.25) {
-                // This final in-flight sample may satisfy the quiet interval
-                // just after the nominal deadline; its scope checks still ran.
-                return
+            try tools.requireActive()
+            let finalApp = tools.frontmostApplicationSnapshot()
+            guard finalApp.identity == observation.fingerprint.frontmostApplicationIdentity,
+                  finalApp.policyName == observation.fingerprint.frontmostApplication else {
+                lastRevalidationDiagnostic = ["blockedAt": "post-action-active-app-after-scope"]
+                throw Failure.scopedSurfaceChanged
             }
+            return
         }
-        // Editor metadata can keep changing while the retained window remains
-        // valid (for example, an asynchronous upload). Reobserve at the bounded
-        // deadline; every later effect still needs a fresh target and fingerprint.
-        let finalSample = try await freshEditorSample("settle-final-editor-sample")
-        if finalSample.recovered {
-            sampleCount += 1
-            if finalSample.token == nil { nilSampleCount += 1 }
-            if finalSample.token != lastToken { tokenChangeCount += 1 }
-            lastToken = finalSample.token
-            quietSince = ContinuousClock.now
-        }
-        let timedOutAt = ContinuousClock.now
-        func milliseconds(_ duration: Duration) -> String {
-            let components = duration.components
-            return String(components.seconds * 1_000 + components.attoseconds / 1_000_000_000_000_000)
-        }
-        lastRevalidationDiagnostic = [
-            "blockedAt": "editor-settle-deadline-reobserve",
-            "sampleCount": String(sampleCount),
-            "tokenChangeCount": String(tokenChangeCount),
-            "nilSampleCount": String(nilSampleCount),
-            "elapsedMs": milliseconds(settleStarted.duration(to: timedOutAt)),
-            "quietMs": milliseconds(quietSince.duration(to: timedOutAt))
-        ]
-        // No native input is issued here. The next turn observes the new state.
     }
 
     private static func displayKeyboardChord(_ keys: [String]) -> String {
@@ -596,14 +499,12 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
         guard postRecognitionApplication.identity == after.identity,
               postRecognitionApplication.policyName == after.policyName else { throw Failure.changedScreen }
         if requiresIntervention { throw Failure.authentication }
-        let editor = try tools.nativeFocusedEditorObservation()
         let controls = try includeControls ? tools.nativeControlObservation(displayBounds: screen.displayBounds, windowBounds: screen.frontmostWindowBounds!) : nil
         let finalApplication = tools.frontmostApplicationSnapshot()
         guard finalApplication.identity == after.identity, finalApplication.policyName == after.policyName else { throw Failure.changedScreen }
         return try Observation(image: ComputerUseDesktopImage(observation: screen),
             fingerprint: tools.planningStateFingerprint(for: screen, frontmostApplication: after.policyName,
                                                         frontmostApplicationIdentity: after.identity),
-            focusedTextFrame: tools.nativeFocusedTextFrame(), focusedEditor: editor?.description, focusedTextState: editor?.textState,
             nativeControls: controls)
     }
 
@@ -611,25 +512,18 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
         let fresh = try await observe(tools)
         let matches: Bool
         switch action {
-        case .typeText?, .key?:
-            if let action, try tools.focusedTypingTargetIsEditable(providerAction: action) {
-                matches = expected.fingerprint.matchesFocusedEditableInputAuthority(fresh.fingerprint)
-            } else if case .key? = action, surfaceScopeCheck != nil {
-                // Keyboard navigation belongs to the same signed window and
-                // focused control, independent of unrelated pixel animation.
-                matches = expected.fingerprint.matchesStableSignedFocusedAuthority(fresh.fingerprint)
-            } else { matches = expected.fingerprint == fresh.fingerprint }
+        case .key?:
+            matches = surfaceScopeCheck != nil
+                ? expected.fingerprint.matchesStableSignedFocusedAuthority(fresh.fingerprint)
+                : expected.fingerprint == fresh.fingerprint
         case .click(let x, let y, _, _)?:
             let target = try action.flatMap { try tools.nativePointerTargetFrame(for: $0) }
             if let window = expected.fingerprint.frontmostWindowBounds,
                let target, !target.isEmpty,
                window.contains(target), target.contains(CGPoint(x: x, y: y)) {
                 let authorityMatches = expected.fingerprint.matchesPendingObservationAuthority(fresh.fingerprint)
-                let unchangedField = expected.focusedTextFrame == fresh.focusedTextFrame
-                    && expected.fingerprint.matchesFocusedEditableInputAuthority(fresh.fingerprint) ? expected.focusedTextFrame : nil
                 var difference: [String: String] = [:]
                 let pixelsMatch = try expected.image.matchesPointerPixels(of: fresh.image, window: window, target: target,
-                    unchangedFocusedField: unchangedField,
                     onInsertionPointDifference: { changed, pixels, field in
                         difference = ["pointerChangedDisplayBounds": String(describing: changed),
                             "pointerChangedPixelBounds": String(describing: pixels), "pointerFieldPixelBounds": String(describing: field)]
@@ -637,8 +531,7 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
                 matches = authorityMatches && pixelsMatch
                 if !matches { lastRevalidationDiagnostic = ["pointerTargetFrame": String(describing: target),
                     "pointerPoint": "\(x),\(y)", "pointerAuthorityMatches": String(authorityMatches),
-                    "pointerTargetPixelsMatch": String(pixelsMatch),
-                    "pointerHasUnchangedEditorProof": String(unchangedField != nil)]
+                    "pointerTargetPixelsMatch": String(pixelsMatch)]
                     lastRevalidationDiagnostic.merge(difference) { _, value in value }
                 }
             } else if surfaceScopeCheck != nil,
@@ -662,22 +555,9 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
             guard let window = expected.fingerprint.frontmostWindowBounds,
                   window.contains(CGPoint(x: x, y: y)) else { throw Failure.changedScreen }
             let scopeMatches = expected.fingerprint.matchesPendingObservationAuthority(fresh.fingerprint)
-            if let field = expected.focusedTextFrame, field == fresh.focusedTextFrame, window.contains(field),
-               expected.fingerprint.matchesFocusedEditableInputAuthority(fresh.fingerprint) {
-                matches = try scopeMatches && expected.image.matchesInsertionPointPixels(of: fresh.image, window: window, field: field)
-            } else {
-                matches = try scopeMatches && expected.image.matchesPixels(of: fresh.image, in: window, wholePixelsOnly: true)
-            }
+            matches = try scopeMatches && expected.image.matchesPixels(of: fresh.image, in: window, wholePixelsOnly: true)
         case nil:
-            if let field = expected.focusedTextFrame, field == fresh.focusedTextFrame,
-               let window = expected.fingerprint.frontmostWindowBounds, window.contains(field),
-               expected.fingerprint.matchesFocusedEditableInputAuthority(fresh.fingerprint) {
-                matches = try expected.image.matchesInsertionPointPixels(of: fresh.image, window: window, field: field,
-                    onDifference: { changed, changedPixels, fieldPixels in
-                        self.lastRevalidationDiagnostic = ["changedDisplayBounds": String(describing: changed),
-                            "changedPixelBounds": String(describing: changedPixels), "fieldPixelBounds": String(describing: fieldPixels)]
-                    })
-            } else if surfaceScopeCheck != nil, let window = expected.fingerprint.frontmostWindowBounds,
+            if surfaceScopeCheck != nil, let window = expected.fingerprint.frontmostWindowBounds,
                       expected.fingerprint.matchesPendingObservationAuthority(fresh.fingerprint) {
                 matches = try expected.image.matchesPixels(of: fresh.image, in: window, wholePixelsOnly: true)
             } else { matches = expected.fingerprint == fresh.fingerprint }
@@ -686,8 +566,6 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
         guard matches else {
             lastRevalidationDiagnostic.merge(["screenMatches": String(expected.fingerprint.screenDigest == fresh.fingerprint.screenDigest),
                 "focusMatches": String(expected.fingerprint.focusedAccessibilityIdentity == fresh.fingerprint.focusedAccessibilityIdentity),
-                "editableAuthorityMatches": String(expected.fingerprint.matchesFocusedEditableInputAuthority(fresh.fingerprint)),
-                "textFrameBefore": String(describing: expected.focusedTextFrame), "textFrameAfter": String(describing: fresh.focusedTextFrame),
                 "window": String(describing: expected.fingerprint.frontmostWindowBounds)]) { _, value in value }
             revalidationFailureObserver?(expected.image, fresh.image, action, lastRevalidationDiagnostic)
             throw Failure.changedScreen
@@ -738,8 +616,7 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
         session.turns += 1
         guard proposal.includeInModelHistory else { return }
         session.history.append(.init(screenshotPNG: observation.image.png, response: proposal.response,
-            actionError: session.actionError, action: proposal.action, observedControl: proposal.observedControl,
-            focusedEditor: observation.focusedEditor, focusedTextState: observation.focusedTextState))
+            actionError: session.actionError, action: proposal.action, observedControl: proposal.observedControl))
         if session.history.count > 20 { session.history.removeFirst(session.history.count - 20) }
     }
 
@@ -773,7 +650,7 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
             let rootID = ComputerUseTaskContract.digest(["native-desktop-session-v1", taskID])
             guard try store.load(taskID: rootID) == nil else { throw Failure.recoveredTask }
             let identity = clarifiedGoal?.taskIdentityText ?? goal
-            let journal = ComputerUseTaskJournal(taskID: rootID, promptDigest: ComputerUseTextTaskContract.digest(identity),
+            let journal = ComputerUseTaskJournal(taskID: rootID, promptDigest: ComputerUseTaskJournalStore.digest(identity),
                 contractDigest: ComputerUseTaskContract.digest([rootID, identity]), stepIDs: ["model-assessed-completion"], statuses: [.attempted])
             try store.save(journal, replacing: nil)
             session = Session(taskID: taskID, goal: goal, journal: journal, clarifiedGoal: clarifiedGoal)
@@ -796,8 +673,8 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
             try Task.checkCancellation(); try lease.assertOwnership()
             try checkScopedSurface()
             let input = ComputerUseFaraModel.Input(goal: session.goal, screenshotPNG: observation.image.png,
-                surface: .desktop, history: session.history, actionError: session.actionError, focusedEditor: observation.focusedEditor,
-                focusedTextState: observation.focusedTextState, nativeControls: observation.nativeControls,
+                surface: .desktop, history: session.history, actionError: session.actionError,
+                nativeControls: observation.nativeControls,
                 clarifiedGoal: session.clarifiedGoal, desktopDisplayBounds: observation.image.displayBounds)
             let propose = self.propose
             let proposal = try await planning.perform(timeout: 45) { try await propose(input) }
@@ -864,10 +741,6 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
                     try checkScopedSurface()
                 }
                 if let action {
-                    if case .typeText = action, try !tools.focusedTypingTargetIsEditable(providerAction: action) {
-                        lastRevalidationDiagnostic = ["blockedAt": "typing-target-unavailable"]
-                        throw Failure.changedScreen
-                    }
                     guard try !tools.actionIsObstructedByTransientSystemOverlay(action) else { throw Failure.changedScreen }
                     try checkScopedSurface(action)
                     let fingerprint: ComputerUseApprovalFingerprint
@@ -1005,27 +878,6 @@ final class ComputerUseDesktopExecutor: ComputerUseTaskAwareExecuting, ComputerU
         } catch {
             if !approved, !began, case ComputerUseHostTools.ToolError.approvalTargetChanged = error {
                 lastRevalidationDiagnostic["blockedAt"] = "approval-fingerprint-dispatch"
-                throw Failure.changedScreen
-            }
-            if !approved, began, case .typeText = action,
-               error as? ComputerUseTextEditError == .preconditionChanged {
-                // The insert editor reports this only before its selected-text
-                // setter or Unicode input. The effect journal was already
-                // attempted at willBeginEffect, so tombstone that exact action
-                // under the same lease before allowing a fresh observation.
-                let retirement = ComputerUseTaskJournal(taskID: attempted.taskID,
-                    promptDigest: attempted.promptDigest, contractDigest: attempted.contractDigest,
-                    stepIDs: attempted.stepIDs, statuses: attempted.statuses,
-                    retirementDigest: ComputerUseTaskContract.digest([
-                        "native-unsent-type-precondition-v1", actionID, attempted.contractDigest,
-                    ]))
-                do {
-                    try store.retireUnsent(retirement, replacing: attempted)
-                } catch {
-                    session.terminal = .unableToComplete(
-                        "I couldn't safely record that text was not entered. Check the field before starting another request.")
-                    throw error
-                }
                 throw Failure.changedScreen
             }
             if began {

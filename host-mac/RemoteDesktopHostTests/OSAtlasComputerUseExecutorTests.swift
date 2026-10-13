@@ -673,7 +673,7 @@ final class OSAtlasLlamaRuntimeTests: XCTestCase {
             XCTAssertTrue(arguments.contains("--no-context-shift"))
             XCTAssertEqual(configuration.maximumProcessCount, 1)
             do {
-                _ = try await runtime.proposeNativeText(endpoint: endpoint, prompt: "Set Origin to Oslo.", fields: nativeTextFields)
+                _ = try await runtime.complete(endpoint: endpoint, prompt: "Click", jpegData: Data())
                 XCTFail("The Fara worker must never receive a general-model text contract")
             } catch { XCTAssertEqual(error as? OSAtlasLlamaRuntimeError, .inactiveSession) }
             let values = await events.values()
@@ -1040,12 +1040,6 @@ final class OSAtlasLlamaRuntimeTests: XCTestCase {
         await exactBoundary.shutdown()
     }
 
-    private var nativeTextFields: [ComputerUseTextField] {
-        [ComputerUseTextField(label: "Origin", snapshot: ComputerUseTextSnapshot(
-            targetID: "field-origin", value: "old private value",
-            selection: NSRange(location: 0, length: 0), isEditable: true, isSecure: false))]
-    }
-
     private func textRuntime(_ launcher: FakeLlamaLauncher,
                              transports: FakeTransportMaker) -> OSAtlasLlamaRuntime {
         OSAtlasLlamaRuntime(launcher: launcher, transportMaker: transports,
@@ -1106,7 +1100,7 @@ final class OSAtlasLlamaRuntimeTests: XCTestCase {
         _ = try await runtime.activate(inputs(variant: .pro4B, name: "replacement"))
         XCTAssertFalse(FileManager.default.fileExists(atPath: credential.directoryURL.path))
         do {
-            _ = try await runtime.proposeNativeText(endpoint: text, prompt: "Set Origin to Oslo.", fields: nativeTextFields)
+            _ = try await runtime.complete(endpoint: text, prompt: "Click", jpegData: Data())
             XCTFail("A stale text endpoint must not reach the replacement model")
         } catch let error as OSAtlasLlamaRuntimeError { XCTAssertEqual(error, .inactiveSession) }
         XCTAssertTrue(transport.recordedCompletionRequests().isEmpty)
@@ -1118,150 +1112,14 @@ final class OSAtlasLlamaRuntimeTests: XCTestCase {
         await runtime.shutdown()
     }
 
-    func testRuntimeTextPlannerUsesFrozenContractAndHostOwnedLiteral() async throws {
-        let events = RuntimeEventLog()
-        let response = try JSONSerialization.data(withJSONObject: [
-            "model": ComputerUseNativeTextRuntimeInputs.modelAlias,
-            "choices": [["finish_reason": "stop", "message": ["role": "assistant",
-                "content": #"{"disposition":"supported","edits":[{"fieldID":"f1","mode":"replaceAll","value":"p2"}]}"#]]]])
-        let transport = FakeTransportMaker(events: events, completionDataResponses: [response])
-        let runtime = textRuntime(FakeLlamaLauncher(events: events), transports: transport)
-        let planner = ComputerUseRuntimeTextGoalPlanner(inputs: nativeTextInputs, runtime: runtime)
-        let result = try await planner.propose(prompt: "Set \"Origin\" to \"  東京\n\".", fields: nativeTextFields)
-        XCTAssertEqual(result, .edits([ComputerUseTextPlanEdit(targetID: "field-origin", mode: .replaceAll, text: "  東京\n")]))
-        let completion = try XCTUnwrap(transport.recordedCompletionRequests().first)
-        XCTAssertEqual(transport.recordedTokenCountRequests(), [completion])
-        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(completion.httpBody)) as? [String: Any])
-        let messages = try XCTUnwrap(object["messages"] as? [[String: String]])
-        XCTAssertEqual(messages[0]["content"], ComputerUseLocalTextGoalPlanner.candidateV2Instructions)
-        XCTAssertTrue(messages[1]["content"]?.contains("literalFieldMatches") == true)
-        XCTAssertFalse(String(decoding: completion.httpBody!, as: UTF8.self).contains("東京"))
-        XCTAssertFalse(String(decoding: completion.httpBody!, as: UTF8.self).contains("old private value"))
-        await runtime.shutdown()
-    }
-
-    func testNativeTextContextOverflowStopsBeforeCompletion() async throws {
-        let events = RuntimeEventLog()
-        let transport = FakeTransportMaker(events: events, inputTokenCounts: [3009])
-        let runtime = textRuntime(FakeLlamaLauncher(events: events), transports: transport)
-        let endpoint = try await runtime.activateNativeText(nativeTextInputs)
-        do {
-            _ = try await runtime.proposeNativeText(endpoint: endpoint, prompt: "Set Origin to Oslo.", fields: nativeTextFields)
-            XCTFail("Exact input overflow must reject before inference")
-        } catch let error as ComputerUseLocalTextPlanError { XCTAssertEqual(error, .contextLimit) }
-        XCTAssertTrue(transport.recordedCompletionRequests().isEmpty)
-        let values = await events.values()
-        XCTAssertTrue(values.contains("wait-finished:Qwen3.5-4B-Q4_K_M.gguf"))
-        await runtime.shutdown()
-    }
-
-    func testRuntimeClarificationRetainsTurnsAndUsesTheExistingManagedModelLease() async throws {
-        let events = RuntimeEventLog()
-        let response = try JSONSerialization.data(withJSONObject: [
-            "model": ComputerUseNativeTextRuntimeInputs.modelAlias,
-            "choices": [["finish_reason": "stop", "message": ["role": "assistant",
-                "content": #"{"disposition":"supported","edits":[{"fieldID":"f1","mode":"replaceAll","value":"p1"}]}"#]]]])
-        let transport = FakeTransportMaker(events: events, completionDataResponses: [response])
-        let runtime = textRuntime(FakeLlamaLauncher(events: events), transports: transport)
-        let goal = try ComputerUseUnresolvedTextGoal(userRequest: "Set Origin to a value")
-            .answering("What exact text?", with: "\"  東京\n\"")
-        let result = try await ComputerUseRuntimeTextGoalPlanner(inputs: nativeTextInputs, runtime: runtime)
-            .propose(goal: goal, fields: nativeTextFields)
-        guard case .edits(let edits, _) = result else { await runtime.shutdown(); return XCTFail("Clarification lost its literal") }
-        XCTAssertEqual(edits.count, 1); XCTAssertTrue(edits[0].text.utf8.elementsEqual("  東京\n".utf8))
-        let requests = transport.recordedCompletionRequests()
-        XCTAssertEqual(requests.count, 1)
-        let body = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(requests.first?.httpBody)) as? [String: Any])
-        let messages = try XCTUnwrap(body["messages"] as? [[String: String]])
-        let context = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(XCTUnwrap(messages[1]["content"]).utf8)) as? [String: Any])
-        XCTAssertEqual(context["userTurns"] as? [String], ["Set Origin to a value", "[exact quoted payload p1]"])
-        XCTAssertEqual(context["questionsBeforeAnswers"] as? [String], ["What exact text?"])
-        await runtime.shutdown()
-    }
-
-    func testRuntimeQuotationSyntaxCandidateUsesTheSameLeaseAndCannotEnableCopyFallback() async throws {
-        let events = RuntimeEventLog()
-        let response = try JSONSerialization.data(withJSONObject: ["model": ComputerUseNativeTextRuntimeInputs.modelAlias,
-            "choices": [["finish_reason": "stop", "message": ["role": "assistant",
-                "content": #"{"disposition":"supported","edits":[{"fieldID":"f1","mode":"replaceAll","value":"p1"}]}"#]]]])
-        let transport = FakeTransportMaker(events: events, completionDataResponses: [response])
-        let runtime = textRuntime(FakeLlamaLauncher(events: events), transports: transport)
-        let endpoint = try await runtime.activateNativeText(nativeTextInputs)
-        let goal = try ComputerUseUnresolvedTextGoal(userRequest: "Set Origin to a value")
-            .answering("What exact text?", with: "\"  東京\n\"")
-        let result = try await runtime.proposeNativeText(endpoint: endpoint, prompt: goal.userTurns[0], fields: nativeTextFields,
-            contract: .quotedReferencesV12, clarificationGoal: goal)
-        guard case .edits(let edits, _) = result else { await runtime.shutdown(); return XCTFail("The candidate lost its literal") }
-        XCTAssertTrue(try XCTUnwrap(edits.first).text.utf8.elementsEqual("  東京\n".utf8))
-        let requests = transport.recordedCompletionRequests()
-        XCTAssertEqual(requests.count, 1)
-        let body = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(requests.first?.httpBody)) as? [String: Any])
-        let messages = try XCTUnwrap(body["messages"] as? [[String: String]])
-        let context = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(XCTUnwrap(messages[1]["content"]).utf8)) as? [String: Any])
-        XCTAssertEqual(context["userTurns"] as? [String], ["Set Origin to a value", "\"[exact quoted payload p1]\""])
-        do {
-            _ = try await runtime.proposeNativeText(endpoint: endpoint, prompt: goal.userTurns[0], fields: nativeTextFields,
-                contract: .quotedReferencesV12, allowFieldCopy: true, clarificationGoal: goal)
-            XCTFail("The quotation-only candidate cannot inherit the experimental copy fallback")
-        } catch { XCTAssertEqual(error as? ComputerUseLocalTextPlanError, .invalidResponse) }
-        XCTAssertEqual(transport.recordedCompletionRequests().count, 1)
-        await runtime.shutdown()
-    }
-
-    func testRuntimeClarificationRejectsAnUnrelatedOriginalAndChecksExactContextLimit() async throws {
-        for mismatchedOriginal in [false, true] {
-            let events = RuntimeEventLog()
-            let transport = FakeTransportMaker(events: events, inputTokenCounts: [3_009])
-            let runtime = textRuntime(FakeLlamaLauncher(events: events), transports: transport)
-            let endpoint = try await runtime.activateNativeText(nativeTextInputs)
-            let goal = try ComputerUseUnresolvedTextGoal(userRequest: "Set Origin to a value").answering("What exact text?", with: "Oslo")
-            do {
-                _ = try await runtime.proposeNativeText(endpoint: endpoint,
-                    prompt: mismatchedOriginal ? "Different goal" : goal.userTurns[0], fields: nativeTextFields, clarificationGoal: goal)
-                XCTFail("An invalid clarification must stop before completion")
-            } catch { XCTAssertEqual(error as? ComputerUseLocalTextPlanError, mismatchedOriginal ? .invalidResponse : .contextLimit) }
-            XCTAssertTrue(transport.recordedCompletionRequests().isEmpty)
-            await runtime.shutdown()
-        }
-    }
-
-    func testNativeTextCancellationReleasesModelLeaseBeforeVisualReplacement() async throws {
-        let events = RuntimeEventLog()
-        let launcher = FakeLlamaLauncher(events: events)
-        let transport = FakeTransportMaker(events: events, blocksCompletion: true)
-        let runtime = textRuntime(launcher, transports: transport)
-        let endpoint = try await runtime.activateNativeText(nativeTextInputs)
-        let fields = nativeTextFields
-        let request = Task { try await runtime.proposeNativeText(endpoint: endpoint,
-            prompt: "Set Origin to Oslo.", fields: fields) }
-        await transport.waitUntilCompletionStarted()
-        let replacementInputs = inputs(variant: .pro4B, name: "replacement")
-        let replacement = Task { try await runtime.activate(replacementInputs) }
-        for _ in 0..<20 { await Task.yield() }
-        let before = await launcher.configurations()
-        XCTAssertEqual(before.count, 1, "A replacement cannot unload a model during its active inference")
-        request.cancel()
-        do { _ = try await request.value; XCTFail("Cancelled proposal must not escape") }
-        catch is CancellationError {} // Test transport only releases after cancelAll.
-        let current = try await replacement.value
-        await runtime.cancel(endpoint: endpoint)
-        let cached = try await runtime.activate(replacementInputs)
-        XCTAssertEqual(cached, current, "A late text cancellation must not stop the replacement")
-        let values = await events.values()
-        XCTAssertLessThan(try XCTUnwrap(values.firstIndex(of: "wait-finished:Qwen3.5-4B-Q4_K_M.gguf")),
-                          try XCTUnwrap(values.firstIndex(of: "launch:replacement-Q4_K_M-00001-of-00002.gguf")))
-        await runtime.shutdown()
-    }
-
     func testCancellingQueuedActivationAndInferenceDoesNotCancelTheCurrentModelOwner() async throws {
         let events = RuntimeEventLog()
         let launcher = FakeLlamaLauncher(events: events)
         let transport = FakeTransportMaker(events: events, blocksCompletion: true)
         let runtime = textRuntime(launcher, transports: transport)
-        let endpoint = try await runtime.activateNativeText(nativeTextInputs)
-        let fields = nativeTextFields
-        let owner = Task { try await runtime.proposeNativeText(endpoint: endpoint,
-            prompt: "Set Origin to Oslo.", fields: fields) }
+        let endpoint = try await runtime.activateFara(faraInputs)
+        let owner = Task { try await runtime.proposeFara(endpoint: endpoint,
+            input: .init(goal: "Set Origin to Oslo.", screenshotPNG: try faraTestPNG())) }
         await transport.waitUntilCompletionStarted()
         let activationFinished = expectation(description: "Queued activation cancels without owner release")
         let replacementInputs = inputs(variant: .pro4B, name: "replacement")
@@ -1272,8 +1130,8 @@ final class OSAtlasLlamaRuntimeTests: XCTestCase {
         let inferenceFinished = expectation(description: "Queued inference cancels without owner release")
         let inference = Task {
             defer { inferenceFinished.fulfill() }
-            return try await runtime.proposeNativeText(endpoint: endpoint,
-                prompt: "Set Origin to Paris.", fields: fields)
+            return try await runtime.proposeFara(endpoint: endpoint,
+                input: .init(goal: "Set Origin to Paris.", screenshotPNG: try faraTestPNG()))
         }
         do {
             try await waitForModelAccessQueue(2) { await runtime.queuedModelAccessRequestCount }
@@ -1303,7 +1161,7 @@ final class OSAtlasLlamaRuntimeTests: XCTestCase {
         _ = try? await owner.value
         do { _ = try await activation.value; XCTFail("Cancelled activation returned a replacement") }
         catch is CancellationError {}
-        do { _ = try await inference.value; XCTFail("Cancelled inference returned a proposal") }
+        do { _ = try await inference.value; XCTFail("Cancelled Fara inference returned a proposal") }
         catch is CancellationError {}
     }
 
@@ -1614,62 +1472,6 @@ final class OSAtlasLlamaRuntimeTests: XCTestCase {
         try Data("version = 1\n[attacker]\nmodel-url = https://example.com/model"
             .utf8).write(to: presetFile.fileURL, options: .atomic)
         XCTAssertThrowsError(try presetFile.verify())
-    }
-
-    func testTextTokenBudgetRequestsUseExactB9992TemplateAndTokenizerContract()
-        throws {
-        let planner = ComputerUseLocalTextGoalPlanner(connection: try ComputerUseTextModelConnection(
-            baseURL: URL(string: "http://127.0.0.1:43123")!,
-            bearerToken: "unit-test-token-16",
-            modelAlias: ComputerUseNativeTextRuntimeInputs.modelAlias))
-        let completion = try planner.makeRequest(
-            catalog: ComputerUseTextPayloadCatalog("Set Destination to Oslo."),
-            fields: [ComputerUseTextField(label: "Destination", snapshot: ComputerUseTextSnapshot(
-                targetID: "field-1", value: "", selection: NSRange(location: 0, length: 0),
-                isEditable: true, isSecure: false))])
-        let template = try OSAtlasLlamaHTTPClient
-            .makeSemanticTemplateRequest(from: completion)
-
-        XCTAssertEqual(
-            template.url?.absoluteString,
-            "http://127.0.0.1:43123/apply-template")
-        XCTAssertEqual(template.httpBody, completion.httpBody)
-        XCTAssertEqual(
-            template.value(forHTTPHeaderField: "Authorization"),
-            "Bearer unit-test-token-16")
-
-        let rendered = "<|system|>route<|end|><|assistant|>"
-        let templateData = try JSONSerialization.data(withJSONObject: [
-            "prompt": rendered,
-        ])
-        XCTAssertEqual(
-            try OSAtlasLlamaHTTPClient.templatePrompt(from: templateData),
-            rendered)
-
-        let tokenize = try OSAtlasLlamaHTTPClient.makeTokenizeRequest(
-            from: completion,
-            templatePrompt: rendered)
-        XCTAssertEqual(
-            tokenize.url?.absoluteString,
-            "http://127.0.0.1:43123/tokenize")
-        XCTAssertEqual(
-            tokenize.value(forHTTPHeaderField: "Authorization"),
-            "Bearer unit-test-token-16")
-        let tokenizeBody = try XCTUnwrap(tokenize.httpBody)
-        let tokenizeJSON = try XCTUnwrap(
-            JSONSerialization.jsonObject(with: tokenizeBody)
-                as? [String: Any])
-        XCTAssertEqual(
-            tokenizeJSON["model"] as? String,
-            ComputerUseNativeTextRuntimeInputs.modelAlias)
-        XCTAssertEqual(tokenizeJSON["content"] as? String, rendered)
-        XCTAssertEqual(tokenizeJSON["add_special"] as? Bool, false)
-        XCTAssertEqual(tokenizeJSON["parse_special"] as? Bool, true)
-        XCTAssertEqual(tokenizeJSON["with_pieces"] as? Bool, false)
-        XCTAssertEqual(
-            try OSAtlasLlamaHTTPClient.tokenCount(
-                from: Data(#"{"tokens":[1,2,3,4]}"#.utf8)),
-            4)
     }
 
     func testTextTokenBudgetParsersFailClosedOnResponseDrift() throws {

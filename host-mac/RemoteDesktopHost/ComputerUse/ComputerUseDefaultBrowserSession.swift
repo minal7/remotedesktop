@@ -252,7 +252,7 @@ final class ComputerUseDefaultBrowserSession {
         guard !taskID.isEmpty, !goal.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw Failure.changedTaskOrGoal
         }
-        let goalDigest = ComputerUseTextTaskContract.digest(goal)
+        let goalDigest = ComputerUseTaskJournalStore.digest(goal)
         if let runState {
             guard runState.taskID == taskID, runState.goalDigest == goalDigest else {
                 throw Failure.changedTaskOrGoal
@@ -311,7 +311,7 @@ final class ComputerUseDefaultBrowserSession {
         try Task.checkCancellation()
         try tools.requireActive()
         guard let state = runState, state.taskID == taskID,
-              state.goalDigest == ComputerUseTextTaskContract.digest(goal),
+              state.goalDigest == ComputerUseTaskJournalStore.digest(goal),
               let expected = state.target, let app = state.app else {
             lastValidationPhaseForDiagnostics = .target
             throw Failure.changedTaskOrGoal
@@ -319,7 +319,7 @@ final class ComputerUseDefaultBrowserSession {
         let current: WindowSnapshot
         lastValidationPhaseForDiagnostics = .capture
         current = try captureForValidation(application: app, target: expected,
-            taskID: taskID, goalDigest: ComputerUseTextTaskContract.digest(goal), tools: tools)
+            taskID: taskID, goalDigest: ComputerUseTaskJournalStore.digest(goal), tools: tools)
         lastValidationPhaseForDiagnostics = .target
         guard current.application == app,
               let focused = current.windows.first(where: { $0.id == expected.id }),

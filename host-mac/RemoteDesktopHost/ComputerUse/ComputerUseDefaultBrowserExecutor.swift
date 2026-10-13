@@ -107,7 +107,7 @@ enum ComputerUseDefaultBrowserActionScope {
 
 @MainActor
 final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, ComputerUseVisualApprovalContinuing,
-    ComputerUseTextClarificationContinuing, ComputerUseClarifiedGoalExecuting {
+    ComputerUseClarificationContinuing, ComputerUseClarifiedGoalExecuting {
     typealias CompletionCheck = @MainActor @Sendable (String) async throws -> Bool
     typealias OutcomeCheck = ComputerUseDesktopExecutor.OutcomeCheck
     typealias RevalidationFailureObserver = ComputerUseDesktopExecutor.RevalidationFailureObserver
@@ -132,7 +132,7 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
         var fileContext: ComputerUseLocalFileContext?
         var selectedCandidate: ComputerUseLocalFileCatalog.Candidate?
         var userSelectedCandidateID: String?
-        var pendingClarification: ComputerUseNativeTextExecutor.Clarification?
+        var pendingClarification: ComputerUseClarificationQuestion?
         var pendingChoiceCandidates: [String: ComputerUseLocalFileCatalog.Candidate] = [:]
         var executionTaskID: String?
         var selectedChoice: ComputerUseClarificationChoice?
@@ -466,7 +466,6 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
     var isReady: Bool { desktop.isReady }
     var runtimeName: String { "Default-browser desktop computer use" }
     var hasAdditionalSetup: Bool { desktop.hasAdditionalSetup }
-    var supportsNativeTextTasks: Bool { desktop.supportsNativeTextTasks }
     var readyDetail: String { desktop.readyDetail }
 
     init(journalDirectory: URL, session suppliedSession: ComputerUseDefaultBrowserSession? = nil,
@@ -992,7 +991,7 @@ final class ComputerUseDefaultBrowserExecutor: ComputerUseTaskAwareExecuting, Co
         desktop.cancelVisualApprovalContinuation(continuation)
     }
 
-    func clarification(taskID: String) throws -> ComputerUseNativeTextExecutor.Clarification? {
+    func clarification(taskID: String) throws -> ComputerUseClarificationQuestion? {
         guard let pending = scope.pendingClarification, scope.executionTaskID == taskID else { return nil }
         guard pending.expiresAt > Date(), pending.taskID == taskID,
               scope.clarificationNonce != nil else {

@@ -1,5 +1,41 @@
 import Foundation
 
+struct ComputerUseClarificationQuestion: Equatable, Sendable {
+    let taskID: String
+    let goal: ComputerUseUnresolvedTextGoal
+    let question: String
+    let scope: String
+    let expiresAt: Date
+    let choices: [ComputerUseClarificationChoice]?
+
+    init(taskID: String, goal: ComputerUseUnresolvedTextGoal, question: String, scope: String,
+         expiresAt: Date, choices: [ComputerUseClarificationChoice]? = nil) {
+        self.taskID = taskID; self.goal = goal; self.question = question; self.scope = scope
+        self.expiresAt = expiresAt; self.choices = choices
+    }
+}
+
+@MainActor
+protocol ComputerUseClarificationContinuing {
+    func clarification(taskID: String) throws -> ComputerUseClarificationQuestion?
+    func continueClarification(taskID: String, originatingTaskID: String, goal: ComputerUseUnresolvedTextGoal,
+                               progress: @escaping (String) -> Void) async throws -> ComputerUseExecutionResult
+    func continueClarification(taskID: String, originatingTaskID: String, goal: ComputerUseUnresolvedTextGoal,
+                               selectedChoice: ComputerUseClarificationChoice?,
+                               progress: @escaping (String) -> Void) async throws -> ComputerUseExecutionResult
+    func invalidateClarification(taskID: String?)
+}
+
+extension ComputerUseClarificationContinuing {
+    func continueClarification(taskID: String, originatingTaskID: String, goal: ComputerUseUnresolvedTextGoal,
+                               selectedChoice: ComputerUseClarificationChoice?,
+                               progress: @escaping (String) -> Void) async throws -> ComputerUseExecutionResult {
+        guard selectedChoice == nil else { throw ComputerUseClarificationStore.Failure.invalidChoice }
+        return try await continueClarification(taskID: taskID, originatingTaskID: originatingTaskID,
+                                               goal: goal, progress: progress)
+    }
+}
+
 /// Structured prompt corruption must not turn into a fresh plain-text task.
 /// The legacy fallback is reserved for bodies that are actually plain text.
 enum ComputerUseExecutionPromptDecoder {
@@ -67,7 +103,7 @@ struct ComputerUseUnresolvedTextGoal: Equatable, Sendable {
               userTurns.allSatisfy({ !$0.isEmpty && $0.count <= ComputerUsePromptRequest.maximumPromptLength }),
               userTurns.reduce(0, { $0 + $1.utf8.count }) <= maximumUserBytes,
               questions.allSatisfy({ !$0.isEmpty && $0.utf8.count <= 8 * 1_024 }) else {
-            throw ComputerUseTextClarificationStore.Failure.inputLimit
+            throw ComputerUseClarificationStore.Failure.inputLimit
         }
     }
 }
@@ -77,7 +113,7 @@ struct ComputerUseUnresolvedTextGoal: Equatable, Sendable {
 /// their authority. The caller still claims the answer's stable task ID in
 /// the durable task ledger before consuming a reference.
 @MainActor
-final class ComputerUseTextClarificationStore {
+final class ComputerUseClarificationStore {
     enum Failure: Error, Equatable { case invalidReference, invalidChoice, expired, scopeChanged, inputLimit }
     struct Resolution: Equatable {
         let goal: ComputerUseUnresolvedTextGoal
@@ -165,7 +201,7 @@ final class ComputerUseTextClarificationStore {
 
     /// The wire store and native executor must still hold the same unresolved
     /// goal, question and form scope. A saved terminal reply cannot recreate it.
-    func retains(_ reference: ComputerUseClarificationReference, native: ComputerUseNativeTextExecutor.Clarification,
+    func retains(_ reference: ComputerUseClarificationReference, native: ComputerUseClarificationQuestion,
                  for request: ComputerUseEnvelope) -> Bool {
         guard let pending, pending.reference == reference, reference.taskID == request.id,
               pending.senderID == request.senderID, pending.sessionID == request.sessionID,

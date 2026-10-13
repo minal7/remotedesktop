@@ -1,5 +1,6 @@
 import Darwin
 import Foundation
+import CryptoKit
 
 // Avoid the Darwin struct/function name collision, as in the installer.
 @_silgen_name("flock")
@@ -8,6 +9,10 @@ private func computerUseJournalFlock(_ descriptor: Int32, _ operation: Int32) ->
 /// Owner-only, atomic, fsync-backed journal writes before task effects. Values,
 /// payloads, URLs and field labels are deliberately absent from this format.
 final class ComputerUseTaskJournalStore {
+    static func digest(_ value: String) -> String {
+        SHA256.hash(data: Data(value.utf8)).map { String(format: "%02x", $0) }.joined()
+    }
+
     private let descriptor: Int32
     private let operationLock = NSLock()
     private var writeFailed = false
@@ -61,7 +66,7 @@ final class ComputerUseTaskJournalStore {
         guard fstat(fd, &info) == 0, info.st_uid == getuid(), info.st_mode & 0o777 == 0o700 else {
             throw StoreError.invalidFile
         }
-        let name = ComputerUseTextTaskContract.digest(taskID) + ".json"
+        let name = ComputerUseTaskJournalStore.digest(taskID) + ".json"
         if fstatat(fd, name, &info, AT_SYMLINK_NOFOLLOW) == 0 { return true }
         guard errno == ENOENT else { throw StoreError.unavailable }
         return false
@@ -76,7 +81,7 @@ final class ComputerUseTaskJournalStore {
     /// while that owner is still inside an adapter call.
     func acquireExecution(taskID: String, expected: ComputerUseTaskJournal?) throws -> any ComputerUseTaskExecutionLease {
         try withStoreOperation {
-            let stem = ComputerUseTextTaskContract.digest(taskID)
+            let stem = ComputerUseTaskJournalStore.digest(taskID)
             let name = stem + ".execution.lock"
             let fd = try openLock(name: name, exclusive: true)
             let lease = ExecutionLease(store: self, name: name, descriptor: fd)
@@ -137,7 +142,7 @@ final class ComputerUseTaskJournalStore {
     }
 
     private func readJournal(taskID: String) throws -> ComputerUseTaskJournal? {
-        let name = ComputerUseTextTaskContract.digest(taskID) + ".json"
+        let name = ComputerUseTaskJournalStore.digest(taskID) + ".json"
         let fd = openat(descriptor, name, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
         if fd < 0 {
             if errno == ENOENT { return nil }
@@ -195,35 +200,11 @@ final class ComputerUseTaskJournalStore {
             throw StoreError.invalidTransition
         }
         try withJournalLock(taskID: expected.taskID, exclusive: true) {
-            let name = ComputerUseTextTaskContract.digest(expected.taskID) + ".execution.lock"
+            let name = ComputerUseTaskJournalStore.digest(expected.taskID) + ".execution.lock"
             guard let owner = executionOwners[name]?.value, owner.isActive else { throw StoreError.busy }
             try owner.assertOwnership()
             guard Self.matches(try readJournal(taskID: expected.taskID), expected) else { throw StoreError.staleJournal }
             guard fsync(descriptor) == 0 else { throw StoreError.unavailable }
-        }
-    }
-
-    /// An explicit re-plan before any step was attempted. The caller must
-    /// also establish that its native adapter has no attempt. Task, original
-    /// request and operation IDs remain fixed; ordinary save never rebinds.
-    func replaceUnattemptedBinding(_ journal: ComputerUseTaskJournal, replacing expected: ComputerUseTaskJournal) throws {
-        guard Self.isValid(journal), Self.isValid(expected) else { throw StoreError.invalidFile }
-        guard journal.retirementDigest == nil, expected.retirementDigest == nil,
-              journal.retainedPrefixCount == nil, expected.retainedPrefixCount == nil,
-              journal.taskID.utf8.elementsEqual(expected.taskID.utf8), journal.promptDigest == expected.promptDigest,
-              journal.stepIDs.count == expected.stepIDs.count,
-              zip(journal.stepIDs, expected.stepIDs).allSatisfy({ $0.0.utf8.elementsEqual($0.1.utf8) }),
-              journal.statuses.allSatisfy({ $0 == .planned }), expected.statuses.allSatisfy({ $0 == .planned }) else {
-            throw StoreError.invalidTransition
-        }
-        let data = try JSONEncoder().encode(journal)
-        guard data.count <= 65_536 else { throw StoreError.invalidFile }
-        try withJournalLock(taskID: journal.taskID, exclusive: true) {
-            let current = try readJournal(taskID: journal.taskID)
-            guard Self.matches(current, expected) else { throw StoreError.staleJournal }
-            if Self.matches(current, journal) { return }
-            do { try replace(data, taskID: journal.taskID) }
-            catch { writeFailed = true; throw error }
         }
     }
 
@@ -259,7 +240,7 @@ final class ComputerUseTaskJournalStore {
         let data = try JSONEncoder().encode(retired)
         guard data.count <= 65_536 else { throw StoreError.invalidFile }
         try withJournalLock(taskID: retired.taskID, exclusive: true) {
-            let name = ComputerUseTextTaskContract.digest(retired.taskID) + ".execution.lock"
+            let name = ComputerUseTaskJournalStore.digest(retired.taskID) + ".execution.lock"
             guard let owner = executionOwners[name]?.value, owner.isActive else { throw StoreError.busy }
             try owner.assertOwnership()
             let current = try readJournal(taskID: retired.taskID)
@@ -275,7 +256,7 @@ final class ComputerUseTaskJournalStore {
 
     private func replace(_ data: Data, taskID: String) throws {
         let temporary = ".pending-" + UUID().uuidString
-        let name = ComputerUseTextTaskContract.digest(taskID) + ".json"
+        let name = ComputerUseTaskJournalStore.digest(taskID) + ".json"
         let fd = openat(descriptor, temporary, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)
         guard fd >= 0 else { throw StoreError.unavailable }
         let handle = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
@@ -296,7 +277,7 @@ final class ComputerUseTaskJournalStore {
 
     private func withJournalLock<Value>(taskID: String, exclusive: Bool, _ body: () throws -> Value) throws -> Value {
         try withStoreOperation {
-            let stem = ComputerUseTextTaskContract.digest(taskID)
+            let stem = ComputerUseTaskJournalStore.digest(taskID)
             var temporaryExecutionLock: Int32?
             defer { if let temporaryExecutionLock { close(temporaryExecutionLock) } }
             if exclusive {
@@ -402,4 +383,3 @@ final class ComputerUseTaskJournalStore {
     }
 }
 
-typealias ComputerUseTextStepStore = ComputerUseTaskJournalStore

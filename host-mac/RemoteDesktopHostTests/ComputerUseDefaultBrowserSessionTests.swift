@@ -2439,71 +2439,43 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
         XCTAssertEqual(fixture.desktop.keyCount, 1)
     }
 
-    func testNativePlannerEditorActionsKeepExistingApproval() async throws {
-        let cases: [(ComputerUseDefaultBrowserControlPlan, ComputerUsePredictedAction)] = [
-            (.typeFocusedText(text: "123456", explanation: "Enter the requested value"), .typeText("123456")),
-            (.pressFocusedKey(chord: "Enter", explanation: "Commit the field"), .key(usage: 0x28, modifiers: 0)),
-        ]
-        for (plan, expectedAction) in cases {
-            let fixture = try Fixture()
-            defer { try? FileManager.default.removeItem(at: fixture.root) }
-            let session = try fixture.session()
-            let goal = "Enter the requested value in the current field"
-            let taskID = "native-semantic-typing-approval"
-            let retained = try await session.ensure(taskID: taskID, goal: goal, tools: fixture.tools)
-            let graph = ExecutorPageAXGraph(application: retained.application, window: retained.accessibilityElement)
-            graph.makePage()
-            let snapshot = ComputerUseTextSnapshot(targetID: "field", value: "", selection: NSRange(location: 0, length: 0),
-                isEditable: true, isSecure: false)
-            var effects = 0
-            let editor = ComputerUseTextEditor(read: { snapshot }, select: { _, _ in false },
-                replaceSelectedText: { _, _ in effects += 1; return nil },
-                postUnicode: { _, _ in effects += 1 }, mayAct: { true })
-            let bounds = retained.identity.bounds
-            let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { true },
-                approvalTargetProvider: { _ in .init(context: "AXTextField verification code",
-                    applicationID: retained.application.bundleIdentifier, accessibilityIdentity: "field") },
-                actionPerformer: { _ in effects += 1 }, textEditor: editor,
-                screenProvider: { .init(image: CIImage(color: .black).cropped(to: bounds), displayBounds: bounds,
-                    frontmostWindowBounds: bounds) },
-                accessibilityContextProvider: { _ in "AXTextField verification code" },
-                planningAccessibilityIdentityProvider: { "field" },
-                frontmostApplicationIdentityProvider: { retained.application },
-                frontmostApplicationProvider: { retained.application.bundleIdentifier })
-            let executor = try ComputerUseDefaultBrowserExecutor(journalDirectory: fixture.root, session: session,
-                propose: { _ in XCTFail("A grounded text proposal needs no visual model"); return .init(response: "", decision: .handoff("Stop")) },
-                nativeControlPlanner: { input, _ in
-                    XCTAssertNotNil(input.focusedEditor)
-                    XCTAssertNotNil(input.focusedTextState)
-                    return plan
-                }, pageReader: ComputerUseDefaultBrowserPageReader(access: graph.access), screenConsentRecognizer: { _ in false })
-            let result = try await executor.execute(taskID: taskID, prompt: goal, trustedUserPrompt: goal,
-                tools: tools, progress: { _ in })
-            guard case .approvalRequired(_, let action, _) = result else {
-                return XCTFail("Semantic typing must retain the existing sensitive-field approval gate")
-            }
-            XCTAssertEqual(action, expectedAction)
-            XCTAssertEqual(effects, 0)
-        }
-    }
-
-    func testNativePlannerTypingWithoutCurrentEditorHandsOffWithoutInput() async throws {
+    func testNativePlannerFocusedKeyWithoutEditorHandsOffWithoutInput() async throws {
         let fixture = try Fixture()
         defer { try? FileManager.default.removeItem(at: fixture.root) }
         let session = try fixture.session()
-        let goal = "Fill the requested field"
-        let taskID = "native-semantic-typing-no-editor"
+        let goal = "Enter the requested value in the current field"
+        let taskID = "native-focused-key-without-editor"
         let retained = try await session.ensure(taskID: taskID, goal: goal, tools: fixture.tools)
         let graph = ExecutorPageAXGraph(application: retained.application, window: retained.accessibilityElement)
         graph.makePage()
+        var effects = 0
+        var visualCalls = 0
+        let bounds = retained.identity.bounds
+        let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { true },
+            approvalTargetProvider: { _ in .init(context: "AXTextField Current field",
+                applicationID: retained.application.bundleIdentifier, accessibilityIdentity: "field") },
+            actionPerformer: { _ in effects += 1 },
+            screenProvider: { .init(image: CIImage(color: .black).cropped(to: bounds), displayBounds: bounds,
+                frontmostWindowBounds: bounds) },
+            transientSystemOverlayProvider: { _ in false },
+            accessibilityContextProvider: { _ in "AXTextField Current field" },
+            authenticationContextProvider: { nil },
+            screenCaptureConsentContextProvider: { nil },
+            planningAccessibilityIdentityProvider: { "field" },
+            frontmostApplicationIdentityProvider: { retained.application },
+            frontmostApplicationProvider: { retained.application.bundleIdentifier })
         let executor = try ComputerUseDefaultBrowserExecutor(journalDirectory: fixture.root, session: session,
-            propose: { _ in XCTFail("Ungrounded typing must not reach visual dispatch"); return .init(response: "", decision: .handoff("Stop")) },
-            nativeControlPlanner: { _, _ in .typeFocusedText(text: "Example", explanation: "Fill field") },
+            propose: { _ in
+                visualCalls += 1
+                return .init(response: "Unexpected visual model call", decision: .handoff("Stop"))
+            },
+            nativeControlPlanner: { _, _ in .pressFocusedKey(chord: "Enter", explanation: "Commit the field") },
             pageReader: ComputerUseDefaultBrowserPageReader(access: graph.access), screenConsentRecognizer: { _ in false })
         let result = try await executor.execute(taskID: taskID, prompt: goal, trustedUserPrompt: goal,
-            tools: fixture.tools, progress: { _ in })
+            tools: tools, progress: { _ in })
         XCTAssertEqual(result, .userInterventionRequired("Focus the intended text field, then choose Resume."))
-        XCTAssertEqual(fixture.desktop.keyCount, 1, "Only the original browser-window setup may send input")
+        XCTAssertEqual(visualCalls, 0)
+        XCTAssertEqual(effects, 0)
     }
 
     func testNativeControlPlannerClicksValidatedCenterUsingNonzeroDisplayOrigin() async throws {
@@ -3509,8 +3481,7 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
             XCTAssertNotNil(panel.pathFieldValue)
             XCTAssertNotNil(panel.pathFieldSelection)
             let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { true })
-            let editable = try tools.focusedTypingTargetIsEditable(providerAction: .typeText(""))
-            var nativeFacts: [String: String] = ["editable": String(editable)]
+            var nativeFacts: [String: String] = [:]
             var node = panel.pathTextFieldElement
             for index in 0..<8 {
                 guard let current = node else { break }
@@ -3525,8 +3496,7 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                     && parent.map { CFGetTypeID($0) == AXUIElementGetTypeID() } == true ? (parent as! AXUIElement) : nil
             }
             let textFacts = XCTAttachment(data: try JSONSerialization.data(withJSONObject: nativeFacts), uniformTypeIdentifier: "public.json")
-            textFacts.name = "Native path field editability and ancestry"; textFacts.lifetime = .keepAlways; add(textFacts)
-            XCTAssertTrue(editable, "The native path field must support typing")
+            textFacts.name = "Native path field ancestry"; textFacts.lifetime = .keepAlways; add(textFacts)
             XCTAssertNil(tools.approvalReason(for: .key(usage: 0x28, modifiers: 0)),
                 "Return in the native Go To path field only navigates locally")
         }
@@ -3683,18 +3653,6 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
             focusFacts["focusedPathReachesAppWindow"] = false
             focusFacts["focusedPathReachesGoToSheet"] = false
         }
-        focusFacts["nativeTextTargetSnapshotAvailable"] = ComputerUseAccessibilityTextTarget().snapshot() != nil
-        let hostTools = ComputerUseHostTools(injector: InputInjector(), mayAct: { true })
-        focusFacts["nativeFocusedEditorObservationAvailable"] =
-            (try? hostTools.nativeFocusedEditorObservation()) != nil
-        if productionPanel.isNavigatingPath {
-            let focusedPathSnapshot = try hostTools.nativeVisualKeyboardTextSnapshot()
-            focusFacts["nativeVisualKeyboardTextSnapshotAvailable"] = focusedPathSnapshot != nil
-            XCTAssertNotNil(focusedPathSnapshot,
-                "The currently focused, recognized native Go To path field should remain observable")
-        } else {
-            focusFacts["nativeVisualKeyboardTextSnapshotAvailable"] = NSNull()
-        }
         let focusAttachment = XCTAttachment(data: try JSONSerialization.data(withJSONObject: focusFacts),
                                             uniformTypeIdentifier: "public.json")
         focusAttachment.name = "Focused native panel scope metadata (no entered values)"
@@ -3712,7 +3670,7 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
         guard ProcessInfo.processInfo.environment["COMPUTER_USE_DEFAULT_BROWSER_SESSION_LIVE"] == "1" else {
             throw XCTSkip("Set TEST_RUNNER_COMPUTER_USE_DEFAULT_BROWSER_SESSION_LIVE=1 to open an empty default-browser window")
         }
-        let directory = ComputerUseTextStepStore.defaultDirectory.appendingPathComponent("Default Browser Session Live", isDirectory: true)
+        let directory = ComputerUseTaskJournalStore.defaultDirectory.appendingPathComponent("Default Browser Session Live", isDirectory: true)
         let session = try ComputerUseDefaultBrowserSession(journalDirectory: directory)
         let tools = ComputerUseHostTools(injector: InputInjector(), mayAct: { true })
         let taskID = UUID().uuidString
