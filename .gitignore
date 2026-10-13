@@ -75,3 +75,6 @@ x86/
 
 # Local XcodeBuildMCP workspace selection
 .xcodebuildmcp/
+
+# Generated computer-use evaluation measurements
+eval/results/

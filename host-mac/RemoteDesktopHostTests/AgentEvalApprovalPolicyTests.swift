@@ -5,7 +5,9 @@ import XCTest
 
 final class AgentEvalApprovalPolicyTests: XCTestCase {
     func testFixtureCommitApprovalBindsTaskScopeFingerprintAndOrigin() throws {
-        let request = try makeRequest(start: "http://127.0.0.1:8765/page", flags: ["allow_fixture_commit": true])
+        let request = try makeRequest(start: "http://127.0.0.1:8765/page", flags: [
+            "allow_fixture_interaction": true, "allow_fixture_commit": true,
+        ])
         let valid = candidate(request: request, action: .click(target: .element(id: 1), button: nil, count: nil),
             currentURL: "http://127.0.0.1:8765/other")
         XCTAssertTrue(AgentEvalApprovalPolicy.permits(valid, request: request))
@@ -15,7 +17,9 @@ final class AgentEvalApprovalPolicyTests: XCTestCase {
     }
 
     func testSecureTargetsAndUnknownHighRiskActionsNeverAutoApprove() throws {
-        let request = try makeRequest(start: "http://localhost:8765/page", flags: ["allow_fixture_commit": true])
+        let request = try makeRequest(start: "http://127.0.0.1:8765/page", flags: [
+            "allow_fixture_interaction": true, "allow_fixture_commit": true,
+        ])
         XCTAssertFalse(AgentEvalApprovalPolicy.permits(candidate(request: request, hasSensitiveTarget: true), request: request))
         XCTAssertFalse(AgentEvalApprovalPolicy.permits(candidate(request: request,
             action: .done(answer: "finished")), request: request))
@@ -23,7 +27,9 @@ final class AgentEvalApprovalPolicyTests: XCTestCase {
     }
 
     func testSyntheticSetFilesNeedsExplicitFixtureCommitAndFixtureRoot() throws {
-        let fixtureRequest = try makeRequest(start: "http://localhost:8765/upload", flags: ["allow_fixture_commit": true])
+        let fixtureRequest = try makeRequest(start: "http://127.0.0.1:8765/upload", flags: [
+            "allow_fixture_interaction": true, "allow_fixture_commit": true,
+        ])
         let action = AgentAction.setFiles(target: .element(id: 2), fileIDs: ["opaque-file-id"])
         XCTAssertTrue(AgentEvalApprovalPolicy.permits(candidate(request: fixtureRequest,
             action: action, hasSyntheticFileRoot: true), request: fixtureRequest))
@@ -34,11 +40,11 @@ final class AgentEvalApprovalPolicyTests: XCTestCase {
             action: action, hasSyntheticFileRoot: true), request: publicRequest))
     }
 
-    func testPublicStartApprovalAllowsOnlySameOriginReadOnlyActions() throws {
+    func testPublicStartFlagNeverAutoApprovesActions() throws {
         let request = try makeRequest(start: "https://example.org/docs", flags: ["allow_start_interaction": true])
-        XCTAssertTrue(AgentEvalApprovalPolicy.permits(candidate(request: request,
+        XCTAssertFalse(AgentEvalApprovalPolicy.permits(candidate(request: request,
             action: .scroll(target: nil, direction: .down, amount: 1), riskTier: "medium"), request: request))
-        XCTAssertTrue(AgentEvalApprovalPolicy.permits(candidate(request: request,
+        XCTAssertFalse(AgentEvalApprovalPolicy.permits(candidate(request: request,
             action: .click(target: .element(id: 1), button: nil, count: nil), riskTier: "medium",
             targetRoles: ["link"]), request: request))
         XCTAssertFalse(AgentEvalApprovalPolicy.permits(candidate(request: request,
@@ -48,6 +54,25 @@ final class AgentEvalApprovalPolicyTests: XCTestCase {
             action: .type(target: nil, text: "value", mode: .append), riskTier: "medium"), request: request))
         XCTAssertFalse(AgentEvalApprovalPolicy.permits(candidate(request: request,
             action: .openURL(url: "https://other.example/"), riskTier: "low"), request: request))
+    }
+
+    func testFixtureApprovalRequiresExplicitInteractionFlagAtEveryRisk() throws {
+        let missing = try makeRequest(start: "http://127.0.0.1:8765/page", flags: ["allow_fixture_commit": true])
+        for risk in ["low", "medium", "high"] {
+            XCTAssertFalse(AgentEvalApprovalPolicy.permits(candidate(request: missing, riskTier: risk), request: missing), risk)
+        }
+        let interactionOnly = try makeRequest(start: "http://127.0.0.1:8765/page", flags: ["allow_fixture_interaction": true])
+        XCTAssertTrue(AgentEvalApprovalPolicy.permits(candidate(request: interactionOnly, riskTier: "medium"), request: interactionOnly))
+        XCTAssertFalse(AgentEvalApprovalPolicy.permits(candidate(request: interactionOnly, riskTier: "high"), request: interactionOnly))
+    }
+
+    func testOnlyExactIPv4LoopbackFixtureOriginCanBeAutoApproved() throws {
+        for url in ["http://localhost:8765/page", "http://[::1]:8765/page", "https://127.0.0.1:8765/page", "https://example.org/page"] {
+            let request = try makeRequest(start: url, flags: ["allow_fixture_interaction": true, "allow_fixture_commit": true])
+            for risk in ["low", "medium", "high"] {
+                XCTAssertFalse(AgentEvalApprovalPolicy.permits(candidate(request: request, riskTier: risk), request: request), "\(url) \(risk)")
+            }
+        }
     }
 
     private func makeRequest(start: String, flags: [String: Bool]) throws -> AgentEvalRequest {

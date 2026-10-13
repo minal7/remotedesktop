@@ -26,9 +26,11 @@ enum AgentEvalApprovalPolicy {
               origin(candidate.currentURL) == origin(candidate.expectedURL),
               origin(candidate.expectedURL) != nil,
               !candidate.hasSensitiveTarget else { return false }
-        let fixture = isLoopbackHTTP(candidate.expectedURL)
+        let fixture = isApprovedFixtureOrigin(candidate.expectedURL)
+        guard fixture, isApprovedFixtureOrigin(candidate.currentURL),
+              request.allowsFixtureInteraction else { return false }
         if candidate.riskTier == "high" {
-            guard fixture, request.allowsFixtureCommit else { return false }
+            guard request.allowsFixtureCommit else { return false }
             switch candidate.action {
             case .click, .key: return true
             case .setFiles(_, let fileIDs):
@@ -37,14 +39,9 @@ enum AgentEvalApprovalPolicy {
             }
         }
         guard ["low", "medium"].contains(candidate.riskTier) else { return false }
-        let authorized = fixture
-            ? request.allowsFixtureInteraction || request.allowsFixtureCommit
-            : request.allowsStartInteraction && scheme(candidate.expectedURL) == "https"
-        guard authorized else { return false }
         if case .openURL(let destination) = candidate.action {
             return origin(destination) == origin(candidate.expectedURL)
         }
-        if !fixture { return isReadOnlyPublicAction(candidate) }
         if case .openApp = candidate.action { return false }
         if case .setFiles = candidate.action { return false }
         return true
@@ -54,18 +51,6 @@ enum AgentEvalApprovalPolicy {
         value.utf8.count == 64 && value.utf8.allSatisfy {
             (48...57).contains($0) || (97...102).contains($0) || (65...70).contains($0)
         }
-    }
-
-    private static func isReadOnlyPublicAction(_ candidate: AgentEvalApprovalCandidate) -> Bool {
-        switch candidate.action {
-        case .scroll, .wait: return true
-        case .click: return candidate.targetRoles.contains { $0.lowercased() == "link" }
-        default: return false
-        }
-    }
-
-    private static func scheme(_ value: String) -> String? {
-        URLComponents(string: value)?.scheme?.lowercased()
     }
 
     private static func origin(_ value: String) -> String? {
@@ -78,11 +63,11 @@ enum AgentEvalApprovalPolicy {
         return "\(scheme)://\(host)\(port)"
     }
 
-    private static func isLoopbackHTTP(_ value: String) -> Bool {
+    private static func isApprovedFixtureOrigin(_ value: String) -> Bool {
         guard let components = URLComponents(string: value),
               components.scheme?.lowercased() == "http",
               let host = components.host?.lowercased() else { return false }
-        return ["localhost", "127.0.0.1", "::1"].contains(host)
+        return host == "127.0.0.1"
     }
 }
 #endif

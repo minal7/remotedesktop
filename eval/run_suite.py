@@ -111,15 +111,12 @@ def validate_task(value: Any, source: Path) -> Task:
         if not isinstance(policy, dict) or not policy or policy.keys() - allowed or any(flag is not True for flag in policy.values()) or value["surface"] != "web":
             raise EvalError(f"{source}: fixture approval policy must explicitly enable supported loopback-only scopes")
         parsed = urllib.parse.urlsplit(start[key])
-        if "allow_start_interaction" in policy:
-            if parsed.scheme != "https" or parsed.hostname in {"127.0.0.1", "localhost", "::1"}:
-                raise EvalError(f"{source}: start interaction requires a public HTTPS start URL")
-            if set(policy) != {"allow_start_interaction"} or checker["type"] != "page_text":
-                raise EvalError(f"{source}: public start interaction is read-only and may not include fixture approvals")
-        elif parsed.scheme != "http" or parsed.hostname not in {"127.0.0.1", "localhost", "::1"}:
+        fixture_flags = {"allow_fixture_interaction", "allow_fixture_commit"} & policy.keys()
+        if "allow_fixture_commit" in policy and "allow_fixture_interaction" not in policy:
+            raise EvalError(f"{source}: fixture commit approval requires explicit fixture interaction approval")
+        if fixture_flags and (parsed.scheme != "http" or parsed.hostname != "127.0.0.1"):
             raise EvalError(f"{source}: fixture approval requires an HTTP loopback origin")
     return Task(source, value)
-
 def load_tasks(suite: str) -> list[Task]:
     directory = TASKS / suite
     if not directory.is_dir():
@@ -513,8 +510,11 @@ def _run_driver(command: list[str], task: Task, policy: str, token: str, task_id
         "max_steps": task.value["max_steps"],
         "policy": policy,
     }
-    if task.value.get("approval_policy"):
-        request["approval_policy"] = task.value["approval_policy"]
+    policy = task.value.get("approval_policy", {})
+    # Retain the legacy YAML key for compatibility, but never forward it to the host.
+    fixture_policy = {key: policy[key] for key in ("allow_fixture_interaction", "allow_fixture_commit") if policy.get(key) is True}
+    if fixture_policy:
+        request["approval_policy"] = fixture_policy
     started = time.monotonic()
     env = dict(os.environ)
     try:

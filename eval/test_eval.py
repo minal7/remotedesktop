@@ -6,6 +6,7 @@ import os
 import sys
 import threading
 import unittest
+from unittest.mock import patch
 import urllib.parse
 import urllib.error
 import urllib.request
@@ -132,7 +133,7 @@ class TaskAndCheckerTests(unittest.TestCase):
         with self.assertRaises(run_suite.EvalError):
             run_suite.validate_task(base, path)
 
-    def test_local_commit_policy_is_explicit_and_loopback_only(self) -> None:
+    def test_local_commit_policy_is_explicit_and_exact_ipv4_loopback_only(self) -> None:
         path = Path("commit.yaml")
         value = {
             "id": "commit", "surface": "web", "start": {"url": "http://127.0.0.1:8765/forms.html"},
@@ -141,11 +142,21 @@ class TaskAndCheckerTests(unittest.TestCase):
             "approval_policy": {"allow_fixture_interaction": True, "allow_fixture_commit": True},
         }
         self.assertTrue(run_suite.validate_task(value, path))
+        value["approval_policy"] = {"allow_fixture_commit": True}
+        with self.assertRaises(run_suite.EvalError):
+            run_suite.validate_task(value, path)
+        value["approval_policy"] = {"allow_fixture_interaction": True}
+        self.assertTrue(run_suite.validate_task(value, path))
+        for host in ("localhost", "[::1]"):
+            value["start"] = {"url": f"http://{host}:8765/forms.html"}
+            with self.assertRaises(run_suite.EvalError):
+                run_suite.validate_task(value, path)
         value["start"] = {"url": "https://example.com"}
+        value["approval_policy"] = {"allow_fixture_interaction": True, "allow_fixture_commit": True}
         with self.assertRaises(run_suite.EvalError):
             run_suite.validate_task(value, path)
 
-    def test_public_start_approval_is_read_only_and_https_only(self) -> None:
+    def test_public_start_flag_is_inert_migration_input(self) -> None:
         value = {
             "id": "public", "surface": "web", "start": {"url": "https://example.test/"},
             "prompt": "read", "checker": {"type": "page_text", "expect": {"contains": ["fact"]}},
@@ -153,9 +164,17 @@ class TaskAndCheckerTests(unittest.TestCase):
             "approval_policy": {"allow_start_interaction": True},
         }
         self.assertTrue(run_suite.validate_task(value, Path("public.yaml")))
-        value["checker"]["type"] = "safety"
-        with self.assertRaises(run_suite.EvalError):
-            run_suite.validate_task(value, Path("public.yaml"))
+        response = {"task_id": "driver-id", "outcome": "done", "answer": "", "episode_path": "/tmp/eval.jsonl", "wall_seconds": 0.1, "real_host_app": True}
+        with patch.object(run_suite.subprocess, "run", return_value=type("Process", (), {"returncode": 0, "stdout": json.dumps(response)})()) as invoke, \
+             patch.object(run_suite, "_prepare_episode_root", return_value=Path("/tmp/eval-root")), \
+             patch.object(run_suite, "_vm_project_root", return_value=None), \
+             patch.object(run_suite, "_vm_remote_eval_root", return_value=None):
+            task = run_suite.validate_task(value, Path("public.yaml"))
+            result, error = run_suite._run_driver(["fake-driver"], task, "fara15-4b", "a" * 32, "driver-id", 5)
+        self.assertIsNone(error)
+        self.assertIsNotNone(result)
+        forwarded = json.loads(invoke.call_args.kwargs["input"])
+        self.assertNotIn("approval_policy", forwarded)
 
     def test_vm_fixture_state_requires_the_current_run_token_and_loopback_url(self) -> None:
         token = uuid.uuid4().hex
