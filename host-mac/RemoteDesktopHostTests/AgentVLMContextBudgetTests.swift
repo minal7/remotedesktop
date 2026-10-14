@@ -24,6 +24,18 @@ final class AgentVLMContextBudgetTests: XCTestCase {
         XCTAssertEqual(try value(after: "--cache-type-v"), "q8_0")
     }
 
+    func testTokenizerCountsInputsLargerThanModelContextForTrimming() throws {
+        let tokenCount = 70_000
+        let ids = Array(repeating: "0", count: tokenCount).joined(separator: ",")
+        let response = Data("{\"tokens\":[\(ids)]}".utf8)
+
+        XCTAssertLessThan(response.count, OSAtlasLlamaHTTPClient.maximumTokenizeResponseBytes)
+        XCTAssertEqual(try OSAtlasLlamaHTTPClient.tokenCount(from: response), tokenCount)
+        XCTAssertThrowsError(try OSAtlasLlamaHTTPClient.tokenCount(
+            from: Data(#"{"tokens":[1.5]}"#.utf8)),
+            "Fractional tokenizer IDs remain invalid")
+    }
+
     func testOversizedMarksPreferNearestFocusBeforeScreenCenter() async throws {
         let transport = ContextBudgetTransport()
         let runtime = OSAtlasLlamaRuntime(launcher: ContextBudgetLauncher(),
@@ -99,7 +111,7 @@ final class AgentVLMContextBudgetTests: XCTestCase {
                 result: index == 7 ? "LAST RESULT MUST REMAIN" : "prior result \(index)"))
         }
         await transport.resetMetrics()
-        var elements = (0..<400).map { index in
+        var elements = (0..<411).map { index in
             AgentElement(id: index, role: "button", name: "Long fixture control \(index) " + String(repeating: "x", count: 64),
                 value: nil, state: ["enabled"],
                 bbox: AgentBoundingBox(x: Double(index % 90), y: Double((index * 7) % 90), width: 4, height: 4), inView: true)
@@ -129,7 +141,7 @@ final class AgentVLMContextBudgetTests: XCTestCase {
         XCTAssertEqual(current["task"] as? String, "Keep this current task intact")
         let retainedElements = try XCTUnwrap(current["elements"] as? [[String: Any]])
         XCTAssertGreaterThan(retainedElements.count, 0)
-        XCTAssertLessThan(retainedElements.count, 402, "Oversized marks are progressively trimmed")
+        XCTAssertLessThan(retainedElements.count, 413, "Oversized marks are progressively trimmed")
         let retainedIDs = Set(retainedElements.compactMap { $0["id"] as? Int })
         XCTAssertTrue(retainedIDs.contains(focusID), "Keep the focused mark; proximity ranking is covered separately")
         let userImages = userContent.filter { $0["type"] as? String == "image_url" }.count

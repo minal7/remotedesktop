@@ -2402,7 +2402,10 @@ enum OSAtlasLlamaHTTPClient {
 
     static let maximumTemplateResponseBytes = 512 * 1_024
     static let maximumTokenizeResponseBytes = 1_024 * 1_024
-    static let maximumTokenizedInputTokens = 65_536
+    // A tokenizer response may describe an input much larger than the model
+    // context. Count it so the caller can trim and retry the count; the bounded
+    // response body limits the maximum number of one-digit token IDs.
+    static let maximumTokenizeResponseItems = maximumTokenizeResponseBytes / 2
     static let agentMaximumCompletionTokens = 1_024
 
     static func makeAgentActionRequest(endpoint: OSAtlasLlamaEndpoint,
@@ -2615,12 +2618,12 @@ enum OSAtlasLlamaHTTPClient {
         }
         var parser = StrictSemanticJSONParser(
             source,
-            maximumValueCount: maximumTokenizedInputTokens + 2)
+            maximumValueCount: maximumTokenizeResponseItems + 2)
         guard case .object(let object) = try parser.parse(),
               Set(object.keys) == ["tokens"],
               case .array(let tokens)? = object["tokens"],
               !tokens.isEmpty,
-              tokens.count <= maximumTokenizedInputTokens,
+              tokens.count <= maximumTokenizeResponseItems,
               tokens.allSatisfy({ token in
                   if case .integer(let value) = token { return value >= 0 }
                   return false
