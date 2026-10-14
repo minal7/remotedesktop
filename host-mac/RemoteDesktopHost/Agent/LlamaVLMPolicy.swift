@@ -201,10 +201,18 @@ final class LlamaVLMPolicy: AgentPolicy {
         let requestInput = AgentVLMRequestInput(messages: messages,
             modelAlias: Self.modelAlias(model), model: model)
         let transport = self.transport
-        let raw = try await withTaskCancellationHandler {
-            try await transport.complete(requestInput)
-        } onCancel: {
-            Task { @MainActor in await transport.stop() }
+        let raw: String
+        do {
+            raw = try await withTaskCancellationHandler {
+                try await transport.complete(requestInput)
+            } onCancel: {
+                Task { @MainActor in await transport.stop() }
+            }
+        } catch OSAtlasLlamaRuntimeError.inputContextTooLarge where model == .fara15_4b {
+            try Task.checkCancellation()
+            return .init(rawOutput: "", action: .askUser(
+                question: "The request exceeds the available model context. Please narrow it to the next step.",
+                choices: nil), rejectionReason: nil)
         }
         try Task.checkCancellation()
         pendingObservationContext = observationContext
@@ -279,7 +287,12 @@ final class LlamaVLMPolicy: AgentPolicy {
         } else {
             bboxScale = nil
         }
-        let elements: [[String: Any]] = observation.elements.map { element in
+        let modelElements = nativeModel.map { _ in observation.elements.filter { element in
+            let box = element.bbox
+            return element.inView && box.x.isFinite && box.y.isFinite && box.width.isFinite && box.height.isFinite &&
+                box.width > 0 && box.height > 0
+        } } ?? observation.elements
+        let elements: [[String: Any]] = modelElements.map { element in
             let bbox: [Double]
             if let bboxScale {
                 bbox = [element.bbox.x * bboxScale.x, element.bbox.y * bboxScale.y,

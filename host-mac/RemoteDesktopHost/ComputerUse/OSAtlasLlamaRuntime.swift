@@ -453,12 +453,14 @@ struct OSAtlasLlamaLaunchConfiguration: Equatable, Sendable {
 
     var arguments: [String] {
         if let trainedVisionAlias, let authenticationFile, let multimodalProjectorURL {
-            return [
+            let isAgentFara = trainedVisionAlias == ComputerUseFaraRuntimeInputs.modelAlias
+                && resourceProfile == .agentVision
+            var arguments = [
                 "--model", modelFirstSplitURL.path, "--mmproj", multimodalProjectorURL.path,
                 "--alias", trainedVisionAlias,
                 "--host", Self.host, "--port", String(port), "--api-key-file", authenticationFile.fileURL.path,
                 "--offline", "--no-ui", "--log-disable", "--parallel", "1", "--no-cont-batching",
-                "--ctx-size", String(resourceProfile.contextSize), "--no-context-shift",
+                "--ctx-size", String(isAgentFara ? 16_384 : resourceProfile.contextSize), "--no-context-shift",
                 "--batch-size", String(resourceProfile.logicalBatchSize), "--ubatch-size", String(resourceProfile.physicalBatchSize),
                 "--cache-ram", "0", "--ctx-checkpoints", "0", "--no-cache-idle-slots",
                 "--threads", String(Self.workerThreads), "--threads-batch", String(Self.workerThreads),
@@ -466,6 +468,10 @@ struct OSAtlasLlamaLaunchConfiguration: Equatable, Sendable {
                 "--image-max-tokens", String(ComputerUseFaraModel.contextImageTokensPerScreenshot),
                 "--mtmd-batch-max-tokens", String(ComputerUseFaraModel.contextImageTokensPerScreenshot), "--jinja",
             ]
+            if isAgentFara {
+                arguments += ["--flash-attn", "on", "--cache-type-k", "q8_0", "--cache-type-v", "q8_0"]
+            }
+            return arguments
         }
         if let authenticationFile {
             // The Qwen3.5 form configuration, without a projector or
@@ -1416,18 +1422,27 @@ actor OSAtlasLlamaRuntime {
         }
         do {
             try validateResources(minimumReclaimableBytes: server.resourceProfile.minimumInferenceMemoryBytes)
-            let request = try OSAtlasLlamaHTTPClient.makeAgentActionRequest(endpoint: endpoint, input: input)
             let answer = try await withTaskCancellationHandler {
                 try Task.checkCancellation()
-                let exactTokens = try await server.transport.exactInputTokenCount(completionRequest: request)
-                try Task.checkCancellation()
-                guard active?.endpoint == endpoint else { throw OSAtlasLlamaRuntimeError.inactiveSession }
-                let imageCount = input.imageCount
-                let reservedTokens = imageCount * ComputerUseFaraModel.contextImageTokensPerScreenshot
-                    + OSAtlasLlamaHTTPClient.agentMaximumCompletionTokens
-                    + ComputerUseFaraModel.contextSafetyReserveTokens
-                guard exactTokens > 0, exactTokens <= server.resourceProfile.contextSize - reservedTokens else {
-                    throw OSAtlasLlamaRuntimeError.inputContextTooLarge
+                var preparedInput = input
+                var request: URLRequest
+                while true {
+                    try Task.checkCancellation()
+                    guard active?.endpoint == endpoint else { throw OSAtlasLlamaRuntimeError.inactiveSession }
+                    request = try OSAtlasLlamaHTTPClient.makeAgentActionRequest(endpoint: endpoint, input: preparedInput)
+                    let exactTokens = try await server.transport.exactInputTokenCount(completionRequest: request)
+                    try Task.checkCancellation()
+                    guard active?.endpoint == endpoint else { throw OSAtlasLlamaRuntimeError.inactiveSession }
+                    let reservedTokens = preparedInput.imageCount * ComputerUseFaraModel.contextImageTokensPerScreenshot
+                        + OSAtlasLlamaHTTPClient.agentMaximumCompletionTokens
+                        + ComputerUseFaraModel.contextSafetyReserveTokens
+                    guard exactTokens > 0 else { throw OSAtlasLlamaRuntimeError.invalidResponse }
+                    if exactTokens <= server.resourceProfile.contextSize - reservedTokens { break }
+                    guard preparedInput.model == .fara15_4b,
+                          let trimmed = Self.trimNextAgentActionContext(preparedInput) else {
+                        throw OSAtlasLlamaRuntimeError.inputContextTooLarge
+                    }
+                    preparedInput = trimmed
                 }
                 try validateResources(minimumReclaimableBytes: server.resourceProfile.minimumInferenceMemoryBytes)
                 let data = try await server.transport.complete(request: request)
@@ -1455,6 +1470,93 @@ actor OSAtlasLlamaRuntime {
             if active?.endpoint == endpoint { try await stopActiveServerUnserialized() }
             throw error
         }
+    }
+
+    private static func trimNextAgentActionContext(_ input: AgentVLMRequestInput) -> AgentVLMRequestInput? {
+        var messages = input.messages
+        guard messages.count >= 2, let currentUser = messages.last, currentUser.role == .user else { return nil }
+
+        for index in messages.indices.dropFirst().dropLast() where messages[index].role == .user {
+            if let imageIndex = messages[index].content.firstIndex(where: {
+                if case .imagePNG = $0 { return true }
+                return false
+            }) {
+                var content = messages[index].content
+                content.remove(at: imageIndex)
+                guard !content.isEmpty else { return nil }
+                messages[index] = AgentVLMMessage(role: .user, content: content)
+                return AgentVLMRequestInput(messages: messages, modelAlias: input.modelAlias, model: input.model)
+            }
+        }
+
+        if messages.count > 3, messages[1].role == .user, messages[2].role == .assistant {
+            messages.removeSubrange(1...2)
+            return AgentVLMRequestInput(messages: messages, modelAlias: input.modelAlias, model: input.model)
+        }
+
+        if let textIndex = currentUser.content.firstIndex(where: {
+            if case .text = $0 { return true }
+            return false
+        }), case .text(let text) = currentUser.content[textIndex],
+           let reduced = trimmingOlderFeedback(from: text), reduced != text {
+            var content = currentUser.content
+            content[textIndex] = .text(reduced)
+            messages[messages.count - 1] = AgentVLMMessage(role: .user, content: content)
+            return AgentVLMRequestInput(messages: messages, modelAlias: input.modelAlias, model: input.model)
+        }
+
+        guard let textIndex = currentUser.content.firstIndex(where: {
+            if case .text = $0 { return true }
+            return false
+        }), case .text(let text) = currentUser.content[textIndex],
+              let reduced = trimmingObservationMarks(from: text), reduced != text else { return nil }
+        var content = currentUser.content
+        content[textIndex] = .text(reduced)
+        messages[messages.count - 1] = AgentVLMMessage(role: .user, content: content)
+        return AgentVLMRequestInput(messages: messages, modelAlias: input.modelAlias, model: input.model)
+    }
+
+    private static func trimmingOlderFeedback(from text: String) -> String? {
+        let marker = "\n\nPrior proposal results:\n"
+        guard let range = text.range(of: marker) else { return nil }
+        let feedback = text[range.upperBound...]
+        let resultStart = feedback.range(of: "\nResult: ", options: .backwards)?.lowerBound
+        let proposalStart = feedback.range(of: "\nPrior proposal ", options: .backwards)?.lowerBound
+        guard let latestStart = [resultStart, proposalStart].compactMap({ $0 }).max() else { return nil }
+        return String(text[..<range.lowerBound]) + marker + String(feedback[latestStart...].dropFirst())
+    }
+
+    private static func trimmingObservationMarks(from text: String) -> String? {
+        let marker = "\n\nPrior proposal results:\n"
+        let observationText = text.components(separatedBy: marker).first ?? text
+        guard let data = observationText.data(using: .utf8),
+              var object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let elements = object["elements"] as? [[String: Any]], !elements.isEmpty else { return nil }
+        let focus = (object["focus"] as? [String: Any])?["id"] as? Int
+        func center(_ element: [String: Any]) -> (Double, Double)? {
+            guard let box = element["bbox"] as? [Double], box.count == 4 else { return nil }
+            return (box[0] + box[2] / 2, box[1] + box[3] / 2)
+        }
+        let focusCenter = elements.first(where: { $0["id"] as? Int == focus }).flatMap(center)
+        func priorityDistance(_ element: [String: Any]) -> Double {
+            guard let point = center(element) else { return .greatestFiniteMagnitude }
+            let target = focusCenter ?? (500.0, 500.0)
+            let dx = point.0 - target.0, dy = point.1 - target.1
+            return dx * dx + dy * dy
+        }
+        let ranked = elements.enumerated().sorted { lhs, rhs in
+            let leftDistance = priorityDistance(lhs.element)
+            let rightDistance = priorityDistance(rhs.element)
+            return leftDistance == rightDistance ? lhs.offset < rhs.offset : leftDistance < rightDistance
+        }
+        let retainedCount = elements.count > 2 ? max(2, elements.count * 3 / 4) : elements.count - 1
+        let retainedOffsets = Set(ranked.prefix(retainedCount).map(\.offset))
+        object["elements"] = elements.enumerated().compactMap { retainedOffsets.contains($0.offset) ? $0.element : nil }
+        guard JSONSerialization.isValidJSONObject(object),
+              let encoded = try? JSONSerialization.data(withJSONObject: object,
+                options: [.sortedKeys, .withoutEscapingSlashes]) else { return nil }
+        let suffix = text.range(of: marker).map { String(text[$0.lowerBound...]) } ?? ""
+        return String(decoding: encoded, as: UTF8.self) + suffix
     }
 
     /// Page extraction shares the action model's serialized owner and cancellation.
