@@ -60,6 +60,45 @@ final class AgentEvalWireTests: XCTestCase {
                 documentURL: raw as CFString, sanitizedURL: runtime)))
     }
 
+    @MainActor
+    func testCleanStartDiscardsOnlyAnOwnedFixtureLossPrompt() {
+        XCTAssertTrue(SuiteCleanStart.ownsLoopbackFixtureWindow(
+            url: "http://127.0.0.1:8765/forms.html?__eval_run=0123456789abcdef0123456789abcdef"))
+        for url in [nil, "http://127.0.0.1:8765/forms.html", "http://localhost:8765/forms.html?__eval_run=x",
+                    "http://127.0.0.1:8766/forms.html?__eval_run=x", "http://127.0.0.1:8765/forms.html?__eval_run="] {
+            XCTAssertFalse(SuiteCleanStart.ownsLoopbackFixtureWindow(url: url))
+        }
+
+        let message = "You have entered text. If you close the window, your changes will be lost. Do you want to close the window anyway?"
+        XCTAssertEqual(SuiteCleanStart.discardButton(prompt: message, buttonTitles: ["Cancel", "Close"]), "Close")
+        XCTAssertEqual(SuiteCleanStart.discardButton(prompt: message, buttonTitles: ["Cancel", "Don't Save"]), "Don't Save")
+        XCTAssertNil(SuiteCleanStart.discardButton(prompt: "Allow this app to control your computer?",
+            buttonTitles: ["Don't Allow", "Allow"]))
+        XCTAssertNil(SuiteCleanStart.discardButton(prompt: "Save changes before closing?",
+            buttonTitles: ["Cancel", "Save"] ))
+        XCTAssertNil(SuiteCleanStart.discardButton(prompt: message, buttonTitles: ["Close"]))
+        XCTAssertNil(SuiteCleanStart.discardButton(prompt: message, buttonTitles: ["Cancel", "Close", "Save As"]))
+    }
+
+    @MainActor
+    func testCleanStartRecognizesOnlyExistingPrivateNativeRunFiles() throws {
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).resolvingSymlinksInPath()
+        let root = home.appendingPathComponent("AgentEval", isDirectory: true)
+        let run = root.appendingPathComponent("task-0123456789abcdef0123456789abcdef", isDirectory: true)
+        try FileManager.default.createDirectory(at: run, withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700])
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: root.path)
+        let document = run.appendingPathComponent("notes.txt")
+        try Data("fixture".utf8).write(to: document)
+        defer { try? FileManager.default.removeItem(at: home) }
+
+        XCTAssertTrue(SuiteCleanStart.ownsNativeScratchDocument(url: document.absoluteString, homeDirectory: home))
+        XCTAssertFalse(SuiteCleanStart.ownsNativeScratchDocument(url: home.appendingPathComponent("notes.txt").absoluteString,
+            homeDirectory: home))
+        let malformedRun = root.appendingPathComponent("task-short", isDirectory: true).appendingPathComponent("notes.txt")
+        XCTAssertFalse(SuiteCleanStart.ownsNativeScratchDocument(url: malformedRun.absoluteString, homeDirectory: home))
+    }
+
     func testAcceptsOnlyKnownPolicyAndBoundedTaskConfiguration() throws {
         let request = try decode(#"{"task_id":"eval_1","prompt":"Read this page","start":{"url":"http://127.0.0.1:8765/read.html"},"max_steps":40,"policy":"fara15-4b"}"#)
         XCTAssertEqual(request.taskID, "eval_1")

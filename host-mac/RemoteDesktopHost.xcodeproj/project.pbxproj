@@ -21,6 +21,7 @@
 		0B8BD03613361C6BDE699437 /* LocalComputerUseRPC.swift in Sources */ = {isa = PBXBuildFile; fileRef = AAEBAC4B4C03C150B6DC8E6B /* LocalComputerUseRPC.swift */; };
 		0BDF187861C7C7A6E4EF3AF6 /* ComputerUseTaskLedger.swift in Sources */ = {isa = PBXBuildFile; fileRef = 67C543A6C4E8B98B5C1BA245 /* ComputerUseTaskLedger.swift */; };
 		0C1505E54746F62839AE2CDC /* DebugAgentEvalCommand.swift in Sources */ = {isa = PBXBuildFile; fileRef = 71ACE701D8FA20434852D6FB /* DebugAgentEvalCommand.swift */; };
+		A44D9D6FA48B4AC09A4C0B61 /* SuiteCleanStart.swift in Sources */ = {isa = PBXBuildFile; fileRef = D44D9D6FA48B4AC09A4C0B61 /* SuiteCleanStart.swift */; };
 		0D09F6F8904907C58D87437B /* AgentEvalWireTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E90C422C26CDD31D6ACBDA1B /* AgentEvalWireTests.swift */; };
 		10E8A0A9FC58CD50ED45BDB2 /* LocalComputerUseBrokerClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6BB881345BEB407F01A6537D /* LocalComputerUseBrokerClient.swift */; };
 		111EDE4B2CAE2DCC971B37D4 /* ComputerUseNativeControlReader.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8320F09E2121874DFE549B9F /* ComputerUseNativeControlReader.swift */; };
@@ -394,6 +395,7 @@
 		AAEBAC4B4C03C150B6DC8E6B /* LocalComputerUseRPC.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalComputerUseRPC.swift; sourceTree = "<group>"; };
 		AE0B5B96F82ECE4DA5674792 /* AgentEnvironments.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentEnvironments.swift; sourceTree = "<group>"; };
 		AE8AA3F8993E0E11D04701FC /* AgentEvalWire.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentEvalWire.swift; sourceTree = "<group>"; };
+		D44D9D6FA48B4AC09A4C0B61 /* SuiteCleanStart.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SuiteCleanStart.swift; sourceTree = "<group>"; };
 		AEC1AA3425B2D090341B56A4 /* AgentMacEnvironmentTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentMacEnvironmentTests.swift; sourceTree = "<group>"; };
 		B104C1229A29AC3A660D5AE2 /* HostCommandLine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HostCommandLine.swift; sourceTree = "<group>"; };
 		B3E8A0B47774C5E3756DA544 /* ComputerUseClarification.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseClarification.swift; sourceTree = "<group>"; };
@@ -507,6 +509,7 @@
 				AE8AA3F8993E0E11D04701FC /* AgentEvalWire.swift */,
 				FCB6EB2FAD0160F490ADB2D7 /* DebugAgentEvalBroker.swift */,
 				71ACE701D8FA20434852D6FB /* DebugAgentEvalCommand.swift */,
+				D44D9D6FA48B4AC09A4C0B61 /* SuiteCleanStart.swift */,
 				73FE58B8A939AC524DA3ED54 /* DebugAgentEvalSession.swift */,
 			);
 			path = Evaluation;
@@ -1163,6 +1166,7 @@
 				B992986DF883BC389857291B /* ContractValidation.swift in Sources */,
 				565E901F528114B9EA5F6266 /* DebugAgentEvalBroker.swift in Sources */,
 				0C1505E54746F62839AE2CDC /* DebugAgentEvalCommand.swift in Sources */,
+				A44D9D6FA48B4AC09A4C0B61 /* SuiteCleanStart.swift in Sources */,
 				323EB15585B5A0956B0B2033 /* DebugAgentEvalSession.swift in Sources */,
 				BFEE2E771F47E133734DCB0D /* DesktopVideoQuality.swift in Sources */,
 				6E193B1BD1883DF0F7B1D09E /* DeviceIdentity.swift in Sources */,
