@@ -11,11 +11,6 @@ struct PixelEnvironmentReadiness {
     let activeBackend: String = "pixel"
 }
 
-private struct PixelMetadata: Encodable {
-    let active_backend = "pixel"
-    let crop_mode: String
-}
-
 @MainActor
 struct PixelClipboardLease {
     private let board: NSPasteboard
@@ -57,7 +52,7 @@ final class PixelEnvironment: AgentEnvironment {
 
     private enum PasteResult: Equatable { case matches, rejected, unavailable }
     var followsFrontmostSurface: Bool { true }
-    private struct Snapshot {
+    struct Snapshot {
         let window: AgentMacAccessibility.Window?
         let application: NSRunningApplication?
         let identity: String
@@ -70,6 +65,10 @@ final class PixelEnvironment: AgentEnvironment {
         let elements: [AgentElement]
         let focus: AgentFocus?
         let screenBounds: CGRect
+        let activeWindowBounds: CGRect?
+        let activeWindowNumber: UInt32?
+        let activeWindowOwnerProcessID: Int32?
+        let visibleWindowCount: Int
         let marks: PixelElementMarks?
     }
 
@@ -89,8 +88,10 @@ final class PixelEnvironment: AgentEnvironment {
     private let allowed: () -> Bool
     private let finder: AgentWebFileFinder?
     private let picker: Picker?
-    private let startURL: String?
+    let startURL: String?
     private let startApp: String?
+    let requireCleanStart: Bool
+    let expectedStartBundleID: String?
     private let capturePreference: PixelCapturePreference
     private let metadataURL: URL?
     private var snapshots: [String: Snapshot] = [:]
@@ -98,15 +99,25 @@ final class PixelEnvironment: AgentEnvironment {
     private var suspended = false
     private var didStart = false
     private var lastSnapshot: Snapshot?
+#if DEBUG
+    var firstObservation: AgentEvalFirstObservation?
+#endif
     private(set) var actualCropMode: PixelCapturePreference
 
     init(taskID: String, injector: InputInjector, registry: AgentAppRegistry,
          allowed: @escaping () -> Bool, finder: AgentWebFileFinder? = nil, picker: Picker? = nil,
          startURL: String? = nil, startApp: String? = nil,
-         capturePreference: PixelCapturePreference = .frontmostWindow, metadataURL: URL? = nil) {
+         capturePreference: PixelCapturePreference = .frontmostWindow, metadataURL: URL? = nil,
+         requireCleanStart: Bool = false) {
         self.taskID = taskID; self.injector = injector; self.registry = registry
         self.allowed = allowed; self.finder = finder; self.picker = picker
-        self.startURL = startURL; self.startApp = startApp
+        self.startURL = startURL; self.startApp = startApp; self.requireCleanStart = requireCleanStart
+#if DEBUG
+        self.expectedStartBundleID = AgentEvalFirstObservation.expectedBundleID(
+            startApp: startApp, startURL: startURL, registry: registry)
+#else
+        self.expectedStartBundleID = nil
+#endif
         self.capturePreference = capturePreference; self.metadataURL = metadataURL
         actualCropMode = capturePreference
     }
@@ -143,9 +154,32 @@ final class PixelEnvironment: AgentEnvironment {
 
     func observe(_ context: AgentObservationContext) async throws -> AgentFrame {
         try checkActive()
+#if DEBUG
+        let validateStart = AgentEvalFirstObservation.requiresStartValidation(
+            configured: requireCleanStart, isInitialObservation: !didStart)
+#endif
         if !didStart { try await startIfNeeded(); didStart = true }
-        let snapshot = try await captureSnapshot(); try checkActive()
+#if DEBUG
+        let snapshot = try await (validateStart ? captureEvaluationStart() : captureSnapshot())
+#else
+        let snapshot = try await captureSnapshot()
+#endif
+        try checkActive()
+#if DEBUG
+        if validateStart, firstObservation == nil {
+            firstObservation = AgentEvalFirstObservation.capture(snapshot: snapshot,
+                expectedBundleID: expectedStartBundleID, expectedURL: startURL)
+        }
+#endif
         try writeMetadata()
+#if DEBUG
+        let invalidStart = AgentEvalFirstObservation.isInvalidStart(validating: validateStart, receipt: firstObservation)
+#else
+        let invalidStart = requireCleanStart
+#endif
+        if invalidStart {
+            throw AgentEnvironmentError.unavailable("Evaluation start state did not resolve to the requested app or URL in one frontmost window.")
+        }
         lastSnapshot = snapshot
         snapshots[snapshot.identity] = snapshot
         if snapshots.count > 2, let old = snapshots.keys.first(where: { $0 != snapshot.identity }) { snapshots.removeValue(forKey: old) }
@@ -289,7 +323,7 @@ final class PixelEnvironment: AgentEnvironment {
     func resume() async throws { guard !stopped else { throw CancellationError() }; suspended = false }
     func stop() async { stopped = true; injector.releaseHeldInput() }
 
-    private func captureSnapshot() async throws -> Snapshot {
+    func captureSnapshot() async throws -> Snapshot {
         try checkActive()
         let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
         let app = NSWorkspace.shared.frontmostApplication
@@ -300,7 +334,8 @@ final class PixelEnvironment: AgentEnvironment {
             AgentSafetyBoundary.blocksAutomation(bundleID: window.owningApplication?.bundleIdentifier,
                 appName: window.owningApplication?.applicationName)
         }
-        let appWindows = content.windows.filter { $0.owningApplication?.processID == app?.processIdentifier && $0.frame.width > 50 && $0.frame.height > 50 }
+        let appOwnedWindows = content.windows.filter { $0.owningApplication?.processID == app?.processIdentifier }
+        let appWindows = appOwnedWindows.filter { $0.frame.width > 50 && $0.frame.height > 50 }
         let appRoot = app.map { AXUIElementCreateApplication($0.processIdentifier) }
         let focusedAXWindow = appRoot.flatMap(ElementMarks.focusedWindow)
         let focusedBounds = focusedAXWindow.flatMap(ElementMarks.bounds)
@@ -350,9 +385,9 @@ final class PixelEnvironment: AgentEnvironment {
         if windowCapture, let resized = PixelGeometry.resize(image, width: 1280), let target {
             image = resized; screenshotBounds = target.frame; actualCropMode = .frontmostWindow
         } else if capturePreference == .frontmostWindow, let rect = marks?.contentRect ?? target?.frame,
-           let cropped = PixelGeometry.crop(image, screenRect: rect, captureBounds: captureBounds) {
-            image = PixelGeometry.resize(cropped, width: 1280) ?? cropped
-            screenshotBounds = rect; actualCropMode = .frontmostWindow
+           let crop = PixelGeometry.cropWithBounds(image, screenRect: rect, captureBounds: captureBounds) {
+            image = PixelGeometry.resize(crop.image, width: 1280) ?? crop.image
+            screenshotBounds = crop.screenBounds; actualCropMode = .frontmostWindow
         } else if windowCapture { actualCropMode = .frontmostWindow }
         else { actualCropMode = .fullDisplay }
         try checkActive()
@@ -377,7 +412,10 @@ final class PixelEnvironment: AgentEnvironment {
         return .init(window: axWindow, application: app, identity: identity, bundleID: app?.bundleIdentifier ?? "unknown",
             appName: app?.localizedName ?? "",
             title: target?.title ?? "Visible desktop", url: marks?.browserURL, image: image, screenshot: png,
-            elements: elements, focus: focus, screenBounds: screenshotBounds, marks: marks)
+            elements: elements, focus: focus, screenBounds: screenshotBounds,
+            activeWindowBounds: target?.frame, activeWindowNumber: target?.windowID,
+            activeWindowOwnerProcessID: target?.owningApplication?.processID,
+            visibleWindowCount: appWindows.count, marks: marks)
     }
 
     private func capture(_ display: SCDisplay, excluding windows: [SCWindow]) async throws -> CGImage {
@@ -459,6 +497,9 @@ final class PixelEnvironment: AgentEnvironment {
     private func screenPoint(_ target: AgentTarget, frame: AgentFrame, targets: [AgentElement],
                              bindings: ResolvedPixelTargets?) throws -> CGPoint {
         guard let snapshot = snapshots[frame.scope.identity] else { throw AgentEnvironmentError.targetGone }
+        guard let activeWindowBounds = snapshot.activeWindowBounds, !activeWindowBounds.isEmpty else {
+            throw AgentEnvironmentError.unavailable("point is outside the active window \"\(snapshot.title)\"; use open_app to switch apps")
+        }
         let size = CGSize(width: snapshot.image.width, height: snapshot.image.height)
         let pixel: CGPoint
         switch target {
@@ -470,14 +511,51 @@ final class PixelEnvironment: AgentEnvironment {
                 throw AgentEnvironmentError.targetGone
             }
             guard let reference = bindings?.references[id] else { throw AgentEnvironmentError.targetGone }
-            return try PixelElementReferenceResolver.currentCentre(element, reference: reference,
-                windowBounds: snapshot.window?.bounds ?? snapshot.screenBounds)
+            let dialogs = snapshot.marks?.overlayBounds ?? []
+            let menuBar = (snapshot.marks?.marks.filter { $0.role == "AXMenuBarItem" }.map(\.screenRect) ?? [])
+                + menuBarBounds()
+            let expandedBounds = (dialogs + menuBar).reduce(activeWindowBounds) { $0.union($1) }
+            let point = try PixelElementReferenceResolver.currentCentre(element, reference: reference,
+                windowBounds: expandedBounds)
+            try requireActiveWindowPoint(point, snapshot: snapshot, dialogs: dialogs, menuBar: menuBar)
+            return point
         case let .point(x, y): pixel = CGPoint(x: x, y: y)
         }
         guard let mapped = Self.mapPoint(pixel, imageSize: size, screenBounds: snapshot.screenBounds) else {
             throw AgentEnvironmentError.targetGone
         }
+        try requireActiveWindowPoint(mapped, snapshot: snapshot)
         return mapped
+    }
+
+    private func requireActiveWindowPoint(_ point: CGPoint, snapshot: Snapshot,
+                                          dialogs: [CGRect]? = nil,
+                                          menuBar suppliedMenuBar: [CGRect]? = nil) throws {
+        guard let windowBounds = snapshot.activeWindowBounds else {
+            throw AgentEnvironmentError.unavailable("point is outside the active window \"\(snapshot.title)\"; use open_app to switch apps")
+        }
+        let marks = snapshot.marks?.marks ?? []
+        let menuBar = suppliedMenuBar ?? (marks.filter { $0.role == "AXMenuBarItem" }.map(\.screenRect) + menuBarBounds())
+        let dialogBounds = dialogs ?? snapshot.marks?.overlayBounds ?? []
+        guard PixelWindowActionBoundary.allows(point, windowBounds: windowBounds,
+            menuBarBounds: menuBar, sameAppDialogBounds: dialogBounds) else {
+            throw AgentEnvironmentError.unavailable("point is outside the active window \"\(snapshot.title)\"; use open_app to switch apps")
+        }
+    }
+
+    private func menuBarBounds() -> [CGRect] {
+        let screens = NSScreen.screens
+        let mainID = CGMainDisplayID()
+        let primaryMaxY = screens.first(where: {
+            ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value == mainID
+        })?.frame.maxY ?? screens.first?.frame.maxY ?? 0
+        return screens.compactMap { screen in
+            let height = screen.frame.maxY - screen.visibleFrame.maxY
+            guard height > 0 else { return nil }
+            let appKitBar = CGRect(x: screen.frame.minX, y: screen.visibleFrame.maxY,
+                width: screen.frame.width, height: height)
+            return PixelGeometry.screenCaptureRect(fromAppKit: appKitBar, primaryScreenMaxY: primaryMaxY)
+        }
     }
 
     private func click(_ point: CGPoint, button: AgentMouseButton, count: Int) throws {
@@ -550,11 +628,14 @@ final class PixelEnvironment: AgentEnvironment {
 
     private func writeMetadata() throws {
         guard let metadataURL else { return }
+#if DEBUG
         let mode = actualCropMode == .frontmostWindow ? "frontmost-window" : "full-display"
-        let data = try JSONEncoder().encode(PixelMetadata(crop_mode: mode))
+        let data = try JSONEncoder().encode(AgentEvalPixelMetadataRecord(crop_mode: mode,
+            first_observation: firstObservation))
         try FileManager.default.createDirectory(at: metadataURL.deletingLastPathComponent(),
             withIntermediateDirectories: true)
         try data.write(to: metadataURL, options: .atomic)
+#endif
     }
 
     private func hostEffect(_ action: () throws -> Void) throws { try injector.performHostEffectIfAllowed(ifAllowed: inputAllowed, action) }
@@ -566,7 +647,7 @@ final class PixelEnvironment: AgentEnvironment {
         }
         return true
     }
-    private func checkActive() throws { try Task.checkCancellation(); guard !stopped, !suspended, allowed() else { throw CancellationError() } }
+    func checkActive() throws { try Task.checkCancellation(); guard !stopped, !suspended, allowed() else { throw CancellationError() } }
     private func checkScope(_ scope: AgentScope) throws {
         try checkActive()
         guard scope.taskID == taskID, scope.kind == .app || scope.kind == .web else { throw AgentEnvironmentError.scopeChanged }
@@ -610,11 +691,6 @@ final class PixelEnvironment: AgentEnvironment {
               screenBounds.width > 0, screenBounds.height > 0 else { return nil }
         return CGPoint(x: screenBounds.minX + pixel.x / imageSize.width * screenBounds.width,
             y: screenBounds.minY + pixel.y / imageSize.height * screenBounds.height)
-    }
-    private static func imageSize(_ base64: String) -> CGSize {
-        guard let data = Data(base64Encoded: base64), let source = CGImageSourceCreateWithData(data as CFData, nil),
-              let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else { return .zero }
-        return CGSize(width: image.width, height: image.height)
     }
 }
 

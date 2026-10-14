@@ -59,6 +59,54 @@ final class PixelEnvironmentTests: XCTestCase {
         XCTAssertEqual(mapped.y, -10, accuracy: 0.001)
     }
 
+    func testMappedClickAndDragPointsStayInsideActiveWindowExceptSameAppOverlays() {
+        let window = CGRect(x: 100, y: 80, width: 400, height: 300)
+        let menuBar = CGRect(x: 0, y: 0, width: 1600, height: 24)
+        let sheet = CGRect(x: 180, y: 320, width: 500, height: 120)
+        XCTAssertTrue(PixelWindowActionBoundary.allows(CGPoint(x: 120, y: 100),
+            windowBounds: window, menuBarBounds: [menuBar], sameAppDialogBounds: []))
+        XCTAssertFalse(PixelWindowActionBoundary.allows(CGPoint(x: 520, y: 160),
+            windowBounds: window, menuBarBounds: [menuBar], sameAppDialogBounds: []))
+        XCTAssertTrue(PixelWindowActionBoundary.allows(CGPoint(x: 40, y: 10),
+            windowBounds: window, menuBarBounds: [menuBar], sameAppDialogBounds: []))
+        XCTAssertTrue(PixelWindowActionBoundary.allows(CGPoint(x: 600, y: 350),
+            windowBounds: window, menuBarBounds: [menuBar], sameAppDialogBounds: [sheet]))
+        XCTAssertFalse(PixelWindowActionBoundary.allows(CGPoint(x: 600, y: 350),
+            windowBounds: window, menuBarBounds: [menuBar], sameAppDialogBounds: []))
+    }
+
+    func testSecondaryDisplayMenuBarUsesScreenCaptureCoordinates() {
+        let secondaryAppKitMenu = CGRect(x: 1440, y: -24, width: 900, height: 24)
+        let menuBar = PixelGeometry.screenCaptureRect(fromAppKit: secondaryAppKitMenu, primaryScreenMaxY: 900)
+        XCTAssertEqual(menuBar, CGRect(x: 1440, y: 900, width: 900, height: 24))
+        XCTAssertTrue(PixelWindowActionBoundary.allows(CGPoint(x: 1450, y: 910),
+            windowBounds: CGRect(x: 1440, y: 930, width: 900, height: 600),
+            menuBarBounds: [menuBar], sameAppDialogBounds: []))
+    }
+
+    func testCropBoundsMatchClippedPixelIntegralWhenAXContentExceedsWindowCapture() throws {
+        let source = try XCTUnwrap(CGImage(width: 800, height: 600, bitsPerComponent: 8, bitsPerPixel: 32,
+            bytesPerRow: 3200, space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue),
+            provider: CGDataProvider(data: Data(repeating: 0, count: 3200 * 600) as CFData)!, decode: nil,
+            shouldInterpolate: false, intent: .defaultIntent))
+        let captureBounds = CGRect(x: 100, y: 100, width: 400, height: 300)
+        let contentBounds = CGRect(x: 99.7, y: 99.8, width: 300.5, height: 200.3)
+        let crop = try XCTUnwrap(PixelGeometry.cropWithBounds(source, screenRect: contentBounds,
+            captureBounds: captureBounds))
+        XCTAssertEqual(crop.image.width, 601)
+        XCTAssertEqual(crop.image.height, 401)
+        XCTAssertEqual(crop.screenBounds.minX, 100, accuracy: 0.001)
+        XCTAssertEqual(crop.screenBounds.minY, 100, accuracy: 0.001)
+        XCTAssertEqual(crop.screenBounds.maxX, 400.5, accuracy: 0.001)
+        XCTAssertEqual(crop.screenBounds.maxY, 300.5, accuracy: 0.001)
+        let resized = try XCTUnwrap(PixelGeometry.resize(crop.image, width: 1280))
+        let mapped = try XCTUnwrap(PixelGeometry.point(CGPoint(x: 640, y: 427),
+            imageSize: CGSize(width: resized.width, height: resized.height), screenBounds: crop.screenBounds))
+        XCTAssertEqual(mapped.x, 250.25, accuracy: 0.01)
+        XCTAssertEqual(mapped.y, 200.25, accuracy: 0.01)
+    }
+
     func testContentCropAndResizePreserveScreenMapping() throws {
         let source = try XCTUnwrap(CGImage(width: 800, height: 600, bitsPerComponent: 8, bitsPerPixel: 32,
             bytesPerRow: 3200, space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue),
@@ -267,6 +315,7 @@ final class PixelEnvironmentTests: XCTestCase {
 
         XCTAssertEqual(try PixelElementReferenceResolver.currentCentre(expected, reference: menuItem,
             windowBounds: CGRect(x: 100, y: 100, width: 400, height: 300)), CGPoint(x: 24, y: 10))
+
     }
 
     func testUnlabeledElementClickReadsOCRAtResolvedCentreOncePerFrame() {
@@ -292,7 +341,8 @@ final class PixelEnvironmentTests: XCTestCase {
 
     func testSelectedAXWindowExcludesOverlappingSiblingWindowsAndKeepsSheetAndMenu() {
         let bounds = CGRect(x: 100, y: 100, width: 400, height: 300)
-        let visibleSheet = TestPixelAXNode(identity: "sheet", role: "AXSheet", title: nil, rect: bounds,
+        let visibleSheet = TestPixelAXNode(identity: "sheet", role: "AXSheet", title: nil,
+            rect: CGRect(x: 100, y: 100, width: 500, height: 380),
             children: [TestPixelAXNode(identity: "sheet-button", role: "AXButton", title: "Continue",
                 rect: CGRect(x: 350, y: 300, width: 90, height: 30))])
         let selected = TestPixelAXNode(identity: "selected-window", role: "AXWindow", title: nil, rect: bounds,
@@ -313,6 +363,11 @@ final class PixelEnvironmentTests: XCTestCase {
         XCTAssertTrue(names.contains("Continue"))
         XCTAssertTrue(names.contains("File"))
         XCTAssertFalse(names.contains("Background editor"))
+        XCTAssertEqual(result.overlayBounds, [CGRect(x: 100, y: 100, width: 500, height: 380)])
+        XCTAssertTrue(PixelWindowActionBoundary.allows(CGPoint(x: 530, y: 430), windowBounds: bounds,
+            menuBarBounds: [], sameAppDialogBounds: result.overlayBounds))
+        XCTAssertFalse(PixelWindowActionBoundary.allows(CGPoint(x: 530, y: 430), windowBounds: bounds,
+            menuBarBounds: [], sameAppDialogBounds: []))
     }
 
     func testMissingOrMismatchedAXWindowDoesNotExposeApplicationSiblingMarks() {

@@ -33,6 +33,7 @@ struct PixelElementMarks {
     let marks: [PixelElementMark]
     let focusedID: Int?
     let secureScreenRects: [CGRect]
+    let overlayBounds: [CGRect]
     let contentRect: CGRect?
     let browserURL: String?
     let axState: [PixelAXElementState]?
@@ -131,7 +132,7 @@ enum ElementMarks {
         if let focusRect, !secureRects.contains(focusRect) { secureRects.append(focusRect) }
         if secureRects != projected.secureScreenRects {
             projected = PixelElementMarks(marks: projected.marks, focusedID: projected.focusedID,
-                secureScreenRects: secureRects, contentRect: projected.contentRect,
+                secureScreenRects: secureRects, overlayBounds: projected.overlayBounds, contentRect: projected.contentRect,
                 browserURL: projected.browserURL, axState: projected.axState)
         }
         return projected
@@ -154,13 +155,14 @@ enum ElementMarks {
     }
 
     private static func emptyProjection() -> PixelElementMarks {
-        PixelElementMarks(marks: [], focusedID: nil, secureScreenRects: [], contentRect: nil, browserURL: nil, axState: nil)
+        PixelElementMarks(marks: [], focusedID: nil, secureScreenRects: [], overlayBounds: [],
+            contentRect: nil, browserURL: nil, axState: nil)
     }
 
     static func project(root: any PixelAXNode, windowBounds: CGRect, focusedIdentity: AnyHashable? = nil,
                         browserURL: String? = nil, readOnly: Bool = false, limit: Int = 60,
                         maxNodes: Int = 160, deadline: ContinuousClock.Instant? = nil) -> PixelElementMarks {
-        var candidates: [Candidate] = [], secureRects: [CGRect] = []
+        var candidates: [Candidate] = [], secureRects: [CGRect] = [], overlayBounds: [CGRect] = []
         var childText: [AnyHashable: [String]] = [:]
         var contentRect: CGRect?
         var resolvedURL = browserURL
@@ -178,6 +180,7 @@ enum ElementMarks {
                 if let rect, valid(rect) { secureRects.append(rect) }
                 return
             }
+            if ["AXSheet", "AXDialog"].contains(role), let rect, valid(rect) { overlayBounds.append(rect) }
 
             let fullWindowContainer = structuralRoles.contains(role) && rect.map {
                 intersectionOverUnion($0, windowBounds) >= 0.9
@@ -240,7 +243,7 @@ enum ElementMarks {
         let axState = ordered.isEmpty ? nil : ordered.map { PixelAXElementState(identity: $0.identity, role: $0.role, title: $0.name,
             value: $0.value, isEnabled: $0.enabled) }
         let focusID = focusedIdentity.flatMap { identity in ordered.firstIndex(where: { $0.identity == identity }).map { $0 + 1 } }
-        return PixelElementMarks(marks: marks, focusedID: focusID, secureScreenRects: secureRects,
+        return PixelElementMarks(marks: marks, focusedID: focusID, secureScreenRects: secureRects, overlayBounds: overlayBounds,
             contentRect: contentRect, browserURL: resolvedURL, axState: axState)
     }
 
@@ -267,10 +270,12 @@ enum ElementMarks {
             readOnly: AgentSafetyBoundary.readOnly(bundleID: application.bundleIdentifier, appName: application.localizedName),
             limit: limit)
         let result = PixelElementMarks(marks: projected.marks, focusedID: projected.focusedID,
-            secureScreenRects: projected.secureScreenRects, contentRect: projected.contentRect,
+            secureScreenRects: projected.secureScreenRects, overlayBounds: projected.overlayBounds,
+            contentRect: projected.contentRect,
             browserURL: browserURL ?? projected.browserURL, axState: projected.axState)
         guard ContinuousClock.now < deadline else {
             return PixelElementMarks(marks: [], focusedID: nil, secureScreenRects: result.secureScreenRects,
+                overlayBounds: result.overlayBounds,
                 contentRect: result.contentRect, browserURL: browserURL, axState: nil)
         }
         return result

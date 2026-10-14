@@ -1,5 +1,116 @@
 #if DEBUG
+import AppKit
 import Foundation
+
+struct AgentEvalFirstObservation: Encodable {
+    let frontmost_bundle_id: String
+    let frontmost_app_name: String
+    let frontmost_process_id: Int32
+    let expected_start_bundle_id: String
+    let expected_start_url: String
+    let observed_start_url: String
+    let start_surface_matches: Bool
+    let visible_window_count: Int
+    let selected_window_title: String
+    let selected_window_number: UInt32?
+    let selected_window_owner_process_id: Int32?
+    let selected_window_bounds: [Double]?
+    let valid: Bool
+
+    static func requiresStartValidation(configured: Bool, isInitialObservation: Bool) -> Bool {
+        configured && isInitialObservation
+    }
+
+    @MainActor
+    static func expectedBundleID(startApp: String?, startURL: String?, registry: AgentAppRegistry) -> String? {
+        let browserID = startURL.flatMap { value -> String? in
+            guard let url = URL(string: value),
+                  let applicationURL = NSWorkspace.shared.urlForApplication(toOpen: url) else { return nil }
+            return Bundle(url: applicationURL)?.bundleIdentifier
+        }
+        return startApp.flatMap { try? registry.resolve($0).bundleID } ?? browserID
+    }
+
+    static func isInvalidStart(validating: Bool, receipt: AgentEvalFirstObservation?) -> Bool {
+        validating && receipt?.valid != true
+    }
+
+    static func capture(snapshot: PixelEnvironment.Snapshot, expectedBundleID: String?,
+                        expectedURL: String?) -> AgentEvalFirstObservation {
+        capture(snapshotBundleID: snapshot.bundleID, appName: snapshot.appName,
+            processID: snapshot.application?.processIdentifier ?? 0,
+            expectedBundleID: expectedBundleID, expectedURL: expectedURL,
+            observedURL: snapshot.url,
+            startSurfaceMatches: matchesStart(expectedBundleID: expectedBundleID,
+                observedBundleID: snapshot.bundleID, expectedURL: expectedURL, observedURL: snapshot.url),
+            visibleWindowCount: snapshot.visibleWindowCount, windowTitle: snapshot.title,
+            windowNumber: snapshot.activeWindowNumber, windowOwnerProcessID: snapshot.activeWindowOwnerProcessID,
+            windowBounds: snapshot.activeWindowBounds)
+    }
+
+    static func capture(snapshotBundleID: String, appName: String, processID: Int32,
+                        expectedBundleID: String?, expectedURL: String?, observedURL: String?,
+                        startSurfaceMatches: Bool, visibleWindowCount: Int, windowTitle: String,
+                        windowNumber: UInt32?, windowOwnerProcessID: Int32?, windowBounds: CGRect?) -> Self {
+        let expectedURL = expectedURL.flatMap(normalizedURL) ?? ""
+        let observedURL = observedURL.flatMap(normalizedURL) ?? ""
+        let bounds = windowBounds.map { [Double($0.minX), Double($0.minY), Double($0.width), Double($0.height)] }
+        return .init(frontmost_bundle_id: snapshotBundleID, frontmost_app_name: appName,
+            frontmost_process_id: processID, expected_start_bundle_id: expectedBundleID ?? "",
+            expected_start_url: expectedURL, observed_start_url: observedURL,
+            start_surface_matches: startSurfaceMatches, visible_window_count: visibleWindowCount,
+            selected_window_title: windowTitle, selected_window_number: windowNumber,
+            selected_window_owner_process_id: windowOwnerProcessID, selected_window_bounds: bounds,
+            valid: visibleWindowCount == 1 && windowBounds != nil && snapshotBundleID != "unknown"
+                && processID > 0 && processID == windowOwnerProcessID && startSurfaceMatches)
+    }
+
+    static func matchesStart(expectedBundleID: String?, observedBundleID: String,
+                             expectedURL: String?, observedURL: String?) -> Bool {
+        guard let expectedBundleID, expectedBundleID == observedBundleID else { return false }
+        guard let expectedURL else { return true }
+        return observedURL.flatMap(normalizedURL) == normalizedURL(expectedURL)
+    }
+
+    static func normalizedURL(_ value: String) -> String? {
+        guard var parts = URLComponents(string: value),
+              let scheme = parts.scheme?.lowercased(),
+              let host = parts.host?.lowercased() else { return nil }
+        parts.scheme = scheme; parts.host = host; parts.fragment = nil
+        if (scheme == "https" && parts.port == 443) || (scheme == "http" && parts.port == 80) { parts.port = nil }
+        return parts.string
+    }
+}
+
+@MainActor
+extension PixelEnvironment {
+    func captureEvaluationStart() async throws -> Snapshot {
+        let deadline = ContinuousClock.now.advanced(by: .seconds(3))
+        var last: Snapshot?
+        repeat {
+            try checkActive()
+            let snapshot = try await captureSnapshot()
+            last = snapshot
+            if snapshot.visibleWindowCount == 1,
+               snapshot.activeWindowBounds != nil,
+               snapshot.application?.processIdentifier == snapshot.activeWindowOwnerProcessID,
+               AgentEvalFirstObservation.matchesStart(expectedBundleID: expectedStartBundleID,
+                   observedBundleID: snapshot.bundleID, expectedURL: startURL, observedURL: snapshot.url) {
+                return snapshot
+            }
+            guard ContinuousClock.now < deadline else { break }
+            try await Task.sleep(for: .milliseconds(150))
+        } while ContinuousClock.now < deadline
+        guard let last else { throw AgentEnvironmentError.unavailable("Evaluation did not produce an initial window.") }
+        return last
+    }
+}
+
+struct AgentEvalPixelMetadataRecord: Encodable {
+    let active_backend = "pixel"
+    let crop_mode: String
+    let first_observation: AgentEvalFirstObservation?
+}
 
 struct AgentEvalRequest: Decodable {
     struct Start: Decodable {
@@ -116,7 +227,7 @@ struct AgentEvalRequest: Decodable {
         else if let app = start.app { surface = .app(app) }
         else { surface = nil }
         return .init(maxSteps: maxSteps, initialSurface: surface,
-            fileRoots: Self.syntheticFileRoots, storageDirectory: storageDirectory,
+            fileRoots: Self.syntheticFileRoots, storageDirectory: storageDirectory, requireCleanStart: true,
             policy: AgentPolicyModel(rawValue: policy) ?? .fara15_4b)
     }
 
@@ -176,11 +287,43 @@ enum AgentEvalPixelMetadata {
         guard let data,
               let root = try? JSONSerialization.jsonObject(with: data),
               let values = root as? [String: Any],
-              Set(values.keys) == Set(["active_backend", "crop_mode"]),
+              (Set(values.keys) == Set(["active_backend", "crop_mode"])
+                || Set(values.keys) == Set(["active_backend", "crop_mode", "first_observation"])),
               let backend = values["active_backend"] as? String, backend == "pixel",
               let cropMode = values["crop_mode"] as? String,
               cropModes.contains(cropMode) else { return "unknown" }
         return cropMode
+    }
+
+    static func hasValidFirstObservation(from data: Data?) -> Bool {
+        guard let data,
+              let root = try? JSONSerialization.jsonObject(with: data),
+              let values = root as? [String: Any],
+              let state = values["first_observation"] as? [String: Any],
+              Set(state.keys) == Set(["frontmost_bundle_id", "frontmost_app_name", "frontmost_process_id",
+                  "expected_start_bundle_id", "expected_start_url", "observed_start_url", "start_surface_matches",
+                  "visible_window_count", "selected_window_title", "selected_window_number",
+                  "selected_window_owner_process_id", "selected_window_bounds", "valid"]),
+              let bundleID = state["frontmost_bundle_id"] as? String, !bundleID.isEmpty,
+              let appName = state["frontmost_app_name"] as? String, !appName.isEmpty,
+              let frontmostPID = state["frontmost_process_id"] as? Int, frontmostPID > 0,
+              let expectedBundleID = state["expected_start_bundle_id"] as? String,
+              !expectedBundleID.isEmpty,
+              expectedBundleID == bundleID,
+              let expectedURL = state["expected_start_url"] as? String,
+              let observedURL = state["observed_start_url"] as? String,
+              let startMatches = state["start_surface_matches"] as? Bool, startMatches,
+              state["selected_window_title"] is String,
+              let count = state["visible_window_count"] as? Int, count == 1,
+              let valid = state["valid"] as? Bool, valid,
+              let number = state["selected_window_number"] as? NSNumber, number.uint32Value > 0,
+              let ownerPID = state["selected_window_owner_process_id"] as? Int, ownerPID == frontmostPID,
+              let bounds = state["selected_window_bounds"] as? [NSNumber], bounds.count == 4,
+              bounds.allSatisfy({ $0.doubleValue.isFinite }), bounds[2].doubleValue > 0, bounds[3].doubleValue > 0 else {
+            return false
+        }
+        guard expectedURL.isEmpty ? observedURL.isEmpty : observedURL == expectedURL else { return false }
+        return true
     }
 }
 

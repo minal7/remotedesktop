@@ -4,6 +4,16 @@ import XCTest
 @testable import RemoteDesktopHost
 
 final class AgentEvalWireTests: XCTestCase {
+    @MainActor
+    func testCleanStartIsEnabledOnlyByEvaluationConfiguration() throws {
+        XCTAssertFalse(AgentHostFactory.Configuration().requireCleanStart)
+        let request = try decode(#"{"task_id":"eval_clean_start","prompt":"Read this page","start":{"url":"http://127.0.0.1:8765/read.html"},"max_steps":2,"policy":"fara15-4b"}"#)
+        XCTAssertTrue(request.hostConfiguration(storageDirectory: URL(fileURLWithPath: "/tmp/eval-clean-start"))
+            .requireCleanStart)
+        XCTAssertTrue(AgentEvalFirstObservation.requiresStartValidation(configured: true, isInitialObservation: true))
+        XCTAssertFalse(AgentEvalFirstObservation.requiresStartValidation(configured: true, isInitialObservation: false))
+    }
+
     func testAcceptsOnlyKnownPolicyAndBoundedTaskConfiguration() throws {
         let request = try decode(#"{"task_id":"eval_1","prompt":"Read this page","start":{"url":"http://127.0.0.1:8765/read.html"},"max_steps":40,"policy":"fara15-4b"}"#)
         XCTAssertEqual(request.taskID, "eval_1")
@@ -92,6 +102,25 @@ final class AgentEvalWireTests: XCTestCase {
             XCTAssertEqual(AgentEvalPixelMetadata.actualCropMode(from: Data(invalid.utf8)), "unknown")
         }
         XCTAssertEqual(AgentEvalPixelMetadata.actualCropMode(from: nil), "unknown")
+    }
+
+    func testPrivatePixelMetadataRecordsTheActualSingleFrontmostStartWindow() throws {
+        let valid = #"{"active_backend":"pixel","crop_mode":"frontmost-window","first_observation":{"frontmost_bundle_id":"com.apple.Safari","frontmost_app_name":"Safari","frontmost_process_id":123,"expected_start_bundle_id":"com.apple.Safari","expected_start_url":"https://example.test/transit","observed_start_url":"https://example.test/transit","start_surface_matches":true,"visible_window_count":1,"selected_window_title":"Transit","selected_window_number":42,"selected_window_owner_process_id":123,"selected_window_bounds":[10,20,800,600],"valid":true}}"#
+        let data = Data(valid.utf8)
+        XCTAssertEqual(AgentEvalPixelMetadata.actualCropMode(from: data), "frontmost-window")
+        XCTAssertTrue(AgentEvalPixelMetadata.hasValidFirstObservation(from: data))
+
+        let twoWindows = valid.replacingOccurrences(of: #""visible_window_count":1"#, with: #""visible_window_count":2"#)
+        XCTAssertFalse(AgentEvalPixelMetadata.hasValidFirstObservation(from: Data(twoWindows.utf8)))
+        let missingSelection = valid.replacingOccurrences(of: #""selected_window_number":42"#, with: #""selected_window_number":null"#)
+        XCTAssertFalse(AgentEvalPixelMetadata.hasValidFirstObservation(from: Data(missingSelection.utf8)))
+        let otherProcess = valid.replacingOccurrences(of: #""selected_window_owner_process_id":123"#, with: #""selected_window_owner_process_id":456"#)
+        XCTAssertFalse(AgentEvalPixelMetadata.hasValidFirstObservation(from: Data(otherProcess.utf8)))
+        let wrongStart = valid.replacingOccurrences(of: #""observed_start_url":"https://example.test/transit""#, with: #""observed_start_url":"https://example.test/other""#)
+        XCTAssertFalse(AgentEvalPixelMetadata.hasValidFirstObservation(from: Data(wrongStart.utf8)))
+        let wrongApplication = valid.replacingOccurrences(of: #""expected_start_bundle_id":"com.apple.Safari""#,
+            with: #""expected_start_bundle_id":"org.example.other""#)
+        XCTAssertFalse(AgentEvalPixelMetadata.hasValidFirstObservation(from: Data(wrongApplication.utf8)))
     }
 
     private func decode(_ json: String) throws -> AgentEvalRequest {

@@ -18,15 +18,18 @@ enum AgentHostFactory {
         let initialSurface: InitialSurface?
         let fileRoots: [URL]?
         let storageDirectory: URL?
+        let requireCleanStart: Bool
 
         init(maxSteps: Int = 30, initialSurface: InitialSurface? = nil,
              fileRoots: [URL]? = nil, storageDirectory: URL? = nil,
+             requireCleanStart: Bool = false,
              policy: AgentPolicyModel = .fara15_4b) {
             self.maxSteps = maxSteps
             self.policy = policy
             self.initialSurface = initialSurface
             self.fileRoots = fileRoots
             self.storageDirectory = storageDirectory
+            self.requireCleanStart = requireCleanStart
         }
     }
 
@@ -72,16 +75,18 @@ enum AgentHostFactory {
             case .web(let url):
                 pixel = PixelEnvironment(taskID: taskID, injector: injector, registry: registry,
                     allowed: mayAct, finder: finder, picker: { try await picker.select($0) }, startURL: url,
-                    capturePreference: configuration.policy.capturePreference, metadataURL: pixelMetadata)
+                    capturePreference: configuration.policy.capturePreference, metadataURL: pixelMetadata,
+                    requireCleanStart: configuration.requireCleanStart)
             case .app(let name):
-                try await registry.open(registry.resolve(name))
                 pixel = PixelEnvironment(taskID: taskID, injector: injector, registry: registry,
-                    allowed: mayAct, finder: finder, picker: { try await picker.select($0) },
-                    capturePreference: configuration.policy.capturePreference, metadataURL: pixelMetadata)
+                    allowed: mayAct, finder: finder, picker: { try await picker.select($0) }, startApp: name,
+                    capturePreference: configuration.policy.capturePreference, metadataURL: pixelMetadata,
+                    requireCleanStart: configuration.requireCleanStart)
             case nil:
                 pixel = PixelEnvironment(taskID: taskID, injector: injector, registry: registry,
                     allowed: mayAct, finder: finder, picker: { try await picker.select($0) },
-                    capturePreference: configuration.policy.capturePreference, metadataURL: pixelMetadata)
+                    capturePreference: configuration.policy.capturePreference, metadataURL: pixelMetadata,
+                    requireCleanStart: configuration.requireCleanStart)
             }
             let recordingRoot = configuration.storageDirectory?.appendingPathComponent("episodes", isDirectory: true)
                 ?? TrajectoryRecorder.defaultRoot

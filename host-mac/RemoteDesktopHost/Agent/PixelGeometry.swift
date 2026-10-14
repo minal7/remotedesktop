@@ -62,6 +62,10 @@ enum PixelTargetContextLabel {
 }
 
 enum PixelGeometry {
+    static func screenCaptureRect(fromAppKit rect: CGRect, primaryScreenMaxY: CGFloat) -> CGRect {
+        CGRect(x: rect.minX, y: primaryScreenMaxY - rect.maxY, width: rect.width, height: rect.height)
+    }
+
     static func nativeWindowPixelSize(windowBounds: CGRect, pointPixelScale: CGFloat) -> (width: Int, height: Int)? {
         guard valid(windowBounds), pointPixelScale.isFinite, pointPixelScale > 0 else { return nil }
         let width = (windowBounds.width * pointPixelScale).rounded(.up)
@@ -101,8 +105,22 @@ enum PixelGeometry {
     }
 
     static func crop(_ image: CGImage, screenRect: CGRect, captureBounds: CGRect) -> CGImage? {
-        guard let rect = imageRect(screenRect, captureBounds: captureBounds, imageSize: CGSize(width: image.width, height: image.height)) else { return nil }
-        return image.cropping(to: rect.integral.intersection(CGRect(x: 0, y: 0, width: image.width, height: image.height)))
+        cropWithBounds(image, screenRect: screenRect, captureBounds: captureBounds)?.image
+    }
+
+    static func cropWithBounds(_ image: CGImage, screenRect: CGRect, captureBounds: CGRect)
+        -> (image: CGImage, screenBounds: CGRect)? {
+        guard let rect = imageRect(screenRect, captureBounds: captureBounds,
+            imageSize: CGSize(width: image.width, height: image.height)) else { return nil }
+        let pixelBounds = rect.integral.intersection(CGRect(x: 0, y: 0, width: image.width, height: image.height))
+        guard !pixelBounds.isNull, !pixelBounds.isEmpty, let cropped = image.cropping(to: pixelBounds) else { return nil }
+        let screenPerPixelX = captureBounds.width / CGFloat(image.width)
+        let screenPerPixelY = captureBounds.height / CGFloat(image.height)
+        let actualBounds = CGRect(x: captureBounds.minX + pixelBounds.minX * screenPerPixelX,
+            y: captureBounds.minY + pixelBounds.minY * screenPerPixelY,
+            width: pixelBounds.width * screenPerPixelX,
+            height: pixelBounds.height * screenPerPixelY)
+        return (cropped, actualBounds)
     }
 
     static func resize(_ image: CGImage, width: Int) -> CGImage? {
@@ -119,5 +137,19 @@ enum PixelGeometry {
     private static func valid(_ rect: CGRect) -> Bool {
         !rect.isNull && !rect.isEmpty && rect.minX.isFinite && rect.minY.isFinite &&
             rect.width.isFinite && rect.height.isFinite
+    }
+}
+
+enum PixelWindowActionBoundary {
+    static func allows(_ point: CGPoint, windowBounds: CGRect, menuBarBounds: [CGRect],
+                       sameAppDialogBounds: [CGRect]) -> Bool {
+        guard point.x.isFinite, point.y.isFinite, valid(windowBounds) else { return false }
+        if windowBounds.contains(point) { return true }
+        return (menuBarBounds + sameAppDialogBounds).contains { valid($0) && $0.contains(point) }
+    }
+
+    private static func valid(_ rect: CGRect) -> Bool {
+        !rect.isNull && !rect.isEmpty && rect.minX.isFinite && rect.minY.isFinite
+            && rect.width.isFinite && rect.height.isFinite
     }
 }

@@ -165,6 +165,67 @@ def smoke_tasks() -> list[Task]:
     ]
 
 
+def _suite_apps(tasks: list[Task], resolved_default_browser: str | None) -> list[str]:
+    apps = {task.value["start"]["app"] for task in tasks if task.value["surface"] == "app"}
+    if any(task.value["surface"] == "web" for task in tasks):
+        apps.add(_required_string(resolved_default_browser, "resolved default browser"))
+    return sorted(apps)
+
+
+def _resolved_default_browser() -> str:
+    configured = os.environ.get("EVAL_DEFAULT_BROWSER_BUNDLE_ID")
+    source = '''import AppKit
+import Foundation
+let url = URL(string: "https://example.org/")!
+guard let app = NSWorkspace.shared.urlForApplication(toOpen: url),
+      let bundleID = Bundle(url: app)?.bundleIdentifier, !bundleID.isEmpty else { exit(1) }
+print(bundleID)
+'''
+    try:
+        result = subprocess.run(["/usr/bin/swift", "-e", source], capture_output=True,
+                                text=True, timeout=20, check=False)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise EvalError("Could not resolve the configured default browser for suite clean start") from error
+    if result.returncode == 0 and result.stdout.strip():
+        bundle_id = result.stdout.strip()
+        if configured and configured.strip() != bundle_id:
+            raise EvalError("EVAL_DEFAULT_BROWSER_BUNDLE_ID does not match the system default browser")
+        return bundle_id
+    raise EvalError("Could not resolve the configured default browser for suite clean start")
+
+
+def _apple_script_target(app: str) -> str:
+    known = {"Finder": "com.apple.finder", "TextEdit": "com.apple.TextEdit", "Notes": "com.apple.Notes",
+             "MacSafari": "com.apple.Safari"}
+    bundle_id = known.get(app, app)
+    if "." in bundle_id:
+        escaped = bundle_id.replace('\\', '\\\\').replace('"', '\\"')
+        return f'application id "{escaped}"'
+    escaped = app.replace('\\', '\\\\').replace('"', '\\"')
+    return f'application "{escaped}"'
+
+
+def _close_app_windows_script(app: str) -> str:
+    target = _apple_script_target(_required_string(app, "suite app"))
+    if app == "TextEdit" or app == "com.apple.TextEdit":
+        operation = "close every document saving no"
+    else:
+        operation = "close every window"
+    return f"tell {target}\n    {operation}\nend tell"
+
+
+def _close_suite_app_windows(apps: list[str], runner: Any = subprocess.run) -> None:
+    for app in apps:
+        script = _close_app_windows_script(app)
+        try:
+            result = runner(["/usr/bin/osascript", "-e", script], capture_output=True,
+                            text=True, timeout=15, check=False)
+        except (OSError, subprocess.TimeoutExpired) as error:
+            raise EvalError(f"Could not close suite app windows for {app}") from error
+        if result.returncode != 0:
+            raise EvalError(f"Could not close suite app windows for {app}")
+
+
 def _native_scratch_directory(task_id: str, run_token: str) -> Path:
     root = Path.home() / "AgentEval"
     root.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -714,7 +775,21 @@ def run(args: argparse.Namespace) -> int:
     tasks, driver, reset, server, output = prepared
     results: list[dict[str, Any]] = []
     try:
-        if args.execution == "real-host" and not _fixture_server_available(DEFAULT_FIXTURE_ORIGIN):
+        suite_apps: list[str] = []
+        if args.execution == "real-host":
+            try:
+                browser = _resolved_default_browser() if any(task.value["surface"] == "web" for task in tasks) else None
+                suite_apps = _suite_apps(tasks, browser)
+                _close_suite_app_windows(suite_apps)
+            except EvalError as error:
+                preflight = failed_preflight(str(error), "Close the suite app windows and rerun clean start.")
+            else:
+                preflight = None
+        else:
+            preflight = None
+        if preflight is not None:
+            pass
+        elif args.execution == "real-host" and not _fixture_server_available(DEFAULT_FIXTURE_ORIGIN):
             preflight = failed_preflight("The local fixture server is unavailable before startup checks.",
                                          "Start the evaluation fixture server on 127.0.0.1:8765, then rerun.")
         else:
@@ -727,7 +802,8 @@ def run(args: argparse.Namespace) -> int:
             return 1
         for run_index in range(args.runs):
             for task in tasks:
-                row = _run_one_task(task, run_index + 1, args, driver, reset, server, output, results)
+                row = _run_one_task(task, run_index + 1, args, driver, reset, server, output, results,
+                    suite_apps=suite_apps if args.execution == "real-host" else None)
                 if row:
                     print(f"{task.value.get('suite', args.suite)}/{task.task_id}: {row}", flush=True)
     finally:
@@ -741,10 +817,12 @@ def run(args: argparse.Namespace) -> int:
 
 def _run_one_task(task: Task, run_number: int, args: argparse.Namespace, driver: list[str],
                   reset: list[str], server: Any, output: Path,
-                  results: list[dict[str, Any]]) -> str | None:
+                  results: list[dict[str, Any]], suite_apps: list[str] | None = None) -> str | None:
     token, task_id = uuid.uuid4().hex, str(uuid.uuid4())
     scratch: Path | None = None
     try:
+        if suite_apps is not None:
+            _close_suite_app_windows(suite_apps)
         runtime_task = task
         if task.value["surface"] == "app":
             scratch = _native_scratch_directory(task.task_id, token)
