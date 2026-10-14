@@ -47,6 +47,16 @@ class CleanStartTests(unittest.TestCase):
         self.assertTrue(all(call[0] == "/usr/bin/osascript" for call in calls))
         self.assertEqual([call[-1] for call in calls], scripts)
 
+    def test_cleanup_failure_preserves_stderr_and_aborts(self) -> None:
+        calls: list[list[str]] = []
+        def fail_on_finder(argv: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+            calls.append(argv)
+            return subprocess.CompletedProcess(argv, 1, "", "Finder permission dialog blocked close")
+        with self.assertRaisesRegex(run_suite.EvalError, "Finder permission dialog blocked close"):
+            run_suite._close_suite_app_windows(["Finder", "Notes"], runner=fail_on_finder)
+        self.assertEqual(len(calls), 1)
+        self.assertIn('application id "com.apple.finder"', calls[0][-1])
+
     def test_clean_start_failure_stops_before_remaining_app_cleanup(self) -> None:
         calls: list[list[str]] = []
         def fail_on_notes(argv: list[str], **_: object) -> subprocess.CompletedProcess[str]:

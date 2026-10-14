@@ -224,7 +224,9 @@ def _close_suite_app_windows(apps: list[str], runner: Any = subprocess.run) -> N
         except (OSError, subprocess.TimeoutExpired) as error:
             raise EvalError(f"Could not close suite app windows for {app}") from error
         if result.returncode != 0:
-            raise EvalError(f"Could not close suite app windows for {app}")
+            detail = " ".join((result.stderr or result.stdout).split())[:512]
+            detail = detail or f"osascript exited with status {result.returncode}"
+            raise EvalError(f"Could not close suite app windows for {app}: {detail}")
 
 
 def _native_scratch_directory(task_id: str, run_token: str) -> Path:
