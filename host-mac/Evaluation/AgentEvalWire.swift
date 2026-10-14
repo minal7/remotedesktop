@@ -1,6 +1,11 @@
 #if DEBUG
 import AppKit
+import Darwin
 import Foundation
+
+private extension CodingUserInfoKey {
+    static let agentEvalHomeDirectory = CodingUserInfoKey(rawValue: "agentEvalHomeDirectory")!
+}
 
 struct AgentEvalFirstObservation: Encodable {
     let frontmost_bundle_id: String
@@ -191,6 +196,7 @@ struct AgentEvalRequest: Decodable {
     let maxSteps: Int
     let policy: String
     let approvalPolicy: ApprovalPolicy?
+    let setupDocument: URL?
 
     private enum CodingKeys: String, CodingKey, CaseIterable {
         case taskID = "task_id"
@@ -198,11 +204,14 @@ struct AgentEvalRequest: Decodable {
         case maxSteps = "max_steps"
         case policy
         case approvalPolicy = "approval_policy"
+        case setupDocument = "setup_document"
     }
 
-    static func decodeStrict(_ data: Data) throws -> Self {
+    static func decodeStrict(_ data: Data,
+                             homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser) throws -> Self {
         guard let root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-              Set(root.keys).isSubset(of: ["task_id", "prompt", "start", "max_steps", "policy", "approval_policy"]),
+              Set(root.keys).isSubset(of: ["task_id", "prompt", "start", "max_steps", "policy", "approval_policy", "setup_document"]),
+              !root.keys.contains("setup_document") || root["setup_document"] is String,
               ["task_id", "prompt", "start", "max_steps", "policy"].allSatisfy({ root[$0] != nil }),
               let start = root["start"] as? [String: Any],
               (Set(start.keys) == ["url"] || Set(start.keys) == ["app"]) else {
@@ -215,7 +224,9 @@ struct AgentEvalRequest: Decodable {
         if root["approval_policy"] != nil, !(root["approval_policy"] is [String: Any]) {
             throw AgentEvalWireError.invalidRequest
         }
-        let request = try JSONDecoder().decode(Self.self, from: data)
+        let decoder = JSONDecoder()
+        decoder.userInfo[.agentEvalHomeDirectory] = homeDirectory
+        let request = try decoder.decode(Self.self, from: data)
         try request.validate()
         return request
     }
@@ -234,6 +245,18 @@ struct AgentEvalRequest: Decodable {
         maxSteps = try container.decode(Int.self, forKey: .maxSteps)
         policy = try container.decode(String.self, forKey: .policy)
         approvalPolicy = try container.decodeIfPresent(ApprovalPolicy.self, forKey: .approvalPolicy)
+        if let path = try container.decodeIfPresent(String.self, forKey: .setupDocument) {
+            guard start.app != nil, approvalPolicy?.allowStartInteraction == true,
+                  let task = ProcessInfo.processInfo.environment["EVAL_TASK_ID"],
+                  let token = ProcessInfo.processInfo.environment["EVAL_RUN_TOKEN"],
+                  let document = AgentEvalSetupDocument.authorized(path: path, taskID: task, token: token,
+                    homeDirectory: decoder.userInfo[.agentEvalHomeDirectory] as? URL ?? FileManager.default.homeDirectoryForCurrentUser) else {
+                throw AgentEvalWireError.invalidRequest
+            }
+            setupDocument = document
+        } else {
+            setupDocument = nil
+        }
         try validate()
     }
 
@@ -367,6 +390,39 @@ enum AgentEvalWireError: Error {
     case bootstrapFailure
     case modelUnavailable
     case timedOut
+}
+
+enum AgentEvalSetupDocument {
+    static func authorized(path: String, taskID: String, token: String,
+                           homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser) -> URL? {
+        guard !taskID.isEmpty, taskID.utf8.count <= 128,
+              taskID.utf8.allSatisfy({ (48...57).contains($0) || (65...90).contains($0) || (97...122).contains($0) || $0 == 45 || $0 == 95 }),
+              token.utf8.count == 32,
+              token.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }) else { return nil }
+        let home = homeDirectory.standardizedFileURL
+        let root = home.appendingPathComponent("AgentEval", isDirectory: true)
+        let run = root.appendingPathComponent("\(taskID)-\(token)", isDirectory: true)
+        let file = URL(fileURLWithPath: path).standardizedFileURL
+        guard file.isFileURL, file.path == path, file.deletingLastPathComponent() == run,
+              !file.lastPathComponent.isEmpty, file.lastPathComponent != ".", file.lastPathComponent != "..",
+              root.resolvingSymlinksInPath() == root,
+              run.resolvingSymlinksInPath() == run,
+              file.resolvingSymlinksInPath() == file,
+              let rootAttributes = try? FileManager.default.attributesOfItem(atPath: root.path),
+              rootAttributes[.type] as? FileAttributeType == .typeDirectory,
+              (rootAttributes[.ownerAccountID] as? NSNumber)?.uint32Value == getuid(),
+              (rootAttributes[.posixPermissions] as? NSNumber)?.intValue == 0o700,
+              let runAttributes = try? FileManager.default.attributesOfItem(atPath: run.path),
+              runAttributes[.type] as? FileAttributeType == .typeDirectory,
+              (runAttributes[.ownerAccountID] as? NSNumber)?.uint32Value == getuid(),
+              (runAttributes[.posixPermissions] as? NSNumber)?.intValue == 0o700,
+              let fileAttributes = try? FileManager.default.attributesOfItem(atPath: file.path),
+              fileAttributes[.type] as? FileAttributeType == .typeRegular,
+              (fileAttributes[.ownerAccountID] as? NSNumber)?.uint32Value == getuid(),
+              (((fileAttributes[.posixPermissions] as? NSNumber)?.intValue ?? 0o777) & 0o077) == 0,
+              (fileAttributes[.size] as? NSNumber)?.intValue == 0 else { return nil }
+        return file
+    }
 }
 
 extension AgentEvalRequest.Start: Equatable {}

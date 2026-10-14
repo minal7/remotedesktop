@@ -186,6 +186,61 @@ class TaskAndCheckerTests(unittest.TestCase):
                 else:
                     os.environ["HOME"] = home
 
+    def test_native_blank_start_document_is_seeded_and_forwarded_only_from_private_scratch(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        original = next(task for task in run_suite.load_tasks("native") if task.task_id == "native-001")
+        value = {**original.value, "setup": {"open_document": "Start.txt"}}
+        task = run_suite.validate_task(value, Path("native-blank-start.yaml"))
+        unsafe = {**value, "setup": {"open_document": "../Start.txt"}}
+        with self.assertRaises(run_suite.EvalError):
+            run_suite.validate_task(unsafe, Path("native-unsafe-start.yaml"))
+        no_start_authority = {**value, "approval_policy": {}}
+        with self.assertRaises(run_suite.EvalError):
+            run_suite.validate_task(no_start_authority, Path("native-no-start-authority.yaml"))
+        collision = {**value, "checker": {"type": "file_text", "expect": {
+            "path": "{eval_dir}/Start.txt", "equals": "x"}}}
+        with self.assertRaises(run_suite.EvalError):
+            run_suite.validate_task(collision, Path("native-output-collision.yaml"))
+
+        with TemporaryDirectory() as directory:
+            previous_home = os.environ.get("HOME")
+            previous_eval_root = os.environ.get("REMOTE_DESKTOP_EVAL_ROOT")
+            os.environ["HOME"] = directory
+            os.environ["REMOTE_DESKTOP_EVAL_ROOT"] = str(Path(directory) / "episodes")
+            try:
+                token = "a" * 32
+                scratch = run_suite._native_scratch_directory(task.task_id, token)
+                run_suite._seed_native_task(task, scratch)
+                document = scratch / "Start.txt"
+                self.assertTrue(document.is_file())
+                self.assertEqual(document.read_bytes(), b"")
+                self.assertEqual(document.stat().st_mode & 0o777, 0o600)
+
+                driver_script = (
+                    "import json,sys; req=json.load(sys.stdin); "
+                    "print(json.dumps({'task_id':req['task_id'],'outcome':'blocked','answer':'',"
+                    "'episode_path':'/tmp/episode.jsonl','wall_seconds':0,'real_host_app':True,"
+                    "'environment':'pixel','policy':req['policy'],'setup_document':req.get('setup_document')}))"
+                )
+                with patch.object(run_suite, "_prepare_episode_root", return_value=Path(directory) / "episodes"), \
+                     patch.object(run_suite, "_vm_project_root", return_value=None), \
+                     patch.object(run_suite, "_vm_remote_eval_root", return_value=None):
+                    response, error = run_suite._run_driver([sys.executable, "-c", driver_script], task,
+                        "fara15-4b", token, "driver-id", 10, setup_document=document)
+                self.assertIsNone(error)
+                self.assertEqual(response["setup_document"], str(document.resolve()))
+            finally:
+                run_suite._remove_native_scratch(Path(directory) / "AgentEval" / f"{task.task_id}-{token}")
+                if previous_home is None:
+                    os.environ.pop("HOME", None)
+                else:
+                    os.environ["HOME"] = previous_home
+                if previous_eval_root is None:
+                    os.environ.pop("REMOTE_DESKTOP_EVAL_ROOT", None)
+                else:
+                    os.environ["REMOTE_DESKTOP_EVAL_ROOT"] = previous_eval_root
+
     def test_read_only_notes_checker_requires_notes_surface(self) -> None:
         task = next(task for task in run_suite.load_tasks("native") if task.task_id == "native-008")
         checker = task.value["checker"]

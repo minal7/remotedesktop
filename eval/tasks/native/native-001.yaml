@@ -2,6 +2,7 @@ id: "native-001"
 surface: app
 start: {"app":"TextEdit"}
 approval_policy: {"allow_start_interaction":true}
+setup: {"open_document":"Start.txt"}
 prompt: "Create a new plain-text document with exactly this line: Meeting notes for Monday. Save it to {eval_dir}/Meeting.txt."
 checker: {"type":"file_text","expect":{"path":"{eval_dir}/Meeting.txt","equals":"Meeting notes for Monday\n"}}
 max_steps: 14

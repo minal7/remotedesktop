@@ -132,11 +132,19 @@ def validate_task(value: Any, source: Path) -> Task:
                 raise EvalError(f"{source}: fixture approval requires an HTTP loopback origin")
     if "setup" in value:
         setup = value["setup"]
-        if value["surface"] != "app" or not isinstance(setup, dict) or setup.keys() - {"folders"}:
-            raise EvalError(f"{source}: native setup may contain only a folders list")
+        if value["surface"] != "app" or not isinstance(setup, dict) or setup.keys() - {"folders", "open_document"}:
+            raise EvalError(f"{source}: native setup may contain only folders and an optional blank document")
         folders = setup.get("folders", [])
         if not isinstance(folders, list) or any(not _safe_relative_path(folder) for folder in folders):
             raise EvalError(f"{source}: setup folders must be safe relative paths")
+        if "open_document" in setup:
+            relative = setup["open_document"]
+            if (not _safe_relative_path(relative) or len(Path(relative).parts) != 1
+                    or value.get("approval_policy", {}).get("allow_start_interaction") is not True):
+                raise EvalError(f"{source}: open_document must be a distinct simple scratch filename")
+            checker_text = json.dumps(checker, ensure_ascii=False)
+            if f"{{eval_dir}}/{relative}" in checker_text:
+                raise EvalError(f"{source}: blank start document must be distinct from checker output")
     return Task(source, value)
 def load_tasks(suite: str) -> list[Task]:
     directory = TASKS / suite
@@ -269,6 +277,14 @@ def _seed_native_task(task: Task, scratch: Path) -> None:
         if not destination.is_relative_to(scratch.resolve(strict=True)):
             raise EvalError("native setup path escaped the per-task scratch directory")
         destination.mkdir(mode=0o700, parents=True, exist_ok=False)
+    relative = task.value.get("setup", {}).get("open_document")
+    if relative:
+        destination = (scratch / relative).resolve(strict=False)
+        if not destination.is_relative_to(scratch.resolve(strict=True)):
+            raise EvalError("native setup document escaped the per-task scratch directory")
+        destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        descriptor = os.open(destination, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        os.close(descriptor)
 
 
 def _remove_native_scratch(directory: Path | None) -> None:
@@ -526,7 +542,8 @@ def authorized_fixture_submit_approved(records: list[dict[str, Any]], authorized
         for record in records if record.get("type") == "step" and record.get("gate", {}).get("decision") == "allowed" and record.get("execution", {}).get("status") == "ok"
     )
 
-def _run_driver(command: list[str], task: Task, policy: str, token: str, task_id: str, timeout: float) -> tuple[dict[str, Any] | None, str | None]:
+def _run_driver(command: list[str], task: Task, policy: str, token: str, task_id: str, timeout: float,
+                setup_document: Path | None = None) -> tuple[dict[str, Any] | None, str | None]:
     request = {
         "task_id": task_id,
         "prompt": task.value["prompt"],
@@ -535,6 +552,8 @@ def _run_driver(command: list[str], task: Task, policy: str, token: str, task_id
         "policy": policy,
     }
     task_approval_policy = task.value.get("approval_policy", {})
+    if setup_document is not None:
+        request["setup_document"] = str(setup_document.resolve(strict=True))
     # Retain the legacy YAML key for compatibility, but never forward it to the host.
     policy_keys = ("allow_fixture_interaction", "allow_fixture_commit")
     if task.value["surface"] == "app":
@@ -763,6 +782,9 @@ def _append_reported(rows: list[dict[str, Any]], row: dict[str, Any], output: Pa
 
 def _prepare_run(args: argparse.Namespace) -> tuple[list[Task], list[str], list[str], Any, Path] | None:
     tasks = smoke_tasks() if args.suite == "smoke" else load_tasks(args.suite)
+    if args.execution != "real-host" and any(task.value.get("setup", {}).get("open_document") for task in tasks):
+        print("BLOCKED: blank native document setup requires signed real-host execution.", file=sys.stderr)
+        return None
     driver_value = args.driver or os.environ.get("EVAL_DRIVER")
     reset_value = args.reset_command or os.environ.get("EVAL_VM_RESET")
     if not driver_value:
@@ -826,13 +848,32 @@ def run(args: argparse.Namespace) -> int:
                 _append_reported(results, row, output, args.execution)
             return 1
         clean_start_failed = False
+        fixture_cleanup_failed = False
         for run_index in range(args.runs):
             for task in tasks:
+                deferred_scratch: list[Path] = []
                 status = _run_one_task(task, run_index + 1, args, driver, reset, server, output, results,
-                    suite_apps=suite_apps if args.execution == "real-host" else None)
+                    suite_apps=suite_apps if args.execution == "real-host" else None,
+                    deferred_scratch=deferred_scratch)
+                setup_document = task.value.get("setup", {}).get("open_document")
+                if setup_document and deferred_scratch and results and results[-1].get("task_id") == task.task_id:
+                    results[-1]["setup_fixture"] = {"kind": "empty_document", "relative_path": setup_document}
+                    _write_report(output, results, args.execution)
+                if deferred_scratch:
+                    try:
+                        _close_suite_app_windows([task.value["start"]["app"]], driver)
+                    except EvalError as error:
+                        if results and results[-1].get("task_id") == task.task_id:
+                            results[-1]["cleanup_error"] = str(error)
+                            _write_report(output, results, args.execution)
+                        fixture_cleanup_failed = True
+                        status = "INFRA-BLOCKED (native fixture cleanup failed)"
+                    else:
+                        for directory in deferred_scratch:
+                            _remove_native_scratch(directory)
                 if status:
                     print(f"{task.value.get('suite', args.suite)}/{task.task_id}: {status}", flush=True)
-                if status == "INFRA-BLOCKED (clean start failed)":
+                if status in {"INFRA-BLOCKED (clean start failed)", "INFRA-BLOCKED (native fixture cleanup failed)"}:
                     clean_start_failed = True
                     break
             if clean_start_failed:
@@ -843,12 +884,13 @@ def run(args: argparse.Namespace) -> int:
             server.wait(timeout=3)
         _write_report(output, results, args.execution)
     print(f"Wrote {len(results)} result rows to {output}")
-    return 0 if results and all(row["status"] == "PASS" for row in results) else 1
+    return 0 if results and all(row["status"] == "PASS" for row in results) and not fixture_cleanup_failed else 1
 
 
 def _run_one_task(task: Task, run_number: int, args: argparse.Namespace, driver: list[str],
                   reset: list[str], server: Any, output: Path,
-                  results: list[dict[str, Any]], suite_apps: list[str] | None = None) -> str | None:
+                  results: list[dict[str, Any]], suite_apps: list[str] | None = None,
+                  deferred_scratch: list[Path] | None = None) -> str | None:
     token, task_id = uuid.uuid4().hex, str(uuid.uuid4())
     scratch: Path | None = None
     try:
@@ -862,6 +904,8 @@ def _run_one_task(task: Task, run_number: int, args: argparse.Namespace, driver:
                 return "INFRA-BLOCKED (clean start failed)"
         runtime_task = task
         if task.value["surface"] == "app":
+            if task.value.get("setup", {}).get("open_document") and args.execution != "real-host":
+                raise EvalError("Blank native document setup requires signed real-host execution")
             scratch = _native_scratch_directory(task.task_id, token)
             _seed_native_task(task, scratch)
             runtime_task = _materialize_native_task(task, scratch)
@@ -879,7 +923,11 @@ def _run_one_task(task: Task, run_number: int, args: argparse.Namespace, driver:
                                      task.tags, args.execution, reason, args.policy)
                 _append_reported(results, row, output, args.execution)
                 return "INFRA-BLOCKED (VM reset failed)"
-        response, error = _run_driver(driver, runtime_task, args.policy, token, task_id, args.timeout)
+        setup_document = (scratch / task.value["setup"]["open_document"]
+                          if scratch is not None and task.value.get("setup", {}).get("open_document") else None)
+        driver_options = {"setup_document": setup_document} if setup_document is not None else {}
+        response, error = _run_driver(driver, runtime_task, args.policy, token, task_id, args.timeout,
+                                      **driver_options)
         if error or response is None:
             row = task_infra_row(task.task_id, task.value.get("suite", args.suite), run_number,
                                  task.tags, args.execution, error or "driver unavailable", args.policy)
@@ -887,6 +935,8 @@ def _run_one_task(task: Task, run_number: int, args: argparse.Namespace, driver:
             return "INFRA-BLOCKED (driver unavailable)"
         row, status = _evaluate_response(runtime_task, response, token, task_id,
                                          run_number, args.execution, args.policy, scratch)
+        if setup_document is not None:
+            row["setup_fixture"] = {"kind": "empty_document", "relative_path": task.value["setup"]["open_document"]}
         _append_reported(results, row, output, args.execution)
         return status
     except EvalError as error:
@@ -895,7 +945,11 @@ def _run_one_task(task: Task, run_number: int, args: argparse.Namespace, driver:
         _append_reported(results, row, output, args.execution)
         return f"INFRA-BLOCKED ({error})"
     finally:
-        _remove_native_scratch(scratch)
+        if scratch and task.value.get("setup", {}).get("open_document"):
+            if deferred_scratch is not None:
+                deferred_scratch.append(scratch)
+        else:
+            _remove_native_scratch(scratch)
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--suite", choices=("basics", "native", "smoke", "safety"), required=True)

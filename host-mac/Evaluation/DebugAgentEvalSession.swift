@@ -43,6 +43,7 @@ final class DebugAgentEvalSession {
         }
         do {
             guard await waitForModel() else { throw AgentEvalWireError.modelUnavailable }
+            try await openSetupDocumentIfNeeded()
             let port = try await broker.start()
             let bootstrap = AgentEvalBootstrap(hostID: hostID, senderID: senderID,
                 sessionID: sessionID, pairingCode: pairingCode, port: port,
@@ -76,6 +77,29 @@ final class DebugAgentEvalSession {
         await manager.shutdown()
         broker.stop()
         bootstrapStore.remove()
+    }
+
+    private func openSetupDocumentIfNeeded() async throws {
+        guard let document = request.setupDocument, let appName = request.start.app,
+              let task = ProcessInfo.processInfo.environment["EVAL_TASK_ID"],
+              let token = ProcessInfo.processInfo.environment["EVAL_RUN_TOKEN"],
+              AgentEvalSetupDocument.authorized(path: document.path, taskID: task, token: token) != nil,
+              SuiteCleanStart.ownsNativeScratchDocument(url: document.absoluteString),
+              let app = try? AgentAppRegistry().resolve(appName) else {
+            if request.setupDocument != nil { throw AgentEvalWireError.invalidRequest }
+            return
+        }
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            NSWorkspace.shared.open([document], withApplicationAt: app.url,
+                configuration: NSWorkspace.OpenConfiguration()) { applications, error in
+                if let error { continuation.resume(throwing: error); return }
+                guard applications?.bundleIdentifier == app.bundleID else {
+                    continuation.resume(throwing: AgentEvalWireError.bootstrapFailure)
+                    return
+                }
+                continuation.resume()
+            }
+        }
     }
 
     private func waitForModel() async -> Bool {

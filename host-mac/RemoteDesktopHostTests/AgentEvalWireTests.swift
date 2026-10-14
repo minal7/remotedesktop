@@ -1,5 +1,6 @@
 #if DEBUG
 import ApplicationServices
+import Darwin
 import Foundation
 import XCTest
 @testable import RemoteDesktopHost
@@ -98,6 +99,76 @@ final class AgentEvalWireTests: XCTestCase {
             homeDirectory: home))
         let malformedRun = root.appendingPathComponent("task-short", isDirectory: true).appendingPathComponent("notes.txt")
         XCTAssertFalse(SuiteCleanStart.ownsNativeScratchDocument(url: malformedRun.absoluteString, homeDirectory: home))
+    }
+
+    func testSetupDocumentRequiresAnEmptyFileInTheCurrentPrivateRun() throws {
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).resolvingSymlinksInPath()
+        let task = "native-001"
+        let token = "0123456789abcdef0123456789abcdef"
+        let root = home.appendingPathComponent("AgentEval", isDirectory: true)
+        let run = root.appendingPathComponent("\(task)-\(token)", isDirectory: true)
+        try FileManager.default.createDirectory(at: run, withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700])
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: root.path)
+        let document = run.appendingPathComponent("Start.txt")
+        FileManager.default.createFile(atPath: document.path, contents: Data(), attributes: [.posixPermissions: 0o600])
+        defer { try? FileManager.default.removeItem(at: home) }
+
+        XCTAssertEqual(AgentEvalSetupDocument.authorized(path: document.path, taskID: task, token: token,
+            homeDirectory: home), document)
+        XCTAssertNil(AgentEvalSetupDocument.authorized(path: document.path, taskID: task, token: String(repeating: "a", count: 32),
+            homeDirectory: home))
+        XCTAssertNil(AgentEvalSetupDocument.authorized(path: document.path, taskID: "other", token: token,
+            homeDirectory: home))
+        let outside = home.appendingPathComponent("Start.txt")
+        FileManager.default.createFile(atPath: outside.path, contents: Data())
+        XCTAssertNil(AgentEvalSetupDocument.authorized(path: outside.path, taskID: task, token: token,
+            homeDirectory: home))
+        let link = run.appendingPathComponent("Linked.txt")
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: document)
+        XCTAssertNil(AgentEvalSetupDocument.authorized(path: link.path, taskID: task, token: token,
+            homeDirectory: home))
+
+        try Data("not blank".utf8).write(to: document)
+        XCTAssertNil(AgentEvalSetupDocument.authorized(path: document.path, taskID: task, token: token,
+            homeDirectory: home))
+    }
+
+    func testSetupDocumentRequestMustMatchRunIdentityAndNativeStart() throws {
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).resolvingSymlinksInPath()
+        let task = "native-001"
+        let token = "0123456789abcdef0123456789abcdef"
+        let root = home.appendingPathComponent("AgentEval", isDirectory: true)
+        let run = root.appendingPathComponent("\(task)-\(token)", isDirectory: true)
+        try FileManager.default.createDirectory(at: run, withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700])
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: root.path)
+        let document = run.appendingPathComponent("Start.txt")
+        FileManager.default.createFile(atPath: document.path, contents: Data(), attributes: [.posixPermissions: 0o600])
+        defer { try? FileManager.default.removeItem(at: home) }
+
+        let oldTask = getenv("EVAL_TASK_ID").map { String(cString: $0) }
+        let oldToken = getenv("EVAL_RUN_TOKEN").map { String(cString: $0) }
+        setenv("EVAL_TASK_ID", task, 1)
+        setenv("EVAL_RUN_TOKEN", token, 1)
+        defer {
+            if let oldTask { setenv("EVAL_TASK_ID", oldTask, 1) } else { unsetenv("EVAL_TASK_ID") }
+            if let oldToken { setenv("EVAL_RUN_TOKEN", oldToken, 1) } else { unsetenv("EVAL_RUN_TOKEN") }
+        }
+        let json = try JSONSerialization.data(withJSONObject: [
+            "task_id": "driver-id", "prompt": "Create a note", "start": ["app": "Notes"],
+            "max_steps": 3, "policy": "fara15-4b", "approval_policy": ["allow_start_interaction": true],
+            "setup_document": document.path,
+        ])
+        XCTAssertEqual(try AgentEvalRequest.decodeStrict(json, homeDirectory: home).setupDocument, document)
+
+        let webJSON = try JSONSerialization.data(withJSONObject: [
+            "task_id": "driver-id", "prompt": "Read", "start": ["url": "https://example.test/"],
+            "max_steps": 3, "policy": "fara15-4b", "setup_document": document.path,
+        ])
+        XCTAssertThrowsError(try AgentEvalRequest.decodeStrict(webJSON, homeDirectory: home))
+        unsetenv("EVAL_RUN_TOKEN")
+        XCTAssertThrowsError(try AgentEvalRequest.decodeStrict(json, homeDirectory: home))
     }
 
     @MainActor
