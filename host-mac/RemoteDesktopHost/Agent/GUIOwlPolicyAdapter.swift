@@ -7,7 +7,7 @@ enum GUIOwlPolicyAdapter {
     static let maximumWheelNotches = 10_000
     private static let maximumHostScrollAmount = 10_000.0
 
-    enum Failure: Error { case invalidCompletion }
+    enum Failure: Error { case invalidCompletion, unsupportedProposal(String) }
 
     static func canonicalActionJSON(
         fromCompletion raw: String,
@@ -123,7 +123,7 @@ enum GUIOwlPolicyAdapter {
             guard Set(keys.map { $0.lowercased() }).count == keys.count else { throw Failure.invalidCompletion }
             let chord = keys.joined(separator: "+")
             do { _ = try AgentKeyStroke.parse(chord) }
-            catch { return .fail(reason: "This key combination is not supported by the host.") }
+            catch { throw Failure.unsupportedProposal("This key combination is not supported by the host.") }
             return .key(chord: chord)
         case "scroll":
             try requireKeys(["action", "pixels"], optional: ["coordinate"])
@@ -157,16 +157,16 @@ enum GUIOwlPolicyAdapter {
         case "mouse_move":
             try requireKeys(["action", "coordinate"])
             _ = try point()
-            return .fail(reason: "Moving the pointer without a click is unavailable in the host action contract.")
+            throw Failure.unsupportedProposal("Moving the pointer without a click is unavailable in the host action contract.")
         case "left_click_drag":
             try requireKeys(["action", "coordinate"])
             _ = try point()
-            return .fail(reason: "The host action contract requires both drag endpoints; GUI-Owl supplied only a destination.")
+            throw Failure.unsupportedProposal("The host action contract requires both drag endpoints; GUI-Owl supplied only a destination.")
         case "hscroll":
             try requireKeys(["action", "pixels"])
             let pixels = try number(arguments["pixels"])
             guard pixels.isFinite, abs(pixels) <= Double(maximumWheelNotches) else { throw Failure.invalidCompletion }
-            return .fail(reason: "Horizontal scrolling is unsupported by the pinned GUI-Owl PC runner.")
+            throw Failure.unsupportedProposal("Horizontal scrolling is unsupported by the pinned GUI-Owl PC runner.")
         default:
             throw Failure.invalidCompletion
         }

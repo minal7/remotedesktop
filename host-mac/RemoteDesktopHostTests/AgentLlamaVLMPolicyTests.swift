@@ -13,7 +13,7 @@ final class AgentLlamaVLMPolicyTests: XCTestCase {
 
         let output = try await policy.propose(observation)
 
-        XCTAssertEqual(policy.promptVersion, "v1-fara-native-content")
+        XCTAssertEqual(policy.promptVersion, "v1-fara-native-coordinates-compact-history")
         XCTAssertEqual(output.rawOutput, raw)
         XCTAssertEqual(output.action, .click(target: .point(x: 1, y: 2), button: nil, count: nil))
         let input = try XCTUnwrap(transport.inputs.first)
@@ -24,7 +24,7 @@ final class AgentLlamaVLMPolicyTests: XCTestCase {
         XCTAssertTrue(nativePrompt.contains("<tool_call>"))
         XCTAssertEqual(input.messages.map(\.role), [.system, .user])
         XCTAssertTrue(input.messages[0].content.textValue?.contains("<tools>") == true)
-        XCTAssertTrue(input.messages[1].content.textValue?.contains(#""elements":[{"bbox":[1,2,30,12]"#) == true)
+        XCTAssertTrue(input.messages[1].content.textValue?.contains(#""elements":[{"bbox":[250,250,500,500]"#) == true)
         XCTAssertEqual(input.messages[1].content.imageValues, [png])
         XCTAssertFalse(input.messages[1].content.textValue?.contains(png.base64EncodedString()) == true)
         XCTAssertEqual(transport.callCount, 1)
@@ -55,13 +55,9 @@ final class AgentLlamaVLMPolicyTests: XCTestCase {
             (#"{"action":"key","keys":["CTRL","L"]}"#, #"{"type":"key","chord":"CTRL+L"}"#),
             (#"{"action":"scroll","pixels":40}"#, #"{"type":"scroll","direction":"up","amount":40}"#),
             (#"{"action":"hscroll","pixels":-40}"#, #"{"type":"scroll","direction":"left","amount":40}"#),
-            (#"{"action":"left_click_drag","coordinate":[8,9]}"#, #"{"type":"fail","reason":"This host action contract requires both drag endpoints; Fara supplied only the destination."}"#),
             (#"{"action":"visit_url","url":"https://example.test/"}"#, #"{"type":"open_url","url":"https://example.test/"}"#),
             (#"{"action":"wait","time":1}"#, #"{"type":"wait","seconds":1}"#),
             (#"{"action":"ask_user_question","question":"Choose one"}"#, #"{"type":"ask_user","question":"Choose one"}"#),
-            (#"{"action":"web_search","query":"weather"}"#, #"{"type":"fail","reason":"Search is unavailable in the current computer-use action contract."}"#),
-            (#"{"action":"read_page_answer_question","question":"What is shown?"}"#, #"{"type":"fail","reason":"Page-reading actions are unavailable in the current computer-use action contract."}"#),
-            (#"{"action":"pause_and_memorize_fact","fact":"remember this"}"#, #"{"type":"fail","reason":"Memory actions are unavailable in the current computer-use action contract."}"#),
             (#"{"action":"terminate","answer":"Complete"}"#, #"{"type":"done","answer":"Complete"}"#),
         ]
         for (native, expected) in cases {
@@ -71,6 +67,66 @@ final class AgentLlamaVLMPolicyTests: XCTestCase {
                            try JSONSerialization.jsonObject(with: Data(expected.utf8)) as? NSDictionary)
             XCTAssertNoThrow(try JSONDecoder().decode(AgentAction.self, from: Data(decoded.utf8)))
         }
+    }
+
+    func testUnsupportedFaraProposalsAreRecoverablePolicyRejections() async throws {
+        let cases: [(String, String)] = [
+            (#"{"action":"mouse_move","coordinate":[502,496]}"#, "Moving the pointer without a click is not available in this host action contract."),
+            (#"{"action":"left_click_drag","coordinate":[8,9]}"#, "This host action contract requires both drag endpoints; Fara supplied only the destination."),
+            (#"{"action":"visit_url","url":"file:///tmp/example.txt"}"#, "Only absolute HTTP and HTTPS URLs are supported."),
+            (#"{"action":"web_search","query":"weather"}"#, "Search is unavailable in the current computer-use action contract."),
+            (#"{"action":"read_page_answer_question","question":"What is shown?"}"#, "Page-reading actions are unavailable in the current computer-use action contract."),
+            (#"{"action":"pause_and_memorize_fact","fact":"remember this"}"#, "Memory actions are unavailable in the current computer-use action contract."),
+        ]
+        for (arguments, reason) in cases {
+            let raw = try completion(arguments: arguments)
+            let transport = RecordingAgentVLMTransport(response: raw)
+            let (policy, observation, _) = try fixture(transport: transport)
+
+            let output = try await policy.propose(observation)
+
+            XCTAssertEqual(output.rawOutput, raw)
+            XCTAssertNil(output.action)
+            XCTAssertEqual(output.rejectionReason, reason)
+            XCTAssertEqual(transport.callCount, 1)
+        }
+    }
+
+    func testUnsupportedGUIOwlProposalsAreRecoverablePolicyRejections() async throws {
+        let model = AgentPolicyModel.guiOwl15_4b
+        let cases: [(String, String)] = [
+            (#"{"action":"mouse_move","coordinate":[502,496]}"#, "Moving the pointer without a click is unavailable in the host action contract."),
+            (#"{"action":"left_click_drag","coordinate":[8,9]}"#, "The host action contract requires both drag endpoints; GUI-Owl supplied only a destination."),
+            (#"{"action":"hscroll","pixels":4}"#, "Horizontal scrolling is unsupported by the pinned GUI-Owl PC runner."),
+        ]
+        for (arguments, reason) in cases {
+            let raw = try completion(arguments: arguments, content: "Action: Try the requested operation.")
+            let transport = RecordingAgentVLMTransport(response: raw)
+            let (_, observation, _) = try fixture(transport: transport)
+            let policy = try LlamaVLMPolicy(transport: transport, prompt: promptText(), model: model)
+
+            let output = try await policy.propose(observation)
+
+            XCTAssertEqual(output.rawOutput, raw)
+            XCTAssertNil(output.action)
+            XCTAssertEqual(output.rejectionReason, reason)
+            XCTAssertEqual(transport.callCount, 1)
+        }
+    }
+
+    func testExplicitNativeTerminalFailureRemainsAFailureAction() async throws {
+        let model = AgentPolicyModel.guiOwl15_4b
+        let raw = try completion(arguments: #"{"action":"terminate","status":"failure"}"#,
+            content: "Action: Report failure.")
+        let transport = RecordingAgentVLMTransport(response: raw)
+        let (_, observation, _) = try fixture(transport: transport)
+        let policy = try LlamaVLMPolicy(transport: transport, prompt: promptText(), model: model)
+
+        let output = try await policy.propose(observation)
+
+        XCTAssertEqual(output.rawOutput, raw)
+        XCTAssertEqual(output.action, .fail(reason: "The model reported task failure."))
+        XCTAssertNil(output.rejectionReason)
     }
 
     func testUiTarsNativeTextAndResizedCoordinatesAreStrictlyAdapted() throws {
@@ -146,6 +202,80 @@ final class AgentLlamaVLMPolicyTests: XCTestCase {
                        try JSONSerialization.jsonObject(with: Data(#"{"type":"click","target":{"x":1999,"y":999}}"#.utf8)) as? NSDictionary)
         let invalid = try completion(arguments: #"{"action":"left_click","coordinate":[1001,10]}"#)
         XCTAssertThrowsError(try FaraPolicyAdapter.canonicalActionJSON(fromCompletion: invalid, imageSize: (2_000, 1_000)))
+    }
+
+    func testModelFacingBoundingBoxesUseNativeFramesAndDecodeBack() async throws {
+        let dimensions = [(width: 1_280, height: 827), (width: 2_048, height: 1_323)]
+        for model in AgentPolicyModel.allCases {
+            for size in dimensions {
+                let png = try makePNG(width: size.width, height: size.height)
+                let box = AgentBoundingBox(x: Double(size.width) * 0.271,
+                    y: Double(size.height) * 0.237, width: Double(size.width) * 0.137,
+                    height: Double(size.height) * 0.119)
+                let observation = AgentObservation(task: "Click the marked control",
+                    surface: .app(bundleID: "example.editor", title: nil),
+                    screenshot: png.base64EncodedString(),
+                    elements: [.init(id: 17, role: "button", name: "Target", value: nil,
+                        state: ["enabled"], bbox: box, inView: true)],
+                    focus: nil, history: [], budget: .init(step: 0, maxSteps: 5))
+                let canonicalJSON = try LlamaVLMPolicy.observationJSON(observation)
+                let canonical = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(canonicalJSON.utf8)) as? [String: Any])
+                let canonicalElements = try XCTUnwrap(canonical["elements"] as? [[String: Any]])
+                XCTAssertEqual(canonicalElements.first?["bbox"] as? [Double], [box.x, box.y, box.width, box.height])
+
+                let expected: [Double]
+                if model == .uiTars15_7b {
+                    let resized = try UIActionTextParser.resizedSize(for: size)
+                    expected = [box.x * Double(resized.width) / Double(size.width),
+                        box.y * Double(resized.height) / Double(size.height),
+                        box.width * Double(resized.width) / Double(size.width),
+                        box.height * Double(resized.height) / Double(size.height)]
+                } else {
+                    expected = [box.x * 1_000 / Double(size.width), box.y * 1_000 / Double(size.height),
+                        box.width * 1_000 / Double(size.width), box.height * 1_000 / Double(size.height)]
+                }
+                let centerX = expected[0] + expected[2] / 2
+                let centerY = expected[1] + expected[3] / 2
+                let response: String
+                switch model {
+                case .fara15_4b:
+                    response = try completion(arguments: #"{"action":"left_click","coordinate":[\#(centerX),\#(centerY)]}"#)
+                case .uiTars15_7b:
+                    response = try uiTarsCompletion("Thought: click the marked control.\nAction: click(start_box='(\(centerX),\(centerY))')")
+                case .guiOwl15_4b:
+                    response = try completion(arguments: #"{"action":"click","coordinate":[\#(centerX),\#(centerY)]}"#,
+                        content: "Action: click the marked control.")
+                }
+                let transport = RecordingAgentVLMTransport(response: response)
+                let policy = try LlamaVLMPolicy(transport: transport, prompt: promptText(), model: model)
+                let output = try await policy.propose(observation)
+                guard case .click(.point(let x, let y), _, _)? = output.action else {
+                    XCTFail("Expected a native center click from \(model)")
+                    continue
+                }
+                XCTAssertGreaterThanOrEqual(x, box.x)
+                XCTAssertLessThanOrEqual(x, box.x + box.width)
+                XCTAssertGreaterThanOrEqual(y, box.y)
+                XCTAssertLessThanOrEqual(y, box.y + box.height)
+
+                let request = try XCTUnwrap(transport.inputs.first)
+                XCTAssertEqual(request.imageCount, 1)
+                let userText = try XCTUnwrap(request.messages.first(where: { $0.role == .user })?.content.textValue)
+                let requestJSON = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(userText.utf8)) as? [String: Any])
+                let requestElements = try XCTUnwrap(requestJSON["elements"] as? [[String: Any]])
+                let actual = try XCTUnwrap(requestElements.first?["bbox"] as? [Double])
+                XCTAssertEqual(actual.count, expected.count)
+                for (actualValue, expectedValue) in zip(actual, expected) {
+                    XCTAssertEqual(actualValue, expectedValue, accuracy: 1e-9)
+                }
+                XCTAssertTrue(request.messages.first?.content.textValue?.contains("bounding boxes") == true)
+                if size.width == 2_048 {
+                    let resized = try UIActionTextParser.resizedSize(for: size)
+                    XCTAssertLessThanOrEqual(resized.width * resized.height, 1_536 * 28 * 28)
+                    XCTAssertGreaterThan(size.width * size.height, 1_536 * 28 * 28)
+                }
+            }
+        }
     }
 
     func testUiTarsCompletionRejectsWrongModelAndMultipleChoices() throws {
@@ -277,7 +407,7 @@ final class AgentLlamaVLMPolicyTests: XCTestCase {
         XCTAssertNil(body["response_format"])
         let messages = try XCTUnwrap(body["messages"] as? [[String: Any]])
         XCTAssertEqual(messages.map { $0["role"] as? String }, ["system", "user"])
-        XCTAssertEqual(messages[0]["content"] as? String, nativePrompt)
+        XCTAssertEqual(messages[0]["content"] as? String, LlamaVLMPolicy.nativePrompt(nativePrompt, model: model))
     }
 
     func testGUIOwlNativeMessageContentIsTheAssistantHistoryTurn() async throws {
@@ -286,7 +416,8 @@ final class AgentLlamaVLMPolicyTests: XCTestCase {
                                                       subdirectory: "policy/prompts"))
         XCTAssertEqual(promptURL.lastPathComponent, "gui-owl-1.5.txt")
         let nativePrompt = try String(contentsOf: promptURL, encoding: .utf8)
-        XCTAssertEqual(LlamaVLMPolicy.nativePrompt(nativePrompt, model: model), nativePrompt)
+        XCTAssertTrue(LlamaVLMPolicy.nativePrompt(nativePrompt, model: model).contains(
+            "[x, y, width, height] in GUI-Owl's normalized 0–1000 display coordinates"))
 
         let rawContent = try completion(arguments: #"{"action":"wait","time":1}"#, content: "Action: Wait.")
         let transport = RecordingAgentVLMTransport(responses: [rawContent, rawContent])
@@ -301,7 +432,8 @@ final class AgentLlamaVLMPolicyTests: XCTestCase {
         _ = try await policy.propose(next)
 
         let messages = try XCTUnwrap(transport.inputs.last?.messages)
-        XCTAssertEqual(messages.first(where: { $0.role == .system })?.content, [.text(nativePrompt)])
+        XCTAssertEqual(messages.first(where: { $0.role == .system })?.content,
+            [.text(LlamaVLMPolicy.nativePrompt(nativePrompt, model: model))])
         XCTAssertEqual(messages.filter { $0.role == .assistant }.map(\.content), [[.text(rawContent)]])
         XCTAssertEqual(messages.map(\.role), [.system, .user, .assistant, .user])
     }
@@ -385,7 +517,7 @@ final class AgentLlamaVLMPolicyTests: XCTestCase {
                 history: history, budget: .init(step: index, maxSteps: 40))
             _ = try await policy.propose(input)
             let sent = try XCTUnwrap(transport.inputs.last)
-            XCTAssertLessThanOrEqual(sent.imageCount, 3)
+            XCTAssertEqual(sent.imageCount, min(index, 2) + 1)
             XCTAssertLessThanOrEqual(sent.messages.filter { $0.role == .assistant }.count, 8)
             XCTAssertFalse(sent.messages.flatMap(\.content).textValues.contains { $0.contains("result-0") } && index >= 9)
             if index == 6 {
@@ -397,9 +529,14 @@ final class AgentLlamaVLMPolicyTests: XCTestCase {
                 XCTAssertEqual(sent.messages.filter { $0.role == .assistant }.count, 6)
             }
             if index == 11 {
-                let earliestPriorUser = try XCTUnwrap(sent.messages.first { $0.role == .user })
-                XCTAssertTrue(earliestPriorUser.content.imageValues.isEmpty)
-                XCTAssertFalse(earliestPriorUser.content.textValue?.contains("Continue") == true)
+                let userTurns = sent.messages.filter { $0.role == .user }
+                for prior in userTurns.dropLast() {
+                    let text = try XCTUnwrap(prior.content.textValue)
+                    XCTAssertFalse(text.contains("\"elements\""))
+                    XCTAssertFalse(text.contains("\"focus\""))
+                }
+                XCTAssertTrue(try XCTUnwrap(userTurns.last?.content.textValue).contains("\"elements\""))
+                XCTAssertFalse(userTurns.first?.content.textValue?.contains("Continue") == true)
             }
             if index == 5 { await policy.suspend() }
             if index == 5 {
@@ -539,7 +676,7 @@ final class AgentLlamaVLMPolicyTests: XCTestCase {
         let observation = AgentObservation(task: "Complete a generic task",
             surface: .web(url: "https://example.test/", title: nil), screenshot: png.base64EncodedString(),
             elements: [.init(id: 1, role: "button", name: "Continue", value: nil, state: ["enabled"],
-                             bbox: .init(x: 1, y: 2, width: 30, height: 12), inView: true)],
+                             bbox: .init(x: 1, y: 1, width: 2, height: 2), inView: true)],
             focus: nil, history: [], budget: .init(step: 0, maxSteps: 40))
         let promptURL = try XCTUnwrap(Bundle.main.url(forResource: "v1", withExtension: "txt",
                                                       subdirectory: "policy/prompts"))
@@ -583,6 +720,15 @@ final class AgentLlamaVLMPolicyTests: XCTestCase {
         for y in 0..<4 {
             for x in 0..<4 { image.setColor(color, atX: x, y: y) }
         }
+        return try XCTUnwrap(image.representation(using: .png, properties: [:]))
+    }
+
+    private func makePNG(width: Int, height: Int) throws -> Data {
+        let image = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: width, pixelsHigh: height,
+            bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+            colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
+        let bitmap = try XCTUnwrap(image.bitmapData)
+        bitmap.update(repeating: 0xff, count: image.bytesPerRow * height)
         return try XCTUnwrap(image.representation(using: .png, properties: [:]))
     }
 }

@@ -27,7 +27,9 @@ enum UIActionTextParser {
               contentLines.last == actionLines[0], actionLines[0].hasPrefix("Action: ") else {
             throw FaraPolicyAdapter.Failure.invalidCompletion
         }
-        let line = String(actionLines[0].dropFirst("Action: ".count))
+        guard let line = canonicalNamedArguments(String(actionLines[0].dropFirst("Action: ".count))) else {
+            throw FaraPolicyAdapter.Failure.invalidCompletion
+        }
         let resized = try resizedSize(for: imageSize)
         let object: [String: Any]
         if let match = capture(line, pattern: #"^(click|left_double|right_single)\(start_box='(?:<\|box_start\|>)?\(([-+0-9.]+),\s*([-+0-9.]+)\)(?:<\|box_end\|>)?'\)$"#),
@@ -38,9 +40,9 @@ enum UIActionTextParser {
             var click: [String: Any] = ["type": "click", "target": target]
             click["button"] = button; click["count"] = count
             object = click.compactMapValues { $0 }
-        } else if let match = capture(line, pattern: #"^drag\(start_box='(?:<\|box_start\|>)?\(([-+0-9.]+),\s*([-+0-9.]+)\)(?:<\|box_end\|>)?',\s*end_box='(?:<\|box_start\|>)?\(([-+0-9.]+),\s*([-+0-9.]+)\)(?:<\|box_end\|>)?'\)$"#),
-                  let x1 = Double(match[1]), let y1 = Double(match[2]),
-                  let x2 = Double(match[3]), let y2 = Double(match[4]) {
+        } else if let match = capture(line, pattern: #"^drag\(end_box='(?:<\|box_start\|>)?\(([-+0-9.]+),\s*([-+0-9.]+)\)(?:<\|box_end\|>)?',\s*start_box='(?:<\|box_start\|>)?\(([-+0-9.]+),\s*([-+0-9.]+)\)(?:<\|box_end\|>)?'\)$"#),
+                  let x1 = Double(match[3]), let y1 = Double(match[4]),
+                  let x2 = Double(match[1]), let y2 = Double(match[2]) {
             object = ["type": "drag", "from": try scaledPoint(x1, y1, resized: resized, original: imageSize),
                       "to": try scaledPoint(x2, y2, resized: resized, original: imageSize)]
         } else if let match = capture(line, pattern: #"^hotkey\(key='((?:\\.|[^'])*)'\)$"#) {
@@ -48,9 +50,9 @@ enum UIActionTextParser {
         } else if let match = capture(line, pattern: #"^type\(content='((?:\\.|[^'])*)'(?:,\s*mode='(replace|append)')?\)$"#) {
             let mode = match.count > 2 && !match[2].isEmpty ? match[2] : "append"
             object = ["type": "type", "text": try decodePythonString(match[1]), "mode": mode]
-        } else if let match = capture(line, pattern: #"^scroll\(start_box='(?:<\|box_start\|>)?\(([-+0-9.]+),\s*([-+0-9.]+)\)(?:<\|box_end\|>)?',\s*direction='(up|down|left|right)'\)$"#),
-                  let x = Double(match[1]), let y = Double(match[2]) {
-            object = ["type": "scroll", "direction": match[3], "amount": max(1, imageSize.height / 2),
+        } else if let match = capture(line, pattern: #"^scroll\(direction='(up|down|left|right)',\s*start_box='(?:<\|box_start\|>)?\(([-+0-9.]+),\s*([-+0-9.]+)\)(?:<\|box_end\|>)?'\)$"#),
+                  let x = Double(match[2]), let y = Double(match[3]) {
+            object = ["type": "scroll", "direction": match[1], "amount": max(1, imageSize.height / 2),
                       "target": try scaledPoint(x, y, resized: resized, original: imageSize)]
         } else if line == "wait()" {
             object = ["type": "wait", "seconds": 5]
@@ -62,18 +64,18 @@ enum UIActionTextParser {
             object = ["type": "open_url", "url": try decodePythonString(match[1])]
         } else if let match = capture(line, pattern: #"^open_app\(name='((?:\\.|[^'])*)'\)$"#) {
             object = ["type": "open_app", "name": try decodePythonString(match[1])]
-        } else if let match = capture(line, pattern: #"^find_files\(query='((?:\\.|[^'])*)'(?:,\s*kind='((?:\\.|[^'])*)')?(?:,\s*modified_after='((?:\\.|[^'])*)')?\)$"#) {
-            var value: [String: Any] = ["type": "find_files", "query": try decodePythonString(match[1])]
-            if !match[2].isEmpty { value["kind"] = try decodePythonString(match[2]) }
-            if !match[3].isEmpty { value["modified_after"] = try decodePythonString(match[3]) }
+        } else if let match = capture(line, pattern: #"^find_files\((?:kind='((?:\\.|[^'])*)',\s*)?(?:modified_after='((?:\\.|[^'])*)',\s*)?query='((?:\\.|[^'])*)'\)$"#) {
+            var value: [String: Any] = ["type": "find_files", "query": try decodePythonString(match[3])]
+            if !match[1].isEmpty { value["kind"] = try decodePythonString(match[1]) }
+            if !match[2].isEmpty { value["modified_after"] = try decodePythonString(match[2]) }
             object = value
-        } else if let match = capture(line, pattern: #"^select_option\(start_box='(?:<\|box_start\|>)?\(([-+0-9.]+),\s*([-+0-9.]+)\)(?:<\|box_end\|>)?',\s*option='((?:\\.|[^'])*)'\)$"#),
-                  let x = Double(match[1]), let y = Double(match[2]) {
+        } else if let match = capture(line, pattern: #"^select_option\(option='((?:\\.|[^'])*)',\s*start_box='(?:<\|box_start\|>)?\(([-+0-9.]+),\s*([-+0-9.]+)\)(?:<\|box_end\|>)?'\)$"#),
+                  let x = Double(match[2]), let y = Double(match[3]) {
             object = ["type": "select", "target": try scaledPoint(x, y, resized: resized, original: imageSize),
-                      "option": try decodePythonString(match[3])]
-        } else if let match = capture(line, pattern: #"^set_files\(start_box='(?:<\|box_start\|>)?\(([-+0-9.]+),\s*([-+0-9.]+)\)(?:<\|box_end\|>)?',\s*file_ids='((?:\\.|[^'])*)'\)$"#),
-                  let x = Double(match[1]), let y = Double(match[2]) {
-            let json = try decodePythonString(match[3])
+                      "option": try decodePythonString(match[1])]
+        } else if let match = capture(line, pattern: #"^set_files\(file_ids='((?:\\.|[^'])*)',\s*start_box='(?:<\|box_start\|>)?\(([-+0-9.]+),\s*([-+0-9.]+)\)(?:<\|box_end\|>)?'\)$"#),
+                  let x = Double(match[2]), let y = Double(match[3]) {
+            let json = try decodePythonString(match[1])
             guard let data = json.data(using: .utf8),
                   let ids = try JSONSerialization.jsonObject(with: data) as? [String], !ids.isEmpty,
                   ids.count <= 16, ids.allSatisfy({ !$0.isEmpty && $0.utf8.count <= 256 && !$0.contains("/") && !$0.contains("\\") }) else {
@@ -117,6 +119,64 @@ enum UIActionTextParser {
         return (0..<match.numberOfRanges).map { index in
             Range(match.range(at: index), in: source).map { String(source[$0]) } ?? ""
         }
+    }
+
+    private static func canonicalNamedArguments(_ source: String) -> String? {
+        guard let open = source.firstIndex(of: "("), source.last == ")" else { return nil }
+        let name = String(source[..<open])
+        guard !name.isEmpty, name.first?.isLetter == true || name.first == "_",
+              name.allSatisfy({ $0.isLetter || $0.isNumber || $0 == "_" }) else { return nil }
+        var index = source.index(after: open)
+        let end = source.index(before: source.endIndex)
+        var arguments: [String: String] = [:]
+        skipWhitespace(source, &index, end)
+        while index < end {
+            guard let key = parseIdentifier(source, &index, end), arguments[key] == nil else { return nil }
+            skipWhitespace(source, &index, end)
+            guard index < end, source[index] == "=" else { return nil }
+            index = source.index(after: index)
+            skipWhitespace(source, &index, end)
+            guard index < end, source[index] == "'" else { return nil }
+            index = source.index(after: index)
+            let start = index
+            var closed = false
+            while index < end {
+                let character = source[index]
+                index = source.index(after: index)
+                if character == "'" { closed = true; break }
+                if character == "\\" {
+                    guard index < end, "nrt\\'\"".contains(source[index]) else { return nil }
+                    index = source.index(after: index)
+                }
+            }
+            guard closed else { return nil }
+            arguments[key] = String(source[start..<source.index(before: index)])
+            skipWhitespace(source, &index, end)
+            if index == end { break }
+            guard source[index] == "," else { return nil }
+            index = source.index(after: index)
+            skipWhitespace(source, &index, end)
+            guard index < end else { return nil }
+        }
+        let normalized = arguments.keys.sorted().compactMap { key in
+            arguments[key].map { "\(key)='\($0)'" }
+        }.joined(separator: ", ")
+        return "\(name)(\(normalized))"
+    }
+
+    private static func parseIdentifier(_ source: String, _ index: inout String.Index,
+                                        _ end: String.Index) -> String? {
+        let start = index
+        guard index < end, source[index].isLetter || source[index] == "_" else { return nil }
+        index = source.index(after: index)
+        while index < end, source[index].isLetter || source[index].isNumber || source[index] == "_" {
+            index = source.index(after: index)
+        }
+        return String(source[start..<index])
+    }
+
+    private static func skipWhitespace(_ source: String, _ index: inout String.Index, _ end: String.Index) {
+        while index < end, source[index].isWhitespace { index = source.index(after: index) }
     }
 
     private static func decodePythonString(_ escaped: String) throws -> String {

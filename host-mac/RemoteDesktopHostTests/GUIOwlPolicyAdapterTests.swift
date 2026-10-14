@@ -80,21 +80,14 @@ final class GUIOwlPolicyAdapterTests: XCTestCase {
             .askUser(question: "Please perform the requested manual operation.", choices: nil))
     }
 
-    func testActionsWithoutARepresentableHostEffectFailWithoutInventingClicks() throws {
+    func testUnsupportedPointerAndWheelActionsAreRejectedWithoutInventingClicks() throws {
         for arguments: [String: Any] in [
             ["action": "mouse_move", "coordinate": [500, 500]],
             ["action": "left_click_drag", "coordinate": [500, 500]],
+            ["action": "hscroll", "pixels": 4],
         ] {
-            guard case .fail(let reason) = try action(completion(arguments)) else {
-                return XCTFail("Unsupported pointer-only action must fail honestly")
-            }
-            XCTAssertFalse(reason.isEmpty)
+            XCTAssertThrowsError(try action(completion(arguments)))
         }
-
-        guard case .fail(let horizontalReason) = try action(completion(["action": "hscroll", "pixels": 4])) else {
-            return XCTFail("The pinned PC runner does not implement hscroll")
-        }
-        XCTAssertFalse(horizontalReason.isEmpty)
     }
 
     func testMalformedToolCallsAndUnboundedValuesAreRejected() throws {

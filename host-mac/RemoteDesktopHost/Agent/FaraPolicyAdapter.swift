@@ -23,7 +23,7 @@ enum FaraPolicyAdapter {
         try canonicalActionJSON(fromCompletion: raw, imageSize: (16_384, 16_384))
     }
 
-    enum Failure: Error { case invalidCompletion }
+    enum Failure: Error { case invalidCompletion, unsupportedProposal(String) }
 
     private static func canonicalAction(_ proposal: ComputerUseFaraAction,
                                         imageSize: (width: Int, height: Int)) throws -> AgentAction {
@@ -49,9 +49,9 @@ enum FaraPolicyAdapter {
             case .doubleClick: return .click(target: target, button: nil, count: 2)
             case .tripleClick: return .click(target: target, button: nil, count: 3)
             case .drag:
-                return .fail(reason: "This host action contract requires both drag endpoints; Fara supplied only the destination.")
+                throw Failure.unsupportedProposal("This host action contract requires both drag endpoints; Fara supplied only the destination.")
             case .mouseMove:
-                return .fail(reason: "Moving the pointer without a click is not available in this host action contract.")
+                throw Failure.unsupportedProposal("Moving the pointer without a click is not available in this host action contract.")
             }
         case .typeText(let text): return .type(target: nil, text: text, mode: .append)
         case .key(let keys): return .key(chord: keys.joined(separator: "+"))
@@ -60,14 +60,14 @@ enum FaraPolicyAdapter {
             return try scroll(horizontal, pixels, point(position))
         case .visitURL(let url): return .openURL(url: url.absoluteString)
         case .unsupportedNavigation:
-            return .fail(reason: "Only absolute HTTP and HTTPS URLs are supported.")
+            throw Failure.unsupportedProposal("Only absolute HTTP and HTTPS URLs are supported.")
         case .historyBack: return .key(chord: "cmd+[")
         case .webSearch:
-            return .fail(reason: "Search is unavailable in the current computer-use action contract.")
+            throw Failure.unsupportedProposal("Search is unavailable in the current computer-use action contract.")
         case .readPageQuestion:
-            return .fail(reason: "Page-reading actions are unavailable in the current computer-use action contract.")
+            throw Failure.unsupportedProposal("Page-reading actions are unavailable in the current computer-use action contract.")
         case .remember:
-            return .fail(reason: "Memory actions are unavailable in the current computer-use action contract.")
+            throw Failure.unsupportedProposal("Memory actions are unavailable in the current computer-use action contract.")
         case .askUser(let question): return .askUser(question: question, choices: nil)
         case .localFileOperation(let operation):
             switch operation {
@@ -76,7 +76,7 @@ enum FaraPolicyAdapter {
             case let .askFile(question, candidates):
                 return .askUser(question: question, choices: candidates)
             case .selectFile, .selectLocalFile:
-                return .fail(reason: "Select the file through the visible host-provided file control.")
+                throw Failure.unsupportedProposal("Select the file through the visible host-provided file control.")
             }
         case .wait(let seconds):
             guard seconds > 0, seconds <= 10 else { throw Failure.invalidCompletion }
