@@ -13,6 +13,38 @@ final class PixelEnvironmentTests: XCTestCase {
         XCTAssertEqual(point.y, 230, accuracy: 0.001)
     }
 
+    func testNativeWindowCaptureSizeUsesFilterPointPixelScale() throws {
+        let native = try XCTUnwrap(PixelGeometry.nativeWindowPixelSize(
+            windowBounds: CGRect(x: 70, y: 40, width: 586, height: 488), pointPixelScale: 2))
+        XCTAssertEqual(native.width, 1172)
+        XCTAssertEqual(native.height, 976)
+        XCTAssertNil(PixelGeometry.nativeWindowPixelSize(
+            windowBounds: CGRect(x: 0, y: 0, width: 586, height: 488), pointPixelScale: 0))
+    }
+
+    func testNativeWindowResizeMapsBackToActualWindowFrameWithoutPadding() throws {
+        let window = CGRect(x: 70, y: 40, width: 586, height: 488)
+        let native = try XCTUnwrap(PixelGeometry.nativeWindowPixelSize(windowBounds: window, pointPixelScale: 2))
+        let resizedSize = CGSize(width: 1280,
+            height: CGFloat((Double(native.height) * 1280 / Double(native.width)).rounded()))
+        let sourceCenter = CGPoint(x: 70 + 179, y: 40 + 227)
+        let screenshotPixel = try XCTUnwrap(PixelGeometry.imagePoint(sourceCenter,
+            imageSize: resizedSize, screenBounds: window))
+        XCTAssertEqual(screenshotPixel.x, 1280 * 179 / 586, accuracy: 0.01)
+        let roundTrip = try XCTUnwrap(PixelGeometry.point(screenshotPixel,
+            imageSize: resizedSize, screenBounds: window))
+        XCTAssertEqual(roundTrip.x, sourceCenter.x, accuracy: 0.001)
+        XCTAssertEqual(roundTrip.y, sourceCenter.y, accuracy: 0.001)
+    }
+
+    func testNativeWindowImageMappingRejectsPointsOutsideCapturedWindow() {
+        let window = CGRect(x: 70, y: 40, width: 586, height: 488)
+        let size = CGSize(width: 1280, height: 1066)
+        XCTAssertNil(PixelGeometry.imagePoint(CGPoint(x: 69.9, y: 100), imageSize: size, screenBounds: window))
+        XCTAssertNil(PixelGeometry.imagePoint(CGPoint(x: CGFloat.infinity, y: 100), imageSize: size, screenBounds: window))
+        XCTAssertNil(PixelGeometry.imagePoint(CGPoint(x: 100, y: 100), imageSize: .zero, screenBounds: window))
+    }
+
     func testPointRejectsNonFiniteAndOutOfBoundsCoordinates() {
         let bounds = CGRect(x: 0, y: 0, width: 100, height: 100)
         XCTAssertNil(PixelGeometry.point(CGPoint(x: CGFloat.infinity, y: 2), imageSize: CGSize(width: 100, height: 100), screenBounds: bounds))

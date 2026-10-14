@@ -62,6 +62,23 @@ enum PixelTargetContextLabel {
 }
 
 enum PixelGeometry {
+    static func nativeWindowPixelSize(windowBounds: CGRect, pointPixelScale: CGFloat) -> (width: Int, height: Int)? {
+        guard valid(windowBounds), pointPixelScale.isFinite, pointPixelScale > 0 else { return nil }
+        let width = (windowBounds.width * pointPixelScale).rounded(.up)
+        let height = (windowBounds.height * pointPixelScale).rounded(.up)
+        guard width.isFinite, height.isFinite, width >= 1, height >= 1,
+              width < CGFloat(Int.max), height < CGFloat(Int.max) else { return nil }
+        return (Int(width), Int(height))
+    }
+
+    static func imagePoint(_ screenPoint: CGPoint, imageSize: CGSize, screenBounds: CGRect) -> CGPoint? {
+        guard valid(screenBounds), imageSize.width.isFinite, imageSize.height.isFinite,
+              imageSize.width > 0, imageSize.height > 0,
+              screenPoint.x.isFinite, screenPoint.y.isFinite, screenBounds.contains(screenPoint) else { return nil }
+        return CGPoint(x: (screenPoint.x - screenBounds.minX) * imageSize.width / screenBounds.width,
+                       y: (screenPoint.y - screenBounds.minY) * imageSize.height / screenBounds.height)
+    }
+
     static func point(_ imagePoint: CGPoint, imageSize: CGSize, screenBounds: CGRect) -> CGPoint? {
         guard imageSize.width.isFinite, imageSize.height.isFinite, imageSize.width > 0, imageSize.height > 0,
               screenBounds.width.isFinite, screenBounds.height.isFinite, screenBounds.width > 0, screenBounds.height > 0,
@@ -97,5 +114,10 @@ enum PixelGeometry {
         context.interpolationQuality = .high
         context.draw(image, in: CGRect(x: 0, y: 0, width: context.width, height: context.height))
         return context.makeImage()
+    }
+
+    private static func valid(_ rect: CGRect) -> Bool {
+        !rect.isNull && !rect.isEmpty && rect.minX.isFinite && rect.minY.isFinite &&
+            rect.width.isFinite && rect.height.isFinite
     }
 }
