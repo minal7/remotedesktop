@@ -105,6 +105,8 @@ private enum CoordinateCalibration {
         let pointPixelScale: CGFloat
         let filterContentRect: CGRect
         let marks: [PixelElementMark]
+        let focusedAXTitle: String?
+        let frameCandidateCount: Int
         let maskedSecureRegions: Int
         let visibleWindowCount: Int
         let pngPath: String
@@ -277,23 +279,31 @@ private enum CoordinateCalibration {
         _ = app.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
         let deadline = ProcessInfo.processInfo.systemUptime + 8
         var selected: (SCWindow, AXUIElement, CGRect, SCShareableContent)?
+        var selectionDiagnostic = "No focused AX window was observed."
         while ProcessInfo.processInfo.systemUptime < deadline {
             guard NSWorkspace.shared.frontmostApplication?.processIdentifier == app.processIdentifier else {
                 try? await Task.sleep(for: .milliseconds(150)); continue
             }
             let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
             let root = AXUIElementCreateApplication(app.processIdentifier)
-            if let focused = ElementMarks.focusedWindow(root), let bounds = ElementMarks.bounds(focused),
-               let target = content.windows.first(where: {
-                   $0.owningApplication?.processID == app.processIdentifier &&
-                   ElementMarks.focusedWindowMatches(bounds, selectedBounds: $0.frame)
-               }) {
-                selected = (target, focused, bounds, content); break
+            if let focused = ElementMarks.focusedWindow(root), let bounds = ElementMarks.bounds(focused) {
+                let candidates = content.windows.filter {
+                    $0.owningApplication?.processID == app.processIdentifier && $0.frame.width > 50 && $0.frame.height > 50
+                }
+                let title = ElementMarks.string(focused, kAXTitleAttribute)
+                let frameCandidates = candidates.filter { ElementMarks.focusedWindowMatches(bounds, selectedBounds: $0.frame) }
+                let summary = frameCandidates.prefix(12).map { window in
+                    "\(window.windowID):\(String((window.title ?? "").prefix(80))):\(rectJSON(window.frame))"
+                }.joined(separator: "; ")
+                selectionDiagnostic = "focusedAXTitle=\(String((title ?? "").prefix(120))), focusedBounds=\(rectJSON(bounds)), frameCandidates=[\(summary)]"
+                if let target = frameCandidates.first {
+                    selected = (target, focused, bounds, content); break
+                }
             }
             try? await Task.sleep(for: .milliseconds(150))
         }
         guard let (target, focused, bounds, content) = selected else {
-            throw AgentEnvironmentError.unavailable("No matching visible focused window appeared for \(spec.name).")
+            throw AgentEnvironmentError.unavailable("No AX/ScreenCaptureKit window match for \(spec.name); \(selectionDiagnostic)")
         }
         let root = AXUIElementCreateApplication(app.processIdentifier)
         let axWindow = AgentMacAccessibility.Window(application: app, element: focused,
@@ -320,7 +330,11 @@ private enum CoordinateCalibration {
             image: image, expectedNativeSize: native.expectedPixelSize,
             nativeSize: CGSize(width: native.image.width, height: native.image.height),
             pointPixelScale: native.pointPixelScale, filterContentRect: native.contentRect,
-            marks: marks.marks, maskedSecureRegions: maskedCount,
+            marks: marks.marks, focusedAXTitle: ElementMarks.string(focused, kAXTitleAttribute),
+            frameCandidateCount: content.windows.filter {
+                $0.owningApplication?.processID == app.processIdentifier &&
+                ElementMarks.focusedWindowMatches(bounds, selectedBounds: $0.frame)
+            }.count, maskedSecureRegions: maskedCount,
             visibleWindowCount: content.windows.filter { $0.owningApplication?.processID == app.processIdentifier && $0.isOnScreen }.count,
             pngPath: pngURL.path, pngSHA256: hash)
     }
@@ -340,6 +354,20 @@ private enum CoordinateCalibration {
         let equal: Bool
         if status == .success, let expected, let actual { equal = CFEqual(expected.element, actual) }
         else { equal = false }
+        var actualPID: pid_t = 0
+        let actualPIDStatus: AXError
+        if let actual { actualPIDStatus = AXUIElementGetPid(actual, &actualPID) }
+        else { actualPIDStatus = .failure }
+        let actualBounds = actual.flatMap(ElementMarks.bounds)
+        let actualRole = actual.flatMap { ElementMarks.string($0, kAXRoleAttribute) }
+        let actualTitle = actual.flatMap { ElementMarks.string($0, kAXTitleAttribute) }
+        let actualDescription = actual.flatMap { ElementMarks.string($0, kAXDescriptionAttribute) }
+        let actualName = actual.map(ElementMarks.label)
+        let hitWindows = actual.map { _ in
+            onScreenWindowCandidates(ownerPID: actualPID, point: roundTrip,
+                                     elementBounds: actualBounds)
+        } ?? []
+        let windowAtPoint = hitWindows.first { $0["containsPoint"] as? Bool == true }
         return [
             "app": sample.spec.name, "bundleID": sample.spec.bundleID,
             "windowID": sample.target.windowID, "windowTitle": sample.target.title ?? "",
@@ -347,6 +375,15 @@ private enum CoordinateCalibration {
             "sourceCenter": pointJSON(center), "screenshotPixel": pixel.map { pointJSON($0) as Any } ?? NSNull(),
             "roundTripPoint": roundTrip.map { pointJSON($0) as Any } ?? NSNull(),
             "axEqual": equal, "axError": status.rawValue,
+            "actualAXRole": actualRole ?? "", "actualAXTitle": actualTitle ?? "",
+            "actualAXDescription": actualDescription ?? "", "actualAXName": actualName ?? "",
+            "actualAXBounds": actualBounds.map { rectJSON($0) as Any } ?? NSNull(),
+            "actualAXPID": actualPIDStatus == .success ? actualPID : 0,
+            "hitPointWindowCandidates": hitWindows,
+            "actualWindowIDAtPoint": windowAtPoint?["windowID"] ?? NSNull(),
+            "selectedWindowAmongHitCandidates": hitWindows.contains {
+                ($0["windowID"] as? UInt32) == sample.target.windowID
+            },
             "windowFrame": rectJSON(sample.bounds),
             "expectedNativePixels": ["width": sample.expectedNativeSize.width, "height": sample.expectedNativeSize.height],
             "nativeCapturedPixels": ["width": sample.nativeSize.width, "height": sample.nativeSize.height],
@@ -358,10 +395,32 @@ private enum CoordinateCalibration {
         ]
     }
 
+    private static func onScreenWindowCandidates(ownerPID: pid_t, point: CGPoint?,
+                                                  elementBounds: CGRect?) -> [[String: Any]] {
+        guard ownerPID > 0,
+              let entries = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements],
+                                                        kCGNullWindowID) as? [[String: Any]] else { return [] }
+        return entries.enumerated().compactMap { order, info in
+            guard info[kCGWindowOwnerPID as String] as? pid_t == ownerPID,
+                  let number = info[kCGWindowNumber as String] as? UInt32,
+                  let rawBounds = info[kCGWindowBounds as String] as? [String: Any],
+                  let bounds = CGRect(dictionaryRepresentation: rawBounds as CFDictionary) else { return nil }
+            let containsPoint = point.map { bounds.contains($0) } ?? false
+            let intersectsElement = elementBounds.map { bounds.intersects($0) } ?? false
+            guard containsPoint || intersectsElement else { return nil }
+            return ["zOrder": order, "windowID": number,
+                    "title": String((info[kCGWindowName as String] as? String ?? "").prefix(120)),
+                    "bounds": rectJSON(bounds), "containsPoint": containsPoint,
+                    "intersectsAXBounds": intersectsElement]
+        }.prefix(12).map { $0 }
+    }
+
     private static func windowJSON(_ sample: WindowSample) -> [String: Any] {
         ["app": sample.spec.name, "bundleID": sample.spec.bundleID,
          "windowID": sample.target.windowID, "windowTitle": sample.target.title ?? "",
          "visibleWindowCount": sample.visibleWindowCount,
+         "focusedAXTitle": sample.focusedAXTitle ?? "",
+         "sameFrameCandidateCount": sample.frameCandidateCount,
          "windowFrame": rectJSON(sample.bounds),
          "expectedNativePixels": ["width": sample.expectedNativeSize.width, "height": sample.expectedNativeSize.height],
          "nativeCapturedPixels": ["width": sample.nativeSize.width, "height": sample.nativeSize.height],
