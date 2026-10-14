@@ -825,12 +825,18 @@ def run(args: argparse.Namespace) -> int:
             for row in _infra_blocked_rows(tasks, args.runs, args.execution, preflight, args.policy):
                 _append_reported(results, row, output, args.execution)
             return 1
+        clean_start_failed = False
         for run_index in range(args.runs):
             for task in tasks:
-                row = _run_one_task(task, run_index + 1, args, driver, reset, server, output, results,
+                status = _run_one_task(task, run_index + 1, args, driver, reset, server, output, results,
                     suite_apps=suite_apps if args.execution == "real-host" else None)
-                if row:
-                    print(f"{task.value.get('suite', args.suite)}/{task.task_id}: {row}", flush=True)
+                if status:
+                    print(f"{task.value.get('suite', args.suite)}/{task.task_id}: {status}", flush=True)
+                if status == "INFRA-BLOCKED (clean start failed)":
+                    clean_start_failed = True
+                    break
+            if clean_start_failed:
+                break
     finally:
         if server is not None:
             server.terminate()
@@ -847,7 +853,13 @@ def _run_one_task(task: Task, run_number: int, args: argparse.Namespace, driver:
     scratch: Path | None = None
     try:
         if suite_apps is not None:
-            _close_suite_app_windows(suite_apps, driver)
+            try:
+                _close_suite_app_windows(suite_apps, driver)
+            except EvalError as error:
+                row = task_infra_row(task.task_id, task.value.get("suite", args.suite), run_number,
+                                     task.tags, args.execution, str(error), args.policy)
+                _append_reported(results, row, output, args.execution)
+                return "INFRA-BLOCKED (clean start failed)"
         runtime_task = task
         if task.value["surface"] == "app":
             scratch = _native_scratch_directory(task.task_id, token)

@@ -85,6 +85,41 @@ class CleanStartTests(unittest.TestCase):
             driver.assert_not_called()
             self.assertEqual(rows[0]["status"], "INFRA-BLOCKED")
 
+    def test_between_task_clean_start_failure_records_once_and_stops_suite(self) -> None:
+        tasks = run_suite.smoke_tasks()[:3]
+        args = SimpleNamespace(execution="real-host", policy="fara15-4b", suite="smoke",
+                               timeout=10, runs=1, output=None)
+        with tempfile.TemporaryDirectory() as directory:
+            output = run_suite.Path(directory) / "report"
+            close_calls = 0
+            def close_apps(*_args, **_kwargs):
+                nonlocal close_calls
+                close_calls += 1
+                if close_calls == 3:  # Initial suite cleanup, task 1, then task 2.
+                    raise run_suite.EvalError("Safari window remained after one close attempt")
+
+            reports = []
+            def capture_report(path, rows, execution):
+                reports.append((path, list(rows), execution))
+
+            response = {"answer": "ok"}
+            with patch.object(run_suite, "_prepare_run", return_value=(tasks, ["signed-host"], [], None, output)), \
+                 patch.object(run_suite, "_resolved_default_browser", return_value="org.example.browser"), \
+                 patch.object(run_suite, "_close_suite_app_windows", side_effect=close_apps), \
+                 patch.object(run_suite, "_run_preflight", return_value=SimpleNamespace(passed=True)), \
+                 patch.object(run_suite, "_fixture_server_available", return_value=True), \
+                 patch.object(run_suite, "_run_driver", return_value=(response, None)) as driver, \
+                 patch.object(run_suite, "_evaluate_response", return_value=({"status": "PASS"}, "PASS")), \
+                 patch.object(run_suite, "_write_report", side_effect=capture_report):
+                result = run_suite.run(args)
+
+            self.assertEqual(result, 1)
+            driver.assert_called_once()
+            final_rows = reports[-1][1]
+            self.assertEqual(len(final_rows), 2)
+            self.assertEqual([row["status"] for row in final_rows], ["PASS", "INFRA-BLOCKED"])
+            self.assertIn("Safari window remained", final_rows[-1]["checker"])
+
 
 if __name__ == "__main__":
     unittest.main()
