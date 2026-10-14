@@ -67,6 +67,21 @@ final class AgentMacAccessibility {
     private(set) var currentWindow: Window?
     private(set) var captureSize = CGSize.zero
 
+    static func matchingWindowID(ownerPID: Int32, bounds: CGRect, focusedTitle: String?,
+                                 entries: [[String: Any]]? = nil) -> UInt32? {
+        let windows = entries ?? (CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? [])
+        let candidates = windows.filter {
+            guard $0[kCGWindowOwnerPID as String] as? Int32 == ownerPID,
+                  let raw = $0[kCGWindowBounds as String] as? [String: Any],
+                  let frame = CGRect(dictionaryRepresentation: raw as CFDictionary) else { return false }
+            return ElementMarks.focusedWindowMatches(bounds, selectedBounds: frame)
+        }
+        let title = focusedTitle.flatMap { $0.isEmpty ? nil : $0 }
+        let selected = title.flatMap { title in candidates.first { $0[kCGWindowName as String] as? String == title } }
+            ?? (title == nil ? candidates.first : nil)
+        return selected?[kCGWindowNumber as String] as? UInt32
+    }
+
     func window() throws -> Window {
         guard AXIsProcessTrusted(), let application = NSWorkspace.shared.frontmostApplication,
               application.bundleIdentifier != nil else { throw AgentEnvironmentError.unavailable("Accessibility permission or a focused app is unavailable.") }
@@ -77,13 +92,9 @@ final class AgentMacAccessibility {
               let entries = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else {
             throw AgentEnvironmentError.unavailable("The focused window could not be identified.")
         }
-        let candidates = entries.filter { info in
-            guard info[kCGWindowOwnerPID as String] as? Int32 == application.processIdentifier,
-                  let raw = info[kCGWindowBounds as String] as? [String: Any],
-                  let frame = CGRect(dictionaryRepresentation: raw as CFDictionary) else { return false }
-            return frame == bounds
-        }
-        guard candidates.count == 1, let number = candidates[0][kCGWindowNumber as String] as? UInt32 else {
+        let focusedTitle = read(focused, kAXTitleAttribute) as? String
+        guard let number = Self.matchingWindowID(ownerPID: application.processIdentifier, bounds: bounds,
+            focusedTitle: focusedTitle, entries: entries) else {
             throw AgentEnvironmentError.scopeChanged
         }
         guard ComputerUseVisibleWindowStack(windowInfo: entries)
@@ -91,7 +102,7 @@ final class AgentMacAccessibility {
             throw AgentEnvironmentError.targetCovered
         }
         let result = Window(application: application, element: focused, bounds: bounds, number: number,
-                            title: read(focused, kAXTitleAttribute) as? String ?? "")
+                            title: focusedTitle ?? "")
         if windowIdentity != result.identity { bindings.removeAll(); windowIdentity = result.identity }
         currentWindow = result
         return result

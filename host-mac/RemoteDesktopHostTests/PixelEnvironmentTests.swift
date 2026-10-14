@@ -51,6 +51,28 @@ final class PixelEnvironmentTests: XCTestCase {
         XCTAssertNil(PixelGeometry.point(CGPoint(x: 100, y: 2), imageSize: CGSize(width: 100, height: 100), screenBounds: bounds))
     }
 
+    func testFocusedWindowSelectionUsesFrontmostCGOrderAndRequiresMatchingTitle() {
+        let frame = CGRect(x: 10, y: 20, width: 500, height: 400)
+        func entry(_ number: UInt32, _ title: String?) -> [String: Any] {
+            var value: [String: Any] = [kCGWindowOwnerPID as String: NSNumber(value: Int32(42)),
+                kCGWindowBounds as String: frame.dictionaryRepresentation,
+                kCGWindowNumber as String: NSNumber(value: number)]
+            if let title { value[kCGWindowName as String] = title }
+            return value
+        }
+        let candidates = [entry(16_742, "Start Page"), entry(16_799, "Safety controls")]
+        XCTAssertEqual(AgentMacAccessibility.matchingWindowID(ownerPID: 42, bounds: frame,
+            focusedTitle: "Safety controls", entries: candidates), 16_799)
+        XCTAssertEqual(AgentMacAccessibility.matchingWindowID(ownerPID: 42, bounds: frame,
+            focusedTitle: "Start Page", entries: candidates), 16_742)
+        XCTAssertNil(AgentMacAccessibility.matchingWindowID(ownerPID: 42, bounds: frame,
+            focusedTitle: "Stale title", entries: candidates))
+        XCTAssertEqual(AgentMacAccessibility.matchingWindowID(ownerPID: 42, bounds: frame,
+            focusedTitle: nil, entries: candidates), 16_742)
+        XCTAssertNil(AgentMacAccessibility.matchingWindowID(ownerPID: 42, bounds: frame,
+            focusedTitle: "Safety controls", entries: []))
+    }
+
     func testFinitePointMappingDoesNotAddASecondImageBoundsGuard() throws {
         let mapped = try XCTUnwrap(PixelEnvironment.mapPoint(CGPoint(x: 120, y: -10),
             imageSize: CGSize(width: 100, height: 100),

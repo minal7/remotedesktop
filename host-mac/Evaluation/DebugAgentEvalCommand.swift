@@ -213,21 +213,33 @@ private enum CoordinateCalibration {
     private static func reactivateAndVerify(_ sample: WindowSample) async -> Bool {
         _ = sample.app.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
         let deadline = ProcessInfo.processInfo.systemUptime + 4
+        var previousWindowID: UInt32?
+        var previousFrame: CGRect?
+        var stablePolls = 0
         while ProcessInfo.processInfo.systemUptime < deadline {
             if NSWorkspace.shared.frontmostApplication?.processIdentifier == sample.app.processIdentifier {
                 do {
                     let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
-                    let stillVisible = content.windows.contains {
-                        $0.windowID == sample.target.windowID &&
-                        $0.owningApplication?.processID == sample.app.processIdentifier && $0.isOnScreen
+                    let candidates = content.windows.filter {
+                        $0.owningApplication?.processID == sample.app.processIdentifier &&
+                        $0.frame.width > 50 && $0.frame.height > 50 && $0.isOnScreen
                     }
                     let root = AXUIElementCreateApplication(sample.app.processIdentifier)
-                    if stillVisible, let focused = ElementMarks.focusedWindow(root),
-                       let bounds = ElementMarks.bounds(focused),
-                       ElementMarks.focusedWindowMatches(bounds, selectedBounds: sample.bounds) {
-                        return true
-                    }
+                    if let focused = ElementMarks.focusedWindow(root), let bounds = ElementMarks.bounds(focused),
+                       let windowID = AgentMacAccessibility.matchingWindowID(ownerPID: sample.app.processIdentifier,
+                           bounds: bounds, focusedTitle: ElementMarks.string(focused, kAXTitleAttribute)),
+                       let target = candidates.first(where: { $0.windowID == windowID }),
+                       windowID == sample.target.windowID,
+                       ElementMarks.focusedWindowMatches(bounds, selectedBounds: target.frame),
+                       ElementMarks.focusedWindowMatches(sample.bounds, selectedBounds: target.frame) {
+                        stablePolls = previousWindowID == windowID && previousFrame == target.frame
+                            ? stablePolls + 1 : 1
+                        if stablePolls >= 2 { return true }
+                        previousWindowID = windowID; previousFrame = target.frame
+                    } else { stablePolls = 0; previousWindowID = nil; previousFrame = nil }
                 } catch { return false }
+            } else {
+                stablePolls = 0; previousWindowID = nil; previousFrame = nil
             }
             try? await Task.sleep(for: .milliseconds(150))
         }
@@ -279,16 +291,20 @@ private enum CoordinateCalibration {
         _ = app.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
         let deadline = ProcessInfo.processInfo.systemUptime + 8
         var selected: (SCWindow, AXUIElement, CGRect, SCShareableContent)?
+        var previousWindowID: UInt32?
+        var previousFrame: CGRect?
+        var stablePolls = 0
         var selectionDiagnostic = "No focused AX window was observed."
         while ProcessInfo.processInfo.systemUptime < deadline {
             guard NSWorkspace.shared.frontmostApplication?.processIdentifier == app.processIdentifier else {
+                previousWindowID = nil; previousFrame = nil; stablePolls = 0
                 try? await Task.sleep(for: .milliseconds(150)); continue
             }
             let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
             let root = AXUIElementCreateApplication(app.processIdentifier)
             if let focused = ElementMarks.focusedWindow(root), let bounds = ElementMarks.bounds(focused) {
                 let candidates = content.windows.filter {
-                    $0.owningApplication?.processID == app.processIdentifier && $0.frame.width > 50 && $0.frame.height > 50
+                    $0.owningApplication?.processID == app.processIdentifier && $0.frame.width > 50 && $0.frame.height > 50 && $0.isOnScreen
                 }
                 let title = ElementMarks.string(focused, kAXTitleAttribute)
                 let frameCandidates = candidates.filter { ElementMarks.focusedWindowMatches(bounds, selectedBounds: $0.frame) }
@@ -296,9 +312,19 @@ private enum CoordinateCalibration {
                     "\(window.windowID):\(String((window.title ?? "").prefix(80))):\(rectJSON(window.frame))"
                 }.joined(separator: "; ")
                 selectionDiagnostic = "focusedAXTitle=\(String((title ?? "").prefix(120))), focusedBounds=\(rectJSON(bounds)), frameCandidates=[\(summary)]"
-                if let target = frameCandidates.first {
-                    selected = (target, focused, bounds, content); break
+                let windowID = AgentMacAccessibility.matchingWindowID(ownerPID: app.processIdentifier,
+                    bounds: bounds, focusedTitle: title)
+                if let windowID, let target = candidates.first(where: { $0.windowID == windowID }),
+                   ElementMarks.focusedWindowMatches(bounds, selectedBounds: target.frame) {
+                    stablePolls = previousWindowID == target.windowID && previousFrame == target.frame
+                        ? stablePolls + 1 : 1
+                    if stablePolls >= 2 { selected = (target, focused, bounds, content); break }
+                    previousWindowID = target.windowID; previousFrame = target.frame
+                } else {
+                    previousWindowID = nil; previousFrame = nil; stablePolls = 0
                 }
+            } else {
+                previousWindowID = nil; previousFrame = nil; stablePolls = 0
             }
             try? await Task.sleep(for: .milliseconds(150))
         }
@@ -354,6 +380,29 @@ private enum CoordinateCalibration {
         let equal: Bool
         if status == .success, let expected, let actual { equal = CFEqual(expected.element, actual) }
         else { equal = false }
+        var actualHitDescendsFromExpected = false
+        var actualHitParentLinksVisited = 0
+        if let actual, let expected, !CFEqual(expected.element, actual) {
+            var current = actual
+            var visited: [AXUIElement] = []
+            for _ in 0..<8 {
+                guard !visited.contains(where: { CFEqual($0, current) }) else { break }
+                visited.append(current)
+                AXUIElementSetMessagingTimeout(current, 0.1)
+                var parentValue: CFTypeRef?
+                guard AXUIElementCopyAttributeValue(
+                    current, kAXParentAttribute as CFString, &parentValue) == .success,
+                    let parentValue,
+                    CFGetTypeID(parentValue) == AXUIElementGetTypeID() else { break }
+                let parent = unsafeBitCast(parentValue, to: AXUIElement.self)
+                actualHitParentLinksVisited += 1
+                if CFEqual(expected.element, parent) {
+                    actualHitDescendsFromExpected = true
+                    break
+                }
+                current = parent
+            }
+        }
         var actualPID: pid_t = 0
         let actualPIDStatus: AXError
         if let actual { actualPIDStatus = AXUIElementGetPid(actual, &actualPID) }
@@ -374,6 +423,9 @@ private enum CoordinateCalibration {
             "role": mark.role, "name": mark.name, "markID": mark.id,
             "sourceCenter": pointJSON(center), "screenshotPixel": pixel.map { pointJSON($0) as Any } ?? NSNull(),
             "roundTripPoint": roundTrip.map { pointJSON($0) as Any } ?? NSNull(),
+            "expectedMarkBounds": rectJSON(mark.screenRect),
+            "actualHitDescendsFromExpected": actualHitDescendsFromExpected,
+            "actualHitParentLinksVisited": actualHitParentLinksVisited,
             "axEqual": equal, "axError": status.rawValue,
             "actualAXRole": actualRole ?? "", "actualAXTitle": actualTitle ?? "",
             "actualAXDescription": actualDescription ?? "", "actualAXName": actualName ?? "",

@@ -339,10 +339,14 @@ final class PixelEnvironment: AgentEnvironment {
         let appRoot = app.map { AXUIElementCreateApplication($0.processIdentifier) }
         let focusedAXWindow = appRoot.flatMap(ElementMarks.focusedWindow)
         let focusedBounds = focusedAXWindow.flatMap(ElementMarks.bounds)
-        let target = focusedBounds.flatMap { bounds in
-            appWindows.first(where: { abs($0.frame.minX - bounds.minX) < 2 && abs($0.frame.minY - bounds.minY) < 2 && abs($0.frame.width - bounds.width) < 2 && abs($0.frame.height - bounds.height) < 2 })
-                ?? appWindows.max { Self.overlapScore($0.frame, bounds) < Self.overlapScore($1.frame, bounds) }
-        } ?? appWindows.first
+        let target: SCWindow? = app.flatMap { application in
+            guard let focusedAXWindow, let focusedBounds else { return nil }
+            let title = ElementMarks.string(focusedAXWindow, kAXTitleAttribute)
+            guard let windowID = AgentMacAccessibility.matchingWindowID(ownerPID: application.processIdentifier,
+                bounds: focusedBounds, focusedTitle: title) else { return nil }
+            return appWindows.first(where: { $0.windowID == windowID &&
+                ElementMarks.focusedWindowMatches(focusedBounds, selectedBounds: $0.frame) })
+        }
         let displayForWindow = target.flatMap { window in
             let center = CGPoint(x: window.frame.midX, y: window.frame.midY)
             return content.displays.first(where: { $0.frame.contains(center) })
@@ -355,15 +359,14 @@ final class PixelEnvironment: AgentEnvironment {
             throw AgentEnvironmentError.unavailable("No display can be captured.")
         }
         var axWindow: AgentMacAccessibility.Window?
-        if AXIsProcessTrusted(), let app, let target, let focusedAXWindow,
-           ElementMarks.focusedWindowMatches(focusedBounds, selectedBounds: target.frame) {
+        if AXIsProcessTrusted(), let app, let target, let focusedAXWindow {
             axWindow = AgentMacAccessibility.Window(application: app, element: focusedAXWindow,
                 bounds: target.frame, number: target.windowID, title: target.title ?? "")
         }
         let marks: PixelElementMarks?
         if AXIsProcessTrusted(), let app, let appRoot {
             marks = ElementMarks.readCapture(window: axWindow, focusedWindowElement: focusedAXWindow,
-                focusedBounds: focusedBounds, appRoot: appRoot, application: app,
+                focusedBounds: axWindow == nil ? nil : focusedBounds, appRoot: appRoot, application: app,
                 selectedBounds: target?.frame ?? display.frame)
         } else { marks = nil }
         var image: CGImage
@@ -616,14 +619,6 @@ final class PixelEnvironment: AgentEnvironment {
             return "pid:\(app.processIdentifier):\(app.launchDate?.timeIntervalSince1970 ?? 0)"
         }
         return "pid:\(app.processIdentifier):\(app.launchDate?.timeIntervalSince1970 ?? 0):window:\(window.windowID):\(window.title)"
-    }
-
-    private static func overlapScore(_ lhs: CGRect, _ rhs: CGRect) -> CGFloat {
-        let intersection = lhs.intersection(rhs)
-        guard !intersection.isNull, !intersection.isEmpty else { return 0 }
-        let intersectionArea = intersection.width * intersection.height
-        let unionArea = lhs.width * lhs.height + rhs.width * rhs.height - intersectionArea
-        return unionArea > 0 ? intersectionArea / unionArea : 0
     }
 
     private func writeMetadata() throws {
