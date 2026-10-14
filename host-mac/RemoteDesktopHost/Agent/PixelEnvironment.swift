@@ -52,6 +52,7 @@ final class PixelEnvironment: AgentEnvironment {
     var followsFrontmostSurface: Bool { true }
     private struct Snapshot {
         let window: AgentMacAccessibility.Window?
+        let application: NSRunningApplication?
         let identity: String
         let bundleID: String
         let appName: String
@@ -246,7 +247,7 @@ final class PixelEnvironment: AgentEnvironment {
         try await Task.sleep(for: .milliseconds(300))
         try checkActive()
         let currentApplication = NSWorkspace.shared.frontmostApplication
-        let sameApplication = snapshots[resolved.frame.scope.identity]?.window?.application.processIdentifier
+        let sameApplication = snapshots[resolved.frame.scope.identity]?.application?.processIdentifier
             == currentApplication?.processIdentifier
         let afterAXState = currentAXState(for: snapshots[resolved.frame.scope.identity], sameApplication: sameApplication)
         let endWindow = await frontWindowIdentity()
@@ -274,10 +275,9 @@ final class PixelEnvironment: AgentEnvironment {
                 appName: window.owningApplication?.applicationName)
         }
         let appWindows = content.windows.filter { $0.owningApplication?.processID == app?.processIdentifier && $0.frame.width > 50 && $0.frame.height > 50 }
-        let focusedBounds: CGRect?
-        if let app {
-            focusedBounds = ElementMarks.focusedWindow(AXUIElementCreateApplication(app.processIdentifier)).flatMap(ElementMarks.bounds)
-        } else { focusedBounds = nil }
+        let appRoot = app.map { AXUIElementCreateApplication($0.processIdentifier) }
+        let focusedAXWindow = appRoot.flatMap(ElementMarks.focusedWindow)
+        let focusedBounds = focusedAXWindow.flatMap(ElementMarks.bounds)
         let target = focusedBounds.flatMap { bounds in
             appWindows.first(where: { abs($0.frame.minX - bounds.minX) < 2 && abs($0.frame.minY - bounds.minY) < 2 && abs($0.frame.width - bounds.width) < 2 && abs($0.frame.height - bounds.height) < 2 })
                 ?? appWindows.max { Self.overlapScore($0.frame, bounds) < Self.overlapScore($1.frame, bounds) }
@@ -294,12 +294,17 @@ final class PixelEnvironment: AgentEnvironment {
             throw AgentEnvironmentError.unavailable("No display can be captured.")
         }
         var axWindow: AgentMacAccessibility.Window?
-        if AXIsProcessTrusted(), let app, let target {
-            let root = AXUIElementCreateApplication(app.processIdentifier)
-            axWindow = AgentMacAccessibility.Window(application: app, element: ElementMarks.focusedWindow(root) ?? root,
+        if AXIsProcessTrusted(), let app, let target, let focusedAXWindow,
+           ElementMarks.focusedWindowMatches(focusedBounds, selectedBounds: target.frame) {
+            axWindow = AgentMacAccessibility.Window(application: app, element: focusedAXWindow,
                 bounds: target.frame, number: target.windowID, title: target.title ?? "")
         }
-        let marks = axWindow.map { ElementMarks.read(window: $0) }
+        let marks: PixelElementMarks?
+        if AXIsProcessTrusted(), let app, let appRoot {
+            marks = ElementMarks.readCapture(window: axWindow, focusedWindowElement: focusedAXWindow,
+                focusedBounds: focusedBounds, appRoot: appRoot, application: app,
+                selectedBounds: target?.frame ?? display.frame)
+        } else { marks = nil }
         var image: CGImage
         var captureBounds: CGRect
         var identity: String
@@ -343,7 +348,7 @@ final class PixelEnvironment: AgentEnvironment {
         if let reason = SystemBarriers.handoffReason(screenshot: png, elements: elements, focus: focus) {
             throw AgentEnvironmentError.systemHandoff(reason)
         }
-        return .init(window: axWindow, identity: identity, bundleID: app?.bundleIdentifier ?? "unknown",
+        return .init(window: axWindow, application: app, identity: identity, bundleID: app?.bundleIdentifier ?? "unknown",
             appName: app?.localizedName ?? "",
             title: target?.title ?? "Visible desktop", url: marks?.browserURL, image: image, screenshot: png,
             elements: elements, focus: focus, screenBounds: screenshotBounds, marks: marks)
@@ -359,7 +364,7 @@ final class PixelEnvironment: AgentEnvironment {
                       targets: [AgentElement], bindings: ResolvedPixelTargets?) async throws -> String {
         guard let snapshot = snapshots[frame.scope.identity] else { throw AgentEnvironmentError.targetGone }
         if let target { try click(screenPoint(target, frame: frame, targets: targets, bindings: bindings), button: .left, count: 1) }
-        let app = snapshot.window.map { AXUIElementCreateApplication($0.application.processIdentifier) }
+        let app = snapshot.application.map { AXUIElementCreateApplication($0.processIdentifier) }
         let focused = app.flatMap(ElementMarks.focusedElement)
         let role = focused.flatMap { ElementMarks.string($0, kAXRoleAttribute) } ?? "unknown"
         let name = focused.map(ElementMarks.label) ?? ""
@@ -434,12 +439,13 @@ final class PixelEnvironment: AgentEnvironment {
         case let .element(id):
             guard let element = targets.first(where: { $0.id == id }) else { throw AgentEnvironmentError.targetGone }
             try Self.requireSecure(element)
-            guard let window = snapshot.window,
-                  NSWorkspace.shared.frontmostApplication?.processIdentifier == window.application.processIdentifier else {
+            guard let application = snapshot.application,
+                  NSWorkspace.shared.frontmostApplication?.processIdentifier == application.processIdentifier else {
                 throw AgentEnvironmentError.targetGone
             }
             guard let reference = bindings?.references[id] else { throw AgentEnvironmentError.targetGone }
-            return try PixelElementReferenceResolver.currentCentre(element, reference: reference, windowBounds: window.bounds)
+            return try PixelElementReferenceResolver.currentCentre(element, reference: reference,
+                windowBounds: snapshot.window?.bounds ?? snapshot.screenBounds)
         case let .point(x, y): pixel = CGPoint(x: x, y: y)
         }
         guard let mapped = Self.mapPoint(pixel, imageSize: size, screenBounds: snapshot.screenBounds) else {
@@ -483,7 +489,7 @@ final class PixelEnvironment: AgentEnvironment {
     }
 
     private func ensureNonSecureFocus() throws {
-        let processID = lastSnapshot?.window?.application.processIdentifier ?? NSWorkspace.shared.frontmostApplication?.processIdentifier
+        let processID = lastSnapshot?.application?.processIdentifier ?? NSWorkspace.shared.frontmostApplication?.processIdentifier
         guard let processID, let focus = ElementMarks.focusedElement(AXUIElementCreateApplication(processID)) else { return }
         let role = ElementMarks.string(focus, kAXRoleAttribute) ?? "unknown"
         let name = ElementMarks.label(focus)
@@ -529,7 +535,9 @@ final class PixelEnvironment: AgentEnvironment {
     private func post(_ event: ControlMessage) throws { guard injector.apply(event, ifAllowed: inputAllowed) else { throw CancellationError() } }
     private func inputAllowed() -> Bool {
         guard !stopped, !suspended, !Task.isCancelled, allowed() else { return false }
-        if let window = lastSnapshot?.window { return NSWorkspace.shared.frontmostApplication?.processIdentifier == window.application.processIdentifier }
+        if let application = lastSnapshot?.application {
+            return NSWorkspace.shared.frontmostApplication?.processIdentifier == application.processIdentifier
+        }
         return true
     }
     private func checkActive() throws { try Task.checkCancellation(); guard !stopped, !suspended, allowed() else { throw CancellationError() } }

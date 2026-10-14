@@ -227,6 +227,16 @@ final class PixelEnvironmentTests: XCTestCase {
         }
     }
 
+    func testMenuItemReferenceRemainsUsableOutsideMatchedWindowBounds() throws {
+        let rect = CGRect(x: 8, y: 0, width: 32, height: 20)
+        let menuItem = TestPixelElementReference(role: "AXMenuBarItem", name: "File", rect: rect)
+        let expected = AgentElement(id: 1, role: "AXMenuBarItem", name: "File", value: nil,
+            state: ["visible", "read_only", "offscreen"], bbox: .init(x: 8, y: 0, width: 32, height: 20), inView: false)
+
+        XCTAssertEqual(try PixelElementReferenceResolver.currentCentre(expected, reference: menuItem,
+            windowBounds: CGRect(x: 100, y: 100, width: 400, height: 300)), CGPoint(x: 24, y: 10))
+    }
+
     func testUnlabeledElementClickReadsOCRAtResolvedCentreOncePerFrame() {
         let before = AgentElement(id: 7, role: "AXButton", name: "", value: nil,
             state: ["visible"], bbox: .init(x: 18, y: 38, width: 20, height: 20), inView: true)
@@ -246,6 +256,83 @@ final class PixelEnvironmentTests: XCTestCase {
         let unavailableFreshLabel = PixelTargetContextLabel.rebound(.click(target: .element(id: 7), button: nil, count: nil),
             targets: [after], previous: firstLabel) { _, _ in nil }
         XCTAssertNil(unavailableFreshLabel)
+    }
+
+    func testSelectedAXWindowExcludesOverlappingSiblingWindowsAndKeepsSheetAndMenu() {
+        let bounds = CGRect(x: 100, y: 100, width: 400, height: 300)
+        let visibleSheet = TestPixelAXNode(identity: "sheet", role: "AXSheet", title: nil, rect: bounds,
+            children: [TestPixelAXNode(identity: "sheet-button", role: "AXButton", title: "Continue",
+                rect: CGRect(x: 350, y: 300, width: 90, height: 30))])
+        let selected = TestPixelAXNode(identity: "selected-window", role: "AXWindow", title: nil, rect: bounds,
+            children: [TestPixelAXNode(identity: "visible-editor", role: "AXTextArea", title: "Editor",
+                rect: CGRect(x: 120, y: 150, width: 300, height: 180)), visibleSheet])
+        let sibling = TestPixelAXNode(identity: "background-window", role: "AXWindow", title: nil, rect: bounds,
+            children: [TestPixelAXNode(identity: "background-editor", role: "AXTextArea", title: "Background editor",
+                rect: CGRect(x: 130, y: 160, width: 280, height: 160))])
+        let menu = TestPixelAXNode(identity: "menu", role: "AXMenuBar", title: nil, rect: nil,
+            children: [TestPixelAXNode(identity: "file-menu", role: "AXMenuBarItem", title: "File",
+                rect: CGRect(x: 8, y: 0, width: 28, height: 20))])
+
+        let result = ElementMarks.projectCaptureRoots(focusedWindow: selected, focusedBounds: bounds, focusedElement: nil,
+            menuBar: menu, selectedBounds: bounds, deadline: .now + .milliseconds(300))
+
+        let names = Set(result.marks.map(\.name))
+        XCTAssertTrue(names.contains("Editor"))
+        XCTAssertTrue(names.contains("Continue"))
+        XCTAssertTrue(names.contains("File"))
+        XCTAssertFalse(names.contains("Background editor"))
+    }
+
+    func testMissingOrMismatchedAXWindowDoesNotExposeApplicationSiblingMarks() {
+        let bounds = CGRect(x: 100, y: 100, width: 400, height: 300)
+        let secure = TestPixelAXNode(identity: "secure", role: "AXTextField", title: "Password",
+            rect: CGRect(x: 150, y: 170, width: 150, height: 28), secure: true,
+            children: [TestPixelAXNode(identity: "secret", role: "AXStaticText", title: "protected",
+                rect: CGRect(x: 150, y: 170, width: 150, height: 28))])
+        let backgroundButton = TestPixelAXNode(identity: "sibling-button", role: "AXButton", title: "Background action",
+            value: "not exposed", rect: CGRect(x: 120, y: 130, width: 100, height: 30))
+        let sibling = TestPixelAXNode(identity: "sibling-window", role: "AXWindow", title: nil, rect: bounds,
+            children: [backgroundButton, secure])
+        let menu = TestPixelAXNode(identity: "menu", role: "AXMenuBar", title: nil, rect: nil,
+            children: [TestPixelAXNode(identity: "file-menu", role: "AXMenuBarItem", title: "File",
+                rect: CGRect(x: 8, y: 0, width: 28, height: 20))])
+        let mismatchedSecure = TestPixelAXNode(identity: "mismatched-secure", role: "AXTextField", title: "PIN",
+            rect: CGRect(x: 930, y: 170, width: 120, height: 26), secure: true,
+            children: [TestPixelAXNode(identity: "mismatched-secret", role: "AXStaticText", title: "hidden",
+                rect: CGRect(x: 930, y: 170, width: 120, height: 26))])
+        let wrongWindow = TestPixelAXNode(identity: "wrong-window", role: "AXWindow", title: nil,
+            rect: CGRect(x: 900, y: 100, width: 400, height: 300), children: [mismatchedSecure])
+
+        let missing = ElementMarks.projectCaptureRoots(focusedWindow: nil, focusedBounds: nil, focusedElement: secure,
+            menuBar: menu, selectedBounds: bounds, deadline: .now + .milliseconds(300))
+        let mismatched = ElementMarks.projectCaptureRoots(focusedWindow: wrongWindow,
+            focusedBounds: CGRect(x: 900, y: 100, width: 400, height: 300), focusedElement: mismatchedSecure, menuBar: menu, selectedBounds: bounds, deadline: .now + .milliseconds(300))
+
+        XCTAssertEqual(missing.marks.map(\.name), ["File"])
+        XCTAssertEqual(mismatched.marks.map(\.name), ["File"])
+        XCTAssertEqual(missing.secureScreenRects, [CGRect(x: 150, y: 170, width: 150, height: 28)])
+        XCTAssertEqual(mismatched.secureScreenRects, [CGRect(x: 930, y: 170, width: 120, height: 26)])
+        XCTAssertEqual(backgroundButton.valueReads, 0, "secure fallback must not read ordinary values")
+        XCTAssertEqual(sibling.childrenReads, 0)
+        XCTAssertEqual(wrongWindow.childrenReads, 1, "a mismatched window may be scanned only for secure rects")
+        XCTAssertEqual(mismatchedSecure.childrenReads, 0, "secure subtrees must be pruned")
+        XCTAssertEqual(mismatchedSecure.valueReads, 0, "secure fallback must never read control values")
+    }
+
+    func testMissingWindowSecureScanHonorsTheSharedReadDeadline() {
+        let bounds = CGRect(x: 100, y: 100, width: 400, height: 300)
+        let secure = TestPixelAXNode(identity: "secure", role: "AXTextField", title: "Password",
+            rect: CGRect(x: 150, y: 170, width: 150, height: 28), secure: true)
+        let menu = TestPixelAXNode(identity: "menu", role: "AXMenuBar", title: nil, rect: nil,
+            children: [TestPixelAXNode(identity: "file-menu", role: "AXMenuBarItem", title: "File",
+                rect: CGRect(x: 8, y: 0, width: 28, height: 20))])
+
+        let result = ElementMarks.projectCaptureRoots(focusedWindow: nil, focusedBounds: nil, focusedElement: secure,
+            menuBar: menu, selectedBounds: bounds, deadline: .now - .milliseconds(1))
+
+        XCTAssertTrue(result.marks.isEmpty)
+        XCTAssertTrue(result.secureScreenRects.isEmpty)
+        XCTAssertEqual(menu.childrenReads, 0)
     }
 
     func testElementMarksLiftsChildTextAndDeduplicatesOverlappingLabelsInFavorOfInteractiveNode() throws {

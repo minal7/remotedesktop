@@ -1,3 +1,4 @@
+import AppKit
 import ApplicationServices
 import CoreGraphics
 import Foundation
@@ -97,9 +98,68 @@ enum ElementMarks {
         "AXApplication", "AXWindow", "AXGroup", "AXContainer", "AXScrollArea", "AXWebArea", "AXList", "AXTable", "AXOutline"
     ]
 
+    static func focusedWindowMatches(_ focusedBounds: CGRect?, selectedBounds: CGRect, tolerance: CGFloat = 2) -> Bool {
+        guard let focusedBounds, valid(focusedBounds), valid(selectedBounds), tolerance.isFinite, tolerance >= 0 else { return false }
+        return abs(focusedBounds.minX - selectedBounds.minX) <= tolerance &&
+            abs(focusedBounds.minY - selectedBounds.minY) <= tolerance &&
+            abs(focusedBounds.width - selectedBounds.width) <= tolerance &&
+            abs(focusedBounds.height - selectedBounds.height) <= tolerance
+    }
+
+    static func projectCaptureRoots(focusedWindow: (any PixelAXNode)?, focusedBounds: CGRect?,
+                                    focusedElement: (any PixelAXNode)?, menuBar: (any PixelAXNode)?,
+                                    selectedBounds: CGRect,
+                                    deadline: ContinuousClock.Instant, readOnly: Bool = false,
+                                    limit: Int = 60, maxNodes: Int = 160) -> PixelElementMarks {
+        guard ContinuousClock.now < deadline else { return emptyProjection() }
+        let matchedWindow = focusedWindow.flatMap {
+            focusedWindowMatches(focusedBounds, selectedBounds: selectedBounds) ? $0 : nil
+        }
+        var secureScan: (rects: [CGRect], visited: Int) = ([], 0)
+        if matchedWindow == nil, let focusedWindow, focusedWindow.role == "AXWindow" {
+            secureScan = collectSecureRects(root: focusedWindow, deadline: deadline, maxNodes: maxNodes)
+        }
+        let roots = [matchedWindow, menuBar].compactMap { $0 }
+        var projected = project(root: PixelAXCompositeNode(nodes: roots), windowBounds: selectedBounds,
+            focusedIdentity: matchedWindow == nil ? nil : focusedElement?.identity,
+            readOnly: readOnly, limit: limit, maxNodes: max(0, maxNodes - secureScan.visited), deadline: deadline)
+        var focusRect: CGRect?
+        if let focusedElement, ContinuousClock.now < deadline,
+           (focusedElement.isProtected || focusedElement.isSecure),
+           let rect = focusedElement.screenRect, valid(rect) { focusRect = rect }
+        var secureRects = secureScan.rects + projected.secureScreenRects
+        if let focusRect, !secureRects.contains(focusRect) { secureRects.append(focusRect) }
+        if secureRects != projected.secureScreenRects {
+            projected = PixelElementMarks(marks: projected.marks, focusedID: projected.focusedID,
+                secureScreenRects: secureRects, contentRect: projected.contentRect,
+                browserURL: projected.browserURL, axState: projected.axState)
+        }
+        return projected
+    }
+
+    private static func collectSecureRects(root: any PixelAXNode, deadline: ContinuousClock.Instant,
+                                           maxNodes: Int) -> (rects: [CGRect], visited: Int) {
+        var rects: [CGRect] = [], visited = 0
+        func walk(_ node: any PixelAXNode) {
+            guard visited < maxNodes, ContinuousClock.now < deadline else { return }
+            visited += 1
+            if node.isProtected || node.isSecure {
+                if let rect = node.screenRect, valid(rect) { rects.append(rect) }
+                return
+            }
+            for child in node.children() { walk(child) }
+        }
+        walk(root)
+        return (rects, visited)
+    }
+
+    private static func emptyProjection() -> PixelElementMarks {
+        PixelElementMarks(marks: [], focusedID: nil, secureScreenRects: [], contentRect: nil, browserURL: nil, axState: nil)
+    }
+
     static func project(root: any PixelAXNode, windowBounds: CGRect, focusedIdentity: AnyHashable? = nil,
                         browserURL: String? = nil, readOnly: Bool = false, limit: Int = 60,
-                        maxNodes: Int = 160) -> PixelElementMarks {
+                        maxNodes: Int = 160, deadline: ContinuousClock.Instant? = nil) -> PixelElementMarks {
         var candidates: [Candidate] = [], secureRects: [CGRect] = []
         var childText: [AnyHashable: [String]] = [:]
         var contentRect: CGRect?
@@ -107,7 +167,8 @@ enum ElementMarks {
         var visited = 0
 
         func walk(_ node: any PixelAXNode, interactiveAncestors: [AnyHashable]) {
-            guard visited < maxNodes, candidates.count < limit else { return }
+            guard visited < maxNodes, candidates.count < limit,
+                  deadline.map({ ContinuousClock.now < $0 }) ?? true else { return }
             visited += 1
             let role = node.role
             let rect = node.screenRect
@@ -184,24 +245,35 @@ enum ElementMarks {
     }
 
     static func read(window: AgentMacAccessibility.Window, budget: Duration = .milliseconds(300), limit: Int = 60) -> PixelElementMarks {
-        let deadline = ContinuousClock.now + budget
         let appRoot = AXUIElementCreateApplication(window.application.processIdentifier)
-        let focused = ax(read(appRoot, kAXFocusedUIElementAttribute, deadline: deadline))
-        var nodes: [any PixelAXNode] = [AXPixelNode(element: window.element, deadline: deadline)]
-        if let menu = ax(read(appRoot, kAXMenuBarAttribute, deadline: deadline)) {
-            nodes.append(AXPixelNode(element: menu, deadline: deadline))
-        }
-        let root = PixelAXCompositeNode(nodes: nodes)
-        let browserURL = safeURL(read(window.element, kAXDocumentAttribute, deadline: deadline))
-        let projected = project(root: root, windowBounds: window.bounds,
-            focusedIdentity: focused.map { AnyHashable(PixelAXIdentity(element: $0)) }, browserURL: browserURL,
-            readOnly: AgentSafetyBoundary.readOnly(bundleID: window.application.bundleIdentifier, appName: window.application.localizedName),
+        return readCapture(window: window, focusedWindowElement: window.element, focusedBounds: window.bounds,
+            appRoot: appRoot, application: window.application, selectedBounds: window.bounds, budget: budget, limit: limit)
+    }
+
+    static func readCapture(window: AgentMacAccessibility.Window?, focusedWindowElement: AXUIElement?,
+                            focusedBounds: CGRect?, appRoot: AXUIElement, application: NSRunningApplication,
+                            selectedBounds: CGRect, budget: Duration = .milliseconds(300),
+                            limit: Int = 60) -> PixelElementMarks {
+        let deadline = ContinuousClock.now + budget
+        let focusedUIElement = ax(read(appRoot, kAXFocusedUIElementAttribute, deadline: deadline))
+        let focusedNode = focusedWindowElement.map { AXPixelNode(element: $0, deadline: deadline) }
+        let focusedElementNode = focusedUIElement.map { AXPixelNode(element: $0, deadline: deadline) }
+        let menuNode = ax(read(appRoot, kAXMenuBarAttribute, deadline: deadline))
+            .map { AXPixelNode(element: $0, deadline: deadline) }
+        let browserURL = window.flatMap { safeURL(read($0.element, kAXDocumentAttribute, deadline: deadline)) }
+        let projected = projectCaptureRoots(focusedWindow: focusedNode, focusedBounds: focusedBounds,
+            focusedElement: focusedElementNode, menuBar: menuNode,
+            selectedBounds: selectedBounds, deadline: deadline,
+            readOnly: AgentSafetyBoundary.readOnly(bundleID: application.bundleIdentifier, appName: application.localizedName),
             limit: limit)
+        let result = PixelElementMarks(marks: projected.marks, focusedID: projected.focusedID,
+            secureScreenRects: projected.secureScreenRects, contentRect: projected.contentRect,
+            browserURL: browserURL ?? projected.browserURL, axState: projected.axState)
         guard ContinuousClock.now < deadline else {
-            return PixelElementMarks(marks: [], focusedID: nil, secureScreenRects: projected.secureScreenRects,
-                contentRect: projected.contentRect, browserURL: browserURL, axState: nil)
+            return PixelElementMarks(marks: [], focusedID: nil, secureScreenRects: result.secureScreenRects,
+                contentRect: result.contentRect, browserURL: browserURL, axState: nil)
         }
-        return projected
+        return result
     }
 
     static func semanticLabel(for node: any PixelAXNode, deadline: ContinuousClock.Instant,
