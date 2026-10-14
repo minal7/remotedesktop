@@ -12,7 +12,7 @@ from urllib.parse import urlsplit
 EXPECTED_CHECKS = (
     "host_process", "accessibility", "screen_recording", "pixel_environment", "model", "trust",
 )
-SUPPORTED_POLICIES = {"fara15-4b", "ui-tars15-7b"}
+SUPPORTED_POLICIES = {"fara15-4b", "ui-tars15-7b", "gui-owl15-4b"}
 TRUSTED_APP_BUNDLES = {
     "Safari": "com.apple.Safari", "TextEdit": "com.apple.TextEdit",
     "Finder": "com.apple.finder", "Notes": "com.apple.Notes",
@@ -206,7 +206,7 @@ def task_infra_row(task_id: str, suite: str, run_index: int, tags: list[str],
 
 
 def _requested_crop_mode(policy: str) -> str:
-    return "full-display" if policy == "ui-tars15-7b" else "frontmost-window"
+    return "full-display" if policy in {"ui-tars15-7b", "gui-owl15-4b"} else "frontmost-window"
 
 
 def first_observation_reason(answer: Any) -> str:
