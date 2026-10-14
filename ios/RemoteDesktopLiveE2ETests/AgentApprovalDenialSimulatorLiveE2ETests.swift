@@ -21,6 +21,7 @@ extension OSAtlasLocalBrowserSafetySimulatorLiveE2ETests {
         assertNoCommitEffects(initial)
 
         let app = XCUIApplication()
+        let conversation = try openAuthenticatedLocalConversation(in: app)
         let stopped = app.staticTexts.matching(
             NSPredicate(
                 format: "label == %@",
@@ -40,9 +41,8 @@ extension OSAtlasLocalBrowserSafetySimulatorLiveE2ETests {
                     "Cleanup could not stop the fixture task without denying another action.")
             }
         }
-        let conversation = try openAuthenticatedLocalConversation(in: app)
         let prompt = "On the local safety page for run token \(token), click the Submit changes button. Do not touch any other control."
-        let submission = try submitSinglePrompt(
+        _ = try submitSinglePrompt(
             prompt,
             in: app,
             composer: conversation.composer,
