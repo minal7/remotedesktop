@@ -4,6 +4,31 @@ import XCTest
 @testable import RemoteDesktopHost
 
 final class AgentEvalWireTests: XCTestCase {
+    func testCoordinateCalibrationIdentityRequiresNearestActionableMarkWithinFiveAncestors() {
+        let passive = (false, false)
+        let expected = (true, true)
+        let actionableSibling = (false, true)
+        func classify(_ ancestors: [(Bool, Bool)], exact: Bool = false, hitActionable: Bool = false,
+                      geometry: Bool = true, window: Bool = true) -> CoordinateCalibrationIdentityResult {
+            CoordinateCalibrationIdentityMatcher.classify(geometryValid: geometry,
+                selectedWindowHit: window, exact: exact, hitIsActionable: hitActionable,
+                ancestors: ancestors)
+        }
+
+        XCTAssertEqual(classify([], exact: true, hitActionable: true), .exact)
+        for depth in 1...5 {
+            XCTAssertEqual(classify(Array(repeating: passive, count: depth - 1) + [expected]),
+                .descendant(depth: depth))
+        }
+        XCTAssertEqual(classify(Array(repeating: passive, count: 5) + [expected]), .rejected)
+        XCTAssertEqual(classify([passive, actionableSibling, expected]), .rejected)
+        XCTAssertEqual(classify([actionableSibling, expected]), .rejected)
+        XCTAssertEqual(classify([], exact: true, hitActionable: true, window: false), .rejected)
+        XCTAssertEqual(classify([], exact: true, hitActionable: true, geometry: false), .rejected)
+        XCTAssertEqual(classify([], exact: true, hitActionable: false), .exact)
+        XCTAssertEqual(classify([(true, false)]), .rejected)
+    }
+
     @MainActor
     func testCleanStartIsEnabledOnlyByEvaluationConfiguration() throws {
         XCTAssertFalse(AgentHostFactory.Configuration().requireCleanStart)

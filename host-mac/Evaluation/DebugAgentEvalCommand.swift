@@ -301,6 +301,24 @@ private struct CoordinateCalibrationRequest {
 
 /// Read-only, DEBUG-only coordinate calibration. It opens only the three declared apps,
 /// captures their selected windows, and never posts input events.
+enum CoordinateCalibrationIdentityResult: Equatable {
+    case exact, descendant(depth: Int), rejected
+}
+
+enum CoordinateCalibrationIdentityMatcher {
+    static func classify(geometryValid: Bool, selectedWindowHit: Bool, exact: Bool,
+                         hitIsActionable: Bool, ancestors: [(Bool, Bool)]) -> CoordinateCalibrationIdentityResult {
+        guard geometryValid, selectedWindowHit else { return .rejected }
+        if exact { return .exact }
+        guard !hitIsActionable else { return .rejected }
+        for (i, a) in ancestors.prefix(5).enumerated() {
+            if a.0 { return a.1 ? .descendant(depth: i + 1) : .rejected }
+            if a.1 { return .rejected }
+        }
+        return .rejected
+    }
+}
+
 @MainActor
 private enum CoordinateCalibration {
     private struct AppSpec {
@@ -373,7 +391,9 @@ private enum CoordinateCalibration {
                 }
                 for mark in selected { checks.append(check(mark, sample: sample)) }
             }
-            let passCount = checks.filter { $0["axEqual"] as? Bool == true }.count
+            let exactCount = checks.filter { $0["identityMatch"] as? String == "exact" }.count
+            let descendantCount = checks.filter { $0["identityMatch"] as? String == "descendant" }.count
+            let passCount = checks.filter { $0["calibrationPass"] as? Bool == true }.count
             let expectedCount = 20
             let appsCovered = apps.allSatisfy { (selectedCounts[$0.bundleID] ?? 0) > 0 }
             return [
@@ -389,6 +409,8 @@ private enum CoordinateCalibration {
                 "allThreeAppsRepresented": appsCovered,
                 "appFailures": appFailures,
                 "passedChecks": passCount,
+                "exactChecks": exactCount,
+                "descendantChecks": descendantCount,
                 "passed": checks.count == expectedCount && passCount == expectedCount && appsCovered && appFailures.isEmpty,
                 "wallSeconds": ProcessInfo.processInfo.systemUptime - started,
             ]
@@ -407,6 +429,15 @@ private enum CoordinateCalibration {
                 !mark.state.contains("disabled") &&
                 sample.bounds.contains(CGPoint(x: mark.screenRect.midX, y: mark.screenRect.midY))
         }
+    }
+
+    private static func isActionable(_ element: AXUIElement) -> Bool {
+        guard let role = ElementMarks.string(element, kAXRoleAttribute),
+              PixelTargetSnapping.interactiveRoles.contains(role) else { return false }
+        var enabledValue: CFTypeRef?
+        if AXUIElementCopyAttributeValue(element, kAXEnabledAttribute as CFString, &enabledValue) == .success,
+           let enabled = enabledValue as? Bool { return enabled }
+        return true
     }
 
     private static func allocate(count: Int, capacities: [Int], rng: inout SplitMix64) -> [Int] {
@@ -594,33 +625,29 @@ private enum CoordinateCalibration {
         let equal: Bool
         if status == .success, let expected, let actual { equal = CFEqual(expected.element, actual) }
         else { equal = false }
-        var actualHitDescendsFromExpected = false
-        var actualHitParentLinksVisited = 0
+        let hitIsActionable = actual.map(Self.isActionable) ?? false
+        var ancestors: [(Bool, Bool)] = []
         if let actual, let expected, !CFEqual(expected.element, actual) {
-            var current = actual
-            var visited: [AXUIElement] = []
-            for _ in 0..<8 {
-                guard !visited.contains(where: { CFEqual($0, current) }) else { break }
-                visited.append(current)
-                AXUIElementSetMessagingTimeout(current, 0.1)
-                var parentValue: CFTypeRef?
-                guard AXUIElementCopyAttributeValue(
-                    current, kAXParentAttribute as CFString, &parentValue) == .success,
-                    let parentValue,
-                    CFGetTypeID(parentValue) == AXUIElementGetTypeID() else { break }
-                let parent = unsafeBitCast(parentValue, to: AXUIElement.self)
-                actualHitParentLinksVisited += 1
-                if CFEqual(expected.element, parent) {
-                    actualHitDescendsFromExpected = true
-                    break
+            if !hitIsActionable {
+                var current = actual
+                for _ in 0..<5 {
+                    AXUIElementSetMessagingTimeout(current, 0.1)
+                    var parentValue: CFTypeRef?
+                    guard AXUIElementCopyAttributeValue(
+                        current, kAXParentAttribute as CFString, &parentValue) == .success,
+                        let parentValue,
+                        CFGetTypeID(parentValue) == AXUIElementGetTypeID() else { break }
+                    let parent = unsafeBitCast(parentValue, to: AXUIElement.self)
+                    let isExpected = CFEqual(expected.element, parent)
+                    let actionable = Self.isActionable(parent)
+                    ancestors.append((isExpected, actionable))
+                    if isExpected || actionable { break }
+                    current = parent
                 }
-                current = parent
             }
         }
         var actualPID: pid_t = 0
-        let actualPIDStatus: AXError
-        if let actual { actualPIDStatus = AXUIElementGetPid(actual, &actualPID) }
-        else { actualPIDStatus = .failure }
+        let actualPIDStatus = actual.map { AXUIElementGetPid($0, &actualPID) } ?? .failure
         let actualBounds = actual.flatMap(ElementMarks.bounds)
         let actualRole = actual.flatMap { ElementMarks.string($0, kAXRoleAttribute) }
         let actualTitle = actual.flatMap { ElementMarks.string($0, kAXTitleAttribute) }
@@ -631,6 +658,22 @@ private enum CoordinateCalibration {
                                      elementBounds: actualBounds)
         } ?? []
         let windowAtPoint = hitWindows.first { $0["containsPoint"] as? Bool == true }
+        let geometryValid = pixel != nil && roundTrip.map { point in
+            sample.bounds.contains(center) && sample.bounds.contains(point) &&
+                abs(point.x - center.x) <= 0.01 && abs(point.y - center.y) <= 0.01
+        } == true
+        let selectedWindowHit = actualPIDStatus == .success && actualPID == sample.app.processIdentifier &&
+            (windowAtPoint?["windowID"] as? UInt32) == sample.target.windowID
+        let identityResult = CoordinateCalibrationIdentityMatcher.classify(geometryValid: geometryValid,
+            selectedWindowHit: selectedWindowHit, exact: equal, hitIsActionable: hitIsActionable,
+            ancestors: ancestors)
+        let identityMatch: String
+        let calibrationPass: Bool
+        switch identityResult {
+        case .exact: identityMatch = "exact"; calibrationPass = true
+        case .descendant: identityMatch = "descendant"; calibrationPass = true
+        case .rejected: identityMatch = "rejected"; calibrationPass = false
+        }
         return [
             "app": sample.spec.name, "bundleID": sample.spec.bundleID,
             "windowID": sample.target.windowID, "windowTitle": sample.target.title ?? "",
@@ -638,9 +681,9 @@ private enum CoordinateCalibration {
             "sourceCenter": pointJSON(center), "screenshotPixel": pixel.map { pointJSON($0) as Any } ?? NSNull(),
             "roundTripPoint": roundTrip.map { pointJSON($0) as Any } ?? NSNull(),
             "expectedMarkBounds": rectJSON(mark.screenRect),
-            "actualHitDescendsFromExpected": actualHitDescendsFromExpected,
-            "actualHitParentLinksVisited": actualHitParentLinksVisited,
-            "axEqual": equal, "axError": status.rawValue,
+            "axEqual": equal, "identityMatch": identityMatch,
+            "geometryValid": geometryValid, "selectedWindowHit": selectedWindowHit,
+            "calibrationPass": calibrationPass, "axError": status.rawValue,
             "actualAXRole": actualRole ?? "", "actualAXTitle": actualTitle ?? "",
             "actualAXDescription": actualDescription ?? "", "actualAXName": actualName ?? "",
             "actualAXBounds": actualBounds.map { rectJSON($0) as Any } ?? NSNull(),
