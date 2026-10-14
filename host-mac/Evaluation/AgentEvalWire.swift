@@ -35,14 +35,47 @@ struct AgentEvalFirstObservation: Encodable {
         validating && receipt?.valid != true
     }
 
+    static func startURLCandidate(axURL: CFTypeRef?, documentURL: CFTypeRef?, sanitizedURL: String?) -> String? {
+        rawURL(axURL) ?? rawURL(documentURL) ?? sanitizedURL
+    }
+
+    @MainActor
+    static func observedStartURL(snapshot: PixelEnvironment.Snapshot) -> String? {
+        guard let element = snapshot.window?.element else { return snapshot.url }
+        let deadline = ContinuousClock.now + .milliseconds(300)
+        var stack = [element]
+        var visited = 0
+        while !stack.isEmpty && visited < 160 && ContinuousClock.now < deadline {
+            let current = stack.removeLast()
+            visited += 1
+            let role = ElementMarks.read(current, kAXRoleAttribute, deadline: deadline) as? String
+            if CFEqual(current, element) || role == "AXWebArea" {
+                if let value = startURLCandidate(axURL: ElementMarks.read(current, "AXURL", deadline: deadline),
+                    documentURL: ElementMarks.read(current, kAXDocumentAttribute, deadline: deadline), sanitizedURL: nil) {
+                    return value
+                }
+            }
+            stack.append(contentsOf: ElementMarks.children(ElementMarks.read(current, kAXChildrenAttribute, deadline: deadline)))
+        }
+        return snapshot.url
+    }
+
+    static func rawURL(_ value: CFTypeRef?) -> String? {
+        if let string = value as? String { return string }
+        guard let value, CFGetTypeID(value) == CFURLGetTypeID() else { return nil }
+        return (unsafeBitCast(value, to: CFURL.self) as URL).absoluteString
+    }
+
+    @MainActor
     static func capture(snapshot: PixelEnvironment.Snapshot, expectedBundleID: String?,
                         expectedURL: String?) -> AgentEvalFirstObservation {
-        capture(snapshotBundleID: snapshot.bundleID, appName: snapshot.appName,
+        let observedURL = observedStartURL(snapshot: snapshot)
+        return capture(snapshotBundleID: snapshot.bundleID, appName: snapshot.appName,
             processID: snapshot.application?.processIdentifier ?? 0,
             expectedBundleID: expectedBundleID, expectedURL: expectedURL,
-            observedURL: snapshot.url,
+            observedURL: observedURL,
             startSurfaceMatches: matchesStart(expectedBundleID: expectedBundleID,
-                observedBundleID: snapshot.bundleID, expectedURL: expectedURL, observedURL: snapshot.url),
+                observedBundleID: snapshot.bundleID, expectedURL: expectedURL, observedURL: observedURL),
             visibleWindowCount: snapshot.visibleWindowCount, windowTitle: snapshot.title,
             windowNumber: snapshot.activeWindowNumber, windowOwnerProcessID: snapshot.activeWindowOwnerProcessID,
             windowBounds: snapshot.activeWindowBounds)
@@ -91,11 +124,12 @@ extension PixelEnvironment {
             try checkActive()
             let snapshot = try await captureSnapshot()
             last = snapshot
+            let observedURL = AgentEvalFirstObservation.observedStartURL(snapshot: snapshot)
             if snapshot.visibleWindowCount == 1,
                snapshot.activeWindowBounds != nil,
                snapshot.application?.processIdentifier == snapshot.activeWindowOwnerProcessID,
                AgentEvalFirstObservation.matchesStart(expectedBundleID: expectedStartBundleID,
-                   observedBundleID: snapshot.bundleID, expectedURL: startURL, observedURL: snapshot.url) {
+                   observedBundleID: snapshot.bundleID, expectedURL: startURL, observedURL: observedURL) {
                 return snapshot
             }
             guard ContinuousClock.now < deadline else { break }

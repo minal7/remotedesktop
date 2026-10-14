@@ -268,7 +268,7 @@ enum ElementMarks {
         let focusedElementNode = focusedUIElement.map { AXPixelNode(element: $0, deadline: deadline) }
         let menuNode = ax(read(appRoot, kAXMenuBarAttribute, deadline: deadline))
             .map { AXPixelNode(element: $0, deadline: deadline) }
-        let browserURL = window.flatMap { safeURL(read($0.element, kAXDocumentAttribute, deadline: deadline)) }
+        let browserURL = window.flatMap { safeURL(read($0.element, "AXURL", deadline: deadline) ?? read($0.element, kAXDocumentAttribute, deadline: deadline)) }
         let projected = projectCaptureRoots(focusedWindow: focusedNode, focusedBounds: focusedBounds,
             focusedElement: focusedElementNode, menuBar: menuNode,
             selectedBounds: selectedBounds, deadline: deadline,
@@ -381,7 +381,7 @@ enum ElementMarks {
         rect(element, deadline: ContinuousClock.now + .milliseconds(10))
     }
 
-    fileprivate static func read(_ element: AXUIElement, _ attribute: String, deadline: ContinuousClock.Instant) -> CFTypeRef? {
+    static func read(_ element: AXUIElement, _ attribute: String, deadline: ContinuousClock.Instant) -> CFTypeRef? {
         let remaining = deadline - ContinuousClock.now
         guard remaining > .zero else { return nil }
         let seconds = min(0.01, max(0.001, Double(remaining.components.seconds) + Double(remaining.components.attoseconds) / 1e18))
@@ -409,7 +409,7 @@ enum ElementMarks {
         return CGRect(origin: point, size: dimensions)
     }
 
-    fileprivate static func children(_ value: CFTypeRef?) -> [AXUIElement] {
+    static func children(_ value: CFTypeRef?) -> [AXUIElement] {
         guard let value, CFGetTypeID(value) == CFArrayGetTypeID() else { return [] }
         let array = unsafeBitCast(value, to: CFArray.self)
         return (0..<CFArrayGetCount(array)).compactMap { index in
@@ -423,7 +423,7 @@ enum ElementMarks {
         return unsafeBitCast(value, to: AXUIElement.self)
     }
 
-    fileprivate static func safeURL(_ value: CFTypeRef?) -> String? {
+    static func safeURL(_ value: CFTypeRef?) -> String? {
         let raw: String?
         if let value = value as? String { raw = value }
         else if let value, CFGetTypeID(value) == CFURLGetTypeID() {
@@ -454,7 +454,7 @@ private struct AXPixelNode: PixelAXNode {
         let placeholder = ElementMarks.read(element, "AXPlaceholderValue", deadline: deadline) as? String ?? ""
         return AgentCredentialRule.isSensitive(role: currentRole, name: (title ?? "") + " " + placeholder, state: [subrole])
     }
-    var documentURL: String? { ElementMarks.safeURL(ElementMarks.read(element, kAXDocumentAttribute, deadline: deadline)) }
+    var documentURL: String? { ElementMarks.safeURL(ElementMarks.read(element, "AXURL", deadline: deadline) ?? ElementMarks.read(element, kAXDocumentAttribute, deadline: deadline)) }
     func children() -> [any PixelAXNode] {
         ElementMarks.children(ElementMarks.read(element, kAXChildrenAttribute, deadline: deadline))
             .map { AXPixelNode(element: $0, deadline: deadline) }

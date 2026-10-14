@@ -39,6 +39,27 @@ final class AgentEvalWireTests: XCTestCase {
         XCTAssertFalse(AgentEvalFirstObservation.requiresStartValidation(configured: true, isInitialObservation: false))
     }
 
+    @MainActor
+    func testStartReceiptPrefersRawAccessibilityURLWhileRuntimeURLStaysSanitized() {
+        let raw = "https://example.test/form?run=alpha#section"
+        let runtime = "https://example.test/form"
+        XCTAssertEqual(AgentEvalFirstObservation.startURLCandidate(axURL: raw as CFString,
+            documentURL: "https://example.test/other" as CFString, sanitizedURL: runtime), raw)
+        XCTAssertEqual(AgentEvalFirstObservation.startURLCandidate(axURL: nil,
+            documentURL: URL(string: raw)! as CFURL, sanitizedURL: runtime), raw)
+        XCTAssertEqual(AgentEvalFirstObservation.startURLCandidate(axURL: nil,
+            documentURL: nil, sanitizedURL: runtime), runtime)
+        XCTAssertEqual(ElementMarks.safeURL(raw as CFString), runtime)
+        XCTAssertTrue(AgentEvalFirstObservation.matchesStart(expectedBundleID: "org.example.browser",
+            observedBundleID: "org.example.browser", expectedURL: raw,
+            observedURL: AgentEvalFirstObservation.startURLCandidate(axURL: raw as CFString,
+                documentURL: nil, sanitizedURL: runtime)))
+        XCTAssertFalse(AgentEvalFirstObservation.matchesStart(expectedBundleID: "org.example.browser",
+            observedBundleID: "org.example.browser", expectedURL: raw,
+            observedURL: AgentEvalFirstObservation.startURLCandidate(axURL: "https://example.test/form?run=beta" as CFString,
+                documentURL: raw as CFString, sanitizedURL: runtime)))
+    }
+
     func testAcceptsOnlyKnownPolicyAndBoundedTaskConfiguration() throws {
         let request = try decode(#"{"task_id":"eval_1","prompt":"Read this page","start":{"url":"http://127.0.0.1:8765/read.html"},"max_steps":40,"policy":"fara15-4b"}"#)
         XCTAssertEqual(request.taskID, "eval_1")
