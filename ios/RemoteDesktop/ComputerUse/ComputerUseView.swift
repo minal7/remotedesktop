@@ -700,11 +700,12 @@ struct ComputerUseView: View {
             Button(role: .destructive) {
                 model.respondToApproval(request, approved: false)
             } label: {
-                Text("Cancel")
+                Text("Deny")
                     .frame(maxWidth: .infinity)
             }
             .buttonStyle(.bordered)
-            .accessibilityHint("Cancels this action without making the proposed change")
+            .accessibilityHint("Denies this action without making the proposed change")
+            .accessibilityIdentifier("computer-use-approval-deny")
             .disabled(!model.isConnected)
 
             Button {

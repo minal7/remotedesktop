@@ -108,13 +108,14 @@ final class OSAtlasLocalBrowserSafetySimulatorLiveE2ETests: XCTestCase {
             "The pending purchase approval was not exposed as the required typed user-intervention outcome.")
 
         let title = app.staticTexts["Approve before AI continues"]
-        let cancel = app.buttons["Cancel"]
+        let deny = app.buttons["computer-use-approval-deny"]
         let approve = app.buttons["Approve once"]
         let privacyShield = app.descendants(matching: .any).matching(
             identifier: "computer-use-approval-privacy-shield").firstMatch
         XCTAssertTrue(title.exists, "The host-owned purchase approval title disappeared.")
-        XCTAssertTrue(cancel.exists && cancel.isHittable,
-            "The exact purchase action could not be canceled from the shipped approval card.")
+        XCTAssertTrue(deny.exists && deny.isHittable,
+            "The exact purchase action could not be denied from the shipped approval card.")
+        XCTAssertEqual(deny.label, "Deny")
         XCTAssertTrue(approve.exists && approve.isHittable,
             "The exact purchase action did not expose a one-time approval choice.")
         XCTAssertTrue(
@@ -130,7 +131,7 @@ final class OSAtlasLocalBrowserSafetySimulatorLiveE2ETests: XCTestCase {
             .runningForeground,
             "The shipped iOS client left the foreground at purchase approval.")
 
-        // Cancel is the only action this acceptance test takes. The shared
+        // Deny is the only action this acceptance test takes. The shared
         // cleanup helper waits for the host-authored terminal cancellation, so
         // a late or lost cancellation cannot leak into the next live case.
         let canceledCountBefore = app.staticTexts.matching(
@@ -150,7 +151,7 @@ final class OSAtlasLocalBrowserSafetySimulatorLiveE2ETests: XCTestCase {
                     format: "label == %@",
                     ComputerUseLiveE2ECleanup.approvalCanceledResponse)).count,
             canceledCountBefore + 1,
-            "Canceling the purchase did not produce exactly one no-action response.")
+            "Denying the purchase did not produce exactly one no-action response.")
         let terminalStatus = app.descendants(matching: .any).matching(
             identifier: "computer-use-status").firstMatch
         XCTAssertTrue(
@@ -166,7 +167,7 @@ final class OSAtlasLocalBrowserSafetySimulatorLiveE2ETests: XCTestCase {
         // again only after cancellation restores that tree.
         assertSingleUserSubmission(submission, in: app)
         XCTAssertFalse(
-            title.exists || cancel.exists || approve.exists,
+            title.exists || deny.exists || approve.exists,
             "The consumed purchase approval remained actionable after cancellation.")
         XCTAssertEqual(
             assistantMessages(in: app).count,
@@ -573,7 +574,7 @@ final class OSAtlasLocalBrowserSafetySimulatorLiveE2ETests: XCTestCase {
             "Unable to complete",
             in: app,
             composer: conversation.composer,
-            failure: "Canceling the fresh replacement approval did not terminate safely.")
+            failure: "Denying the fresh replacement approval did not terminate safely.")
         assertSingleUserSubmission(submission, in: app)
         XCTAssertFalse(hasApprovalOrIntervention(in: app))
 
@@ -592,12 +593,12 @@ final class OSAtlasLocalBrowserSafetySimulatorLiveE2ETests: XCTestCase {
         add(evidence)
     }
 
-    private struct LocalConversation {
+    struct LocalConversation {
         let composer: XCUIElement
         let localConnection: XCUIElement
     }
 
-    private struct Submission {
+    struct Submission {
         let prompt: String
         let assistantCountBefore: Int
         let userCountBefore: Int
@@ -675,7 +676,7 @@ final class OSAtlasLocalBrowserSafetySimulatorLiveE2ETests: XCTestCase {
         }
     }
 
-    private enum AcceptanceFailure: Error {
+    enum AcceptanceFailure: Error {
         case unmetPrecondition
         case unsafeAction
         case unexpectedOutcome
@@ -683,7 +684,7 @@ final class OSAtlasLocalBrowserSafetySimulatorLiveE2ETests: XCTestCase {
         case transportFailure
     }
 
-    private func requireOptIn(
+    func requireOptIn(
         _ key: String,
         precondition: String
     ) throws {
@@ -701,7 +702,7 @@ final class OSAtlasLocalBrowserSafetySimulatorLiveE2ETests: XCTestCase {
         }
     }
 
-    private func openAuthenticatedLocalConversation(
+    func openAuthenticatedLocalConversation(
         in app: XCUIApplication
     ) throws -> LocalConversation {
         try ComputerUseLiveE2EPreflight
@@ -805,7 +806,7 @@ final class OSAtlasLocalBrowserSafetySimulatorLiveE2ETests: XCTestCase {
             localConnection: localConnection)
     }
 
-    private func submitSinglePrompt(
+    func submitSinglePrompt(
         _ prompt: String,
         in app: XCUIApplication,
         composer: XCUIElement,
@@ -855,7 +856,7 @@ final class OSAtlasLocalBrowserSafetySimulatorLiveE2ETests: XCTestCase {
         timeout: TimeInterval
     ) throws -> PurchaseObservation {
         let approvalTitle = app.staticTexts["Approve before AI continues"]
-        let cancel = app.buttons["Cancel"]
+        let deny = app.buttons["computer-use-approval-deny"]
         let approve = app.buttons["Approve once"]
         let intervention = app.descendants(matching: .any)[
             "computer-use-intervention-guidance"]
@@ -902,7 +903,7 @@ final class OSAtlasLocalBrowserSafetySimulatorLiveE2ETests: XCTestCase {
                 }
             }
 
-            if approvalTitle.exists && cancel.exists && approve.exists {
+            if approvalTitle.exists && deny.exists && approve.exists {
                 approvalBecameVisibleAt = approvalBecameVisibleAt ?? Date()
                 if approvalOutcome.exists,
                    approvalOutcome.label == "User intervention required" {
@@ -1383,7 +1384,7 @@ final class OSAtlasLocalBrowserSafetySimulatorLiveE2ETests: XCTestCase {
             NSPredicate(format: "label BEGINSWITH %@", "You: "))
     }
 
-    private func waitUntil(
+    func waitUntil(
         timeout: TimeInterval,
         predicate: () -> Bool
     ) -> Bool {

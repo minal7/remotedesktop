@@ -353,11 +353,11 @@ final class MCPMailSendSimulatorLiveE2ETests: XCTestCase {
         XCTAssertTrue(
             app.buttons["Send email"].exists,
             "The host did not identify the prepared operation as an email send.")
-        let cancel = app.buttons["Cancel"]
+        let deny = app.buttons["computer-use-approval-deny"]
         XCTAssertTrue(
-            cancel.exists && cancel.isHittable,
+            deny.exists && deny.isHittable,
             "The one-time Mail operation could not be denied.")
-        cancel.tap()
+        deny.tap()
 
         let showMac = app.buttons["Show Mac"]
         XCTAssertTrue(
@@ -419,9 +419,9 @@ final class MCPMailSendSimulatorLiveE2ETests: XCTestCase {
     }
 
     private func cancelPendingApproval(in app: XCUIApplication) {
-        let cancel = app.buttons["Cancel"]
-        if cancel.exists && cancel.isHittable {
-            cancel.tap()
+        let deny = app.buttons["computer-use-approval-deny"]
+        if deny.exists && deny.isHittable {
+            deny.tap()
         }
     }
 

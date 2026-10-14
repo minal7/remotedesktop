@@ -1472,9 +1472,9 @@ final class OSAtlasDoorDashTakeoverResumeSimulatorLiveE2ETests: XCTestCase {
     }
 
     private func cancelOrStopAfterResumeIfStillPending(in app: XCUIApplication) {
-        let cancel = app.buttons["Cancel"]
-        if cancel.exists && cancel.isHittable {
-            cancel.tap()
+        let deny = app.buttons["computer-use-approval-deny"]
+        if deny.exists && deny.isHittable {
+            deny.tap()
         }
         let stop = app.buttons["Stop task"]
         if stop.exists && stop.isHittable {
