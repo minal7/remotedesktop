@@ -336,9 +336,7 @@ struct AgentKeyStroke: Equatable {
             usage = Int(value - 97) + 4
             if let originalScalar, (65...90).contains(originalScalar) { modifiers |= 1 }
         }
-        else if let value = scalar, (65...90).contains(value) {
-            usage = Int(value - 65) + 4; modifiers |= 1
-        } else if let value = scalar, (49...57).contains(value) { usage = Int(value - 49) + 0x1e }
+        else if let value = scalar, (49...57).contains(value) { usage = Int(value - 49) + 0x1e }
         else if key == "0" { usage = 0x27 }
         else if let value = scalar, let baseUsage = shifted[value] { usage = baseUsage; modifiers |= 1 }
         else if let value = scalar {

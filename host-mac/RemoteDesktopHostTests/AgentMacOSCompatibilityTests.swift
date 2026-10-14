@@ -106,6 +106,26 @@ final class AgentMacOSCompatibilityTests: XCTestCase {
         XCTAssertFalse(prompt.contains("Return exactly one JSON action"))
     }
 
+    func testFaraProgressNarrationStripsNativeThinkEnvelope() throws {
+        let narrative = "I can see the window is ready. I will continue with the visible control."
+        let toolCall = #"<tool_call>{"name":"computer_use","arguments":{"action":"left_click","coordinate":[500,500]}}</tool_call>"#
+        let completions = [
+            "<think>\n\(narrative)\n</think>\n\(toolCall)",
+            "<think>\n\(narrative)\n\(toolCall)",
+        ]
+        let ordinary = AgentObservation(task: "A generic task", surface: .app(bundleID: "example.app", title: nil),
+            screenshot: "", elements: [], focus: nil, history: [], budget: .init(step: 0, maxSteps: 10))
+
+        for raw in completions {
+            let progress = try XCTUnwrap(FaraPolicyAdapter.progressText(fromCompletion: raw))
+            let rendered = AgentProgressNarration.text(modelText: progress,
+                action: .click(target: .point(x: 500, y: 500), button: nil, count: nil), observation: ordinary)
+            XCTAssertEqual(rendered, "I can see the window is ready")
+            XCTAssertFalse(rendered.contains("<think>"))
+            XCTAssertFalse(rendered.contains("</think>"))
+        }
+    }
+
     func testProgressUsesOneShortSentenceAndNeverQuotesSensitiveValues() {
         let ordinary = AgentObservation(task: "A generic task", surface: .app(bundleID: "example.app", title: nil),
             screenshot: "", elements: [], focus: nil, history: [], budget: .init(step: 0, maxSteps: 10))

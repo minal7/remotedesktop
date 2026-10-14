@@ -36,7 +36,17 @@ enum FaraPolicyAdapter {
               let start = raw.range(of: "<tool_call>") else { return nil }
         let prefix = raw[..<start.lowerBound]
         guard !prefix.contains("<tool_call"), !prefix.contains("</tool_call") else { return nil }
-        let text = prefix.trimmingCharacters(in: .whitespacesAndNewlines)
+        var text = prefix.trimmingCharacters(in: .whitespacesAndNewlines)
+        if text.hasPrefix("<think>") {
+            text.removeFirst("<think>".count)
+            if let closing = text.range(of: "</think>") {
+                guard text[closing.upperBound...].trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                    return nil
+                }
+                text = String(text[..<closing.lowerBound])
+            }
+            text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
         return text.isEmpty || text.utf8.count > 4_096 ? nil : text
     }
 
