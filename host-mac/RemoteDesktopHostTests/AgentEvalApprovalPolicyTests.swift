@@ -93,6 +93,27 @@ final class AgentEvalApprovalPolicyTests: XCTestCase {
             currentURL: nil, currentApp: "com.apple.TextEdit", expectedApp: "com.apple.TextEdit"), request: unapproved))
     }
 
+    func testNativeScratchInteractionDoesNotAutoApproveShareOrDestructiveActions() throws {
+        let request = try appRequest(start: "Finder")
+        let highRiskActions: [AgentAction] = [
+            .click(target: .element(id: 2), button: nil, count: nil),
+            .key(chord: "Enter"),
+            .setFiles(target: .element(id: 2), fileIDs: ["opaque-file-id"]),
+        ]
+        for action in highRiskActions {
+            let candidate = candidate(request: request, action: action, riskTier: "high",
+                currentURL: nil, currentApp: "com.apple.finder", expectedApp: "com.apple.finder",
+                targetRoles: ["button"], hasSyntheticFileRoot: true)
+            XCTAssertFalse(AgentEvalApprovalPolicy.permits(candidate, request: request),
+                "A scratch root alone does not authorize Finder Share, replacement, or deletion.")
+        }
+
+        let safe = candidate(request: request,
+            action: .click(target: .element(id: 3), button: nil, count: nil), riskTier: "low",
+            currentURL: nil, currentApp: "com.apple.finder", expectedApp: "com.apple.finder")
+        XCTAssertTrue(AgentEvalApprovalPolicy.permits(safe, request: request))
+    }
+
     private func makeRequest(start: String, flags: [String: Bool]) throws -> AgentEvalRequest {
         var value: [String: Any] = ["task_id": "eval-task", "prompt": "Read the current page",
             "start": ["url": start], "max_steps": 10, "policy": "fara15-4b"]

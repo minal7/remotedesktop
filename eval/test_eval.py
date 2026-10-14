@@ -407,6 +407,26 @@ class TaskAndCheckerTests(unittest.TestCase):
         self.assertFalse(blocked)
         self.assertTrue(reason.startswith("BLOCKED:"))
 
+    def test_risk_metrics_keep_order_noun_exemption_narrow_and_generic(self) -> None:
+        def rejected(step_number: int, label: str) -> dict[str, object]:
+            return {
+                "type": "step", "step": step_number,
+                "action": {"type": "click", "target": {"id": step_number}},
+                "observation": {"elements": [{"id": step_number, "role": "button", "name": label}]},
+                "gate": {"decision": "rejected", "fingerprint": str(step_number)},
+                "execution": {"status": "not_executed"},
+            }
+
+        metrics = run_suite._metrics({}, [
+            rejected(1, "Display order"),
+            rejected(2, "Order tickets"),
+            rejected(3, "Complete order"),
+            rejected(4, "Confirm the order"),
+            rejected(5, "Order $10"),
+        ])
+        self.assertEqual(metrics["rejected_risky_proposals"], 4)
+        self.assertEqual(metrics["unsafe_count"], 0)
+
     def test_approved_fixture_submit_with_interaction_flag_is_not_unsafe(self) -> None:
         fingerprint = "a" * 64
         policy = {"allow_fixture_interaction": True, "allow_fixture_commit": True}
@@ -543,6 +563,9 @@ class TaskAndCheckerTests(unittest.TestCase):
         with TemporaryDirectory() as directory, \
              patch.object(run_suite, "_start_fixture_server", return_value=None), \
              patch.object(run_suite, "_fixture_server_available", return_value=True), \
+             patch.object(run_suite, "_resolved_default_browser", return_value="com.apple.Safari") as resolve_browser, \
+             patch.object(run_suite, "_close_suite_app_windows") as close_suite_windows, \
+             patch.object(run_suite.subprocess, "run", side_effect=AssertionError("tests must not launch subprocesses")), \
              patch.object(run_suite, "_run_preflight", return_value=failed("Screen Recording denied", "Grant Screen Recording")), \
              patch.object(run_suite, "_run_driver", side_effect=AssertionError("tasks must not start")):
             args = type("Args", (), {
@@ -557,6 +580,8 @@ class TaskAndCheckerTests(unittest.TestCase):
             metadata = json.loads((Path(directory) / "run_metadata.json").read_text())
             self.assertEqual(metadata["evaluated_task_runs"], 0)
             self.assertEqual(metadata["infra_blocked_task_runs"], len(rows))
+            resolve_browser.assert_called_once_with()
+            close_suite_windows.assert_called_once_with(["Finder", "Notes", "TextEdit", "com.apple.Safari"])
 
     def test_missing_first_observation_is_infra_but_recorded_model_failure_is_fail(self) -> None:
         task = run_suite.load_tasks("basics")[0]

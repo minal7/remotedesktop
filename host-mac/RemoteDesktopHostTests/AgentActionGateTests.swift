@@ -161,6 +161,43 @@ final class AgentActionGateTests: XCTestCase {
         }
     }
 
+    func testOrdinaryDisplayOrderStaysLowWhileCommitAndDestructiveLabelsStayHigh() throws {
+        let scope = webScope()
+        let gate = AgentActionGate(trustStore: MemoryTrustStore(trusted: ["web:https://example.test"]),
+            allowPolicy: TestAllowPolicy())
+        let safeLabels = ["Display order", "Sort order", "Reading order", "Save", "Save As", "Create", "New Folder", "Rename"]
+        for label in safeLabels {
+            let resolved = resolved(.click(target: .point(x: 10, y: 10), button: nil, count: nil), scope, label: label)
+            let result = try gate.evaluate(resolved, expectedScope: scope).result
+            XCTAssertEqual(result.decision, .allowed, label)
+            XCTAssertEqual(result.riskTier, "low", label)
+        }
+        let highLabels = ["Order", "Order tickets", "Order online", "Order $10", "Order now", "Place order",
+            "Place an order", "Complete order", "Confirm order", "Confirm the order", "Confirm your order",
+            "Commit changes", "Replace existing file", "Overwrite", "Delete", "Move to Trash", "Share"]
+        for label in highLabels {
+            let resolved = resolved(.click(target: .point(x: 10, y: 10), button: nil, count: nil), scope, label: label)
+            let result = try gate.evaluate(resolved, expectedScope: scope).result
+            XCTAssertEqual(result.decision, .needsApproval, label)
+            XCTAssertEqual(result.riskTier, "high", label)
+        }
+
+        let displayOrderButton = element(40, "AXButton", "Display order")
+        let enterDisplayOrder = AgentResolvedAction(action: .key(chord: "enter"),
+            frame: frame(scope, elements: [displayOrderButton]), targets: [])
+        XCTAssertEqual(try gate.evaluate(enterDisplayOrder, expectedScope: scope).result.decision, .allowed)
+        let orderButton = element(41, "AXButton", "Order")
+        let clickOrder = resolved(.click(target: .element(id: 41), button: nil, count: nil), scope,
+            elements: [orderButton])
+        XCTAssertEqual(try gate.evaluate(clickOrder, expectedScope: scope).result.decision, .needsApproval)
+
+        let untrustedGate = AgentActionGate(trustStore: MemoryTrustStore(), allowPolicy: TestAllowPolicy())
+        let untrustedDisplayOrder = resolved(.click(target: .point(x: 10, y: 10), button: nil, count: nil),
+            scope, label: "Display order")
+        XCTAssertEqual(try untrustedGate.evaluate(untrustedDisplayOrder, expectedScope: scope).result.decision,
+            .needsApproval, "Low-risk classification must preserve first-use surface approval.")
+    }
+
     private func resolved(_ action: AgentAction, _ scope: AgentScope, elements: [AgentElement] = [],
                           title: String = "Inbox", url: String = "https://example.test/", label: String? = nil) -> AgentResolvedAction {
         let targets: [AgentElement]

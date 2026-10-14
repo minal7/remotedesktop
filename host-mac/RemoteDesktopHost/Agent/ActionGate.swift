@@ -154,8 +154,11 @@ final class AgentActionGate {
         return (resolved.targets.map(\.name) + [resolved.targetContextLabel ?? ""]).contains(where: containsHighRiskLabel)
     }
     private func containsHighRiskLabel(_ text: String) -> Bool {
-        let pattern = #"\b(send|submit|pay|purchase|buy|order|delete|remove|share|publish|post|transfer|sign[\s_-]*out|allow|grant|install)\b"#
-        return text.range(of: pattern, options: [.regularExpression, .caseInsensitive]) != nil
+        let normalized = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let ordinaryOrder = #"^(display|sort|reading|tab|navigation|ascending|descending|chronological|reverse|column|row)\s+order$"#
+        if normalized.range(of: ordinaryOrder, options: [.regularExpression, .caseInsensitive]) != nil { return false }
+        let pattern = #"\b(send|submit|pay|purchase|buy|commit|order|delete|remove|replace|overwrite|share|publish|post|transfer|trash|sign[\s_-]*out|allow|grant|install)\b"#
+        return normalized.range(of: pattern, options: [.regularExpression, .caseInsensitive]) != nil
     }
     private func isEnter(_ action: AgentAction) -> Bool {
         guard case .key(let chord) = action else { return false }
