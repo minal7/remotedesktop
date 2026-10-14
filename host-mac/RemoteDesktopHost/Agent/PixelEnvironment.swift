@@ -325,7 +325,7 @@ final class PixelEnvironment: AgentEnvironment {
 
     func captureSnapshot() async throws -> Snapshot {
         try checkActive()
-        let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+        let content = try await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: true)
         let app = NSWorkspace.shared.frontmostApplication
         guard !AgentSafetyBoundary.blocksAutomation(bundleID: app?.bundleIdentifier, appName: app?.localizedName) else {
             throw AgentEnvironmentError.unavailable("This app is outside the computer-use boundary.")

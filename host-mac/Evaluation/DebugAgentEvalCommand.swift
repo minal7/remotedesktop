@@ -89,6 +89,18 @@ private struct SuiteCleanStartRequest {
     }
 }
 
+enum SuiteCleanStartWindowRole: Equatable {
+    case window, nonWindow, unknown
+
+    static func classify(_ role: String) -> Self {
+        switch role {
+        case "AXWindow", "AXDialog", "AXSheet": .window
+        case "AXScrollArea": .nonWindow
+        default: .unknown
+        }
+    }
+}
+
 /// DEBUG-only reset for already-running suite apps. It never launches or terminates apps,
 /// sends AppleEvents, or answers save/permission sheets.
 @MainActor
@@ -117,11 +129,26 @@ private enum SuiteCleanStart {
             }
             let root = AXUIElementCreateApplication(app.processIdentifier)
             AXUIElementSetMessagingTimeout(root, 0.75)
+            var stage = "application-root-created"
+            var initialCount = -1
+            var actionsAttempted = 0
+            var pressedWindows: [AXUIElement] = []
             do {
-                let initial = try windows(root)
-                for window in initial {
+                stage = "initial-AXWindows-query"
+                let initial = try await windows(root)
+                initialCount = initial.count
+                while ProcessInfo.processInfo.systemUptime < overallDeadline {
+                    stage = "fresh-AXWindows-query"
+                    let current = try await windows(root)
+                    for (index, window) in current.enumerated() { try ensureNotDialog(window, index: index) }
+                    guard let window = current.first else { break }
+                    guard !pressedWindows.contains(where: { CFEqual($0, window) }) else {
+                        throw CleanStartFailure.windowRemainsAfterSingleClose(current.count)
+                    }
+                    stage = "initial-window-role[\(actionsAttempted)]"
                     AXUIElementSetMessagingTimeout(window, 0.75)
-                    try ensureNotDialog(window)
+                    try ensureNotDialog(window, index: actionsAttempted)
+                    stage = "close-button-query[\(actionsAttempted)]"
                     var buttonValue: CFTypeRef?
                     let buttonError = AXUIElementCopyAttributeValue(window, kAXCloseButtonAttribute as CFString, &buttonValue)
                     guard buttonError == .success, let buttonValue,
@@ -130,18 +157,23 @@ private enum SuiteCleanStart {
                     }
                     let button = unsafeBitCast(buttonValue, to: AXUIElement.self)
                     AXUIElementSetMessagingTimeout(button, 0.75)
+                    stage = "close-button-press[\(actionsAttempted)]"
+                    pressedWindows.append(window)
+                    actionsAttempted += 1
                     let pressError = AXUIElementPerformAction(button, kAXPressAction as CFString)
                     guard pressError == .success else { throw CleanStartFailure.closeFailed(pressError.rawValue) }
+                    stage = "await-disappearance[\(actionsAttempted - 1)]"
                     try await waitUntilGone(window, app: root, deadline: min(overallDeadline, ProcessInfo.processInfo.systemUptime + 6))
                 }
-                let remainingWindows = try windows(root)
-                for window in remainingWindows { try ensureNotDialog(window) }
+                stage = "final-AXWindows-query"
+                let remainingWindows = try await windows(root)
+                for (index, window) in remainingWindows.enumerated() { try ensureNotDialog(window, index: index) }
                 guard remainingWindows.isEmpty else { throw CleanStartFailure.windowsRemain(remainingWindows.count) }
                 reports.append(["bundle_id": bundleID, "windows_before": initial.count,
                                 "windows_after": 0, "status": initial.isEmpty ? "already_clear" : "closed"])
             } catch {
                 return ["operation": "suite_clean_start", "passed": false, "applications": reports,
-                        "owner_action": "Clean start stopped at \(bundleID): \(error). Resolve any save or system dialog, then rerun."]
+                        "owner_action": "Clean start stopped at \(bundleID), stage=\(stage), initial_windows=\(initialCount), close_actions_attempted=\(actionsAttempted): \(error). Resolve any save or system dialog, then rerun."]
             }
         }
         return ["operation": "suite_clean_start", "passed": true, "applications": reports, "owner_action": ""]
@@ -149,21 +181,21 @@ private enum SuiteCleanStart {
 
     private static func waitUntilGone(_ target: AXUIElement, app: AXUIElement, deadline: TimeInterval) async throws {
         while ProcessInfo.processInfo.systemUptime < deadline {
-            let current = try windows(app)
-            for window in current { try ensureNotDialog(window) }
+            let current = try await windows(app)
+            for (index, window) in current.enumerated() { try ensureNotDialog(window, index: index) }
             if !current.contains(where: { CFEqual($0, target) }) { return }
             try await Task.sleep(for: .milliseconds(80))
         }
-        let remaining = try windows(app)
+        let remaining = try await windows(app)
         if remaining.contains(where: { CFEqual($0, target) }) { throw CleanStartFailure.windowsRemain(remaining.count) }
     }
 
-    private static func ensureNotDialog(_ window: AXUIElement) throws {
+    private static func ensureNotDialog(_ window: AXUIElement, index: Int) throws {
         AXUIElementSetMessagingTimeout(window, 0.75)
         var value: CFTypeRef?
         let error = AXUIElementCopyAttributeValue(window, kAXRoleAttribute as CFString, &value)
         guard error == .success, let role = value as? String else {
-            throw CleanStartFailure.roleUnavailable(error.rawValue)
+            throw CleanStartFailure.roleUnavailable(index: index, code: error.rawValue)
         }
         if role == "AXDialog" || role == "AXSheet" { throw CleanStartFailure.dialogRequiresOwner(role) }
         var subroleValue: CFTypeRef?
@@ -178,27 +210,72 @@ private enum SuiteCleanStart {
         }
     }
 
-    private static func windows(_ app: AXUIElement) throws -> [AXUIElement] {
-        var value: CFTypeRef?
-        let error = AXUIElementCopyAttributeValue(app, kAXWindowsAttribute as CFString, &value)
-        guard error == .success, let windows = value as? [AXUIElement] else {
-            throw CleanStartFailure.windowListUnavailable(error.rawValue)
-        }
-        return windows
+    private static func windows(_ app: AXUIElement) async throws -> [AXUIElement] {
+        let retryDeadline = ProcessInfo.processInfo.systemUptime + 0.4
+        var lastUnstableEntry = "unknown AX window role"
+        repeat {
+            AXUIElementSetMessagingTimeout(app, 0.2)
+            var value: CFTypeRef?
+            let error = AXUIElementCopyAttributeValue(app, kAXWindowsAttribute as CFString, &value)
+            guard error == .success, let value, CFGetTypeID(value) == CFArrayGetTypeID() else {
+                throw CleanStartFailure.windowListUnavailable(error.rawValue)
+            }
+            let array = unsafeBitCast(value, to: CFArray.self)
+            var result: [AXUIElement] = []
+            var retry = false
+            for index in 0..<CFArrayGetCount(array) {
+                guard let pointer = CFArrayGetValueAtIndex(array, index) else {
+                    lastUnstableEntry = "AXWindows[\(index)] was null"
+                    retry = true
+                    break
+                }
+                let object = Unmanaged<AnyObject>.fromOpaque(pointer).takeUnretainedValue() as CFTypeRef
+                guard CFGetTypeID(object) == AXUIElementGetTypeID() else {
+                    lastUnstableEntry = "AXWindows[\(index)] typeID=\(CFGetTypeID(object))"
+                    retry = true
+                    break
+                }
+                let window = unsafeBitCast(object, to: AXUIElement.self)
+                AXUIElementSetMessagingTimeout(window, 0.2)
+                var roleValue: CFTypeRef?
+                let roleError = AXUIElementCopyAttributeValue(window, kAXRoleAttribute as CFString, &roleValue)
+                guard roleError == .success, let role = roleValue as? String else {
+                    lastUnstableEntry = "AXWindows[\(index)] roleError=\(roleError.rawValue)"
+                    retry = true
+                    break
+                }
+                switch SuiteCleanStartWindowRole.classify(role) {
+                case .window: result.append(window)
+                case .nonWindow: continue
+                case .unknown:
+                    lastUnstableEntry = "AXWindows[\(index)] unrecognized role=\(role)"
+                    retry = true
+                }
+                if retry { break }
+            }
+            if !retry { return result }
+            guard ProcessInfo.processInfo.systemUptime < retryDeadline else {
+                throw CleanStartFailure.unstableWindowEntry(lastUnstableEntry)
+            }
+            try await Task.sleep(for: .milliseconds(60))
+        } while ProcessInfo.processInfo.systemUptime < retryDeadline
+        throw CleanStartFailure.unstableWindowEntry(lastUnstableEntry)
     }
 }
 
 private enum CleanStartFailure: Error, CustomStringConvertible {
-    case windowListUnavailable(Int32), roleUnavailable(Int32), dialogRequiresOwner(String)
-    case closeButtonUnavailable, closeFailed(Int32), windowsRemain(Int)
+    case windowListUnavailable(Int32), unstableWindowEntry(String), roleUnavailable(index: Int, code: Int32)
+    case dialogRequiresOwner(String), closeButtonUnavailable, closeFailed(Int32), windowsRemain(Int), windowRemainsAfterSingleClose(Int)
     var description: String {
         switch self {
-        case .windowListUnavailable(let code): return "AX window list unavailable (\(code))"
-        case .roleUnavailable(let code): return "AX window role unavailable (\(code))"
+        case .windowListUnavailable(let code): return "AXWindows query failed (\(code))"
+        case .unstableWindowEntry(let detail): return "AX window entry remained invalid after bounded reread: \(detail)"
+        case .roleUnavailable(let index, let code): return "AX role query failed windowIndex=\(index) code=\(code)"
         case .dialogRequiresOwner(let role): return "\(role) requires owner action"
         case .closeButtonUnavailable: return "AX close button unavailable; a dialog may require owner action"
         case .closeFailed(let code): return "AX close action failed (\(code))"
         case .windowsRemain(let count): return "\(count) suite window(s) remain after close"
+        case .windowRemainsAfterSingleClose(let count): return "\(count) window(s) remain with no unpressed AX identity"
         }
     }
 }
@@ -356,7 +433,7 @@ private enum CoordinateCalibration {
         while ProcessInfo.processInfo.systemUptime < deadline {
             if NSWorkspace.shared.frontmostApplication?.processIdentifier == sample.app.processIdentifier {
                 do {
-                    let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+                    let content = try await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: true)
                     let candidates = content.windows.filter {
                         $0.owningApplication?.processID == sample.app.processIdentifier &&
                         $0.frame.width > 50 && $0.frame.height > 50 && $0.isOnScreen
@@ -437,7 +514,7 @@ private enum CoordinateCalibration {
                 previousWindowID = nil; previousFrame = nil; stablePolls = 0
                 try? await Task.sleep(for: .milliseconds(150)); continue
             }
-            let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+            let content = try await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: true)
             let root = AXUIElementCreateApplication(app.processIdentifier)
             if let focused = ElementMarks.focusedWindow(root), let bounds = ElementMarks.bounds(focused) {
                 let candidates = content.windows.filter {

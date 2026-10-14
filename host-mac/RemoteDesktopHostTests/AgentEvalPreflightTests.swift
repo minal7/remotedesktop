@@ -7,6 +7,14 @@ import XCTest
 final class AgentEvalPreflightTests: XCTestCase {
     private let probeURL = "http://127.0.0.1:8765/forms.html?__eval_run=0123456789abcdef0123456789abcdef"
 
+    func testSuiteCleanStartRoleFilterOnlyCountsWindowRoles() {
+        XCTAssertEqual(SuiteCleanStartWindowRole.classify("AXWindow"), .window)
+        XCTAssertEqual(SuiteCleanStartWindowRole.classify("AXDialog"), .window)
+        XCTAssertEqual(SuiteCleanStartWindowRole.classify("AXSheet"), .window)
+        XCTAssertEqual(SuiteCleanStartWindowRole.classify("AXScrollArea"), .nonWindow)
+        XCTAssertEqual(SuiteCleanStartWindowRole.classify("AXUnrecognizedRole"), .unknown)
+    }
+
     func testRequestRequiresExactLoopbackProbeAndSupportedPolicy() throws {
         let request = try AgentEvalPreflightRequest.decodeStrict(requestData())
         XCTAssertEqual(request.operation, "preflight")
