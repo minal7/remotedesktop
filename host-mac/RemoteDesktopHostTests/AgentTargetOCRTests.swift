@@ -64,6 +64,44 @@ final class AgentTargetOCRTests: XCTestCase {
         XCTAssertNil(SystemBarriers.targetLabel(screenshot: image, x: 320, y: .nan))
     }
 
+    func testSmallPointTargetLabelFlowsThroughPixelContextIntoApprovalGate() throws {
+        let point = CGPoint(x: 1016.65, y: 143.74)
+        let action = AgentAction.click(target: .point(x: Double(point.x), y: Double(point.y)), button: nil, count: nil)
+        let submitImage = try syntheticScreenshot(width: 1280, height: 827) { canvas in
+            canvas.button("Submit", center: point, fontSize: 10, size: CGSize(width: 65, height: 12))
+        }
+        let submitLabel = try XCTUnwrap(PixelTargetContextLabel.resolve(action, targets: []) { x, y in
+            SystemBarriers.targetLabel(screenshot: submitImage, x: x, y: y)
+        })
+        let scope = AgentScope(taskID: "fixture", kind: .web, identity: "https://fixture.test")
+        let gate = AgentActionGate(trustStore: TrustedStore(), allowPolicy: AllowPolicy())
+
+        func evaluate(_ screenshot: String, label: String) throws -> AgentGateEvaluation {
+            let observation = AgentObservation(task: "Complete a generic form",
+                surface: .web(url: "https://fixture.test", title: nil), screenshot: screenshot,
+                elements: [], focus: nil, history: [], budget: .init(step: 0, maxSteps: 20))
+            let frame = AgentFrame(observation: observation, scope: scope)
+            let resolved = AgentResolvedAction(action: action, frame: frame, targets: [], targetContextLabel: label)
+            return try gate.evaluate(resolved, expectedScope: scope)
+        }
+
+        XCTAssertEqual(normalized(submitLabel), "submit")
+        let submit = try evaluate(submitImage, label: submitLabel)
+        XCTAssertEqual(submit.result.decision, .needsApproval)
+        XCTAssertEqual(submit.result.riskTier, AgentRiskTier.high.rawValue)
+
+        let continueImage = try syntheticScreenshot(width: 1280, height: 827) { canvas in
+            canvas.button("Continue", center: point, fontSize: 10, size: CGSize(width: 65, height: 12))
+        }
+        let continueLabel = try XCTUnwrap(PixelTargetContextLabel.resolve(action, targets: []) { x, y in
+            SystemBarriers.targetLabel(screenshot: continueImage, x: x, y: y)
+        })
+        XCTAssertEqual(normalized(continueLabel), "continue")
+        let continueResult = try evaluate(continueImage, label: continueLabel)
+        XCTAssertEqual(continueResult.result.decision, .allowed)
+        XCTAssertEqual(continueResult.result.riskTier, AgentRiskTier.low.rawValue)
+    }
+
     func testRecognizedSubmitLabelRequiresApprovalAtActionGate() throws {
         let image = try syntheticScreenshot { $0.button("Submit", center: CGPoint(x: 320, y: 120), fontSize: 18) }
         let label = try XCTUnwrap(SystemBarriers.targetLabel(screenshot: image, x: 320, y: 120))
@@ -85,28 +123,33 @@ final class AgentTargetOCRTests: XCTestCase {
         value?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
     }
 
-    private func syntheticScreenshot(_ draw: (Canvas) -> Void) throws -> String {
-        let rep = try XCTUnwrap(NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 640, pixelsHigh: 240,
+    private func syntheticScreenshot(width: Int = 640, height: Int = 240,
+                                     _ draw: (Canvas) -> Void) throws -> String {
+        let rep = try XCTUnwrap(NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: width, pixelsHigh: height,
             bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
             colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0))
         let context = try XCTUnwrap(NSGraphicsContext(bitmapImageRep: rep))
         NSGraphicsContext.saveGraphicsState()
         NSGraphicsContext.current = context
         NSColor.white.setFill()
-        NSBezierPath(rect: CGRect(x: 0, y: 0, width: 640, height: 240)).fill()
-        draw(Canvas())
+        NSBezierPath(rect: CGRect(x: 0, y: 0, width: width, height: height)).fill()
+        draw(Canvas(imageHeight: CGFloat(height)))
         context.flushGraphics()
         NSGraphicsContext.restoreGraphicsState()
         return try XCTUnwrap(rep.representation(using: .png, properties: [:])).base64EncodedString()
     }
 
     private struct Canvas {
-        private let imageHeight: CGFloat = 240
+        private let imageHeight: CGFloat
 
-        func button(_ title: String, center: CGPoint, fontSize: CGFloat) {
+        init(imageHeight: CGFloat = 240) { self.imageHeight = imageHeight }
+
+        func button(_ title: String, center: CGPoint, fontSize: CGFloat,
+                    size: CGSize = CGSize(width: 108, height: 36)) {
             NSColor(calibratedRed: 0.08, green: 0.28, blue: 0.72, alpha: 1).setFill()
-            NSBezierPath(roundedRect: CGRect(x: center.x - 54, y: imageHeight - center.y - 18,
-                width: 108, height: 36), xRadius: 5, yRadius: 5).fill()
+            NSBezierPath(roundedRect: CGRect(x: center.x - size.width / 2,
+                y: imageHeight - center.y - size.height / 2, width: size.width, height: size.height),
+                xRadius: 5, yRadius: 5).fill()
             text(title, center: center, fontSize: fontSize, color: .white, weight: .semibold)
         }
 
