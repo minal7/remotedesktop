@@ -1,4 +1,5 @@
 #if DEBUG
+import ApplicationServices
 import Foundation
 import XCTest
 @testable import RemoteDesktopHost
@@ -97,6 +98,15 @@ final class AgentEvalWireTests: XCTestCase {
             homeDirectory: home))
         let malformedRun = root.appendingPathComponent("task-short", isDirectory: true).appendingPathComponent("notes.txt")
         XCTAssertFalse(SuiteCleanStart.ownsNativeScratchDocument(url: malformedRun.absoluteString, homeDirectory: home))
+    }
+
+    @MainActor
+    func testCleanStartRetriesOnlyTransientWindowListFailureAndPreservesTimeoutCode() {
+        let transient = AXError.cannotComplete.rawValue
+        let permanent = AXError.failure.rawValue
+        XCTAssertEqual(SuiteCleanStart.windowListFailureAction(code: transient, deadlineExpired: false), .retry)
+        XCTAssertEqual(SuiteCleanStart.windowListFailureAction(code: transient, deadlineExpired: true), .fail(transient))
+        XCTAssertEqual(SuiteCleanStart.windowListFailureAction(code: permanent, deadlineExpired: false), .fail(permanent))
     }
 
     func testAcceptsOnlyKnownPolicyAndBoundedTaskConfiguration() throws {

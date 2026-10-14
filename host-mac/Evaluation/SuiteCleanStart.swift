@@ -40,6 +40,14 @@ enum SuiteCleanStartWindowRole: Equatable {
 /// sends AppleEvents, or answers unowned save/permission sheets.
 @MainActor
 enum SuiteCleanStart {
+    enum WindowListFailureAction: Equatable {
+        case retry, fail(Int32)
+    }
+
+    static func windowListFailureAction(code: Int32, deadlineExpired: Bool) -> WindowListFailureAction {
+        code == AXError.cannotComplete.rawValue && !deadlineExpired ? .retry : .fail(code)
+    }
+
     static func ownsLoopbackFixtureWindow(url value: String?) -> Bool {
         guard let value, let parts = URLComponents(string: value), parts.scheme == "http",
               parts.host == "127.0.0.1", parts.port == 8765, parts.user == nil, parts.password == nil else {
@@ -341,7 +349,19 @@ enum SuiteCleanStart {
             AXUIElementSetMessagingTimeout(app, 0.2)
             var value: CFTypeRef?
             let error = AXUIElementCopyAttributeValue(app, kAXWindowsAttribute as CFString, &value)
-            guard error == .success, let value, CFGetTypeID(value) == CFArrayGetTypeID() else {
+            if error != .success {
+                switch windowListFailureAction(code: error.rawValue,
+                    deadlineExpired: ProcessInfo.processInfo.systemUptime >= retryDeadline) {
+                case .retry:
+                    try await Task.sleep(for: .milliseconds(60))
+                    if ProcessInfo.processInfo.systemUptime >= retryDeadline {
+                        throw CleanStartFailure.windowListUnavailable(error.rawValue)
+                    }
+                    continue
+                case .fail(let code): throw CleanStartFailure.windowListUnavailable(code)
+                }
+            }
+            guard let value, CFGetTypeID(value) == CFArrayGetTypeID() else {
                 throw CleanStartFailure.windowListUnavailable(error.rawValue)
             }
             let array = unsafeBitCast(value, to: CFArray.self)
