@@ -356,14 +356,22 @@ class TaskAndCheckerTests(unittest.TestCase):
         self.assertFalse(passed)
 
     def test_modal_tasks_require_both_open_and_close_events(self) -> None:
-        task = next(task for task in run_suite.load_tasks("basics") if task.task_id == "web-basic-033")
-        state = {"url": "http://127.0.0.1:8765/controls.html", "elements": {
-            "#modal": {"text": "Details panel", "visible": False},
-        }, "event_counts": {}}
-        # The original closed state is insufficient evidence that either action happened.
-        self.assertFalse(run_suite._match_expectation(state, task.value["checker"], [])[0])
-        state["event_counts"] = {"#open-modal": {"click": 1}, "#close-modal": {"click": 1}}
-        self.assertTrue(run_suite._match_expectation(state, task.value["checker"], [])[0])
+        tasks = [task for task in run_suite.load_tasks("basics")
+                 if task.task_id in {"web-basic-033", "web-basic-034"}]
+        self.assertEqual({task.task_id for task in tasks}, {"web-basic-033", "web-basic-034"})
+        for task in tasks:
+            with self.subTest(task=task.task_id):
+                state = {"url": "http://127.0.0.1:8765/controls.html", "elements": {
+                    # Adjacent </p><button> markup concatenates these in parent textContent.
+                    "#modal": {"text": "Details panelClose", "visible": False},
+                    "#modal-details": {"text": "Details panel", "visible": False},
+                }, "event_counts": {}}
+                # The original closed state is insufficient evidence that either action happened.
+                self.assertFalse(run_suite._match_expectation(state, task.value["checker"], [])[0])
+                state["event_counts"] = {"#open-modal": {"click": 1}}
+                self.assertFalse(run_suite._match_expectation(state, task.value["checker"], [])[0])
+                state["event_counts"]["#close-modal"] = {"click": 1}
+                self.assertTrue(run_suite._match_expectation(state, task.value["checker"], [])[0])
 
     def test_scroll_tasks_require_scroll_event_and_actual_visibility(self) -> None:
         task = next(task for task in run_suite.load_tasks("basics") if task.task_id == "web-basic-043")
