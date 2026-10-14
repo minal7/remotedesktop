@@ -168,12 +168,17 @@ enum ElementMarks {
         var resolvedURL = browserURL
         var visited = 0
 
-        func walk(_ node: any PixelAXNode, interactiveAncestors: [AnyHashable]) {
+        func walk(_ node: any PixelAXNode, interactiveAncestors: [AnyHashable], viewportBounds: CGRect?) {
             guard visited < maxNodes, candidates.count < limit,
                   deadline.map({ ContinuousClock.now < $0 }) ?? true else { return }
             visited += 1
             let role = node.role
             let rect = node.screenRect
+            var childViewportBounds = viewportBounds
+            if role == "AXScrollArea" || role == "AXClipView" {
+                if let rect, valid(rect) { childViewportBounds = viewportBounds.map { $0.intersection(rect) } ?? rect }
+                else { childViewportBounds = .null }
+            }
             let protected = node.isProtected
             let secure = protected || node.isSecure
             if secure {
@@ -200,22 +205,22 @@ enum ElementMarks {
                 var state = ["visible"]
                 if !enabled { state.append("disabled") }
                 if readOnly { state.append("read_only") }
-                guard let rect, valid(rect) else {
-                    walkChildren(node, ancestors: interactiveAncestors + [node.identity], walk: walk)
-                    return
+                if let rect, valid(rect) {
+                    let inWindow = rect.intersects(windowBounds) &&
+                        (viewportBounds.map { rect.intersection($0.intersection(windowBounds)).contains(CGPoint(x: rect.midX, y: rect.midY)) } ?? true)
+                    if inWindow || role == "AXMenuBarItem" {
+                        candidates.append(Candidate(identity: node.identity, role: role, name: title, rect: rect,
+                            state: state, inWindow: inWindow, enabled: enabled, value: node.value, node: node))
+                    }
                 }
-                let inWindow = rect.intersects(windowBounds)
-                guard inWindow || role == "AXMenuBarItem" else {
-                    walkChildren(node, ancestors: interactiveAncestors + [node.identity], walk: walk)
-                    return
-                }
-                candidates.append(Candidate(identity: node.identity, role: role, name: title, rect: rect,
-                    state: state, inWindow: inWindow, enabled: enabled, value: node.value, node: node))
             }
-            walkChildren(node, ancestors: interactive ? interactiveAncestors + [node.identity] : interactiveAncestors, walk: walk)
+            let childAncestors = interactive ? interactiveAncestors + [node.identity] : interactiveAncestors
+            for child in node.children() {
+                walk(child, interactiveAncestors: childAncestors, viewportBounds: childViewportBounds)
+            }
         }
 
-        walk(root, interactiveAncestors: [])
+        walk(root, interactiveAncestors: [], viewportBounds: nil)
         let named = candidates.map { candidate -> Candidate in
             guard candidate.name.isEmpty, let lifted = childText[candidate.identity], !lifted.isEmpty else { return candidate }
             return Candidate(identity: candidate.identity, role: candidate.role, name: lifted.joined(separator: " "),
@@ -307,11 +312,6 @@ enum ElementMarks {
         }
         collect(node, depth: 0)
         return normalized(labels.joined(separator: " "))
-    }
-
-    private static func walkChildren(_ node: any PixelAXNode, ancestors: [AnyHashable],
-                                     walk: (any PixelAXNode, [AnyHashable]) -> Void) {
-        for child in node.children() { walk(child, ancestors) }
     }
 
     private static func normalized(_ value: String?) -> String {

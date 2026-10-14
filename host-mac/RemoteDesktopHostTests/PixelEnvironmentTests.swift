@@ -476,6 +476,32 @@ final class PixelEnvironmentTests: XCTestCase {
         XCTAssertEqual(rowMarks.marks.first?.name, "Invoice 42")
     }
 
+    func testElementMarksRespectAncestorScrollViewportWithoutLosingSecureRects() {
+        let bounds = CGRect(x: 0, y: 0, width: 500, height: 300)
+        let secureRect = CGRect(x: 100, y: 110, width: 80, height: 20)
+        let clip = TestPixelAXNode(identity: "clip", role: "AXClipView", title: nil,
+            rect: CGRect(x: 245, y: 0, width: 255, height: 300), children: [
+                TestPixelAXNode(identity: "offscreen-column-field", role: "AXTextField", title: nil,
+                    rect: CGRect(x: 100, y: 50, width: 80, height: 20)),
+                TestPixelAXNode(identity: "partly-visible-safe", role: "AXTextField", title: "Visible",
+                    rect: CGRect(x: 220, y: 80, width: 60, height: 20)),
+                TestPixelAXNode(identity: "partly-visible-unsafe", role: "AXTextField", title: "Hidden center",
+                    rect: CGRect(x: 210, y: 140, width: 50, height: 20)),
+                TestPixelAXNode(identity: "offscreen-password", role: "AXTextField", title: "",
+                    rect: secureRect, protected: true, secure: true),
+            ])
+        let scrollArea = TestPixelAXNode(identity: "scroll", role: "AXScrollArea", title: nil,
+            rect: CGRect(x: 240, y: 0, width: 260, height: 300), children: [clip])
+
+        let result = ElementMarks.project(root: TestPixelAXNode.root([scrollArea]), windowBounds: bounds)
+        let identities = Set(result.marks.compactMap { $0.identity as? String })
+
+        XCTAssertFalse(identities.contains("offscreen-column-field"))
+        XCTAssertFalse(identities.contains("partly-visible-unsafe"))
+        XCTAssertTrue(identities.contains("partly-visible-safe"))
+        XCTAssertEqual(result.secureScreenRects, [secureRect])
+    }
+
     func testLiftedTextReferenceRejectsChangedOrUnavailableChildLabelButKeepsDirectLabel() throws {
         let child = TestPixelAXNode(identity: "child", role: "AXStaticText", title: "Submit",
             rect: CGRect(x: 20, y: 20, width: 60, height: 16))
