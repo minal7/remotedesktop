@@ -609,7 +609,7 @@ final class PixelEnvironment: AgentEnvironment {
             try hostEffect { _ = NSWorkspace.shared.open(url) }
             try await Task.sleep(for: .milliseconds(300))
         }
-        if let startApp { try await registry.open(registry.resolve(startApp)) }
+        if let app = try startApp.map({ try registry.resolve($0) }), NSWorkspace.shared.frontmostApplication?.bundleIdentifier != app.bundleID { try await registry.open(app) }
     }
 
     private func frontWindowIdentity() async -> String? {
