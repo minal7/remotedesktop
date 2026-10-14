@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import subprocess
 import tempfile
 import unittest
@@ -10,15 +11,15 @@ import run_suite
 
 
 class CleanStartTests(unittest.TestCase):
-    def test_suite_clean_start_includes_all_used_apps_and_resolved_default_browser(self) -> None:
-        tasks = run_suite.smoke_tasks()
-        apps = run_suite._suite_apps(tasks, resolved_default_browser="MacSafari")
-        self.assertEqual(set(apps), {"Finder", "MacSafari", "Notes", "TextEdit"})
-        self.assertEqual(len(apps), len(set(apps)))
+    def test_suite_apps_are_mapped_to_bundle_ids(self) -> None:
+        apps = run_suite._suite_apps(run_suite.smoke_tasks(), resolved_default_browser="org.example.browser")
+        self.assertEqual(run_suite._suite_bundle_ids(apps), [
+            "com.apple.finder", "com.apple.Notes", "com.apple.TextEdit", "org.example.browser"
+        ])
 
     def test_default_browser_uses_system_workspace_resolution(self) -> None:
-        calls: list[list[str]] = []
-        def resolve(argv: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+        calls = []
+        def resolve(argv, **kwargs):
             calls.append(argv)
             return subprocess.CompletedProcess(argv, 0, "org.example.browser\n", "")
         with patch.dict(run_suite.os.environ, {}, clear=True), patch.object(run_suite.subprocess, "run", resolve):
@@ -27,56 +28,59 @@ class CleanStartTests(unittest.TestCase):
         self.assertEqual(calls[0][:2], ["/usr/bin/swift", "-e"])
         self.assertIn("NSWorkspace.shared.urlForApplication(toOpen: url)", calls[0][2])
 
-    def test_clean_start_closes_only_suite_windows_without_save_prompts(self) -> None:
-        apps = ["Finder", "MacSafari", "Notes", "TextEdit"]
-        scripts = [run_suite._close_app_windows_script(app) for app in apps]
-        self.assertIn("close every document saving no", scripts[-1])
-        self.assertIn("close every window", scripts[0])
-        self.assertIn("close every window", scripts[1])
-        self.assertIn("close every window", scripts[2])
-        for script in scripts:
-            self.assertNotIn("saving yes", script.lower())
-            self.assertNotIn("save every", script.lower())
-
-        calls: list[list[str]] = []
-        def succeed(argv: list[str], **_: object) -> subprocess.CompletedProcess[str]:
-            calls.append(argv)
-            return subprocess.CompletedProcess(argv, 0, "", "")
-        run_suite._close_suite_app_windows(apps, runner=succeed)
-        self.assertEqual(len(calls), len(apps))
-        self.assertTrue(all(call[0] == "/usr/bin/osascript" for call in calls))
-        self.assertEqual([call[-1] for call in calls], scripts)
-
-    def test_cleanup_failure_preserves_stderr_and_aborts(self) -> None:
-        calls: list[list[str]] = []
-        def fail_on_finder(argv: list[str], **_: object) -> subprocess.CompletedProcess[str]:
-            calls.append(argv)
-            return subprocess.CompletedProcess(argv, 1, "", "Finder permission dialog blocked close")
-        with self.assertRaisesRegex(run_suite.EvalError, "Finder permission dialog blocked close"):
-            run_suite._close_suite_app_windows(["Finder", "Notes"], runner=fail_on_finder)
+    def test_signed_host_request_is_strict_and_requires_zero_window_snapshot(self) -> None:
+        expected = ["com.apple.finder", "com.apple.TextEdit"]
+        response = {"operation": "suite_clean_start", "passed": True, "owner_action": "", "applications": [
+            {"bundle_id": app, "windows_before": 1, "windows_after": 0, "status": "closed"} for app in expected
+        ]}
+        calls = []
+        def runner(argv, **kwargs):
+            calls.append((argv, kwargs))
+            return subprocess.CompletedProcess(argv, 0, json.dumps(response), "")
+        run_suite._close_suite_app_windows(["Finder", "TextEdit"], ["signed-host", "--debug-agent-eval"], runner=runner)
         self.assertEqual(len(calls), 1)
-        self.assertIn('application id "com.apple.finder"', calls[0][-1])
+        self.assertEqual(json.loads(calls[0][1]["input"]), {"operation": "suite_clean_start", "bundle_ids": expected})
 
-    def test_clean_start_failure_stops_before_remaining_app_cleanup(self) -> None:
-        calls: list[list[str]] = []
-        def fail_on_notes(argv: list[str], **_: object) -> subprocess.CompletedProcess[str]:
-            calls.append(argv)
-            code = 1 if 'application id "com.apple.Notes"' in argv[-1] else 0
-            return subprocess.CompletedProcess(argv, code, "", "close failed" if code else "")
+    def test_failure_is_closed_and_preserves_owner_action(self) -> None:
+        response = {"operation": "suite_clean_start", "passed": False,
+                    "owner_action": "Clean start stopped at com.apple.finder: AX dialog requires owner action.",
+                    "applications": []}
+        completed = subprocess.CompletedProcess([], 0, json.dumps(response), "")
+        calls = []
+        def runner(*args, **kwargs):
+            calls.append(args[0])
+            return completed
+        with self.assertRaisesRegex(run_suite.EvalError, "stopped at com.apple.finder"):
+            run_suite._close_suite_app_windows(["Finder", "TextEdit"], ["signed-host"], runner=runner)
+        self.assertEqual(calls, [["signed-host"]])
+
+    def test_failure_after_valid_successful_prefix_preserves_owner_action(self) -> None:
+        response = {"operation": "suite_clean_start", "passed": False,
+                    "owner_action": "Clean start stopped at com.apple.TextEdit: AXSheet requires owner action.",
+                    "applications": [{"bundle_id": "com.apple.finder", "windows_before": 0,
+                                      "windows_after": 0, "status": "already_clear"}]}
+        completed = subprocess.CompletedProcess([], 0, json.dumps(response), "")
+        with self.assertRaisesRegex(run_suite.EvalError, "stopped at com.apple.TextEdit"):
+            run_suite._close_suite_app_windows(["Finder", "TextEdit", "Notes"], ["signed-host"],
+                                               runner=lambda *a, **k: completed)
+
+    def test_malformed_or_nonzero_driver_response_fails_closed(self) -> None:
+        malformed = subprocess.CompletedProcess([], 0, "{}", "")
         with self.assertRaises(run_suite.EvalError):
-            run_suite._close_suite_app_windows(["Finder", "MacSafari", "Notes", "TextEdit"], runner=fail_on_notes)
-        self.assertEqual(len(calls), 3)
-        self.assertNotIn('application id "com.apple.TextEdit"', calls[-1][-1])
+            run_suite._close_suite_app_windows(["Finder"], ["signed-host"], runner=lambda *a, **k: malformed)
+        failed = subprocess.CompletedProcess([], 1, "", "")
+        with self.assertRaises(run_suite.EvalError):
+            run_suite._close_suite_app_windows(["Finder"], ["signed-host"], runner=lambda *a, **k: failed)
 
-    def test_task_driver_is_not_called_when_clean_start_fails(self) -> None:
+    def test_reset_failure_stops_before_task_driver(self) -> None:
         task = run_suite.smoke_tasks()[0]
         args = SimpleNamespace(execution="real-host", policy="fara15-4b", suite="basics", timeout=10)
-        with tempfile.TemporaryDirectory() as directory:
-            output_directory = run_suite.Path(directory)
-            rows: list[dict[str, object]] = []
-            with patch.object(run_suite, "_close_suite_app_windows", side_effect=run_suite.EvalError("close failed")), \
-                 patch.object(run_suite, "_run_driver") as driver:
-                result = run_suite._run_one_task(task, 1, args, [], [], None, output_directory, rows, suite_apps=["Finder"])
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.object(run_suite, "_close_suite_app_windows", side_effect=run_suite.EvalError("save sheet needs owner")), \
+             patch.object(run_suite, "_run_driver") as driver:
+            rows = []
+            result = run_suite._run_one_task(task, 1, args, ["signed-host"], [], None,
+                                             run_suite.Path(directory), rows, suite_apps=["TextEdit"])
             self.assertIn("INFRA-BLOCKED", result or "")
             driver.assert_not_called()
             self.assertEqual(rows[0]["status"], "INFRA-BLOCKED")

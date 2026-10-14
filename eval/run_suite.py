@@ -195,38 +195,53 @@ print(bundleID)
     raise EvalError("Could not resolve the configured default browser for suite clean start")
 
 
-def _apple_script_target(app: str) -> str:
-    known = {"Finder": "com.apple.finder", "TextEdit": "com.apple.TextEdit", "Notes": "com.apple.Notes",
-             "MacSafari": "com.apple.Safari"}
-    bundle_id = known.get(app, app)
-    if "." in bundle_id:
-        escaped = bundle_id.replace('\\', '\\\\').replace('"', '\\"')
-        return f'application id "{escaped}"'
-    escaped = app.replace('\\', '\\\\').replace('"', '\\"')
-    return f'application "{escaped}"'
+def _suite_bundle_ids(apps: list[str]) -> list[str]:
+    known = {"Finder": "com.apple.finder", "TextEdit": "com.apple.TextEdit",
+             "Notes": "com.apple.Notes", "MacSafari": "com.apple.Safari"}
+    bundle_ids = [known.get(app, app) for app in apps]
+    if (not 1 <= len(bundle_ids) <= 8 or len(set(bundle_ids)) != len(bundle_ids)
+            or any(not isinstance(value, str) or len(value) > 255 or "." not in value
+                   or not all(char in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-" for char in value) for value in bundle_ids)):
+        raise EvalError("Suite clean start received an invalid app bundle list")
+    return bundle_ids
 
 
-def _close_app_windows_script(app: str) -> str:
-    target = _apple_script_target(_required_string(app, "suite app"))
-    if app == "TextEdit" or app == "com.apple.TextEdit":
-        operation = "close every document saving no"
-    else:
-        operation = "close every window"
-    return f"tell {target}\n    {operation}\nend tell"
-
-
-def _close_suite_app_windows(apps: list[str], runner: Any = subprocess.run) -> None:
-    for app in apps:
-        script = _close_app_windows_script(app)
-        try:
-            result = runner(["/usr/bin/osascript", "-e", script], capture_output=True,
-                            text=True, timeout=15, check=False)
-        except (OSError, subprocess.TimeoutExpired) as error:
-            raise EvalError(f"Could not close suite app windows for {app}") from error
-        if result.returncode != 0:
-            detail = " ".join((result.stderr or result.stdout).split())[:512]
-            detail = detail or f"osascript exited with status {result.returncode}"
-            raise EvalError(f"Could not close suite app windows for {app}: {detail}")
+def _close_suite_app_windows(apps: list[str], driver: list[str], runner: Any = subprocess.run,
+                             timeout: float = 20) -> None:
+    bundle_ids = _suite_bundle_ids(apps)
+    request = json.dumps({"operation": "suite_clean_start", "bundle_ids": bundle_ids}, separators=(",", ":"))
+    try:
+        result = runner(driver, input=request, capture_output=True, text=True,
+                        env=dict(os.environ), timeout=timeout, check=False)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise EvalError(f"Could not reset suite windows through the signed host: {type(error).__name__}") from error
+    if result.returncode != 0:
+        raise EvalError(f"Signed host clean start exited with status {result.returncode}")
+    try:
+        response = json.loads(result.stdout)
+    except (TypeError, json.JSONDecodeError) as error:
+        raise EvalError("Signed host clean start did not return one JSON response") from error
+    if (not isinstance(response, dict) or set(response) != {"operation", "passed", "applications", "owner_action"}
+            or response.get("operation") != "suite_clean_start" or type(response.get("passed")) is not bool
+            or not isinstance(response.get("owner_action"), str)):
+        raise EvalError("Signed host clean start response did not match its strict protocol")
+    rows = response.get("applications")
+    if not isinstance(rows, list) or len(rows) > len(bundle_ids):
+        raise EvalError("Signed host clean start returned an invalid app result list")
+    for expected, row in zip(bundle_ids, rows):
+        if not isinstance(row, dict) or set(row) != {"bundle_id", "windows_before", "windows_after", "status"}:
+            raise EvalError("Signed host clean start returned an invalid app result")
+        status, before, after = row.get("status"), row.get("windows_before"), row.get("windows_after")
+        if (row.get("bundle_id") != expected or type(before) is not int or before < 0
+                or type(after) is not int or after != 0
+                or status not in {"not_running", "already_clear", "closed"}
+                or (status in {"not_running", "already_clear"} and before != 0)
+                or (status == "closed" and before < 1)):
+            raise EvalError("Signed host clean start app snapshot did not prove zero windows")
+    if response["passed"] is not True:
+        raise EvalError(response["owner_action"] or "Signed host clean start did not pass")
+    if len(rows) != len(bundle_ids) or response["owner_action"]:
+        raise EvalError("Signed host clean start did not verify every suite app")
 
 
 def _native_scratch_directory(task_id: str, run_token: str) -> Path:
@@ -790,7 +805,7 @@ def run(args: argparse.Namespace) -> int:
             try:
                 browser = _resolved_default_browser() if any(task.value["surface"] == "web" for task in tasks) else None
                 suite_apps = _suite_apps(tasks, browser)
-                _close_suite_app_windows(suite_apps)
+                _close_suite_app_windows(suite_apps, driver)
             except EvalError as error:
                 preflight = failed_preflight(str(error), "Close the suite app windows and rerun clean start.")
             else:
@@ -832,7 +847,7 @@ def _run_one_task(task: Task, run_number: int, args: argparse.Namespace, driver:
     scratch: Path | None = None
     try:
         if suite_apps is not None:
-            _close_suite_app_windows(suite_apps)
+            _close_suite_app_windows(suite_apps, driver)
         runtime_task = task
         if task.value["surface"] == "app":
             scratch = _native_scratch_directory(task.task_id, token)

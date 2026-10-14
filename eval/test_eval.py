@@ -581,7 +581,7 @@ class TaskAndCheckerTests(unittest.TestCase):
             self.assertEqual(metadata["evaluated_task_runs"], 0)
             self.assertEqual(metadata["infra_blocked_task_runs"], len(rows))
             resolve_browser.assert_called_once_with()
-            close_suite_windows.assert_called_once_with(["Finder", "Notes", "TextEdit", "com.apple.Safari"])
+            close_suite_windows.assert_called_once_with(["Finder", "Notes", "TextEdit", "com.apple.Safari"], ["fake-driver"])
 
     def test_missing_first_observation_is_infra_but_recorded_model_failure_is_fail(self) -> None:
         task = run_suite.load_tasks("basics")[0]

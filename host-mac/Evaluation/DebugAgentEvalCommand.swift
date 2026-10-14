@@ -39,6 +39,9 @@ enum DebugAgentEvalCommand {
             } else if root?["operation"] as? String == "policy_replay" {
                 let request = try AgentEvalPolicyReplayRequest.decodeStrict(data)
                 encoded = try JSONEncoder().encode(await AgentEvalPolicyReplay.run(request))
+            } else if root?["operation"] as? String == "suite_clean_start" {
+                let request = try SuiteCleanStartRequest.decodeStrict(data)
+                encoded = try JSONSerialization.data(withJSONObject: await SuiteCleanStart.run(request), options: [.sortedKeys])
             } else if root?["operation"] as? String == "preflight" {
                 let response: AgentEvalPreflightResponse
                 if let request = try? AgentEvalPreflightRequest.decodeStrict(data) {
@@ -63,6 +66,140 @@ enum DebugAgentEvalCommand {
 
     private static func write(_ value: String, to handle: FileHandle) {
         handle.write(Data(value.utf8))
+    }
+}
+
+private struct SuiteCleanStartRequest {
+    let bundleIDs: [String]
+
+    static func decodeStrict(_ data: Data) throws -> Self {
+        guard data.count <= 4_096,
+              let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              Set(object.keys) == ["operation", "bundle_ids"],
+              object["operation"] as? String == "suite_clean_start",
+              let bundleIDs = object["bundle_ids"] as? [String],
+              (1...8).contains(bundleIDs.count), Set(bundleIDs).count == bundleIDs.count,
+              bundleIDs.allSatisfy({ id in
+                  !id.isEmpty && id.utf8.count <= 255 && id.contains(".") &&
+                  id.unicodeScalars.allSatisfy { CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-").contains($0) } &&
+                  !AgentSafetyBoundary.blocksAutomation(bundleID: id, appName: nil) &&
+                  !AgentSafetyBoundary.readOnly(bundleID: id, appName: nil)
+              }) else { throw AgentEvalWireError.invalidRequest }
+        return Self(bundleIDs: bundleIDs)
+    }
+}
+
+/// DEBUG-only reset for already-running suite apps. It never launches or terminates apps,
+/// sends AppleEvents, or answers save/permission sheets.
+@MainActor
+private enum SuiteCleanStart {
+    static func run(_ request: SuiteCleanStartRequest) async -> [String: Any] {
+        guard AXIsProcessTrusted() else {
+            return ["operation": "suite_clean_start", "passed": false, "applications": [],
+                    "owner_action": "Enable Accessibility for the signed host, then rerun clean start."]
+        }
+        let targets = request.bundleIDs.map { bundleID in
+            (bundleID, NSWorkspace.shared.runningApplications.first { $0.bundleIdentifier == bundleID })
+        }
+        if let (bundleID, app) = targets.first(where: { item in
+            AgentSafetyBoundary.blocksAutomation(bundleID: item.0, appName: item.1?.localizedName) ||
+            AgentSafetyBoundary.readOnly(bundleID: item.0, appName: item.1?.localizedName)
+        }) {
+            return ["operation": "suite_clean_start", "passed": false, "applications": [],
+                    "owner_action": "Refusing to close protected app \(app?.localizedName ?? bundleID). Remove it from the suite app list."]
+        }
+        var reports: [[String: Any]] = []
+        let overallDeadline = ProcessInfo.processInfo.systemUptime + 18
+        for (bundleID, maybeApp) in targets {
+            guard let app = maybeApp else {
+                reports.append(["bundle_id": bundleID, "windows_before": 0, "windows_after": 0, "status": "not_running"])
+                continue
+            }
+            let root = AXUIElementCreateApplication(app.processIdentifier)
+            AXUIElementSetMessagingTimeout(root, 0.75)
+            do {
+                let initial = try windows(root)
+                for window in initial {
+                    AXUIElementSetMessagingTimeout(window, 0.75)
+                    try ensureNotDialog(window)
+                    var buttonValue: CFTypeRef?
+                    let buttonError = AXUIElementCopyAttributeValue(window, kAXCloseButtonAttribute as CFString, &buttonValue)
+                    guard buttonError == .success, let buttonValue,
+                          CFGetTypeID(buttonValue) == AXUIElementGetTypeID() else {
+                        throw CleanStartFailure.closeButtonUnavailable
+                    }
+                    let button = unsafeBitCast(buttonValue, to: AXUIElement.self)
+                    AXUIElementSetMessagingTimeout(button, 0.75)
+                    let pressError = AXUIElementPerformAction(button, kAXPressAction as CFString)
+                    guard pressError == .success else { throw CleanStartFailure.closeFailed(pressError.rawValue) }
+                    try await waitUntilGone(window, app: root, deadline: min(overallDeadline, ProcessInfo.processInfo.systemUptime + 6))
+                }
+                let remainingWindows = try windows(root)
+                for window in remainingWindows { try ensureNotDialog(window) }
+                guard remainingWindows.isEmpty else { throw CleanStartFailure.windowsRemain(remainingWindows.count) }
+                reports.append(["bundle_id": bundleID, "windows_before": initial.count,
+                                "windows_after": 0, "status": initial.isEmpty ? "already_clear" : "closed"])
+            } catch {
+                return ["operation": "suite_clean_start", "passed": false, "applications": reports,
+                        "owner_action": "Clean start stopped at \(bundleID): \(error). Resolve any save or system dialog, then rerun."]
+            }
+        }
+        return ["operation": "suite_clean_start", "passed": true, "applications": reports, "owner_action": ""]
+    }
+
+    private static func waitUntilGone(_ target: AXUIElement, app: AXUIElement, deadline: TimeInterval) async throws {
+        while ProcessInfo.processInfo.systemUptime < deadline {
+            let current = try windows(app)
+            for window in current { try ensureNotDialog(window) }
+            if !current.contains(where: { CFEqual($0, target) }) { return }
+            try await Task.sleep(for: .milliseconds(80))
+        }
+        let remaining = try windows(app)
+        if remaining.contains(where: { CFEqual($0, target) }) { throw CleanStartFailure.windowsRemain(remaining.count) }
+    }
+
+    private static func ensureNotDialog(_ window: AXUIElement) throws {
+        AXUIElementSetMessagingTimeout(window, 0.75)
+        var value: CFTypeRef?
+        let error = AXUIElementCopyAttributeValue(window, kAXRoleAttribute as CFString, &value)
+        guard error == .success, let role = value as? String else {
+            throw CleanStartFailure.roleUnavailable(error.rawValue)
+        }
+        if role == "AXDialog" || role == "AXSheet" { throw CleanStartFailure.dialogRequiresOwner(role) }
+        var subroleValue: CFTypeRef?
+        if AXUIElementCopyAttributeValue(window, kAXSubroleAttribute as CFString, &subroleValue) == .success,
+           let subrole = subroleValue as? String, subrole == "AXDialog" || subrole == "AXSystemDialog" {
+            throw CleanStartFailure.dialogRequiresOwner(subrole)
+        }
+        var sheetsValue: CFTypeRef?
+        if AXUIElementCopyAttributeValue(window, "AXSheets" as CFString, &sheetsValue) == .success,
+           let sheets = sheetsValue as? [AXUIElement], !sheets.isEmpty {
+            throw CleanStartFailure.dialogRequiresOwner("AXSheet")
+        }
+    }
+
+    private static func windows(_ app: AXUIElement) throws -> [AXUIElement] {
+        var value: CFTypeRef?
+        let error = AXUIElementCopyAttributeValue(app, kAXWindowsAttribute as CFString, &value)
+        guard error == .success, let windows = value as? [AXUIElement] else {
+            throw CleanStartFailure.windowListUnavailable(error.rawValue)
+        }
+        return windows
+    }
+}
+
+private enum CleanStartFailure: Error, CustomStringConvertible {
+    case windowListUnavailable(Int32), roleUnavailable(Int32), dialogRequiresOwner(String)
+    case closeButtonUnavailable, closeFailed(Int32), windowsRemain(Int)
+    var description: String {
+        switch self {
+        case .windowListUnavailable(let code): return "AX window list unavailable (\(code))"
+        case .roleUnavailable(let code): return "AX window role unavailable (\(code))"
+        case .dialogRequiresOwner(let role): return "\(role) requires owner action"
+        case .closeButtonUnavailable: return "AX close button unavailable; a dialog may require owner action"
+        case .closeFailed(let code): return "AX close action failed (\(code))"
+        case .windowsRemain(let count): return "\(count) suite window(s) remain after close"
+        }
     }
 }
 
