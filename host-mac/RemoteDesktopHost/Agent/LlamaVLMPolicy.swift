@@ -142,7 +142,7 @@ final class LlamaVLMPolicy: AgentPolicy {
         self.transport = transport
         self.model = model
         self.promptVersion = switch model {
-        case .fara15_4b: "v1-fara-native-coordinates-compact-history"
+        case .fara15_4b: "v2-fara-macos-native-coordinates-compact-history"
         case .uiTars15_7b: "v1-ui-tars-native-coordinates-compact-history"
         case .guiOwl15_4b: "v1-gui-owl-native-coordinates-compact-history"
         }
@@ -154,7 +154,8 @@ final class LlamaVLMPolicy: AgentPolicy {
         runtime: OSAtlasLlamaRuntime = .shared,
         bundle: Bundle = .main
     ) throws {
-        let promptURL = try Self.resourceURL(bundle: bundle, name: "v1", extension: "txt", subdirectory: "policy/prompts")
+        let promptURL = try Self.resourceURL(bundle: bundle, name: Self.promptResourceName(for: .fara15_4b),
+            extension: "txt", subdirectory: "policy/prompts")
         let prompt = try String(contentsOf: promptURL, encoding: .utf8)
         try self.init(transport: RuntimeAgentVLMTransport(inputs: runtimeInputs, runtime: runtime),
                       prompt: prompt, model: .fara15_4b)
@@ -209,23 +210,29 @@ final class LlamaVLMPolicy: AgentPolicy {
         pendingObservationContext = observationContext
         pendingAssistantOutput = Self.assistantHistoryContent(from: raw, model: model)
         pendingScreenshotPNG = screenshot
+        let progressText = model == .fara15_4b ? FaraPolicyAdapter.progressText(fromCompletion: raw) : nil
+        let resultLineNote = model == .fara15_4b ? try? FaraPolicyAdapter.resultLineNote(fromCompletion: raw) : nil
         let actionJSON: String
         do {
             actionJSON = try Self.actionJSON(from: raw, model: model, screenshot: screenshot)
         } catch FaraPolicyAdapter.Failure.unsupportedProposal(let reason) {
-            return .init(rawOutput: raw, action: nil, rejectionReason: reason)
+            return .init(rawOutput: raw, action: nil, rejectionReason: reason,
+                         resultLineNote: resultLineNote, progressText: progressText)
         } catch GUIOwlPolicyAdapter.Failure.unsupportedProposal(let reason) {
-            return .init(rawOutput: raw, action: nil, rejectionReason: reason)
+            return .init(rawOutput: raw, action: nil, rejectionReason: reason, progressText: progressText)
         } catch {
-            return .init(rawOutput: raw, action: nil, rejectionReason: "Model output was not one valid computer-use action.")
+            return .init(rawOutput: raw, action: nil,
+                         rejectionReason: "Model output was not one valid computer-use action.", progressText: progressText)
         }
         guard
               actionJSON.utf8.count <= 32_768,
               let data = actionJSON.data(using: .utf8),
               let action = try? JSONDecoder().decode(AgentAction.self, from: data) else {
-            return .init(rawOutput: raw, action: nil, rejectionReason: "Model output was not one valid computer-use action.")
+            return .init(rawOutput: raw, action: nil,
+                         rejectionReason: "Model output was not one valid computer-use action.", progressText: progressText)
         }
-        return .init(rawOutput: raw, action: action, rejectionReason: nil)
+        return .init(rawOutput: raw, action: action, rejectionReason: nil,
+                     resultLineNote: resultLineNote, progressText: progressText)
     }
 
     func stop() async {
@@ -404,7 +411,11 @@ final class LlamaVLMPolicy: AgentPolicy {
     }
 
     static func promptResourceName(for model: AgentPolicyModel) -> String {
-        model == .guiOwl15_4b ? "gui-owl-1.5" : "v1"
+        switch model {
+        case .fara15_4b: "v2-fara"
+        case .uiTars15_7b: "v1"
+        case .guiOwl15_4b: "gui-owl-1.5"
+        }
     }
 
     private static func modelAlias(_ model: AgentPolicyModel) -> String {
@@ -431,8 +442,10 @@ final class LlamaVLMPolicy: AgentPolicy {
             guard let criticalPoints = official.range(of: "A critical point is a situation") else {
                 return official4BIdentity
             }
-            return official4BIdentity + "\n\n" + String(official[criticalPoints.lowerBound...])
+            let native = official4BIdentity + "\n\n" + String(official[criticalPoints.lowerBound...])
                 + "\n\nElement bounding boxes in observation JSON are [x, y, width, height] in Fara's normalized 0–1000 display coordinates. Use the center of a box for a click."
+            let appendix = base.trimmingCharacters(in: .whitespacesAndNewlines)
+            return appendix.hasPrefix("You are operating macOS.") ? native + "\n\n" + appendix : native
         }
         let policy = base.components(separatedBy: "\nAction schema:").first ?? base
         let adapted = policy

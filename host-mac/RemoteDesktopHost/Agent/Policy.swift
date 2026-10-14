@@ -4,6 +4,14 @@ struct AgentPolicyOutput {
     let rawOutput: String
     let action: AgentAction?
     let rejectionReason: String?
+    let resultLineNote: String?
+    let progressText: String?
+
+    init(rawOutput: String, action: AgentAction?, rejectionReason: String?,
+         resultLineNote: String? = nil, progressText: String? = nil) {
+        self.rawOutput = rawOutput; self.action = action; self.rejectionReason = rejectionReason
+        self.resultLineNote = resultLineNote; self.progressText = progressText
+    }
 }
 
 @MainActor

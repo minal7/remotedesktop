@@ -86,9 +86,8 @@ final class AgentCapabilityAdapter: ComputerUseTaskAwareExecuting, ComputerUseCl
             }
         }
 
-        let result = try await executor.execute(taskID: executionTaskID, prompt: executionPrompt) { update in
-            progress(Self.progressText(for: update))
-        }
+        let result = try await executor.execute(taskID: executionTaskID, prompt: executionPrompt,
+            progress: { progress(Self.progressText(for: $0)) }, stepProgress: progress)
         return present(result, rootTaskID: executionTaskID, hostTaskID: taskID)
     }
 
@@ -145,7 +144,8 @@ final class AgentCapabilityAdapter: ComputerUseTaskAwareExecuting, ComputerUseCl
             nextGoal = suppliedGoal
         }
 
-        let result = try await executor.answer(taskID: rootTaskID, questionID: pending.question.id, answer: answer)
+        let result = try await executor.answer(taskID: rootTaskID, questionID: pending.question.id,
+            answer: answer, stepProgress: progress)
         pendingQuestion = nil
         hostTaskID = taskID
         goal = nextGoal
@@ -163,13 +163,15 @@ final class AgentCapabilityAdapter: ComputerUseTaskAwareExecuting, ComputerUseCl
             && executor.activeLoop?.pendingStep?.approval.id == request.id
     }
 
-    func resumeApproval(request: AgentApprovalRequest, approved: Bool) async -> ComputerUseExecutionResult {
+    func resumeApproval(request: AgentApprovalRequest, approved: Bool,
+                         progress: @escaping (String) -> Void) async -> ComputerUseExecutionResult {
         guard request.taskID == rootTaskID, let hostTaskID,
               executor.activeTaskID == request.taskID else {
             return .unableToComplete("This approval is no longer attached to an active agent task.")
         }
         do {
-            let result = try await executor.resumeApproval(taskID: request.taskID, request: request, approved: approved)
+            let result = try await executor.resumeApproval(taskID: request.taskID, request: request,
+                approved: approved, stepProgress: progress)
             return present(result, rootTaskID: request.taskID, hostTaskID: hostTaskID)
         } catch {
             return .unableToComplete("The agent could not resume this approval: \(error.localizedDescription)")

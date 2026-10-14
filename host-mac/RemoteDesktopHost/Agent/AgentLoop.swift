@@ -2,7 +2,7 @@ import Foundation
 
 @MainActor
 final class AgentLoop {
-    struct PendingStep { let resolved: AgentResolvedAction; let approval: AgentApprovalRequest }
+    struct PendingStep { let resolved: AgentResolvedAction; let approval: AgentApprovalRequest; let note: String? }
     let taskID: String
     let maxSteps: Int
     let environment: AgentEnvironment
@@ -28,6 +28,8 @@ final class AgentLoop {
     var footerAttempted = false
     var terminalResult: AgentLoopResult?
     var completionWaiters: [CheckedContinuation<Void, Never>] = []
+    var stepProgress: (@MainActor (String) -> Void)?
+    private var progressNeedsSafeFallback = false
 
     init(taskID: String, prompt: String, maxSteps: Int = 30, environment: AgentEnvironment,
          policy: AgentPolicy, gate: AgentActionGate, recorder: AgentRecording,
@@ -92,10 +94,10 @@ final class AgentLoop {
                 fingerprint: pending.approval.fingerprint, scopeIdentity: pending.approval.scopeIdentity,
                 riskTier: pending.approval.riskTier.rawValue)
             try record(pending.resolved.frame.observation, raw: "", action: pending.resolved.action,
-                       gate: denied, execution: .init(status: .notExecuted, result: denied.reason),
+                       gate: denied, execution: .init(status: .notExecuted, result: noted(denied.reason, pending.note)),
                        start: continuationStart)
             corrections.append("Approval declined by the owner.")
-            history.append(.init(action: pending.resolved.action, result: "rejected: user declined"))
+            history.append(.init(action: pending.resolved.action, result: noted("rejected: user declined", pending.note)))
             stepIndex += 1; rejectionStreak += 1
             if let question = askAfterRejections() { return question }
             return try await runSteps()
@@ -108,9 +110,9 @@ final class AgentLoop {
             gate.cancelPendingApproval(pending.approval.id); pendingStep = nil
             try record(frame.observation, raw: "", action: pending.resolved.action,
                        gate: rejected("Approval target changed: \(error)", scope: frame.scope),
-                       execution: .init(status: .notExecuted, result: String(describing: error)),
+                       execution: .init(status: .notExecuted, result: noted(String(describing: error), pending.note)),
                        start: continuationStart)
-            history.append(.init(action: pending.resolved.action, result: "rejected: approval target changed"))
+            history.append(.init(action: pending.resolved.action, result: noted("rejected: approval target changed", pending.note)))
             stepIndex += 1; rejectionStreak += 1
             if let question = askAfterRejections() { return question }
             return try await runSteps()
@@ -120,11 +122,11 @@ final class AgentLoop {
         pendingStep = nil
         guard decision.result.decision == .allowed else {
             try record(frame.observation, raw: "", action: pending.resolved.action, gate: decision.result,
-                       execution: .init(status: .notExecuted, result: decision.result.reason),
+                       execution: .init(status: .notExecuted, result: noted(decision.result.reason, pending.note)),
                        start: continuationStart)
             corrections.append("Approval denied or invalidated: \(decision.result.reason)")
             let rejection = approved ? "rejected: \(decision.result.reason)" : "rejected: user declined"
-            history.append(.init(action: pending.resolved.action, result: rejection))
+            history.append(.init(action: pending.resolved.action, result: noted(rejection, pending.note)))
             stepIndex += 1; rejectionStreak += 1
             if let question = askAfterRejections() { return question }
             return try await runSteps()
@@ -135,12 +137,13 @@ final class AgentLoop {
                 fingerprint: decision.result.fingerprint, scopeIdentity: decision.result.scopeIdentity,
                 riskTier: decision.result.riskTier)
             try record(frame.observation, raw: "", action: pending.resolved.action, gate: rejected,
-                       execution: .init(status: .notExecuted, result: reason),
+                       execution: .init(status: .notExecuted, result: noted(reason, pending.note)),
                        start: continuationStart)
             return try await finish(.failed(reason: reason), outcome: "failed")
         }
         approvals.append(pending.approval.fingerprint)
-        if let terminal = try await execute(frame.observation, "", rebound, decision.result, continuationStart) { return terminal }
+        if let terminal = try await execute(frame.observation, "", rebound, decision.result, continuationStart,
+                                             note: pending.note) { return terminal }
         return try await runSteps()
     }
 
@@ -178,6 +181,10 @@ final class AgentLoop {
             }
             let policyMS = ms(policyStart)
             try checkBoundary()
+            progressNeedsSafeFallback = progressNeedsSafeFallback || AgentProgressNarration.hasSensitiveContext(frame.observation)
+            stepProgress?(AgentProgressNarration.text(modelText: output.progressText,
+                action: output.action, observation: frame.observation,
+                afterSensitiveContext: progressNeedsSafeFallback))
             guard let proposedAction = output.action else {
                 if let result = try recordRejection(frame, raw: output.rawOutput, action: nil,
                     reason: output.rejectionReason ?? "Malformed action output.", start: start,
@@ -196,18 +203,18 @@ final class AgentLoop {
                 if error == .credentialHandoff {
                     try recordRejection(frame, raw: output.rawOutput, action: proposedAction,
                         reason: "Credential entry requires the owner.", start: start,
-                        observeMS: observeMS, policyMS: policyMS)
+                        observeMS: observeMS, policyMS: policyMS, note: output.resultLineNote)
                     return .handoff(reason: "Credential entry requires the owner.")
                 }
                 if let result = try recordRejection(frame, raw: output.rawOutput, action: proposedAction,
                     reason: "Target resolution rejected: \(error)", start: start,
-                    observeMS: observeMS, policyMS: policyMS) { return result }
+                    observeMS: observeMS, policyMS: policyMS, note: output.resultLineNote) { return result }
                 continue
             }
             catch {
                 if let result = try recordRejection(frame, raw: output.rawOutput, action: proposedAction,
                     reason: "Target resolution rejected: \(error)", start: start,
-                    observeMS: observeMS, policyMS: policyMS) { return result }
+                    observeMS: observeMS, policyMS: policyMS, note: output.resultLineNote) { return result }
                 continue
             }
             let action = resolved.action
@@ -217,22 +224,24 @@ final class AgentLoop {
             catch {
                 if let result = try recordRejection(frame, raw: output.rawOutput, action: action,
                     reason: "Gate rejected action: \(error)", start: start,
-                    observeMS: observeMS, policyMS: policyMS, gateMS: ms(gateStart)) { return result }
+                    observeMS: observeMS, policyMS: policyMS, gateMS: ms(gateStart),
+                    note: output.resultLineNote) { return result }
                 continue
             }
             let gateMS = ms(gateStart)
             if let approval = evaluation.approval {
-                pendingStep = PendingStep(resolved: resolved, approval: approval)
+                pendingStep = PendingStep(resolved: resolved, approval: approval, note: output.resultLineNote)
                 try record(frame.observation, raw: output.rawOutput, action: action, gate: evaluation.result,
-                           execution: .init(status: .notExecuted, result: evaluation.result.reason),
+                           execution: .init(status: .notExecuted, result: noted(evaluation.result.reason, output.resultLineNote)),
                            start: start, observeMS: observeMS, policyMS: policyMS, gateMS: gateMS)
-                history.append(.init(action: action, result: "needs approval: \(evaluation.result.reason)")); stepIndex += 1
+                history.append(.init(action: action, result: noted("needs approval: \(evaluation.result.reason)", output.resultLineNote))); stepIndex += 1
                 return .pendingApproval(approval)
             }
             guard evaluation.result.decision == .allowed else {
                 if let result = try recordRejection(frame, raw: output.rawOutput, action: action,
                     reason: evaluation.result.reason, start: start, observeMS: observeMS,
-                    policyMS: policyMS, gateMS: gateMS, result: evaluation.result) { return result }
+                    policyMS: policyMS, gateMS: gateMS, result: evaluation.result,
+                    note: output.resultLineNote) { return result }
                 if evaluation.result.reason.localizedCaseInsensitiveContains("credential") {
                     return .handoff(reason: evaluation.result.reason)
                 }
@@ -242,14 +251,14 @@ final class AgentLoop {
             if let result = try await control(frame, output, evaluation.result, start, observeMS,
                                               policyMS, gateMS) { return result }
             if let terminal = try await execute(frame.observation, output.rawOutput, resolved,
-                evaluation.result, start, observeMS, policyMS, gateMS) { return terminal }
+                evaluation.result, start, observeMS, policyMS, gateMS, note: output.resultLineNote) { return terminal }
         }
         return try await finish(.failed(reason: "The task reached its \(maxSteps)-step limit."), outcome: "failed")
     }
 
     private func execute(_ observation: AgentObservation, _ raw: String, _ resolved: AgentResolvedAction,
                          _ gate: AgentGateResult, _ start: Date, _ observeMS: Int = 0,
-                         _ policyMS: Int = 0, _ gateMS: Int = 0) async throws -> AgentLoopResult? {
+                         _ policyMS: Int = 0, _ gateMS: Int = 0, note: String? = nil) async throws -> AgentLoopResult? {
         let action = resolved.action, begins = isInput(action), executionStart = Date()
         let fingerprint = gate.fingerprint ?? ""
         if begins {
@@ -263,7 +272,7 @@ final class AgentLoop {
             if case .systemHandoff(let reason) = error {
                 if begins { try journal.verify(step: stepIndex, fingerprint: fingerprint) }
                 try record(observation, raw: raw, action: action, gate: gate,
-                           execution: .init(status: .error, result: "Owner handoff: \(reason)"),
+                           execution: .init(status: .error, result: noted("Owner handoff: \(reason)", note)),
                            start: start, observeMS: observeMS, policyMS: policyMS, gateMS: gateMS,
                            executionMS: ms(executionStart))
                 stepIndex += 1; throw LoopBoundary.handoff(reason)
@@ -271,20 +280,20 @@ final class AgentLoop {
             if error == .credentialHandoff {
                 if begins { try journal.verify(step: stepIndex, fingerprint: fingerprint) }
                 try record(observation, raw: raw, action: action, gate: gate,
-                           execution: .init(status: .notExecuted, result: "Credential entry requires the owner."),
+                           execution: .init(status: .notExecuted, result: noted("Credential entry requires the owner.", note)),
                            start: start, observeMS: observeMS, policyMS: policyMS, gateMS: gateMS,
                            executionMS: ms(executionStart))
-                history.append(.init(action: action, result: "Credential entry requires the owner."))
+                history.append(.init(action: action, result: noted("Credential entry requires the owner.", note)))
                 stepIndex += 1
                 throw LoopBoundary.handoff("Credential entry requires the owner.")
             }
             return try await recoverAttempt(error, observation, raw, action, gate, start,
-                                            observeMS, policyMS, gateMS, executionStart, fingerprint, begins)
+                                            observeMS, policyMS, gateMS, executionStart, fingerprint, begins, note)
         } catch {
             if error is CancellationError || error is LoopPause || cancelRequested || Task.isCancelled {
                 if begins { try journal.markUncertain(step: stepIndex, fingerprint: fingerprint) }
                 try record(observation, raw: raw, action: action, gate: gate,
-                           execution: .init(status: .error, result: "Interrupted input attempt: \(error)"),
+                           execution: .init(status: .error, result: noted("Interrupted input attempt: \(error)", note)),
                            start: start, observeMS: observeMS, policyMS: policyMS, gateMS: gateMS,
                            executionMS: ms(executionStart))
                 stepIndex += 1
@@ -293,15 +302,15 @@ final class AgentLoop {
             if begins && gate.riskTier == AgentRiskTier.high.rawValue {
                 try journal.markUncertain(step: stepIndex, fingerprint: fingerprint)
                 try record(observation, raw: raw, action: action, gate: gate,
-                           execution: .init(status: .error, result: "Uncertain input attempt: \(error)"),
+                           execution: .init(status: .error, result: noted("Uncertain input attempt: \(error)", note)),
                            start: start, observeMS: observeMS, policyMS: policyMS, gateMS: gateMS,
                            executionMS: ms(executionStart))
-                history.append(.init(action: action, result: "uncertain: \(error)")); stepIndex += 1
+                history.append(.init(action: action, result: noted("uncertain: \(error)", note))); stepIndex += 1
                 return try await finish(.failed(reason: "High-risk action outcome is uncertain."), outcome: "uncertain")
             }
             if begins { try journal.verify(step: stepIndex, fingerprint: fingerprint) }
             try record(observation, raw: raw, action: action, gate: gate,
-                       execution: .init(status: .error, result: "Attempted; environment error: \(error)"),
+                       execution: .init(status: .error, result: noted("Attempted; environment error: \(error)", note)),
                        start: start, observeMS: observeMS, policyMS: policyMS, gateMS: gateMS,
                        executionMS: ms(executionStart))
             history.append(.init(action: action, result: "Attempted; environment error: \(error)")); stepIndex += 1
@@ -309,10 +318,11 @@ final class AgentLoop {
         }
         if result.status != .ok && begins && gate.riskTier == AgentRiskTier.high.rawValue {
             try journal.markUncertain(step: stepIndex, fingerprint: fingerprint)
-            try record(observation, raw: raw, action: action, gate: gate, execution: result,
+            try record(observation, raw: raw, action: action, gate: gate,
+                       execution: .init(status: result.status, result: noted(result.result, note)),
                        start: start, observeMS: observeMS, policyMS: policyMS, gateMS: gateMS,
                        executionMS: ms(executionStart))
-            history.append(.init(action: action, result: "Uncertain: \(result.result)")); stepIndex += 1
+            history.append(.init(action: action, result: noted("Uncertain: \(result.result)", note))); stepIndex += 1
             return try await finish(.failed(reason: "High-risk action outcome is uncertain."), outcome: "uncertain")
         }
         if begins {
@@ -320,10 +330,11 @@ final class AgentLoop {
         }
         if result.status == .ok, case .openURL = action { expectedTransition = action }
         if result.status == .ok, case .openApp = action { expectedTransition = action }
-        try record(observation, raw: raw, action: action, gate: gate, execution: result,
+        try record(observation, raw: raw, action: action, gate: gate,
+                   execution: .init(status: result.status, result: noted(result.result, note)),
                    start: start, observeMS: observeMS, policyMS: policyMS, gateMS: gateMS,
                    executionMS: ms(executionStart))
-        history.append(.init(action: action, result: result.status == .ok ? "ok: \(result.result)" : "Attempted: \(result.result)"))
+        history.append(.init(action: action, result: noted(result.status == .ok ? "ok: \(result.result)" : "Attempted: \(result.result)", note)))
         stepIndex += 1
         return nil
     }
@@ -355,35 +366,35 @@ final class AgentLoop {
     private func recoverAttempt(_ error: Error, _ observation: AgentObservation, _ raw: String,
                                 _ action: AgentAction, _ gate: AgentGateResult, _ start: Date,
                                 _ observeMS: Int, _ policyMS: Int, _ gateMS: Int, _ executionStart: Date,
-                                _ fingerprint: String, _ begins: Bool) async throws -> AgentLoopResult? {
+                                _ fingerprint: String, _ begins: Bool, _ note: String?) async throws -> AgentLoopResult? {
         if begins && gate.riskTier == AgentRiskTier.high.rawValue {
             try journal.markUncertain(step: stepIndex, fingerprint: fingerprint)
             try record(observation, raw: raw, action: action, gate: gate,
-                       execution: .init(status: .error, result: "Uncertain input attempt: \(error)"),
+                       execution: .init(status: .error, result: noted("Uncertain input attempt: \(error)", note)),
                        start: start, observeMS: observeMS, policyMS: policyMS, gateMS: gateMS,
                        executionMS: ms(executionStart))
-            history.append(.init(action: action, result: "uncertain: \(error)")); stepIndex += 1
+            history.append(.init(action: action, result: noted("uncertain: \(error)", note))); stepIndex += 1
             return try await finish(.failed(reason: "High-risk action outcome is uncertain."), outcome: "uncertain")
         }
         if begins && environment.followsFrontmostSurface { try await Task.sleep(for: .milliseconds(300)) }
         if begins { try journal.verify(step: stepIndex, fingerprint: fingerprint) }
         try record(observation, raw: raw, action: action, gate: gate,
-                   execution: .init(status: .error, result: "Attempted; environment error: \(error)"),
+                   execution: .init(status: .error, result: noted("Attempted; environment error: \(error)", note)),
                    start: start, observeMS: observeMS, policyMS: policyMS, gateMS: gateMS,
                    executionMS: ms(executionStart))
-        history.append(.init(action: action, result: "Attempted; environment error: \(error)")); stepIndex += 1
+        history.append(.init(action: action, result: noted("Attempted; environment error: \(error)", note))); stepIndex += 1
         return nil
     }
 
     private func recordRejection(_ frame: AgentFrame, raw: String, action: AgentAction?, reason: String,
                                  start: Date, observeMS: Int, policyMS: Int, gateMS: Int = 0,
-                                 result: AgentGateResult? = nil) throws -> AgentLoopResult? {
+                                 result: AgentGateResult? = nil, note: String? = nil) throws -> AgentLoopResult? {
         let decision = result ?? AgentGateResult(decision: .rejected, reason: reason,
             scopeIdentity: frame.scope.identity, riskTier: AgentRiskTier.low.rawValue)
         try record(frame.observation, raw: raw, action: action, gate: decision,
-                   execution: .init(status: .notExecuted, result: reason), start: start,
+                   execution: .init(status: .notExecuted, result: noted(reason, note)), start: start,
                    observeMS: observeMS, policyMS: policyMS, gateMS: gateMS)
-        history.append(.init(action: action, result: "rejected: \(reason)")); stepIndex += 1
+        history.append(.init(action: action, result: noted("rejected: \(reason)", note))); stepIndex += 1
         rejectionStreak += 1; corrections.append(reason)
         return askAfterRejections()
     }
@@ -470,6 +481,10 @@ final class AgentLoop {
     }
 
     private func gateCancel(_ id: UUID) { gate.cancelPendingApproval(id) }
+    private func noted(_ result: String, _ note: String?) -> String {
+        guard let note, !note.isEmpty else { return result }
+        return "\(result) (\(note))"
+    }
     private func stopServices() async {
         guard !servicesStopped else { return }; servicesStopped = true
         await environment.stop(); await policy.stop()

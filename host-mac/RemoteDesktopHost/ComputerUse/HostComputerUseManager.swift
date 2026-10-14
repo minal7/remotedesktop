@@ -5450,7 +5450,12 @@ final class HostComputerUseManager: ObservableObject {
             guard let self else { return }
             await lifecycle?.value
             guard !Task.isCancelled, currentExecutionToken == token else { return }
-            let result = await agent.resumeApproval(request: request, approved: approved)
+            let progress: (String) -> Void = { [weak self] value in
+                guard self?.currentExecutionToken == token else { return }
+                self?.activity = .working(value)
+                self?.sendStatus(value, replyingTo: context.envelope, channel: context.channel)
+            }
+            let result = await agent.resumeApproval(request: request, approved: approved, progress: progress)
             guard !Task.isCancelled, currentExecutionToken == token, let executor else { return }
             do { try await acceptExecutionResult(result, executor: executor, context: context, token: token) }
             catch {

@@ -9,13 +9,35 @@ enum FaraPolicyAdapter {
     static func canonicalActionJSON(fromCompletion raw: String, imageSize: (width: Int, height: Int)) throws -> String {
         guard raw.utf8.count <= maximumCompletionBytes,
               imageSize.width > 0, imageSize.height > 0 else { throw Failure.invalidCompletion }
-        let proposal: ComputerUseFaraAction
-        do { proposal = try ComputerUseFaraAction.decodeNativeMessage(raw) }
-        catch { throw Failure.invalidCompletion }
-        let action = try canonicalAction(proposal, imageSize: imageSize)
+        let action: AgentAction
+        if let openApp = try decodeOpenApp(raw) { action = openApp }
+        else {
+            let proposal: ComputerUseFaraAction
+            do { proposal = try ComputerUseFaraAction.decodeNativeMessage(raw) }
+            catch { throw Failure.invalidCompletion }
+            action = try canonicalAction(proposal, imageSize: imageSize)
+        }
         let data = try JSONEncoder().encode(action)
         guard data.count <= maximumActionBytes else { throw Failure.invalidCompletion }
         return String(decoding: data, as: UTF8.self)
+    }
+
+    static func resultLineNote(fromCompletion raw: String) throws -> String? {
+        guard raw.utf8.count <= maximumCompletionBytes else { throw Failure.invalidCompletion }
+        let proposal: ComputerUseFaraAction
+        do { proposal = try ComputerUseFaraAction.decodeNativeMessage(raw) }
+        catch { throw Failure.invalidCompletion }
+        guard case .key(let keys) = proposal else { return nil }
+        return try keyChord(keys).note
+    }
+
+    static func progressText(fromCompletion raw: String) -> String? {
+        guard raw.utf8.count <= maximumCompletionBytes,
+              let start = raw.range(of: "<tool_call>") else { return nil }
+        let prefix = raw[..<start.lowerBound]
+        guard !prefix.contains("<tool_call"), !prefix.contains("</tool_call") else { return nil }
+        let text = prefix.trimmingCharacters(in: .whitespacesAndNewlines)
+        return text.isEmpty || text.utf8.count > 4_096 ? nil : text
     }
 
     static func actionJSON(fromCompletion raw: String) throws -> String {
@@ -24,6 +46,31 @@ enum FaraPolicyAdapter {
     }
 
     enum Failure: Error { case invalidCompletion, unsupportedProposal(String) }
+
+    private static func keyChord(_ keys: [String]) throws -> (chord: String, note: String?) {
+        guard let nativeKey = keys.last?.lowercased(), !nativeKey.isEmpty else { throw Failure.invalidCompletion }
+        let key = ["arrowleft": "left", "arrowright": "right"][nativeKey] ?? nativeKey
+        let modifiers = Set(keys.dropLast().map { $0.lowercased() })
+        let hasControl = modifiers.contains("ctrl") || modifiers.contains("control")
+        let hasOption = modifiers.contains("alt") || modifiers.contains("option") || modifiers.contains("opt")
+        if hasOption && key == "tab" {
+            throw Failure.unsupportedProposal("Use open_app to switch apps.")
+        }
+        let native = keys.map { $0.lowercased() }.joined(separator: "+")
+        let mapped: String?
+        if hasControl && modifiers.count == 2 && modifiers.contains("shift") && key == "z" { mapped = "cmd+shift+z" }
+        else if hasControl && modifiers.count == 1 && ["a", "c", "v", "x", "z", "y", "s", "o", "n", "w", "t", "f", "l", "p", "q"].contains(key) {
+            mapped = "cmd+\(key)"
+        } else if hasControl && modifiers.count == 1 && key == "home" { mapped = "cmd+up" }
+        else if hasControl && modifiers.count == 1 && key == "end" { mapped = "cmd+down" }
+        else if hasOption && modifiers.count == 1 && key == "left" { mapped = "cmd+[" }
+        else if hasOption && modifiers.count == 1 && key == "right" { mapped = "cmd+]" }
+        else if modifiers.isEmpty && key == "home" { mapped = "cmd+left" }
+        else if modifiers.isEmpty && key == "end" { mapped = "cmd+right" }
+        else { mapped = nil }
+        guard let mapped else { return (keys.joined(separator: "+"), nil) }
+        return (mapped, "mapped \(native) → \(mapped)")
+    }
 
     private static func canonicalAction(_ proposal: ComputerUseFaraAction,
                                         imageSize: (width: Int, height: Int)) throws -> AgentAction {
@@ -54,7 +101,7 @@ enum FaraPolicyAdapter {
                 throw Failure.unsupportedProposal("Moving the pointer without a click is not available in this host action contract.")
             }
         case .typeText(let text): return .type(target: nil, text: text, mode: .append)
-        case .key(let keys): return .key(chord: keys.joined(separator: "+"))
+        case .key(let keys): return .key(chord: try keyChord(keys).chord)
         case let .scroll(horizontal, pixels): return try scroll(horizontal, pixels)
         case let .scrollAt(horizontal, pixels, position):
             return try scroll(horizontal, pixels, point(position))
@@ -83,5 +130,24 @@ enum FaraPolicyAdapter {
             return .wait(seconds: seconds)
         case .reportCompletion(let answer): return .done(answer: answer)
         }
+    }
+
+    private static func decodeOpenApp(_ raw: String) throws -> AgentAction? {
+        guard let start = raw.range(of: "<tool_call>") else { return nil }
+        let callText = String(raw[start.lowerBound...]).trimmingCharacters(in: .whitespacesAndNewlines)
+        let prefix = "<tool_call>", suffix = "</tool_call>"
+        guard callText.hasPrefix(prefix), callText.hasSuffix(suffix) else { return nil }
+        let body = String(callText.dropFirst(prefix.count).dropLast(suffix.count))
+        var parser = StrictSemanticJSONParser(body)
+        guard case .object(let call) = try parser.parse(), Set(call.keys) == ["name", "arguments"],
+              call["name"] == .string("computer_use"), case .object(let args)? = call["arguments"],
+              case .string("open_app")? = args["action"] else { return nil }
+        guard Set(args.keys) == ["action", "name"], case .string(let name)? = args["name"],
+              !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              name.utf8.count <= 1_024,
+              !name.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains) else {
+            throw Failure.invalidCompletion
+        }
+        return .openApp(name: name)
     }
 }

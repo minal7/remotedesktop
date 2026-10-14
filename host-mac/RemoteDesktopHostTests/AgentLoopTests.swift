@@ -185,6 +185,66 @@ final class AgentLoopTests: XCTestCase {
         XCTAssertEqual(environment.lastContext?.history.last?.result, "rejected: user declined")
     }
 
+    func testPolicyResultNoteSurvivesApprovalDenialAndApprovedResume() async throws {
+        let frame = webFrame(elements: [button(id: 1, name: "Submit")])
+        let action = AgentAction.click(target: .element(id: 1), button: nil, count: nil)
+        let note = "mapped ctrl+a → cmd+a"
+
+        let deniedEnvironment = TestEnvironment(frames: [frame, frame])
+        let deniedRecorder = TestRecorder()
+        let deniedPolicy = TestPolicy([.output(.init(rawOutput: "action:key", action: action,
+            rejectionReason: nil, resultLineNote: note)), .action(.done(answer: "Declined safely"))])
+        let deniedLoop = try makeLoop(environment: deniedEnvironment, policy: deniedPolicy,
+            recorder: deniedRecorder, journal: TestJournal())
+        guard case .pendingApproval(let deniedApproval) = try await deniedLoop.run() else {
+            return XCTFail("Expected approval")
+        }
+        _ = try await deniedLoop.resume(approvalID: deniedApproval.id, approved: false)
+        XCTAssertTrue(deniedRecorder.steps[0].execution.result.contains(note))
+        XCTAssertTrue(deniedRecorder.steps[1].execution.result.contains(note))
+        XCTAssertTrue(deniedEnvironment.executed.isEmpty)
+
+        let approvedEnvironment = TestEnvironment(frames: [frame, frame, frame])
+        let approvedRecorder = TestRecorder()
+        let approvedPolicy = TestPolicy([.output(.init(rawOutput: "action:key", action: action,
+            rejectionReason: nil, resultLineNote: note)), .action(.done(answer: "Completed safely"))])
+        let approvedLoop = try makeLoop(environment: approvedEnvironment, policy: approvedPolicy,
+            recorder: approvedRecorder, journal: TestJournal())
+        guard case .pendingApproval(let approval) = try await approvedLoop.run() else {
+            return XCTFail("Expected approval")
+        }
+        _ = try await approvedLoop.resume(approvalID: approval.id, approved: true)
+        XCTAssertTrue(approvedRecorder.steps[0].execution.result.contains(note))
+        XCTAssertTrue(approvedRecorder.steps[1].execution.result.contains(note))
+        XCTAssertEqual(approvedEnvironment.executed.count, 1)
+    }
+
+    func testPerStepProgressUsesPolicyNarrationWithoutChangingApprovalFlow() async throws {
+        let secure = AgentFrame(observation: AgentObservation(task: "Complete a generic task",
+            surface: .app(bundleID: "example.app", title: nil), screenshot: "",
+            elements: [.init(id: 1, role: "AXSecureTextField", name: "Password", value: nil,
+                state: ["secure"], bbox: .init(x: 1, y: 2, width: 3, height: 4), inView: true)],
+            focus: nil, history: [], budget: .init(step: 0, maxSteps: 40)),
+            scope: AgentScope(taskID: "task-1", kind: .app, identity: "window-1"))
+        let ordinary = AgentFrame(observation: AgentObservation(task: secure.observation.task,
+            surface: secure.observation.surface, screenshot: "", elements: [], focus: nil,
+            history: [], budget: .init(step: 0, maxSteps: 40)), scope: secure.scope)
+        let policy = TestPolicy([
+            .output(.init(rawOutput: "action:wait", action: .wait(seconds: 0.1), rejectionReason: nil,
+                          progressText: "The password is private-value-123.")),
+            .output(.init(rawOutput: "action:done", action: .done(answer: "Done"), rejectionReason: nil,
+                          progressText: "The password is private-value-123.")),
+        ])
+        let loop = try makeLoop(environment: TestEnvironment(frames: [secure, ordinary]), policy: policy,
+            recorder: TestRecorder(), journal: TestJournal())
+        var updates: [String] = []
+        loop.stepProgress = { updates.append($0) }
+        _ = try await loop.run()
+        XCTAssertEqual(updates, ["I’m handling a sensitive control carefully.",
+                                 "I’m handling a sensitive control carefully."])
+        XCTAssertFalse(updates.joined().contains("private-value-123"))
+    }
+
     func testApprovalAtStepLimitFailsWithoutExecutingOrExceedingBudget() async throws {
         let target = webFrame(elements: [button(id: 1, name: "Submit")])
         let environment = TestEnvironment(frames: [target, target])
@@ -458,7 +518,7 @@ final class AgentLoopTests: XCTestCase {
 
 @MainActor
 private final class TestPolicy: AgentPolicy {
-    enum Reply { case action(AgentAction), malformed(String) }
+    enum Reply { case action(AgentAction), malformed(String), output(AgentPolicyOutput) }
     let promptVersion = "test-v1"
     private var replies: [Reply]
     private(set) var observations: [AgentObservation] = []
@@ -470,6 +530,7 @@ private final class TestPolicy: AgentPolicy {
         switch replies.removeFirst() {
         case .action(let action): return .init(rawOutput: "action:\(action.type)", action: action, rejectionReason: nil)
         case .malformed(let raw): return .init(rawOutput: raw, action: nil, rejectionReason: "Invalid output")
+        case .output(let output): return output
         }
     }
     func stop() async { stopCount += 1 }

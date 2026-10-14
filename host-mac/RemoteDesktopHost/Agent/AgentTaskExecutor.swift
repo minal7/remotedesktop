@@ -23,7 +23,8 @@ final class AgentTaskExecutor {
     var activeLoop: AgentLoop? { active?.loop }
 
     func execute(taskID: String, prompt: String,
-                 progress: (@MainActor (AgentLoopResult) -> Void)? = nil) async throws -> AgentLoopResult {
+                 progress: (@MainActor (AgentLoopResult) -> Void)? = nil,
+                 stepProgress: (@MainActor (String) -> Void)? = nil) async throws -> AgentLoopResult {
         guard !taskID.isEmpty, !prompt.isEmpty else { throw AgentTaskExecutorError.invalidTask }
         guard !cancellationInProgress, active?.loop.cancelRequested != true else {
             throw AgentTaskExecutorError.cancellationInProgress
@@ -31,6 +32,7 @@ final class AgentTaskExecutor {
         if let active {
             if active.taskID == taskID {
                 guard active.prompt == prompt else { throw AgentTaskExecutorError.promptChanged }
+                active.loop.stepProgress = stepProgress
                 let result = try await (active.loop.pauseRequested ? active.loop.resume() : active.loop.run())
                 progress?(result)
                 return result
@@ -41,6 +43,7 @@ final class AgentTaskExecutor {
 
         let loop = try await loopFactory(taskID, prompt)
         guard loop.taskID == taskID else { throw AgentTaskExecutorError.factoryTaskMismatch }
+        loop.stepProgress = stepProgress
         active = ActiveTask(taskID: taskID, prompt: prompt, loop: loop)
         let result = try await (loop.pauseRequested ? loop.resume() : loop.run())
         progress?(result)
@@ -48,18 +51,21 @@ final class AgentTaskExecutor {
     }
 
     func resumeApproval(taskID: String, request: AgentApprovalRequest,
-                        approved: Bool) async throws -> AgentLoopResult {
+                        approved: Bool, stepProgress: (@MainActor (String) -> Void)? = nil) async throws -> AgentLoopResult {
         let loop = try requireActive(taskID: taskID)
         guard request.taskID == taskID,
               loop.pendingStep?.approval == request else {
             throw AgentTaskExecutorError.staleApproval
         }
+        loop.stepProgress = stepProgress
         return try await loop.resume(approvalID: request.id, approved: approved)
     }
 
-    func answer(taskID: String, questionID: UUID, answer: String) async throws -> AgentLoopResult {
+    func answer(taskID: String, questionID: UUID, answer: String,
+                stepProgress: (@MainActor (String) -> Void)? = nil) async throws -> AgentLoopResult {
         let loop = try requireActive(taskID: taskID)
         guard loop.pendingQuestion?.id == questionID else { throw AgentTaskExecutorError.staleQuestion }
+        loop.stepProgress = stepProgress
         return try await loop.resume(answer: answer)
     }
 

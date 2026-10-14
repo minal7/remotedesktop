@@ -13,7 +13,7 @@ final class AgentLlamaVLMPolicyTests: XCTestCase {
 
         let output = try await policy.propose(observation)
 
-        XCTAssertEqual(policy.promptVersion, "v1-fara-native-coordinates-compact-history")
+        XCTAssertEqual(policy.promptVersion, "v2-fara-macos-native-coordinates-compact-history")
         XCTAssertEqual(output.rawOutput, raw)
         XCTAssertEqual(output.action, .click(target: .point(x: 1, y: 2), button: nil, count: nil))
         let input = try XCTUnwrap(transport.inputs.first)
@@ -22,6 +22,7 @@ final class AgentLlamaVLMPolicyTests: XCTestCase {
         XCTAssertTrue(nativePrompt.contains("A critical point is a situation"))
         XCTAssertTrue(nativePrompt.contains("<tools>"))
         XCTAssertTrue(nativePrompt.contains("<tool_call>"))
+        XCTAssertTrue(nativePrompt.contains(#"{"action":"open_app","name":"App name"}"#))
         XCTAssertEqual(input.messages.map(\.role), [.system, .user])
         XCTAssertTrue(input.messages[0].content.textValue?.contains("<tools>") == true)
         XCTAssertTrue(input.messages[1].content.textValue?.contains(#""elements":[{"bbox":[250,250,500,500]"#) == true)
@@ -52,7 +53,7 @@ final class AgentLlamaVLMPolicyTests: XCTestCase {
             (#"{"action":"left_click","coordinate":[120,45]}"#, #"{"type":"click","target":{"x":120,"y":45}}"#),
             (#"{"action":"right_click","coordinate":[120,45]}"#, #"{"type":"click","target":{"x":120,"y":45},"button":"right"}"#),
             (#"{"action":"type","text":"sample","coordinate":[700,800]}"#, #"{"type":"type","text":"sample","mode":"append"}"#),
-            (#"{"action":"key","keys":["CTRL","L"]}"#, #"{"type":"key","chord":"CTRL+L"}"#),
+            (#"{"action":"key","keys":["CTRL","L"]}"#, #"{"type":"key","chord":"cmd+l"}"#),
             (#"{"action":"scroll","pixels":40}"#, #"{"type":"scroll","direction":"up","amount":40}"#),
             (#"{"action":"hscroll","pixels":-40}"#, #"{"type":"scroll","direction":"left","amount":40}"#),
             (#"{"action":"visit_url","url":"https://example.test/"}"#, #"{"type":"open_url","url":"https://example.test/"}"#),
@@ -678,8 +679,8 @@ final class AgentLlamaVLMPolicyTests: XCTestCase {
             elements: [.init(id: 1, role: "button", name: "Continue", value: nil, state: ["enabled"],
                              bbox: .init(x: 1, y: 1, width: 2, height: 2), inView: true)],
             focus: nil, history: [], budget: .init(step: 0, maxSteps: 40))
-        let promptURL = try XCTUnwrap(Bundle.main.url(forResource: "v1", withExtension: "txt",
-                                                      subdirectory: "policy/prompts"))
+        let promptURL = try XCTUnwrap(Bundle.main.url(forResource: LlamaVLMPolicy.promptResourceName(for: .fara15_4b),
+                                                      withExtension: "txt", subdirectory: "policy/prompts"))
         let prompt = try String(contentsOf: promptURL, encoding: .utf8)
         return (try LlamaVLMPolicy(transport: transport, prompt: prompt), observation, png)
     }

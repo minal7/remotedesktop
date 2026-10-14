@@ -86,16 +86,23 @@ final class AgentCapabilityAdapterTests: XCTestCase {
             .done(answer: "Completed")
         ]])
         let adapter = AgentCapabilityAdapter(executor: fixture.executor)
+        var initialProgress: [String] = []
+        var answerProgress: [String] = []
+        var approvalProgress: [String] = []
         _ = try await adapter.execute(taskID: "approval-root", prompt: "Start",
-            trustedUserPrompt: "Continue safely", tools: hostTools(), progress: { _ in })
+            trustedUserPrompt: "Continue safely", tools: hostTools(), progress: { initialProgress.append($0) })
+        let initialProgressCount = initialProgress.count
         let clarification = try XCTUnwrap(adapter.clarification(taskID: "approval-root"))
         let choice = try XCTUnwrap(clarification.choices?.first)
         let result = try await adapter.continueClarification(taskID: "approval-alias",
             originatingTaskID: "approval-root", goal: clarification.goal, selectedChoice: choice,
-            progress: { _ in })
+            progress: { answerProgress.append($0) })
         guard case .agentApprovalRequired(let request) = result else {
             return XCTFail("Expected the host approval request")
         }
+        XCTAssertEqual(initialProgress.count, initialProgressCount,
+            "The original callback must not receive the answer-resume step")
+        XCTAssertEqual(answerProgress.count, 1, "The answer-resume callback must receive its step")
 
         XCTAssertEqual(request.taskID, "approval-root")
         XCTAssertTrue(adapter.ownsApproval(request, hostTaskID: "approval-alias"))
@@ -103,14 +110,19 @@ final class AgentCapabilityAdapterTests: XCTestCase {
         let wrongTask = AgentApprovalRequest(id: request.id, taskID: "wrong-root",
             scopeIdentity: request.scopeIdentity, fingerprint: request.fingerprint, riskTier: request.riskTier,
             reason: request.reason, action: request.action)
-        let wrongApprovalResult = await adapter.resumeApproval(request: wrongTask, approved: true)
+        let wrongApprovalResult = await adapter.resumeApproval(request: wrongTask, approved: true, progress: { _ in })
         guard case .unableToComplete = wrongApprovalResult else {
             return XCTFail("Approval must not be transferable to another task")
         }
         XCTAssertTrue(fixture.environments[0].executed.isEmpty)
 
-        let approved = await adapter.resumeApproval(request: request, approved: true)
+        let approved = await adapter.resumeApproval(request: request, approved: true,
+            progress: { approvalProgress.append($0) })
         XCTAssertEqual(approved, .completed("Completed"))
+        XCTAssertEqual(initialProgress.count, initialProgressCount,
+            "The original callback must not receive resumed steps")
+        XCTAssertEqual(answerProgress.count, 1, "The answer callback must not receive approval-resume steps")
+        XCTAssertEqual(approvalProgress.count, 1, "Approval resume must report through its current callback")
         XCTAssertEqual(fixture.factoryPrompts, ["Continue safely"])
         XCTAssertEqual(fixture.executor.activeTaskID, "approval-root")
         XCTAssertEqual(fixture.policies[0].proposalCount, 3)

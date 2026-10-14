@@ -90,6 +90,9 @@ final class PixelEnvironment: AgentEnvironment {
     private var stopped = false
     private var suspended = false
     private var didStart = false
+#if DEBUG
+    private var didLogWindowGeometryDiagnostic = false
+#endif
     private var lastSnapshot: Snapshot?
     private(set) var actualCropMode: PixelCapturePreference
 
@@ -276,8 +279,14 @@ final class PixelEnvironment: AgentEnvironment {
         }
         let appWindows = content.windows.filter { $0.owningApplication?.processID == app?.processIdentifier && $0.frame.width > 50 && $0.frame.height > 50 }
         let appRoot = app.map { AXUIElementCreateApplication($0.processIdentifier) }
+        let axLookupStarted = Date()
         let focusedAXWindow = appRoot.flatMap(ElementMarks.focusedWindow)
         let focusedBounds = focusedAXWindow.flatMap(ElementMarks.bounds)
+#if DEBUG
+        let focusedAXRole = focusedAXWindow.flatMap { ElementMarks.string($0, kAXRoleAttribute) }
+        let focusedAXTitle = focusedAXWindow.flatMap { ElementMarks.string($0, kAXTitleAttribute) }
+        let axLookupMilliseconds = Date().timeIntervalSince(axLookupStarted) * 1_000
+#endif
         let target = focusedBounds.flatMap { bounds in
             appWindows.first(where: { abs($0.frame.minX - bounds.minX) < 2 && abs($0.frame.minY - bounds.minY) < 2 && abs($0.frame.width - bounds.width) < 2 && abs($0.frame.height - bounds.height) < 2 })
                 ?? appWindows.max { Self.overlapScore($0.frame, bounds) < Self.overlapScore($1.frame, bounds) }
@@ -305,6 +314,17 @@ final class PixelEnvironment: AgentEnvironment {
                 focusedBounds: focusedBounds, appRoot: appRoot, application: app,
                 selectedBounds: target?.frame ?? display.frame)
         } else { marks = nil }
+#if DEBUG
+        if metadataURL != nil, !didLogWindowGeometryDiagnostic {
+            didLogWindowGeometryDiagnostic = true
+            let rect: (CGRect?) -> String = { $0.map { "\(Int($0.minX)),\(Int($0.minY)),\(Int($0.width)),\(Int($0.height))" } ?? "nil" }
+            let exact = focusedBounds.map { b in appWindows.contains { ElementMarks.focusedWindowMatches(b, selectedBounds: $0.frame) } } ?? false
+            let route = target == nil ? "none" : focusedBounds == nil ? "first" : exact ? "exact" : Self.overlapScore(target!.frame, focusedBounds!) > 0 ? "overlap" : "first"
+            let candidates = appWindows.map { "\($0.windowID):\($0.title ?? ""):\(rect($0.frame))" }.joined(separator: ";")
+            let line = "ax_ms=\(axLookupMilliseconds) focused=\(focusedAXWindow != nil) bounds=\(focusedBounds != nil) role=\(focusedAXRole ?? "") title=\(focusedAXTitle ?? "") ax_frame=\(rect(focusedBounds)) selected=\(target.map { Int($0.windowID) } ?? 0):\(target?.title ?? ""):\(rect(target?.frame)) route=\(route) candidates=[\(candidates)] strict=\(ElementMarks.focusedWindowMatches(focusedBounds, selectedBounds: target?.frame ?? display.frame)) marks=\(marks?.marks.count ?? 0) in_view=\(marks?.marks.filter(\.inView).count ?? 0)"
+            NSLog("PixelWindowDiagnostic %@", line)
+        }
+#endif
         var image: CGImage
         var captureBounds: CGRect
         var identity: String
