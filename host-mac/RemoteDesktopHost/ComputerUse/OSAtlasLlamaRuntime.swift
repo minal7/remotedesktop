@@ -1448,6 +1448,7 @@ actor OSAtlasLlamaRuntime {
                 let data = try await server.transport.complete(request: request)
                 try Task.checkCancellation()
                 guard active?.endpoint == endpoint else { throw OSAtlasLlamaRuntimeError.inactiveSession }
+                if let body = request.httpBody { inspectFaraExchange?(body, data) }
                 guard data.count <= FaraPolicyAdapter.maximumCompletionBytes else {
                     throw OSAtlasLlamaRuntimeError.invalidResponse
                 }
