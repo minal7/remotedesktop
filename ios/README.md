@@ -4,9 +4,10 @@ SwiftUI app for iPad and iPhone with CloudKit-assisted automatic enrollment,
 live WebRTC screen and audio playback, direct remote input, and the local AI
 Computer Use chat experience.
 
-Computer use (Beta) runs the Fara 1.5-4B vision-language model locally on a
-Mac with at least 16 GB of memory. The iPhone provides the task, progress,
-questions, approvals, Stop, and Take over controls. Final smoke, safety, and
+Computer use (Beta) runs the Fara 1.5-4B vision-language model locally on an
+Apple silicon Mac with at least 16 GB of memory. The iPhone provides the task
+and shows progress, questions, approvals, Stop, and Take over controls. Final
+smoke, safety, and
 physical iPhone or iPad acceptance results are pending. See the top-level README and
 `docs/support.html` for current setup guidance.
 

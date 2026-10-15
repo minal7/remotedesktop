@@ -96,10 +96,10 @@ The Mac observes the screen, takes one action, and checks the next screen. The
 feature is in beta; its release-candidate smoke, safety, and physical-device
 results are pending.
 
-The shipped model is Fara 1.5-4B and inference runs on the Mac. A Mac with at
-least 16 GB of memory is required. The iPhone and Mac must be on the same local
-network for task traffic. Setup may use the account's private CloudKit database
-for bounded enrollment and model setup; after enrollment, prompts, task status,
+The shipped model is Fara 1.5-4B and inference runs on the Mac. An Apple silicon
+Mac with at least 16 GB of memory is required. The iPhone and Mac must be on the
+same local network for task traffic. Setup may use the account's private
+CloudKit database for bounded enrollment and model setup; after enrollment, prompts, task status,
 results, controls, and approvals use authenticated LAN TLS. Screen sharing and
 direct remote input continue over WebRTC. Ordinary task content is not sent to
 a developer-operated AI service.

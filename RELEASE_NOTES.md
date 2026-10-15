@@ -36,8 +36,8 @@ checks. The build identity and measurements are **pending**.
   pending measurement on the release candidate.
 - Computer use is limited to basic browser and Mac-app tasks and may stop and
   ask for help.
-- The Mac needs at least 16 GB of memory. Model setup needs about 4.3 GiB of
-  free disk space.
+- An Apple silicon Mac with at least 16 GB of memory is required. Model setup
+  needs about 4.3 GiB of free disk space.
 - The iPhone and Mac need to be on the same local network for task traffic.
   CloudKit supports bounded enrollment and model setup; ordinary task traffic
   uses authenticated LAN TLS.
