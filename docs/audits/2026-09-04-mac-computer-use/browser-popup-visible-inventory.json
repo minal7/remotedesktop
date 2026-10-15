@@ -1,9 +1,0 @@
-{
-  "selectors": [
-    "RemoteDesktopHostTests/ComputerUseOwnedBrowserVisibleAcceptanceTests"
-  ],
-  "expectedTests": [
-    "RemoteDesktopHostTests/ComputerUseOwnedBrowserVisibleAcceptanceTests/testSignedHostOwnsVisibleSignInWindowAndClosingItPreservesThePausedParent",
-    "RemoteDesktopHostTests/ComputerUseOwnedBrowserVisibleAcceptanceTests/testSignedHostPresentsAndClosesItsOwnedBrowserWindow"
-  ]
-}

@@ -104,11 +104,11 @@ video view and immutable display metadata. Retirement removes that exact view;
 queued internal work can finish on the removed object without sharing its frame
 cache or drawable size with a successor. Native presentation timing, capture
 freshness and foreground return still need repair and qualification. See the
-[renderer ownership review](../docs/audits/2026-09-04-mac-computer-use/RENDERER_OWNERSHIP_REVIEW.md)
-and [native surface review](../docs/audits/2026-09-04-mac-computer-use/NATIVE_SURFACE_LIFETIME_REVIEW.md). These display
+[renderer ownership review](https://github.com/minal7/remotedesktop/blob/7a43912f1f27049723d70ec9669ba9a871f3e216/docs/audits/2026-09-04-mac-computer-use/RENDERER_OWNERSHIP_REVIEW.md)
+and [native surface review](https://github.com/minal7/remotedesktop/blob/7a43912f1f27049723d70ec9669ba9a871f3e216/docs/audits/2026-09-04-mac-computer-use/NATIVE_SURFACE_LIFETIME_REVIEW.md). These display
 requirements are part of the unreleased `inputSessions: 1` extension and require
 the matching host and phone implementation. See the
-[presentation recovery review](../docs/audits/2026-09-04-mac-computer-use/INPUT_PRESENTATION_RECOVERY_REVIEW.md).
+[presentation recovery review](https://github.com/minal7/remotedesktop/blob/7a43912f1f27049723d70ec9669ba9a871f3e216/docs/audits/2026-09-04-mac-computer-use/INPUT_PRESENTATION_RECOVERY_REVIEW.md).
 
 ### Capture-loss invalidation
 
@@ -156,7 +156,7 @@ The source implementation handles reported stream stops and nonterminal
 blank/suspended or invalid output. Silent stalls still need handling. Source
 output and a later renderer submission do not prove that current source pixels
 were displayed on the phone. End-to-end media identity, actual presentation and
-native compatibility remain unqualified; see the [capture/input review](../docs/audits/2026-09-04-mac-computer-use/CAPTURE_INPUT_INVALIDATION_REVIEW.md).
+native compatibility remain unqualified; see the [capture/input review](https://github.com/minal7/remotedesktop/blob/7a43912f1f27049723d70ec9669ba9a871f3e216/docs/audits/2026-09-04-mac-computer-use/CAPTURE_INPUT_INVALIDATION_REVIEW.md).
 
 Each scoped input message carries a separate envelope, for example:
 
@@ -188,7 +188,7 @@ native RTC callback order and the channel's reliable-ordered delivery. It also
 does not scope the separate `bye` or video-quality messages. Physical input,
 AI task controls, account handoff and result verification retain their own
 contracts. The source changes and pending qualification are tracked in the
-[wire-input session review](../docs/audits/2026-09-04-mac-computer-use/WIRE_INPUT_SESSION_REVIEW.md).
+[wire-input session review](https://github.com/minal7/remotedesktop/blob/7a43912f1f27049723d70ec9669ba9a871f3e216/docs/audits/2026-09-04-mac-computer-use/WIRE_INPUT_SESSION_REVIEW.md).
 
 ## Message types
 
