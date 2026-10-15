@@ -612,6 +612,9 @@
     "RemoteDesktopHostTests/PixelEnvironmentTests/testNativeWindowResizeMapsBackToActualWindowFrameWithoutPadding",
     "RemoteDesktopHostTests/PixelEnvironmentTests/testSecondaryDisplayMenuBarUsesScreenCaptureCoordinates",
     "RemoteDesktopHostTests/PixelEnvironmentTests/testSelectedAXWindowExcludesOverlappingSiblingWindowsAndKeepsSheetAndMenu",
-    "RemoteDesktopHostTests/PixelEnvironmentTests/testSystemVoiceOverlayClassificationRequiresOwnedLayerZeroWindowAndCompleteIconShape"
+    "RemoteDesktopHostTests/PixelEnvironmentTests/testSystemVoiceOverlayClassificationRequiresOwnedLayerZeroWindowAndCompleteSingleButtonShape",
+    "RemoteDesktopHostTests/HostAgentLifecycleTests/testDefaultManagerSelectsGeneralAgentFactoryWithoutExternalServices",
+    "RemoteDesktopHostTests/HostAgentLifecycleTests/testInjectedExecutorDoesNotSelectGeneralAgentFactory",
+    "RemoteDesktopHostTests/PixelEnvironmentTests/testNativeWindowCaptureExcludesChildWindowsFromRaster"
   ]
 }
