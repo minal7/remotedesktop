@@ -354,8 +354,9 @@ enum AgentEvalPixelMetadata {
     static func actualCropMode(from data: Data?) -> String {
         guard let data,
               let root = try? JSONSerialization.jsonObject(with: data),
-              let values = root as? [String: Any],
-              let keys = Set(values.keys),
+              let values = root as? [String: Any] else { return "unknown" }
+        let keys = Set(values.keys)
+        guard
               keys == Set(["active_backend", "crop_mode"])
                 || keys == Set(["active_backend", "crop_mode", "first_observation"])
                 || keys == Set(["active_backend", "crop_mode", "voice_overlay_escape_count", "voice_overlay_detected_during_capture"])
