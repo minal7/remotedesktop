@@ -355,11 +355,18 @@ enum AgentEvalPixelMetadata {
         guard let data,
               let root = try? JSONSerialization.jsonObject(with: data),
               let values = root as? [String: Any],
-              (Set(values.keys) == Set(["active_backend", "crop_mode"])
-                || Set(values.keys) == Set(["active_backend", "crop_mode", "first_observation"])),
+              let keys = Set(values.keys),
+              keys == Set(["active_backend", "crop_mode"])
+                || keys == Set(["active_backend", "crop_mode", "first_observation"])
+                || keys == Set(["active_backend", "crop_mode", "voice_overlay_escape_count", "voice_overlay_detected_during_capture"])
+                || keys == Set(["active_backend", "crop_mode", "first_observation", "voice_overlay_escape_count", "voice_overlay_detected_during_capture"]),
               let backend = values["active_backend"] as? String, backend == "pixel",
               let cropMode = values["crop_mode"] as? String,
               cropModes.contains(cropMode) else { return "unknown" }
+        if keys.contains("voice_overlay_escape_count") {
+            guard let escapeCount = values["voice_overlay_escape_count"] as? Int, escapeCount >= 0,
+                  values["voice_overlay_detected_during_capture"] is Bool else { return "unknown" }
+        }
         return cropMode
     }
 
@@ -390,7 +397,7 @@ enum AgentEvalPixelMetadata {
               bounds.allSatisfy({ $0.doubleValue.isFinite }), bounds[2].doubleValue > 0, bounds[3].doubleValue > 0 else {
             return false
         }
-        guard expectedURL.isEmpty ? observedURL.isEmpty : observedURL == expectedURL else { return false }
+        guard expectedURL.isEmpty || observedURL == expectedURL else { return false }
         return true
     }
 }

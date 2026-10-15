@@ -270,11 +270,30 @@ final class AgentEvalWireTests: XCTestCase {
         XCTAssertEqual(AgentEvalPixelMetadata.actualCropMode(from: nil), "unknown")
     }
 
+    func testPixelMetadataAcceptsExactOverlayRecordFieldsAndRejectsExtras() throws {
+        let record = AgentEvalPixelMetadataRecord(crop_mode: "frontmost-window", first_observation: nil,
+            voice_overlay_escape_count: 1, voice_overlay_detected_during_capture: true)
+        let data = try JSONEncoder().encode(record)
+        XCTAssertEqual(AgentEvalPixelMetadata.actualCropMode(from: data), "frontmost-window")
+
+        var object = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        object["unexpected"] = true
+        XCTAssertEqual(AgentEvalPixelMetadata.actualCropMode(from: try JSONSerialization.data(withJSONObject: object)), "unknown")
+        object.removeValue(forKey: "unexpected")
+        object["voice_overlay_escape_count"] = -1
+        XCTAssertEqual(AgentEvalPixelMetadata.actualCropMode(from: try JSONSerialization.data(withJSONObject: object)), "unknown")
+    }
+
     func testPrivatePixelMetadataRecordsTheActualSingleFrontmostStartWindow() throws {
         let valid = #"{"active_backend":"pixel","crop_mode":"frontmost-window","first_observation":{"frontmost_bundle_id":"com.apple.Safari","frontmost_app_name":"Safari","frontmost_process_id":123,"expected_start_bundle_id":"com.apple.Safari","expected_start_url":"https://example.test/transit","observed_start_url":"https://example.test/transit","start_surface_matches":true,"visible_window_count":1,"selected_window_title":"Transit","selected_window_number":42,"selected_window_owner_process_id":123,"selected_window_bounds":[10,20,800,600],"valid":true}}"#
         let data = Data(valid.utf8)
         XCTAssertEqual(AgentEvalPixelMetadata.actualCropMode(from: data), "frontmost-window")
         XCTAssertTrue(AgentEvalPixelMetadata.hasValidFirstObservation(from: data))
+
+        let appOnlyStart = valid
+            .replacingOccurrences(of: #""expected_start_url":"https://example.test/transit""#, with: #""expected_start_url":"""#)
+            .replacingOccurrences(of: #""observed_start_url":"https://example.test/transit""#, with: #""observed_start_url":"file:///Users/test/AgentEval/Start.txt""#)
+        XCTAssertTrue(AgentEvalPixelMetadata.hasValidFirstObservation(from: Data(appOnlyStart.utf8)))
 
         let twoWindows = valid.replacingOccurrences(of: #""visible_window_count":1"#, with: #""visible_window_count":2"#)
         XCTAssertFalse(AgentEvalPixelMetadata.hasValidFirstObservation(from: Data(twoWindows.utf8)))
