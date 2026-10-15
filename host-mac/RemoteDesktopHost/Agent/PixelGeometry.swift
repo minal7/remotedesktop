@@ -1,4 +1,5 @@
 import CoreGraphics
+import ScreenCaptureKit
 
 struct PixelPointSnap {
     let point: CGPoint
@@ -62,6 +63,19 @@ enum PixelTargetContextLabel {
 }
 
 enum PixelGeometry {
+    static func nativeWindowCaptureConfiguration(width: Int, height: Int) -> SCStreamConfiguration? {
+        guard #available(macOS 14.2, *) else { return nil }
+        let configuration = SCStreamConfiguration()
+        configuration.width = width
+        configuration.height = height
+        configuration.showsCursor = false
+        configuration.scalesToFit = true
+        configuration.preservesAspectRatio = true
+        configuration.ignoreShadowsSingleWindow = true
+        configuration.includeChildWindows = false
+        return configuration
+    }
+
     static func screenCaptureRect(fromAppKit rect: CGRect, primaryScreenMaxY: CGFloat) -> CGRect {
         CGRect(x: rect.minX, y: primaryScreenMaxY - rect.maxY, width: rect.width, height: rect.height)
     }

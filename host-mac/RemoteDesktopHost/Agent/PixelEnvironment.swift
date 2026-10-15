@@ -144,10 +144,9 @@ final class PixelEnvironment: AgentEnvironment {
         guard let size = PixelGeometry.nativeWindowPixelSize(windowBounds: window.frame, pointPixelScale: scale) else {
             throw AgentEnvironmentError.unavailable("Could not resolve native pixels-per-point for the selected window.")
         }
-        var configuration = SCStreamConfiguration()
-        configuration.width = size.width; configuration.height = size.height
-        configuration.showsCursor = false; configuration.scalesToFit = true
-        configuration.preservesAspectRatio = true; configuration.ignoreShadowsSingleWindow = true
+        guard let configuration = PixelGeometry.nativeWindowCaptureConfiguration(width: size.width, height: size.height) else {
+            throw AgentEnvironmentError.unavailable("Exact independent-window capture is unavailable on this macOS version.")
+        }
         let image = try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: configuration)
         guard image.width == size.width, image.height == size.height else {
             throw AgentEnvironmentError.unavailable("Captured window pixels did not match the requested native dimensions.")
