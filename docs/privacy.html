@@ -24,7 +24,7 @@
 </head>
 <body>
   <h1>Privacy Policy</h1>
-  <p class="muted">Remote Desktop · Last updated July 23, 2026</p>
+  <p class="muted">Remote Desktop · Last updated October 15, 2026</p>
 
   <p>Remote Desktop is designed so the developer does not receive your session content. We do
   not run a data-collection server, but the apps do store technical records in your private
@@ -87,6 +87,20 @@
   pixels, host audio, and direct input stay on the separate peer-to-peer WebRTC connection. AI
   planning, policy checks, and visual grounding run locally on the Mac host rather than through
   a developer-operated AI service.</p>
+
+  <h2>Computer use (Beta) on the Mac</h2>
+  <p>Computer use uses the Fara 1.5-4B vision-language model on the Mac. The task prompt
+  travels from your iPhone or iPad to your enrolled Mac over the authenticated local-network
+  connection. The Mac processes the task locally; prompts, screenshots, and task results are
+  not sent to a developer-operated AI service. Model files are downloaded during setup from
+  the configured model source and verified before use.</p>
+
+  <p>The Mac stores task episode records locally under its Remote Desktop Host application
+  support folder. These records can include screenshots, visible interface marks, task text,
+  model output, actions, and results. They are not uploaded by the app. The host removes
+  episode folders older than seven days when a new recording starts; you can also delete task
+  history from the host's Computer Use settings while no task is active. The app restricts the
+  history folder and files to the Mac user account.</p>
 
   <p>A receiving device attempts to delete a CloudKit setup record only after it has applied the
   message. If deletion is interrupted, the app retains a bounded cleanup identity and retries

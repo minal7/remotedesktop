@@ -15,7 +15,7 @@ struct HostSettingsView: View {
                 .tabItem { Label("General", systemImage: "gearshape") }
 
             computerUseTab
-                .tabItem { Label("Computer Use", systemImage: "sparkles") }
+                .tabItem { Label("Computer use (Beta)", systemImage: "sparkles") }
 
             licensesTab
                 .tabItem { Label("Licenses", systemImage: "doc.text") }
@@ -74,7 +74,7 @@ struct HostSettingsView: View {
     private var computerUseTab: some View {
         settingsScroll {
             settingsHeader(
-                title: "AI Computer Use",
+                title: "Computer use (Beta)",
                 subtitle: computerUseStatusDetail)
 
             GroupBox("Local Computer Use") {
@@ -107,7 +107,7 @@ struct HostSettingsView: View {
 
             GroupBox("Task History") {
                 VStack(alignment: .leading, spacing: 8) {
-                    Text("Task screenshots and actions stay on this Mac and are kept for seven days.")
+                    Text("Task screenshots and actions stay on this Mac. Episodes older than seven days are removed when a new task recording starts.")
                         .font(.callout)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -141,21 +141,11 @@ struct HostSettingsView: View {
                         destination: ComputerUseArtifactManifest.displayedFaraLicenseURL)
                     Divider().padding(.vertical, 10)
                     licenseRow(
-                        name: "Qwen 3.5 base model and local text planner",
+                        name: "Qwen 3.5 base model license",
                         license: "Apache License 2.0",
                         destination: ComputerUseArtifactManifest.bundledLegalDocumentURL(
                             ComputerUseArtifactManifest.qwen35License)
                             ?? ComputerUseArtifactManifest.qwen35LicenseURL)
-                    Divider().padding(.vertical, 10)
-                    licenseRow(
-                        name: "OS-Atlas Pro 4B",
-                        license: "Apache License 2.0",
-                        destination: ComputerUseArtifactManifest.displayedOSAtlasLicenseURL)
-                    Divider().padding(.vertical, 10)
-                    licenseRow(
-                        name: "Granite 4.0 1B candidate selector",
-                        license: "Apache License 2.0",
-                        destination: ComputerUseArtifactManifest.displayedGraniteLicenseURL)
                     Divider().padding(.vertical, 10)
                     licenseRow(
                         name: "llama.cpp",
@@ -235,7 +225,7 @@ struct HostSettingsView: View {
     private var computerUseStatusDetail: String {
         switch session.computerUse.capability.state {
         case .ready: return session.computerUse.capability.detail
-        case .busy: return "AI Computer Use is working on a task."
+        case .busy: return "Computer use (Beta) is working on a task."
         case .paused: return session.computerUse.capability.detail
         case .installing: return session.computerUse.capability.detail
         case .setupRequired: return "Finish setup from your iPhone or iPad."

@@ -1,6 +1,6 @@
-# Physical iPhone end-to-end checklist
+# Physical iPhone or iPad end-to-end checklist
 
-Use this checklist with the signed release candidate or latest signed host build and the owner's physical iPhone. Keep the Mac and iPhone on the same Wi-Fi. Record what happened, including failures; do not infer success from a hidden approval card or a final narration alone.
+Use this checklist with the signed release candidate or latest signed host build and the owner's physical iPhone or iPad. Keep the Mac and device on the same Wi-Fi. Record what happened, including failures; do not infer success from a hidden approval card or a final narration alone.
 
 ## Run details
 
@@ -10,8 +10,8 @@ Use this checklist with the signed release candidate or latest signed host build
 | Host Mac / macOS | |
 | Host app version and build | |
 | Installed host SHA-256 | |
-| iPhone model / iOS | |
-| iPhone app version and build | |
+| Device model / OS version | |
+| Remote Desktop app version and build | |
 | Wi-Fi network confirmed same on both devices | |
 | Test account / fixture reset confirmed | |
 | Owner | |
@@ -33,7 +33,7 @@ For every task, record the timestamp when it starts and ends, the result, task I
 
 ## Five demo prompts
 
-Run each prompt once, as written. Record whether step narration appeared on the iPhone and whether the task completed or failed honestly. Do not retry a failed prompt during this checklist.
+Run each prompt once, as written. Record whether step narration appeared on the device and whether the task completed or failed honestly. Do not retry a failed prompt during this checklist.
 
 1. “Open wikipedia.org and tell me the population of Lisbon.”
 2. “Fill out the contact form on http://127.0.0.1:8765/forms.html with name Ada Lovelace and email ada@example.test, but don't submit it.”

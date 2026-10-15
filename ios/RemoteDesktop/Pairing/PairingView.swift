@@ -437,7 +437,7 @@ struct PairingView: View {
                 computerUseSetup.startSetup(for: host)
             } label: {
                 computerUseButtonLabel(
-                    "Set up AI",
+                    "Set up Computer use (Beta)",
                     systemImage: "sparkles",
                     fillsWidth: fillsWidth)
             }
@@ -501,7 +501,7 @@ struct PairingView: View {
         Button {
             connect(to: host, experience: .computerUse)
         } label: {
-            computerUseButtonLabel("Use AI", systemImage: "sparkles", fillsWidth: fillsWidth)
+            computerUseButtonLabel("Computer use (Beta)", systemImage: "sparkles", fillsWidth: fillsWidth)
         }
         .buttonStyle(.borderedProminent)
         .buttonBorderShape(.roundedRectangle(radius: 14))
@@ -637,7 +637,7 @@ struct PairingView: View {
                     .foregroundStyle(.orange)
                     .lineLimit(horizontalSizeClass == .compact ? 2 : 1)
             case .setup:
-                Label("AI setup available", systemImage: "sparkles")
+                Label("Computer use (Beta) setup available", systemImage: "sparkles")
                     .foregroundStyle(.indigo)
                     .lineLimit(1)
                     .minimumScaleFactor(0.78)
@@ -646,7 +646,7 @@ struct PairingView: View {
                     .foregroundStyle(.indigo)
                     .lineLimit(horizontalSizeClass == .compact ? 2 : 1)
             case .useAI:
-                Label(host.computerUseCapability.detail.isEmpty ? "AI Computer Use available" : host.computerUseCapability.detail,
+                Label(host.computerUseCapability.detail.isEmpty ? "Computer use (Beta) available" : host.computerUseCapability.detail,
                       systemImage: "checkmark.circle.fill")
                     .foregroundStyle(.green)
                     .lineLimit(1)

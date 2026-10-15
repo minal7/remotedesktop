@@ -213,7 +213,7 @@ struct ComputerUseView: View {
     private var header: some View {
         HStack(spacing: 12) {
             VStack(alignment: .leading, spacing: 2) {
-                Label("AI Computer Use", systemImage: "sparkles")
+                Label("Computer use (Beta)", systemImage: "sparkles")
                     .font(.headline)
                 Text(session.hostName ?? model.hostName)
                     .font(.caption)
@@ -233,7 +233,7 @@ struct ComputerUseView: View {
                     .labelStyle(.titleAndIcon)
             }
             .buttonStyle(.bordered)
-            .accessibilityHint("Ends AI Computer Use and returns to Devices")
+            .accessibilityHint("Ends Computer use (Beta) and returns to Devices")
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)

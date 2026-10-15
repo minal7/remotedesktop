@@ -259,10 +259,22 @@ struct HostSetupView: View {
             .padding(16)
             .background(.quaternary, in: RoundedRectangle(cornerRadius: 12))
 
-            Text("To use AI Computer Use, tap Set up AI beside this Mac on your iPhone or iPad. The Mac will install verified local tools and the visual fallback model, with live progress shown on your mobile device. No API key or paid AI service is needed.")
+            Text("Computer use (Beta) runs Fara 1.5-4B locally on this Mac. Start setup beside this Mac in the Remote Desktop app on your iPhone or iPad.")
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
+
+            Text(computerUseSetupDetails)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            HStack(spacing: 4) {
+                Text("If a system overlay blocks a task, close it on the Mac and tap Resume.")
+                    .foregroundStyle(.secondary)
+                Link("see Support", destination: URL(string: "https://github.com/minal7/remotedesktop/blob/main/docs/support.html")!)
+            }
+            .font(.caption)
 
             Button("Finish Setup") { onFinish() }
                 .buttonStyle(.borderedProminent)
@@ -277,6 +289,18 @@ struct HostSetupView: View {
             return "Remote Desktop Host can now show the screen and accept your controls. It will start listening automatically."
         }
         return "Remote Desktop Host can now show the screen and accept your controls. Choose Start listening from the menu bar when you’re ready."
+    }
+
+    private var computerUseSetupDetails: String {
+        let manifest = ComputerUseArtifactManifest.current
+        let downloadBytes = manifest.modelArtifacts.reduce(Int64.zero) { $0 + $1.byteCount }
+        let requiredFreeBytes = downloadBytes + ComputerUseInstaller.installationHeadroomBytes
+        let formatter = ByteCountFormatter()
+        formatter.countStyle = .file
+        let downloadSize = formatter.string(fromByteCount: downloadBytes)
+        let requiredFreeSpace = formatter.string(fromByteCount: requiredFreeBytes)
+        let requiredMemoryGB = (manifest.minimumMemoryBytes + 1_073_741_823) / 1_073_741_824
+        return "Download: \(downloadSize). Keep \(requiredFreeSpace) free before setup. Requires at least \(requiredMemoryGB) GB of memory; setup reports the available memory if this Mac is below the minimum. Your iPhone or iPad shows progress; interrupted downloads resume, and SHA-256 is verified before activation."
     }
 
     private func permissionStep(
