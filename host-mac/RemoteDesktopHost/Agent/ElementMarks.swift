@@ -39,6 +39,25 @@ struct PixelElementMarks {
     let axState: [PixelAXElementState]?
 }
 
+enum PixelWindowDisposition: Equatable { case window, systemOverlay, unknown, notAppWindow }
+
+enum PixelWindowTreeShape: Equatable { case iconButtonOnly, other, incomplete }
+
+enum SystemVoiceOverlayFailure: Error { case notFrontmost, secureFocus, inspectionUnavailable, persists }
+enum SystemVoiceOverlayDecision: Equatable { case proceed, dismissOnce, handoff }
+
+struct PixelWindowEvidence {
+    let appPID: Int32
+    let ownerPID: Int32
+    let windowID: UInt32
+    let layer: Int
+    let role: String
+    let subrole: String?
+    let title: String?
+    let document: String?
+    let tree: PixelWindowTreeShape
+}
+
 
 enum PixelTargetRebinding {
     static func find(_ expected: AgentElement, in current: [PixelElementMark]) -> PixelElementMark? {
@@ -98,6 +117,194 @@ enum ElementMarks {
     private static let structuralRoles: Set<String> = [
         "AXApplication", "AXWindow", "AXGroup", "AXContainer", "AXScrollArea", "AXWebArea", "AXList", "AXTable", "AXOutline"
     ]
+
+    static func classifyWindow(_ evidence: PixelWindowEvidence) -> PixelWindowDisposition {
+        guard evidence.appPID > 0, evidence.ownerPID == evidence.appPID,
+              evidence.windowID > 0, evidence.layer == 0 else { return .notAppWindow }
+        let roleIsWindow = ["AXWindow", "AXDialog", "AXSheet"].contains(evidence.role)
+        let subroleIsWindow = ["AXStandardWindow", "AXDialog", "AXSystemDialog"].contains(evidence.subrole ?? "")
+        guard roleIsWindow && subroleIsWindow else { return .unknown }
+        let named = [evidence.title, evidence.document].compactMap { $0 }
+            .contains { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        if roleIsWindow && subroleIsWindow && named { return .window }
+        if evidence.role == "AXWindow", evidence.subrole == "AXDialog" {
+            if evidence.tree == .iconButtonOnly { return .systemOverlay }
+            if evidence.tree == .other { return .window }
+        } else if roleIsWindow && evidence.tree == .other { return .window }
+        return .unknown
+    }
+
+    static func classifyAXWindow(_ window: AXUIElement, appPID: Int32,
+                                 cgWindowID: UInt32) -> PixelWindowDisposition {
+        guard let cg = cgWindowInfo(cgWindowID),
+              let role = requiredString(window, kAXRoleAttribute as String, deadline: ContinuousClock.now + .milliseconds(120)) else { return .unknown }
+        let deadline = ContinuousClock.now + .milliseconds(120)
+        guard let subrole = requiredString(window, kAXSubroleAttribute as String, deadline: deadline),
+              let (title, titleComplete) = optionalString(window, kAXTitleAttribute as String, deadline: deadline), titleComplete,
+              let (document, documentComplete) = optionalString(window, kAXDocumentAttribute as String, deadline: deadline), documentComplete else { return .unknown }
+        let tree = title?.isEmpty == false || document?.isEmpty == false ? .other : inspectOverlayTree(window, deadline: deadline)
+        return classifyWindow(.init(appPID: appPID, ownerPID: cg.ownerPID, windowID: cg.windowID,
+            layer: cg.layer, role: role, subrole: subrole, title: title, document: document, tree: tree))
+    }
+
+    /// Recognizes only a complete, untitled AX dialog with a single icon-like
+    /// button. Any timeout, unsupported container, or unfamiliar control fails closed.
+    static func isSystemVoiceOverlay(_ window: AXUIElement, ownerPID: Int32) -> Bool {
+        systemVoiceOverlayWindowID(window, ownerPID: ownerPID) != nil
+    }
+
+    static func systemVoiceOverlayWindowID(_ window: AXUIElement, ownerPID: Int32) -> UInt32? {
+        let deadline = ContinuousClock.now + .milliseconds(120)
+        guard let role = requiredString(window, kAXRoleAttribute as String, deadline: deadline),
+              let subrole = requiredString(window, kAXSubroleAttribute as String, deadline: deadline),
+              let bounds = rect(window, deadline: deadline), valid(bounds),
+              let (title, titleComplete) = optionalString(window, kAXTitleAttribute as String, deadline: deadline), titleComplete,
+              let (document, documentComplete) = optionalString(window, kAXDocumentAttribute as String, deadline: deadline), documentComplete,
+              let cg = matchingCGWindow(ownerPID: ownerPID, bounds: bounds,
+                  title: title) else { return nil }
+        let shape = inspectOverlayTree(window, deadline: deadline)
+        guard classifyWindow(.init(appPID: ownerPID, ownerPID: cg.ownerPID, windowID: cg.windowID,
+            layer: cg.layer, role: role, subrole: subrole, title: title, document: document, tree: shape)) == .systemOverlay else { return nil }
+        return cg.windowID
+    }
+
+    private static func inspectOverlayTree(_ root: AXUIElement, deadline: ContinuousClock.Instant) -> PixelWindowTreeShape {
+        var stack: [(AXUIElement, Int)] = [(root, 0)]
+        var visited = 0, groups = 0, buttons = 0
+        while !stack.isEmpty {
+            guard ContinuousClock.now < deadline, visited < 32 else { return .incomplete }
+            let (element, depth) = stack.removeLast(); visited += 1
+            guard depth <= 6, let role = requiredString(element, kAXRoleAttribute as String, deadline: deadline) else { return .incomplete }
+            if role == "AXGroup" { groups += 1 }
+            else if role == "AXButton" {
+                buttons += 1
+                guard let (title, complete) = optionalString(element, kAXTitleAttribute as String, deadline: deadline), complete else { return .incomplete }
+                if title?.isEmpty == false { return .other }
+            } else if role != "AXWindow" { return .other }
+            var value: CFTypeRef?
+            let error = AXUIElementCopyAttributeValue(element, kAXChildrenAttribute as CFString, &value)
+            if error == .noValue, role == "AXButton" { continue }
+            guard error == .success, let value, CFGetTypeID(value) == CFArrayGetTypeID() else { return .incomplete }
+            guard let childElements = strictAXChildren(value) else { return .incomplete }
+            guard childElements.count <= 32 - visited - stack.count else { return .incomplete }
+            stack.append(contentsOf: childElements.map { ($0, depth + 1) })
+        }
+        return groups > 0 && buttons == 1 ? .iconButtonOnly : .other
+    }
+
+    private static func strictAXChildren(_ value: CFTypeRef) -> [AXUIElement]? {
+        guard CFGetTypeID(value) == CFArrayGetTypeID() else { return nil }
+        let array = unsafeBitCast(value, to: CFArray.self)
+        var result: [AXUIElement] = []
+        for index in 0..<CFArrayGetCount(array) {
+            guard let pointer = CFArrayGetValueAtIndex(array, index) else { return nil }
+            let item = Unmanaged<AnyObject>.fromOpaque(pointer).takeUnretainedValue() as CFTypeRef
+            guard CFGetTypeID(item) == AXUIElementGetTypeID() else { return nil }
+            result.append(unsafeBitCast(item, to: AXUIElement.self))
+        }
+        return result
+    }
+
+    private static func requiredString(_ element: AXUIElement, _ key: String,
+                                       deadline: ContinuousClock.Instant) -> String? {
+        guard ContinuousClock.now < deadline else { return nil }
+        AXUIElementSetMessagingTimeout(element, 0.025)
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, key as CFString, &value) == .success else { return nil }
+        return value as? String
+    }
+
+    private static func optionalString(_ element: AXUIElement, _ key: String,
+                                       deadline: ContinuousClock.Instant) -> (String?, Bool)? {
+        guard ContinuousClock.now < deadline else { return nil }
+        AXUIElementSetMessagingTimeout(element, 0.025)
+        var value: CFTypeRef?
+        let error = AXUIElementCopyAttributeValue(element, key as CFString, &value)
+        if error == .success { return (value as? String, true) }
+        if error == .noValue || error == .attributeUnsupported { return (nil, true) }
+        return (nil, false)
+    }
+
+    private static func matchingCGWindow(ownerPID: Int32, bounds: CGRect, title: String?)
+        -> (ownerPID: Int32, windowID: UInt32, layer: Int)? {
+        guard let entries = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else { return nil }
+        let candidates = entries.compactMap { entry -> (Int32, UInt32, Int, String?, CGRect)? in
+            guard let pid = entry[kCGWindowOwnerPID as String] as? Int32,
+                  let id = entry[kCGWindowNumber as String] as? UInt32, id > 0,
+                  let layer = entry[kCGWindowLayer as String] as? Int,
+                  let raw = entry[kCGWindowBounds as String] as? [String: Any],
+                  let frame = CGRect(dictionaryRepresentation: raw as CFDictionary) else { return nil }
+            return (pid, id, layer, entry[kCGWindowName as String] as? String, frame)
+        }.filter { candidate in
+            candidate.0 == ownerPID && candidate.2 == 0 && focusedWindowMatches(bounds, selectedBounds: candidate.4) &&
+                (title?.isEmpty != false || candidate.3 == title)
+        }
+        guard candidates.count == 1, let item = candidates.first else { return nil }
+        return (item.0, item.1, item.2)
+    }
+
+    private static func cgWindowInfo(_ windowID: UInt32) -> (ownerPID: Int32, windowID: UInt32, layer: Int)? {
+        guard let entries = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]],
+              let entry = entries.first(where: { $0[kCGWindowNumber as String] as? UInt32 == windowID }),
+              let ownerPID = entry[kCGWindowOwnerPID as String] as? Int32,
+              let layer = entry[kCGWindowLayer as String] as? Int else { return nil }
+        return (ownerPID, windowID, layer)
+    }
+
+    static func applicationWindows(_ app: AXUIElement) -> [AXUIElement]? {
+        AXUIElementSetMessagingTimeout(app, 0.12)
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(app, kAXWindowsAttribute as CFString, &value) == .success,
+              let value, CFGetTypeID(value) == CFArrayGetTypeID() else { return nil }
+        let array = unsafeBitCast(value, to: CFArray.self)
+        var result: [AXUIElement] = []
+        for index in 0..<CFArrayGetCount(array) {
+            guard let pointer = CFArrayGetValueAtIndex(array, index) else { return nil }
+            let item = Unmanaged<AnyObject>.fromOpaque(pointer).takeUnretainedValue() as CFTypeRef
+            guard CFGetTypeID(item) == AXUIElementGetTypeID() else { return nil }
+            result.append(unsafeBitCast(item, to: AXUIElement.self))
+        }
+        return result
+    }
+
+    static func systemVoiceOverlayWindows(_ appRoot: AXUIElement, ownerPID: Int32) -> [AXUIElement]? {
+        guard let windows = applicationWindows(appRoot) else { return nil }
+        return windows.filter { isSystemVoiceOverlay($0, ownerPID: ownerPID) }
+    }
+
+    static func overlayDecision(isPresent: Bool, escapeAlreadySent: Bool) -> SystemVoiceOverlayDecision {
+        !isPresent ? .proceed : escapeAlreadySent ? .handoff : .dismissOnce
+    }
+
+    static func dismissSystemVoiceOverlayIfPresent(app: NSRunningApplication, appRoot: AXUIElement,
+                                                    injector: InputInjector,
+                                                    escapeAlreadySent: Bool = false,
+                                                    canInject: () -> Bool) async throws -> Bool {
+        let overlays = systemVoiceOverlayWindows(appRoot, ownerPID: app.processIdentifier)
+        switch overlayDecision(isPresent: overlays?.isEmpty == false, escapeAlreadySent: escapeAlreadySent) {
+        case .proceed: return false
+        case .handoff: throw SystemVoiceOverlayFailure.persists
+        case .dismissOnce: break
+        }
+        guard NSWorkspace.shared.frontmostApplication?.processIdentifier == app.processIdentifier else {
+            throw SystemVoiceOverlayFailure.notFrontmost
+        }
+        if let focus = focusedElement(appRoot) {
+            let role = string(focus, kAXRoleAttribute) ?? "unknown"
+            if isSensitive(focus, role: role, name: label(focus)) { throw SystemVoiceOverlayFailure.secureFocus }
+        }
+        guard canInject() else { throw CancellationError() }
+        do {
+            try injector.applyHostKeyStroke(usage: 0x29, modifiers: 0,
+                ifAllowed: canInject, beforePosting: { guard canInject() else { throw CancellationError() } })
+        } catch is InputInjector.AutomationGateError { throw CancellationError() }
+        try await Task.sleep(for: .milliseconds(100))
+        guard let remaining = systemVoiceOverlayWindows(appRoot, ownerPID: app.processIdentifier) else {
+            throw SystemVoiceOverlayFailure.inspectionUnavailable
+        }
+        guard remaining.isEmpty else { throw SystemVoiceOverlayFailure.persists }
+        return true
+    }
 
     static func focusedWindowMatches(_ focusedBounds: CGRect?, selectedBounds: CGRect, tolerance: CGFloat = 2) -> Bool {
         guard let focusedBounds, valid(focusedBounds), valid(selectedBounds), tolerance.isFinite, tolerance >= 0 else { return false }

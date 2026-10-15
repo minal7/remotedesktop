@@ -99,6 +99,8 @@ final class PixelEnvironment: AgentEnvironment {
     private var suspended = false
     private var didStart = false
     private var lastSnapshot: Snapshot?
+    private var voiceOverlayDismissalNotePending = false
+    private var voiceOverlayHistoryNotePending = false
 #if DEBUG
     var firstObservation: AgentEvalFirstObservation?
 #endif
@@ -159,6 +161,7 @@ final class PixelEnvironment: AgentEnvironment {
             configured: requireCleanStart, isInitialObservation: !didStart)
 #endif
         if !didStart { try await startIfNeeded(); didStart = true }
+        try await dismissSystemVoiceOverlayBeforeObservation()
 #if DEBUG
         let snapshot = try await (validateStart ? captureEvaluationStart() : captureSnapshot())
 #else
@@ -187,8 +190,9 @@ final class PixelEnvironment: AgentEnvironment {
             ?? .app(bundleID: snapshot.bundleID, title: snapshot.title)
         let observation = AgentObservation(task: context.task, surface: surface,
             screenshot: snapshot.screenshot.base64EncodedString(), elements: snapshot.elements,
-            focus: snapshot.focus, history: context.history, budget: context.budget)
+            focus: snapshot.focus, history: observationHistory(context.history), budget: context.budget)
         try observation.validate()
+        voiceOverlayHistoryNotePending = false
         let kind: AgentScope.Kind
         if case .web = surface { kind = .web } else { kind = .app }
         return .init(observation: observation, scope: .init(taskID: taskID, kind: kind, identity: snapshot.identity))
@@ -294,7 +298,7 @@ final class PixelEnvironment: AgentEnvironment {
             let candidates = try await finder(query, kind, modifiedAfter).prefix(8)
             try await Task.sleep(for: .milliseconds(300))
             try checkActive()
-            return .init(status: .ok, result: try AgentFileResults.render(Array(candidates)))
+            return .init(status: .ok, result: resultLine(try AgentFileResults.render(Array(candidates))))
         case let .setFiles(target, ids):
             try click(try screenPoint(target, frame: resolved.frame, targets: resolved.targets, bindings: bindings), button: .left, count: 1)
             guard let picker else { throw AgentEnvironmentError.unavailable("The native file picker is unavailable.") }
@@ -316,7 +320,7 @@ final class PixelEnvironment: AgentEnvironment {
         let diff = PixelAXDiff.describe(before: snapshots[resolved.frame.scope.identity]?.marks?.axState,
             after: afterAXState, sameApplication: sameApplication, windowChanged: changed == "yes")
         let summary = diff.isEmpty ? "window changed: \(changed)" : diff.joined(separator: "; ")
-        return .init(status: .ok, result: "\(detail) → \(summary)")
+        return .init(status: .ok, result: resultLine("\(detail) → \(summary)"))
     }
 
     func suspend() async { suspended = true; injector.releaseHeldInput() }
@@ -325,18 +329,39 @@ final class PixelEnvironment: AgentEnvironment {
 
     func captureSnapshot() async throws -> Snapshot {
         try checkActive()
-        let content = try await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: true)
         let app = NSWorkspace.shared.frontmostApplication
         guard !AgentSafetyBoundary.blocksAutomation(bundleID: app?.bundleIdentifier, appName: app?.localizedName) else {
             throw AgentEnvironmentError.unavailable("This app is outside the computer-use boundary.")
         }
+        let appRoot = app.map { AXUIElementCreateApplication($0.processIdentifier) }
+        let content = try await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: true)
         let blockedWindows = content.windows.filter { window in
             AgentSafetyBoundary.blocksAutomation(bundleID: window.owningApplication?.bundleIdentifier,
                 appName: window.owningApplication?.applicationName)
         }
         let appOwnedWindows = content.windows.filter { $0.owningApplication?.processID == app?.processIdentifier }
-        let appWindows = appOwnedWindows.filter { $0.frame.width > 50 && $0.frame.height > 50 }
-        let appRoot = app.map { AXUIElementCreateApplication($0.processIdentifier) }
+        let appWindows = appOwnedWindows.filter {
+            $0.windowID != 0 && $0.windowLayer == 0 && $0.frame.width > 50 && $0.frame.height > 50
+        }
+        let axWindows = appRoot.flatMap(ElementMarks.applicationWindows)
+        var visibleAppWindowCount = appWindows.count
+        if let app, let axWindows {
+            visibleAppWindowCount = 0
+            for window in appWindows {
+                let matching = axWindows.filter { axWindow in
+                    guard let bounds = ElementMarks.bounds(axWindow) else { return false }
+                    return AgentMacAccessibility.matchingWindowID(ownerPID: app.processIdentifier, bounds: bounds,
+                        focusedTitle: ElementMarks.string(axWindow, kAXTitleAttribute)) == window.windowID
+                }
+                guard matching.count == 1 else { visibleAppWindowCount += 1; continue }
+                switch ElementMarks.classifyAXWindow(matching[0], appPID: app.processIdentifier, cgWindowID: window.windowID) {
+                case .window, .unknown: visibleAppWindowCount += 1
+                case .notAppWindow: break
+                case .systemOverlay:
+                    throw AgentEnvironmentError.systemHandoff("A system voice overlay is open on your Mac; close it and tap Resume")
+                }
+            }
+        }
         let focusedAXWindow = appRoot.flatMap(ElementMarks.focusedWindow)
         let focusedBounds = focusedAXWindow.flatMap(ElementMarks.bounds)
         let target: SCWindow? = app.flatMap { application in
@@ -418,7 +443,38 @@ final class PixelEnvironment: AgentEnvironment {
             elements: elements, focus: focus, screenBounds: screenshotBounds,
             activeWindowBounds: target?.frame, activeWindowNumber: target?.windowID,
             activeWindowOwnerProcessID: target?.owningApplication?.processID,
-            visibleWindowCount: appWindows.count, marks: marks)
+            visibleWindowCount: visibleAppWindowCount, marks: marks)
+    }
+
+    private func dismissSystemVoiceOverlayBeforeObservation() async throws {
+        guard AXIsProcessTrusted(), let app = NSWorkspace.shared.frontmostApplication else { return }
+        // Observing protected/read-only apps is still handled by captureSnapshot;
+        // never send a cleanup keystroke to them.
+        if AgentSafetyBoundary.blocksAutomation(bundleID: app.bundleIdentifier, appName: app.localizedName) ||
+            AgentSafetyBoundary.readOnly(bundleID: app.bundleIdentifier, appName: app.localizedName) { return }
+        let root = AXUIElementCreateApplication(app.processIdentifier)
+        do {
+            if try await ElementMarks.dismissSystemVoiceOverlayIfPresent(app: app, appRoot: root,
+                injector: injector, canInject: {
+                self.inputAllowed() && NSWorkspace.shared.frontmostApplication?.processIdentifier == app.processIdentifier
+            }) {
+                voiceOverlayDismissalNotePending = true
+                voiceOverlayHistoryNotePending = true
+            }
+        } catch is CancellationError { throw CancellationError() }
+        catch SystemVoiceOverlayFailure.secureFocus { throw AgentEnvironmentError.credentialHandoff }
+        catch { throw AgentEnvironmentError.systemHandoff("A system voice overlay is open on your Mac; close it and tap Resume") }
+    }
+
+    private func observationHistory(_ history: [AgentHistoryItem]) -> [AgentHistoryItem] {
+        guard voiceOverlayHistoryNotePending else { return history }
+        return history + [.init(action: nil, result: "dismissed a system voice overlay")]
+    }
+
+    private func resultLine(_ value: String) -> String {
+        guard voiceOverlayDismissalNotePending else { return value }
+        voiceOverlayDismissalNotePending = false
+        return "dismissed a system voice overlay; \(value)"
     }
 
     private func capture(_ display: SCDisplay, excluding windows: [SCWindow]) async throws -> CGImage {

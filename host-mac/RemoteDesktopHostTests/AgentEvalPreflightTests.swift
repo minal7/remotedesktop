@@ -15,6 +15,12 @@ final class AgentEvalPreflightTests: XCTestCase {
         XCTAssertEqual(SuiteCleanStartWindowRole.classify("AXUnrecognizedRole"), .unknown)
     }
 
+    func testSystemVoiceOverlayResetAllowsOneEscapeThenRequiresOwnerIfItPersists() {
+        XCTAssertEqual(ElementMarks.overlayDecision(isPresent: false, escapeAlreadySent: false), .proceed)
+        XCTAssertEqual(ElementMarks.overlayDecision(isPresent: true, escapeAlreadySent: false), .dismissOnce)
+        XCTAssertEqual(ElementMarks.overlayDecision(isPresent: true, escapeAlreadySent: true), .handoff)
+    }
+
     func testRequestRequiresExactLoopbackProbeAndSupportedPolicy() throws {
         let request = try AgentEvalPreflightRequest.decodeStrict(requestData())
         XCTAssertEqual(request.operation, "preflight")

@@ -86,6 +86,14 @@ final class AgentMacOSCompatibilityTests: XCTestCase {
         XCTAssertEqual(try AgentKeyStroke.parse("meta+option+control+shift+f5").modifiers, 15)
         XCTAssertEqual(try AgentKeyStroke.parse("command+alt+enter").modifiers, 12)
         XCTAssertEqual(try AgentKeyStroke.parse("shift+A"), .init(usage: 0x04, modifiers: 1))
+        for modifierOnly in [
+            "ctrl", "control", "cmd", "shift", "option", "fn", "function", "globe",
+            "ctrl+shift", "cmd+option+control", "fn+globe",
+        ] {
+            XCTAssertThrowsError(try AgentKeyStroke.parse(modifierOnly), modifierOnly) { error in
+                XCTAssertEqual(error as? AgentEnvironmentError, .unavailable("Unsupported key or modifier."))
+            }
+        }
         for unknown in ["shell+run", "cmd+", "f25", "not-a-key", "\u{1}"] {
             XCTAssertThrowsError(try AgentKeyStroke.parse(unknown), unknown) { error in
                 XCTAssertEqual(error as? AgentEnvironmentError, .unavailable("Unsupported key or modifier."))

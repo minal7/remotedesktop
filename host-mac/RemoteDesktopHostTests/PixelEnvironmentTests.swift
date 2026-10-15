@@ -5,6 +5,28 @@ import XCTest
 
 @MainActor
 final class PixelEnvironmentTests: XCTestCase {
+    func testSystemVoiceOverlayClassificationRequiresOwnedLayerZeroWindowAndCompleteIconShape() {
+        func evidence(role: String = "AXWindow", subrole: String? = "AXDialog", title: String? = nil,
+                      document: String? = nil, tree: PixelWindowTreeShape = .iconButtonOnly,
+                      appPID: Int32 = 42, ownerPID: Int32 = 42, windowID: UInt32 = 7, layer: Int = 0) -> PixelWindowEvidence {
+            .init(appPID: appPID, ownerPID: ownerPID, windowID: windowID, layer: layer,
+                role: role, subrole: subrole, title: title, document: document, tree: tree)
+        }
+        XCTAssertEqual(ElementMarks.classifyWindow(evidence()), .systemOverlay)
+        XCTAssertEqual(ElementMarks.classifyWindow(evidence(title: "Preferences")), .window)
+        XCTAssertEqual(ElementMarks.classifyWindow(evidence(document: "file:///tmp/document")), .window)
+        XCTAssertEqual(ElementMarks.classifyWindow(evidence(role: "AXDialog")), .unknown)
+        XCTAssertEqual(ElementMarks.classifyWindow(evidence(role: "AXDialog", subrole: "AXSystemDialog",
+            title: "Unsaved changes")), .window)
+        XCTAssertEqual(ElementMarks.classifyWindow(evidence(tree: .other)), .window)
+        XCTAssertEqual(ElementMarks.classifyWindow(evidence(tree: .incomplete)), .unknown)
+        // A complete ordinary dialog tree (including text or secure controls) is not the one-icon overlay.
+        XCTAssertEqual(ElementMarks.classifyWindow(evidence(role: "AXDialog", tree: .other)), .window)
+        XCTAssertEqual(ElementMarks.classifyWindow(evidence(ownerPID: 43)), .notAppWindow)
+        XCTAssertEqual(ElementMarks.classifyWindow(evidence(layer: 1)), .notAppWindow)
+        XCTAssertEqual(ElementMarks.classifyWindow(evidence(windowID: 0)), .notAppWindow)
+    }
+
     func testPointMapsFromScreenshotPixelsAcrossRetinaScale() throws {
         let point = try XCTUnwrap(PixelGeometry.point(CGPoint(x: 640, y: 360),
             imageSize: CGSize(width: 1280, height: 720),
