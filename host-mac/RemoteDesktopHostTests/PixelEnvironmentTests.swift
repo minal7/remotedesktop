@@ -5,15 +5,16 @@ import XCTest
 
 @MainActor
 final class PixelEnvironmentTests: XCTestCase {
-    func testSystemVoiceOverlayClassificationRequiresOwnedLayerZeroWindowAndCompleteIconShape() {
+    func testSystemVoiceOverlayClassificationRequiresOwnedLayerZeroWindowAndCompleteSingleButtonShape() {
         func evidence(role: String = "AXWindow", subrole: String? = "AXDialog", title: String? = nil,
-                      document: String? = nil, tree: PixelWindowTreeShape = .iconButtonOnly,
+                      document: String? = nil, tree: PixelWindowTreeShape = .singleButtonOnly,
                       appPID: Int32 = 42, ownerPID: Int32 = 42, windowID: UInt32 = 7, layer: Int = 0) -> PixelWindowEvidence {
             .init(appPID: appPID, ownerPID: ownerPID, windowID: windowID, layer: layer,
                 role: role, subrole: subrole, title: title, document: document, tree: tree)
         }
         XCTAssertEqual(ElementMarks.classifyWindow(evidence()), .systemOverlay)
-        XCTAssertEqual(ElementMarks.classifyWindow(evidence(title: "Preferences")), .window)
+        XCTAssertEqual(ElementMarks.classifyWindow(evidence(title: "status")), .systemOverlay)
+        XCTAssertEqual(ElementMarks.classifyWindow(evidence(title: "Preferences", tree: .other)), .window)
         XCTAssertEqual(ElementMarks.classifyWindow(evidence(document: "file:///tmp/document")), .window)
         XCTAssertEqual(ElementMarks.classifyWindow(evidence(role: "AXDialog")), .unknown)
         XCTAssertEqual(ElementMarks.classifyWindow(evidence(role: "AXDialog", subrole: "AXSystemDialog",

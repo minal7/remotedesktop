@@ -41,7 +41,7 @@ struct PixelElementMarks {
 
 enum PixelWindowDisposition: Equatable { case window, systemOverlay, unknown, notAppWindow }
 
-enum PixelWindowTreeShape: Equatable { case iconButtonOnly, other, incomplete }
+enum PixelWindowTreeShape: Equatable { case singleButtonOnly, other, incomplete }
 
 enum SystemVoiceOverlayFailure: Error { case notFrontmost, secureFocus, inspectionUnavailable, persists, detected }
 extension SystemVoiceOverlayFailure {
@@ -135,11 +135,13 @@ enum ElementMarks {
         let roleIsWindow = ["AXWindow", "AXDialog", "AXSheet"].contains(evidence.role)
         let subroleIsWindow = ["AXStandardWindow", "AXDialog", "AXSystemDialog"].contains(evidence.subrole ?? "")
         guard roleIsWindow && subroleIsWindow else { return .unknown }
+        let hasDocument = evidence.document?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
         let named = [evidence.title, evidence.document].compactMap { $0 }
             .contains { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        if evidence.role == "AXWindow", evidence.subrole == "AXDialog", !hasDocument,
+           evidence.tree == .singleButtonOnly { return .systemOverlay }
         if roleIsWindow && subroleIsWindow && named { return .window }
         if evidence.role == "AXWindow", evidence.subrole == "AXDialog" {
-            if evidence.tree == .iconButtonOnly { return .systemOverlay }
             if evidence.tree == .other { return .window }
         } else if roleIsWindow && evidence.tree == .other { return .window }
         return .unknown
@@ -153,13 +155,14 @@ enum ElementMarks {
         guard let subrole = requiredString(window, kAXSubroleAttribute as String, deadline: deadline),
               let (title, titleComplete) = optionalString(window, kAXTitleAttribute as String, deadline: deadline), titleComplete,
               let (document, documentComplete) = optionalString(window, kAXDocumentAttribute as String, deadline: deadline), documentComplete else { return .unknown }
-        let tree = title?.isEmpty == false || document?.isEmpty == false ? .other : inspectOverlayTree(window, deadline: deadline)
+        let tree = document?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+            ? .other : inspectOverlayTree(window, deadline: deadline)
         return classifyWindow(.init(appPID: appPID, ownerPID: cg.ownerPID, windowID: cg.windowID,
             layer: cg.layer, role: role, subrole: subrole, title: title, document: document, tree: tree))
     }
 
-    /// Recognizes only a complete, untitled AX dialog with a single icon-like
-    /// button. Any timeout, unsupported container, or unfamiliar control fails closed.
+    /// Recognizes only a complete, documentless AX dialog with one button and optional groups.
+    /// Any timeout, unsupported container, or unfamiliar control fails closed.
     static func isSystemVoiceOverlay(_ window: AXUIElement, ownerPID: Int32) -> Bool {
         systemVoiceOverlayWindowID(window, ownerPID: ownerPID) != nil
     }
@@ -181,17 +184,15 @@ enum ElementMarks {
 
     private static func inspectOverlayTree(_ root: AXUIElement, deadline: ContinuousClock.Instant) -> PixelWindowTreeShape {
         var stack: [(AXUIElement, Int)] = [(root, 0)]
-        var visited = 0, groups = 0, buttons = 0
+        var visited = 0, buttons = 0
         while !stack.isEmpty {
             guard ContinuousClock.now < deadline, visited < 32 else { return .incomplete }
             let (element, depth) = stack.removeLast(); visited += 1
             guard depth <= 6, let role = requiredString(element, kAXRoleAttribute as String, deadline: deadline) else { return .incomplete }
-            if role == "AXGroup" { groups += 1 }
-            else if role == "AXButton" {
+            if role == "AXButton" {
                 buttons += 1
-                guard let (title, complete) = optionalString(element, kAXTitleAttribute as String, deadline: deadline), complete else { return .incomplete }
-                if title?.isEmpty == false { return .other }
-            } else if role != "AXWindow" { return .other }
+                guard let (_, complete) = optionalString(element, kAXTitleAttribute as String, deadline: deadline), complete else { return .incomplete }
+            } else if role != "AXWindow" && role != "AXGroup" { return .other }
             var value: CFTypeRef?
             let error = AXUIElementCopyAttributeValue(element, kAXChildrenAttribute as CFString, &value)
             if error == .noValue, role == "AXButton" { continue }
@@ -200,7 +201,7 @@ enum ElementMarks {
             guard childElements.count <= 32 - visited - stack.count else { return .incomplete }
             stack.append(contentsOf: childElements.map { ($0, depth + 1) })
         }
-        return groups > 0 && buttons == 1 ? .iconButtonOnly : .other
+        return buttons == 1 ? .singleButtonOnly : .other
     }
 
     private static func strictAXChildren(_ value: CFTypeRef) -> [AXUIElement]? {
