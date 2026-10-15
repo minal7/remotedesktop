@@ -388,7 +388,30 @@ enum SuiteCleanStart {
         let modal = ElementMarks.bool(window, "AXModal").map { String($0) } ?? "unknown"
         let titlePresent = ElementMarks.string(window, kAXTitleAttribute as String).map { !$0.isEmpty } ?? false
         let documentPresent = ElementMarks.string(window, kAXDocumentAttribute as String).map { !$0.isEmpty } ?? false
-        return "role=\(role),subrole=\(ElementMarks.string(window, kAXSubroleAttribute as String) ?? "unknown"),titlePresent=\(titlePresent),documentPresent=\(documentPresent),bounds=\(bounds.map { String(describing: $0) } ?? "unknown"),cg=[\(cgWindows)],overlay=\(ElementMarks.isSystemVoiceOverlay(window, ownerPID: ownerPID)),tree=\(ElementMarks.systemVoiceOverlayTreeShape(window)),modal=\(modal),focused=\(focused),input=\(ElementMarks.systemVoiceOverlayInputState(window, appRoot: appRoot))"
+        return "role=\(role),subrole=\(ElementMarks.string(window, kAXSubroleAttribute as String) ?? "unknown"),titlePresent=\(titlePresent),documentPresent=\(documentPresent),bounds=\(bounds.map { String(describing: $0) } ?? "unknown"),cg=[\(cgWindows)],overlay=\(ElementMarks.isSystemVoiceOverlay(window, ownerPID: ownerPID)),tree=\(windowTreeDiagnostic(window)),modal=\(modal),focused=\(focused),input=\(ElementMarks.systemVoiceOverlayInputState(window, appRoot: appRoot))"
+    }
+
+    private static func windowTreeDiagnostic(_ root: AXUIElement) -> String {
+        let deadline = ContinuousClock.now + .milliseconds(120)
+        var stack: [(AXUIElement, Int)] = [(root, 0)], entries: [String] = [], incomplete = false
+        while !stack.isEmpty && entries.count < 32 && ContinuousClock.now < deadline {
+            let (element, depth) = stack.removeLast()
+            guard let role = ElementMarks.string(element, kAXRoleAttribute as String) else { incomplete = true; break }
+            var item = role
+            if role == "AXWindow" || role == "AXButton" {
+                let title = ElementMarks.string(element, kAXTitleAttribute as String).map { !$0.isEmpty } ?? false
+                let description = ElementMarks.string(element, kAXDescriptionAttribute as String).map { !$0.isEmpty } ?? false
+                item += "[title=\(title),description=\(description)]"
+            }
+            entries.append(item)
+            var value: CFTypeRef?
+            let error = AXUIElementCopyAttributeValue(element, kAXChildrenAttribute as CFString, &value)
+            if error == .success, let value, CFGetTypeID(value) == CFArrayGetTypeID() {
+                stack.append(contentsOf: ElementMarks.children(value).prefix(max(0, 32 - entries.count - stack.count)).map { ($0, depth + 1) })
+            } else if error != .noValue && error != .attributeUnsupported { incomplete = true; break }
+        }
+        if !stack.isEmpty || ContinuousClock.now >= deadline { incomplete = true }
+        return (incomplete ? "partial:" : "") + entries.joined(separator: ">")
     }
 
     private static func windows(_ app: AXUIElement, ownerPID: Int32) async throws -> [AXUIElement] {

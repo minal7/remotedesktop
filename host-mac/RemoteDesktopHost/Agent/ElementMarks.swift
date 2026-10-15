@@ -296,12 +296,6 @@ enum ElementMarks {
         return overlayInputState(modal: modal, focused: focused)
     }
 
-#if DEBUG
-    static func systemVoiceOverlayTreeShape(_ window: AXUIElement) -> PixelWindowTreeShape {
-        inspectOverlayTree(window, deadline: ContinuousClock.now + .milliseconds(120))
-    }
-#endif
-
     static func overlayDecision(isPresent: Bool, escapeAlreadySent: Bool) -> SystemVoiceOverlayDecision {
         !isPresent ? .proceed : escapeAlreadySent ? .handoff : .dismissOnce
     }
