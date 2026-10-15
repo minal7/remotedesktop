@@ -156,14 +156,14 @@ enum SuiteCleanStart {
                     stage = "fresh-AXWindows-query"
                     try await dismissSystemVoiceOverlayIfPresent(app: app, root: root, state: overlayEscape)
                     let current = try await windows(root, ownerPID: app.processIdentifier)
-                    for (index, window) in current.enumerated() { try ensureNotDialog(window, index: index) }
+                    for (index, window) in current.enumerated() { try ensureNotDialog(window, index: index, appRoot: root, ownerPID: app.processIdentifier) }
                     guard let window = current.first else { break }
                     guard !pressedWindows.contains(where: { CFEqual($0, window) }) else {
                         throw CleanStartFailure.windowRemainsAfterSingleClose(current.count)
                     }
                     stage = "initial-window-role[\(actionsAttempted)]"
                     AXUIElementSetMessagingTimeout(window, 0.75)
-                    try ensureNotDialog(window, index: actionsAttempted)
+                    try ensureNotDialog(window, index: actionsAttempted, appRoot: root, ownerPID: app.processIdentifier)
                     stage = "close-button-query[\(actionsAttempted)]"
                     let ownedFixtureWindow = fixtureURL(window, deadline: ContinuousClock.now + .milliseconds(500)) != nil
                     var buttonValue: CFTypeRef?
@@ -187,7 +187,7 @@ enum SuiteCleanStart {
                 stage = "final-AXWindows-query"
                 try await dismissSystemVoiceOverlayIfPresent(app: app, root: root, state: overlayEscape)
                 let remainingWindows = try await windows(root, ownerPID: app.processIdentifier)
-                for (index, window) in remainingWindows.enumerated() { try ensureNotDialog(window, index: index) }
+                for (index, window) in remainingWindows.enumerated() { try ensureNotDialog(window, index: index, appRoot: root, ownerPID: app.processIdentifier) }
                 guard remainingWindows.isEmpty else { throw CleanStartFailure.windowsRemain(remainingWindows.count) }
                 reports.append(["bundle_id": bundleID, "windows_before": initial.count,
                                 "windows_after": 0, "status": initial.isEmpty ? "already_clear" : "closed"])
@@ -225,7 +225,7 @@ enum SuiteCleanStart {
                 ownedFixtureWindow: ownedFixtureWindow) { continue }
             try await dismissSystemVoiceOverlayIfPresent(app: runningApp, root: app, state: overlayEscape)
             let current = try await windows(app, ownerPID: runningApp.processIdentifier)
-            for (index, window) in current.enumerated() { try ensureNotDialog(window, index: index) }
+            for (index, window) in current.enumerated() { try ensureNotDialog(window, index: index, appRoot: app, ownerPID: runningApp.processIdentifier) }
             if !current.contains(where: { CFEqual($0, target) }) { return }
             try await Task.sleep(for: .milliseconds(80))
         }
@@ -350,24 +350,45 @@ enum SuiteCleanStart {
         return value
     }
 
-    private static func ensureNotDialog(_ window: AXUIElement, index: Int) throws {
+    private static func ensureNotDialog(_ window: AXUIElement, index: Int, appRoot: AXUIElement, ownerPID: Int32) throws {
         AXUIElementSetMessagingTimeout(window, 0.75)
         var value: CFTypeRef?
         let error = AXUIElementCopyAttributeValue(window, kAXRoleAttribute as CFString, &value)
         guard error == .success, let role = value as? String else {
             throw CleanStartFailure.roleUnavailable(index: index, code: error.rawValue)
         }
-        if role == "AXDialog" || role == "AXSheet" { throw CleanStartFailure.dialogRequiresOwner(role) }
+        let detail = { windowDiagnostic(window, role: role, appRoot: appRoot, ownerPID: ownerPID) }
+        if role == "AXDialog" || role == "AXSheet" { throw CleanStartFailure.dialogRequiresOwner("\(role) [\(detail())]") }
         var subroleValue: CFTypeRef?
         if AXUIElementCopyAttributeValue(window, kAXSubroleAttribute as CFString, &subroleValue) == .success,
            let subrole = subroleValue as? String, subrole == "AXDialog" || subrole == "AXSystemDialog" {
-            throw CleanStartFailure.dialogRequiresOwner(subrole)
+            throw CleanStartFailure.dialogRequiresOwner("\(subrole) [\(detail())]")
         }
         var sheetsValue: CFTypeRef?
         if AXUIElementCopyAttributeValue(window, "AXSheets" as CFString, &sheetsValue) == .success,
            let sheets = sheetsValue as? [AXUIElement], !sheets.isEmpty {
-            throw CleanStartFailure.dialogRequiresOwner("AXSheet")
+            throw CleanStartFailure.dialogRequiresOwner("AXSheet [\(detail())]")
         }
+    }
+
+    private static func windowDiagnostic(_ window: AXUIElement, role: String,
+                                         appRoot: AXUIElement, ownerPID: Int32) -> String {
+        let bounds = ElementMarks.bounds(window)
+        let cgWindows = (CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? [])
+            .compactMap { entry -> String? in
+                guard entry[kCGWindowOwnerPID as String] as? Int32 == ownerPID,
+                      let id = entry[kCGWindowNumber as String] as? UInt32,
+                      let layer = entry[kCGWindowLayer as String] as? Int,
+                      let raw = entry[kCGWindowBounds as String] as? [String: Any],
+                      let frame = CGRect(dictionaryRepresentation: raw as CFDictionary) else { return nil }
+                let match = bounds.map { ElementMarks.focusedWindowMatches($0, selectedBounds: frame, tolerance: 3) } ?? false
+                return "\(id):layer\(layer):\(frame.origin.x),\(frame.origin.y),\(frame.width),\(frame.height):match=\(match)"
+            }.prefix(8).joined(separator: ";")
+        let focused = ElementMarks.focusedWindow(appRoot).map { CFEqual($0, window) ? "yes" : "no" } ?? "unknown"
+        let modal = ElementMarks.bool(window, "AXModal").map { String($0) } ?? "unknown"
+        let titlePresent = ElementMarks.string(window, kAXTitleAttribute as String).map { !$0.isEmpty } ?? false
+        let documentPresent = ElementMarks.string(window, kAXDocumentAttribute as String).map { !$0.isEmpty } ?? false
+        return "role=\(role),subrole=\(ElementMarks.string(window, kAXSubroleAttribute as String) ?? "unknown"),titlePresent=\(titlePresent),documentPresent=\(documentPresent),bounds=\(bounds.map { String(describing: $0) } ?? "unknown"),cg=[\(cgWindows)],overlay=\(ElementMarks.isSystemVoiceOverlay(window, ownerPID: ownerPID)),tree=\(ElementMarks.systemVoiceOverlayTreeShape(window)),modal=\(modal),focused=\(focused),input=\(ElementMarks.systemVoiceOverlayInputState(window, appRoot: appRoot))"
     }
 
     private static func windows(_ app: AXUIElement, ownerPID: Int32) async throws -> [AXUIElement] {
