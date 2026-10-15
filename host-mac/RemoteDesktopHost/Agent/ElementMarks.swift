@@ -43,7 +43,7 @@ enum PixelWindowDisposition: Equatable { case window, systemOverlay, unknown, no
 
 enum PixelWindowTreeShape: Equatable { case iconButtonOnly, other, incomplete }
 
-enum SystemVoiceOverlayFailure: Error { case notFrontmost, secureFocus, inspectionUnavailable, persists }
+enum SystemVoiceOverlayFailure: Error { case notFrontmost, secureFocus, inspectionUnavailable, persists, detected }
 enum SystemVoiceOverlayDecision: Equatable { case proceed, dismissOnce, handoff }
 
 struct PixelWindowEvidence {
@@ -279,6 +279,7 @@ enum ElementMarks {
     static func dismissSystemVoiceOverlayIfPresent(app: NSRunningApplication, appRoot: AXUIElement,
                                                     injector: InputInjector,
                                                     escapeAlreadySent: Bool = false,
+                                                    onEscapeSent: () -> Void = {},
                                                     canInject: () -> Bool) async throws -> Bool {
         let overlays = systemVoiceOverlayWindows(appRoot, ownerPID: app.processIdentifier)
         switch overlayDecision(isPresent: overlays?.isEmpty == false, escapeAlreadySent: escapeAlreadySent) {
@@ -298,6 +299,7 @@ enum ElementMarks {
             try injector.applyHostKeyStroke(usage: 0x29, modifiers: 0,
                 ifAllowed: canInject, beforePosting: { guard canInject() else { throw CancellationError() } })
         } catch is InputInjector.AutomationGateError { throw CancellationError() }
+        onEscapeSent()
         try await Task.sleep(for: .milliseconds(100))
         guard let remaining = systemVoiceOverlayWindows(appRoot, ownerPID: app.processIdentifier) else {
             throw SystemVoiceOverlayFailure.inspectionUnavailable

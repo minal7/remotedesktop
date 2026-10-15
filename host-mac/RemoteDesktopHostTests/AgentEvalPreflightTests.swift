@@ -16,9 +16,22 @@ final class AgentEvalPreflightTests: XCTestCase {
     }
 
     func testSystemVoiceOverlayResetAllowsOneEscapeThenRequiresOwnerIfItPersists() {
-        XCTAssertEqual(ElementMarks.overlayDecision(isPresent: false, escapeAlreadySent: false), .proceed)
-        XCTAssertEqual(ElementMarks.overlayDecision(isPresent: true, escapeAlreadySent: false), .dismissOnce)
-        XCTAssertEqual(ElementMarks.overlayDecision(isPresent: true, escapeAlreadySent: true), .handoff)
+        var escapeCount = 0
+        func inspect(_ present: Bool) -> SystemVoiceOverlayDecision {
+            switch ElementMarks.overlayDecision(isPresent: present, escapeAlreadySent: escapeCount > 0) {
+            case .proceed: return .proceed
+            case .dismissOnce:
+                escapeCount += 1
+                return .dismissOnce
+            case .handoff: return .handoff
+            }
+        }
+
+        XCTAssertEqual(inspect(false), .proceed)
+        XCTAssertEqual(inspect(true), .dismissOnce) // Overlay appeared after the first precheck.
+        XCTAssertEqual(escapeCount, 1)
+        XCTAssertEqual(inspect(true), .handoff) // A persistent overlay cannot cause another Escape.
+        XCTAssertEqual(escapeCount, 1)
     }
 
     func testRequestRequiresExactLoopbackProbeAndSupportedPolicy() throws {

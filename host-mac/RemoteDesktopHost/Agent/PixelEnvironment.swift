@@ -101,6 +101,8 @@ final class PixelEnvironment: AgentEnvironment {
     private var lastSnapshot: Snapshot?
     private var voiceOverlayDismissalNotePending = false
     private var voiceOverlayHistoryNotePending = false
+    private var voiceOverlayEscapeSent = false
+    private var voiceOverlayDetectedDuringCapture = false
 #if DEBUG
     var firstObservation: AgentEvalFirstObservation?
 #endif
@@ -161,11 +163,13 @@ final class PixelEnvironment: AgentEnvironment {
             configured: requireCleanStart, isInitialObservation: !didStart)
 #endif
         if !didStart { try await startIfNeeded(); didStart = true }
+        voiceOverlayEscapeSent = false
+        voiceOverlayDetectedDuringCapture = false
         try await dismissSystemVoiceOverlayBeforeObservation()
 #if DEBUG
-        let snapshot = try await (validateStart ? captureEvaluationStart() : captureSnapshot())
+        let snapshot = try await (validateStart ? captureEvaluationStart() : captureSnapshotForObservation())
 #else
-        let snapshot = try await captureSnapshot()
+        let snapshot = try await captureSnapshotForObservation()
 #endif
         try checkActive()
 #if DEBUG
@@ -358,7 +362,8 @@ final class PixelEnvironment: AgentEnvironment {
                 case .window, .unknown: visibleAppWindowCount += 1
                 case .notAppWindow: break
                 case .systemOverlay:
-                    throw AgentEnvironmentError.systemHandoff("A system voice overlay is open on your Mac; close it and tap Resume")
+                    voiceOverlayDetectedDuringCapture = true
+                    throw SystemVoiceOverlayFailure.detected
                 }
             }
         }
@@ -455,15 +460,37 @@ final class PixelEnvironment: AgentEnvironment {
         let root = AXUIElementCreateApplication(app.processIdentifier)
         do {
             if try await ElementMarks.dismissSystemVoiceOverlayIfPresent(app: app, appRoot: root,
-                injector: injector, canInject: {
+                injector: injector, escapeAlreadySent: voiceOverlayEscapeSent,
+                onEscapeSent: {
+                    self.voiceOverlayEscapeSent = true
+                }, canInject: {
                 self.inputAllowed() && NSWorkspace.shared.frontmostApplication?.processIdentifier == app.processIdentifier
             }) {
                 voiceOverlayDismissalNotePending = true
                 voiceOverlayHistoryNotePending = true
+                return
             }
         } catch is CancellationError { throw CancellationError() }
         catch SystemVoiceOverlayFailure.secureFocus { throw AgentEnvironmentError.credentialHandoff }
-        catch { throw AgentEnvironmentError.systemHandoff("A system voice overlay is open on your Mac; close it and tap Resume") }
+        catch {
+            try? writeMetadata()
+            throw AgentEnvironmentError.systemHandoff("A system voice overlay is open on your Mac; close it and tap Resume")
+        }
+    }
+
+    func captureSnapshotForObservation() async throws -> Snapshot {
+        do { return try await captureSnapshot() }
+        catch SystemVoiceOverlayFailure.detected {
+            voiceOverlayDetectedDuringCapture = true
+            do { try await dismissSystemVoiceOverlayBeforeObservation() }
+            catch { try? writeMetadata(); throw error }
+            do { return try await captureSnapshot() }
+            catch {
+                try? writeMetadata()
+                if error is SystemVoiceOverlayFailure { throw AgentEnvironmentError.systemHandoff("A system voice overlay is open on your Mac; close it and tap Resume") }
+                throw error
+            }
+        }
     }
 
     private func observationHistory(_ history: [AgentHistoryItem]) -> [AgentHistoryItem] {
@@ -681,11 +708,9 @@ final class PixelEnvironment: AgentEnvironment {
         guard let metadataURL else { return }
 #if DEBUG
         let mode = actualCropMode == .frontmostWindow ? "frontmost-window" : "full-display"
-        let data = try JSONEncoder().encode(AgentEvalPixelMetadataRecord(crop_mode: mode,
-            first_observation: firstObservation))
-        try FileManager.default.createDirectory(at: metadataURL.deletingLastPathComponent(),
-            withIntermediateDirectories: true)
-        try data.write(to: metadataURL, options: .atomic)
+        try AgentEvalPixelMetadataRecord.write(to: metadataURL, cropMode: mode,
+            firstObservation: firstObservation, escapeCount: voiceOverlayEscapeSent ? 1 : 0,
+            detectedDuringCapture: voiceOverlayDetectedDuringCapture)
 #endif
     }
 

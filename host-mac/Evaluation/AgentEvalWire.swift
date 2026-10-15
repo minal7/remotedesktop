@@ -127,7 +127,7 @@ extension PixelEnvironment {
         var last: Snapshot?
         repeat {
             try checkActive()
-            let snapshot = try await captureSnapshot()
+            let snapshot = try await captureSnapshotForObservation()
             last = snapshot
             let observedURL = AgentEvalFirstObservation.observedStartURL(snapshot: snapshot)
             if snapshot.visibleWindowCount == 1,
@@ -149,6 +149,17 @@ struct AgentEvalPixelMetadataRecord: Encodable {
     let active_backend = "pixel"
     let crop_mode: String
     let first_observation: AgentEvalFirstObservation?
+    let voice_overlay_escape_count: Int
+    let voice_overlay_detected_during_capture: Bool
+
+    static func write(to url: URL, cropMode: String, firstObservation: AgentEvalFirstObservation?,
+                      escapeCount: Int, detectedDuringCapture: Bool) throws {
+        let record = Self(crop_mode: cropMode, first_observation: firstObservation,
+            voice_overlay_escape_count: escapeCount, voice_overlay_detected_during_capture: detectedDuringCapture)
+        let data = try JSONEncoder().encode(record)
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try data.write(to: url, options: .atomic)
+    }
 }
 
 struct AgentEvalRequest: Decodable {
