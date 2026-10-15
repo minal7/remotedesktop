@@ -3978,6 +3978,8 @@ final class HostComputerUseManager: ObservableObject {
         (executor as? ComputerUseCapabilityExecutor)?.agentAdapter ?? executor as? AgentCapabilityAdapter
     }
 #if DEBUG
+    var hasGeneralAgentFactory: Bool { generalAgentFactory != nil }
+
     func debugPendingAgentApproval(taskID: String, requestID: String) -> AgentLoop.PendingStep? {
         guard case .awaitingApproval = activity,
               let pendingApproval,

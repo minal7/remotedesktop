@@ -3,6 +3,28 @@ import XCTest
 
 @MainActor
 final class HostAgentLifecycleTests: XCTestCase {
+    func testDefaultManagerSelectsGeneralAgentFactoryWithoutExternalServices() {
+        let manager = HostComputerUseManager(
+            injector: InputInjector(),
+            allowsExternalServices: false)
+        defer { _ = manager.stop() }
+
+        XCTAssertTrue(manager.hasGeneralAgentFactory)
+    }
+
+    func testInjectedExecutorDoesNotSelectGeneralAgentFactory() {
+        let fixture = AdapterFixture(replies: [])
+        let executor = ComputerUseCapabilityExecutor(
+            agentAdapter: AgentCapabilityAdapter(executor: fixture.executor))
+        let manager = HostComputerUseManager(
+            injector: InputInjector(),
+            executor: executor,
+            allowsExternalServices: false)
+        defer { _ = manager.stop() }
+
+        XCTAssertFalse(manager.hasGeneralAgentFactory)
+    }
+
     func testLocalTakeoverRetainsPendingAgentApprovalAndResurfacesSameGate() async throws {
         let fixture = AdapterFixture(replies: [[
             .click(target: .element(id: 1), button: nil, count: nil),
