@@ -362,6 +362,9 @@ final class PixelEnvironment: AgentEnvironment {
                 case .window, .unknown: visibleAppWindowCount += 1
                 case .notAppWindow: break
                 case .systemOverlay:
+                    let inputState = appRoot.map { ElementMarks.systemVoiceOverlayInputState(matching[0], appRoot: $0) } ?? .unknown
+                    if inputState == .nonblocking { continue }
+                    guard inputState == .blocking else { visibleAppWindowCount += 1; continue }
                     voiceOverlayDetectedDuringCapture = true
                     throw SystemVoiceOverlayFailure.detected
                 }
@@ -471,23 +474,24 @@ final class PixelEnvironment: AgentEnvironment {
                 return
             }
         } catch is CancellationError { throw CancellationError() }
-        catch SystemVoiceOverlayFailure.secureFocus { throw AgentEnvironmentError.credentialHandoff }
-        catch {
+        catch let failure as SystemVoiceOverlayFailure {
+            if case .persists = failure { try? writeMetadata() }
+            throw failure.environmentError
+        } catch {
             try? writeMetadata()
-            throw AgentEnvironmentError.systemHandoff("A system voice overlay is open on your Mac; close it and tap Resume")
+            throw AgentEnvironmentError.systemHandoff("The system overlay could not be safely dismissed; inspect the Mac and tap Resume")
         }
     }
 
     func captureSnapshotForObservation() async throws -> Snapshot {
         do { return try await captureSnapshot() }
         catch SystemVoiceOverlayFailure.detected {
-            voiceOverlayDetectedDuringCapture = true
-            do { try await dismissSystemVoiceOverlayBeforeObservation() }
-            catch { try? writeMetadata(); throw error }
-            do { return try await captureSnapshot() }
-            catch {
+            do {
+                try await dismissSystemVoiceOverlayBeforeObservation()
+                return try await captureSnapshot()
+            } catch {
                 try? writeMetadata()
-                if error is SystemVoiceOverlayFailure { throw AgentEnvironmentError.systemHandoff("A system voice overlay is open on your Mac; close it and tap Resume") }
+                if let failure = error as? SystemVoiceOverlayFailure { throw failure.environmentError }
                 throw error
             }
         }
@@ -707,10 +711,7 @@ final class PixelEnvironment: AgentEnvironment {
     private func writeMetadata() throws {
         guard let metadataURL else { return }
 #if DEBUG
-        let mode = actualCropMode == .frontmostWindow ? "frontmost-window" : "full-display"
-        try AgentEvalPixelMetadataRecord.write(to: metadataURL, cropMode: mode,
-            firstObservation: firstObservation, escapeCount: voiceOverlayEscapeSent ? 1 : 0,
-            detectedDuringCapture: voiceOverlayDetectedDuringCapture)
+        try AgentEvalPixelMetadataRecord.write(to: metadataURL, cropMode: actualCropMode == .frontmostWindow ? "frontmost-window" : "full-display", firstObservation: firstObservation, escapeCount: voiceOverlayEscapeSent ? 1 : 0, detectedDuringCapture: voiceOverlayDetectedDuringCapture)
 #endif
     }
 

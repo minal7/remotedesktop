@@ -44,6 +44,17 @@ enum PixelWindowDisposition: Equatable { case window, systemOverlay, unknown, no
 enum PixelWindowTreeShape: Equatable { case iconButtonOnly, other, incomplete }
 
 enum SystemVoiceOverlayFailure: Error { case notFrontmost, secureFocus, inspectionUnavailable, persists, detected }
+extension SystemVoiceOverlayFailure {
+    var environmentError: AgentEnvironmentError {
+        switch self {
+        case .notFrontmost: .scopeChanged
+        case .secureFocus: .credentialHandoff
+        case .inspectionUnavailable: .unavailable("Accessibility could not verify the system overlay state.")
+        case .persists, .detected: .systemHandoff("A system voice overlay is open on your Mac; close it and tap Resume")
+        }
+    }
+}
+enum SystemVoiceOverlayInputState: Equatable { case blocking, nonblocking, unknown }
 enum SystemVoiceOverlayDecision: Equatable { case proceed, dismissOnce, handoff }
 
 struct PixelWindowEvidence {
@@ -272,6 +283,19 @@ enum ElementMarks {
         return windows.filter { isSystemVoiceOverlay($0, ownerPID: ownerPID) }
     }
 
+    static func overlayInputState(modal: Bool?, focused: Bool?) -> SystemVoiceOverlayInputState {
+        if modal == true || focused == true { return .blocking }
+        if modal == false && focused == false { return .nonblocking }
+        return .unknown
+    }
+
+    static func systemVoiceOverlayInputState(_ window: AXUIElement, appRoot: AXUIElement) -> SystemVoiceOverlayInputState {
+        let deadline = ContinuousClock.now + .milliseconds(30)
+        let modal = read(window, kAXModalAttribute, deadline: deadline) as? Bool
+        let focused = focusedWindow(appRoot).map { CFEqual($0, window) }
+        return overlayInputState(modal: modal, focused: focused)
+    }
+
     static func overlayDecision(isPresent: Bool, escapeAlreadySent: Bool) -> SystemVoiceOverlayDecision {
         !isPresent ? .proceed : escapeAlreadySent ? .handoff : .dismissOnce
     }
@@ -281,8 +305,11 @@ enum ElementMarks {
                                                     escapeAlreadySent: Bool = false,
                                                     onEscapeSent: () -> Void = {},
                                                     canInject: () -> Bool) async throws -> Bool {
-        let overlays = systemVoiceOverlayWindows(appRoot, ownerPID: app.processIdentifier)
-        switch overlayDecision(isPresent: overlays?.isEmpty == false, escapeAlreadySent: escapeAlreadySent) {
+        guard let overlays = systemVoiceOverlayWindows(appRoot, ownerPID: app.processIdentifier) else {
+            return false
+        }
+        let blocking = overlays.filter { systemVoiceOverlayInputState($0, appRoot: appRoot) == .blocking }
+        switch overlayDecision(isPresent: !blocking.isEmpty, escapeAlreadySent: escapeAlreadySent) {
         case .proceed: return false
         case .handoff: throw SystemVoiceOverlayFailure.persists
         case .dismissOnce: break
@@ -304,7 +331,9 @@ enum ElementMarks {
         guard let remaining = systemVoiceOverlayWindows(appRoot, ownerPID: app.processIdentifier) else {
             throw SystemVoiceOverlayFailure.inspectionUnavailable
         }
-        guard remaining.isEmpty else { throw SystemVoiceOverlayFailure.persists }
+        let remainingStates = remaining.map { systemVoiceOverlayInputState($0, appRoot: appRoot) }
+        guard !remainingStates.contains(.blocking) else { throw SystemVoiceOverlayFailure.persists }
+        guard !remainingStates.contains(.unknown) else { throw SystemVoiceOverlayFailure.inspectionUnavailable }
         return true
     }
 

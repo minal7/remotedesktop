@@ -150,12 +150,12 @@ enum SuiteCleanStart {
             do {
                 stage = "initial-AXWindows-query"
                 try await dismissSystemVoiceOverlayIfPresent(app: app, root: root, state: overlayEscape)
-                let initial = try await windows(root)
+                let initial = try await windows(root, ownerPID: app.processIdentifier)
                 initialCount = initial.count
                 while ProcessInfo.processInfo.systemUptime < overallDeadline {
                     stage = "fresh-AXWindows-query"
                     try await dismissSystemVoiceOverlayIfPresent(app: app, root: root, state: overlayEscape)
-                    let current = try await windows(root)
+                    let current = try await windows(root, ownerPID: app.processIdentifier)
                     for (index, window) in current.enumerated() { try ensureNotDialog(window, index: index) }
                     guard let window = current.first else { break }
                     guard !pressedWindows.contains(where: { CFEqual($0, window) }) else {
@@ -186,7 +186,7 @@ enum SuiteCleanStart {
                 }
                 stage = "final-AXWindows-query"
                 try await dismissSystemVoiceOverlayIfPresent(app: app, root: root, state: overlayEscape)
-                let remainingWindows = try await windows(root)
+                let remainingWindows = try await windows(root, ownerPID: app.processIdentifier)
                 for (index, window) in remainingWindows.enumerated() { try ensureNotDialog(window, index: index) }
                 guard remainingWindows.isEmpty else { throw CleanStartFailure.windowsRemain(remainingWindows.count) }
                 reports.append(["bundle_id": bundleID, "windows_before": initial.count,
@@ -201,15 +201,20 @@ enum SuiteCleanStart {
 
     private static func dismissSystemVoiceOverlayIfPresent(app: NSRunningApplication, root: AXUIElement,
                                                            state: OverlayEscapeState) async throws {
-        guard let overlays = ElementMarks.systemVoiceOverlayWindows(root, ownerPID: app.processIdentifier), !overlays.isEmpty else { return }
         let alreadySent = state.attempted
-        state.attempted = true
         do {
             _ = try await ElementMarks.dismissSystemVoiceOverlayIfPresent(app: app, appRoot: root,
-                injector: state.injector, escapeAlreadySent: alreadySent, canInject: {
+                injector: state.injector, escapeAlreadySent: alreadySent, onEscapeSent: { state.attempted = true }, canInject: {
                     AXIsProcessTrusted() && NSWorkspace.shared.frontmostApplication?.processIdentifier == app.processIdentifier
                 })
-        } catch { throw CleanStartFailure.systemOverlay }
+        } catch let failure as SystemVoiceOverlayFailure {
+            switch failure {
+            case .notFrontmost: throw CleanStartFailure.systemOverlayNotFrontmost
+            case .secureFocus: throw CleanStartFailure.systemOverlaySecureFocus
+            case .inspectionUnavailable: throw CleanStartFailure.systemOverlayInspectionUnavailable
+            case .persists, .detected: throw CleanStartFailure.systemOverlayPersists
+            }
+        } catch { throw CleanStartFailure.systemOverlayDismissalFailed(String(describing: error)) }
     }
 
     private static func waitUntilGone(_ target: AXUIElement, app: AXUIElement, bundleID: String, ownedFixtureWindow: Bool,
@@ -219,13 +224,13 @@ enum SuiteCleanStart {
             if try await dismissOwnedDiscardPrompt(window: target, bundleID: bundleID,
                 ownedFixtureWindow: ownedFixtureWindow) { continue }
             try await dismissSystemVoiceOverlayIfPresent(app: runningApp, root: app, state: overlayEscape)
-            let current = try await windows(app)
+            let current = try await windows(app, ownerPID: runningApp.processIdentifier)
             for (index, window) in current.enumerated() { try ensureNotDialog(window, index: index) }
             if !current.contains(where: { CFEqual($0, target) }) { return }
             try await Task.sleep(for: .milliseconds(80))
         }
         try await dismissSystemVoiceOverlayIfPresent(app: runningApp, root: app, state: overlayEscape)
-        let remaining = try await windows(app)
+        let remaining = try await windows(app, ownerPID: runningApp.processIdentifier)
         if remaining.contains(where: { CFEqual($0, target) }) { throw CleanStartFailure.windowsRemain(remaining.count) }
     }
 
@@ -365,7 +370,7 @@ enum SuiteCleanStart {
         }
     }
 
-    private static func windows(_ app: AXUIElement) async throws -> [AXUIElement] {
+    private static func windows(_ app: AXUIElement, ownerPID: Int32) async throws -> [AXUIElement] {
         let retryDeadline = ProcessInfo.processInfo.systemUptime + 0.4
         var lastUnstableEntry = "unknown AX window role"
         repeat {
@@ -412,7 +417,10 @@ enum SuiteCleanStart {
                     break
                 }
                 switch SuiteCleanStartWindowRole.classify(role) {
-                case .window: result.append(window)
+                case .window:
+                    if ElementMarks.isSystemVoiceOverlay(window, ownerPID: ownerPID),
+                       ElementMarks.systemVoiceOverlayInputState(window, appRoot: app) == .nonblocking { continue }
+                    result.append(window)
                 case .nonWindow: continue
                 case .unknown:
                     lastUnstableEntry = "AXWindows[\(index)] unrecognized role=\(role)"
@@ -432,14 +440,20 @@ enum SuiteCleanStart {
 
 private enum CleanStartFailure: Error, CustomStringConvertible {
     case windowListUnavailable(Int32), unstableWindowEntry(String), roleUnavailable(index: Int, code: Int32)
-    case dialogRequiresOwner(String), systemOverlay, closeButtonUnavailable, closeFailed(Int32), windowsRemain(Int), windowRemainsAfterSingleClose(Int)
+    case dialogRequiresOwner(String), systemOverlayPersists, systemOverlayNotFrontmost
+    case systemOverlaySecureFocus, systemOverlayInspectionUnavailable, systemOverlayDismissalFailed(String)
+    case closeButtonUnavailable, closeFailed(Int32), windowsRemain(Int), windowRemainsAfterSingleClose(Int)
     var description: String {
         switch self {
         case .windowListUnavailable(let code): return "AXWindows query failed (\(code))"
         case .unstableWindowEntry(let detail): return "AX window entry remained invalid after bounded reread: \(detail)"
         case .roleUnavailable(let index, let code): return "AX role query failed windowIndex=\(index) code=\(code)"
         case .dialogRequiresOwner(let role): return "\(role) requires owner action"
-        case .systemOverlay: return "system overlay remains after one Escape"
+        case .systemOverlayPersists: return "system overlay remains after one Escape"
+        case .systemOverlayNotFrontmost: return "system overlay belongs to an app that is no longer frontmost; no Escape was sent"
+        case .systemOverlaySecureFocus: return "a secure field has focus; no Escape was sent"
+        case .systemOverlayInspectionUnavailable: return "Accessibility could not verify whether the system overlay was dismissed"
+        case .systemOverlayDismissalFailed(let detail): return "system overlay dismissal failed before confirmation: \(detail)"
         case .closeButtonUnavailable: return "AX close button unavailable; a dialog may require owner action"
         case .closeFailed(let code): return "AX close action failed (\(code))"
         case .windowsRemain(let count): return "\(count) suite window(s) remain after close"

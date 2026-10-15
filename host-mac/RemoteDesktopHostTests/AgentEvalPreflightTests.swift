@@ -34,6 +34,25 @@ final class AgentEvalPreflightTests: XCTestCase {
         XCTAssertEqual(escapeCount, 1)
     }
 
+    func testSystemVoiceOverlayFailuresDoNotMisreportBackgroundOrUnknownStateAsDismissal() {
+        XCTAssertEqual(SystemVoiceOverlayFailure.notFrontmost.environmentError, .scopeChanged)
+        XCTAssertEqual(SystemVoiceOverlayFailure.secureFocus.environmentError, .credentialHandoff)
+        XCTAssertEqual(SystemVoiceOverlayFailure.inspectionUnavailable.environmentError,
+            .unavailable("Accessibility could not verify the system overlay state."))
+        XCTAssertEqual(SystemVoiceOverlayFailure.persists.environmentError,
+            .systemHandoff("A system voice overlay is open on your Mac; close it and tap Resume"))
+    }
+
+    func testOnlyModalOrFocusedSystemOverlayBlocksInput() {
+        XCTAssertEqual(ElementMarks.overlayInputState(modal: false, focused: false), .nonblocking)
+        XCTAssertEqual(ElementMarks.overlayInputState(modal: false, focused: true), .blocking)
+        XCTAssertEqual(ElementMarks.overlayInputState(modal: true, focused: false), .blocking)
+        XCTAssertEqual(ElementMarks.overlayInputState(modal: true, focused: nil), .blocking)
+        XCTAssertEqual(ElementMarks.overlayInputState(modal: false, focused: nil), .unknown)
+        XCTAssertEqual(ElementMarks.overlayInputState(modal: nil, focused: false), .unknown)
+        XCTAssertEqual(ElementMarks.overlayInputState(modal: nil, focused: nil), .unknown)
+    }
+
     func testRequestRequiresExactLoopbackProbeAndSupportedPolicy() throws {
         let request = try AgentEvalPreflightRequest.decodeStrict(requestData())
         XCTAssertEqual(request.operation, "preflight")
