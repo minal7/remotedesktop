@@ -82,10 +82,12 @@ struct OSAtlasRuntimeInputResolver {
             return .fara(try resolveFara(receipt: receipt, runtimeDirectoryURL: runtimeDirectoryURL,
                 enclosingBundleURL: enclosingBundleURL))
         }
+#if DEBUG
         if manifest.modelVariant == .holo31_4B {
             return .holo(try resolveHolo(receipt: receipt, runtimeDirectoryURL: runtimeDirectoryURL,
                 enclosingBundleURL: enclosingBundleURL))
         }
+#endif
         throw OSAtlasRuntimeInstallationError.invalidReceipt
     }
 
@@ -97,6 +99,7 @@ struct OSAtlasRuntimeInputResolver {
         runtimeDirectoryURL: URL,
         enclosingBundleURL: URL
     ) throws -> ComputerUseNativeTextRuntimeInputs {
+#if DEBUG
         guard manifest.modelVariant == .nativeText4B,
               receipt.modelVariant == .nativeText4B,
               receipt.installationVersion == manifest.installationVersion,
@@ -120,6 +123,10 @@ struct OSAtlasRuntimeInputResolver {
         }
         return ComputerUseNativeTextRuntimeInputs(modelURL: model, llamaServerURL:
             try resolveBundledExecutable(runtimeDirectoryURL: runtimeDirectoryURL, enclosingBundleURL: enclosingBundleURL))
+
+#else
+        throw OSAtlasRuntimeInstallationError.invalidReceipt
+#endif
     }
 
     /// Installer verification supplies the content hashes. Activation rechecks
@@ -135,31 +142,47 @@ struct OSAtlasRuntimeInputResolver {
 
     func resolveHolo(receipt: ComputerUseInstallationReceipt,
         runtimeDirectoryURL: URL, enclosingBundleURL: URL) throws -> ComputerUseHoloRuntimeInputs {
+#if DEBUG
         let directory = try resolveTrainedVisionDirectory(receipt: receipt, variant: .holo31_4B,
             modelFileName: ComputerUseHoloRuntimeInputs.modelFileName, projectorFileName: ComputerUseHoloRuntimeInputs.projectorFileName)
         return ComputerUseHoloRuntimeInputs(modelURL: directory.appendingPathComponent(ComputerUseHoloRuntimeInputs.modelFileName),
             projectorURL: directory.appendingPathComponent(ComputerUseHoloRuntimeInputs.projectorFileName),
             llamaServerURL: try resolveBundledExecutable(runtimeDirectoryURL: runtimeDirectoryURL, enclosingBundleURL: enclosingBundleURL))
+
+#else
+        throw OSAtlasRuntimeInstallationError.invalidReceipt
+#endif
     }
 
     /// Resolves the separately pinned UI-TARS package without consulting or
     /// mutating the active Fara installation receipt.
     func resolveUITARS15(modelRootURL: URL, runtimeDirectoryURL: URL,
                          enclosingBundleURL: URL) throws -> AgentVisionRuntimeInputs {
+#if DEBUG
         try resolveAgentVisionPackage(manifest: .uiTars15, model: .uiTars15_7b,
             modelRootURL: modelRootURL, runtimeDirectoryURL: runtimeDirectoryURL,
             enclosingBundleURL: enclosingBundleURL)
+
+#else
+        throw OSAtlasRuntimeInstallationError.invalidReceipt
+#endif
     }
 
     func resolveGUIOwl15(modelRootURL: URL, runtimeDirectoryURL: URL,
                          enclosingBundleURL: URL) throws -> AgentVisionRuntimeInputs {
+#if DEBUG
         try resolveAgentVisionPackage(manifest: .guiOwl15, model: .guiOwl15_4b,
             modelRootURL: modelRootURL, runtimeDirectoryURL: runtimeDirectoryURL,
             enclosingBundleURL: enclosingBundleURL)
+
+#else
+        throw OSAtlasRuntimeInstallationError.invalidReceipt
+#endif
     }
 
     func resolveAgentVisionPackage(manifest: ComputerUseArtifactManifest, model: AgentPolicyModel,
         modelRootURL: URL, runtimeDirectoryURL: URL, enclosingBundleURL: URL) throws -> AgentVisionRuntimeInputs {
+#if DEBUG
         let expectedVariant: ComputerUseArtifactManifest.ModelVariant
         switch model {
         case .uiTars15_7b: expectedVariant = .uiTars15_7B
@@ -195,6 +218,10 @@ struct OSAtlasRuntimeInputResolver {
         return AgentVisionRuntimeInputs(model: model, modelURL: modelURL, projectorURL: projectorURL,
             llamaServerURL: try resolveBundledExecutable(runtimeDirectoryURL: runtimeDirectoryURL,
                                                           enclosingBundleURL: enclosingBundleURL))
+
+#else
+        throw OSAtlasRuntimeInstallationError.invalidReceipt
+#endif
     }
 
     private static func sha256(file url: URL) throws -> String {

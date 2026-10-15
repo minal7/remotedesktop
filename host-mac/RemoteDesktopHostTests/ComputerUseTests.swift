@@ -1128,6 +1128,7 @@ final class ComputerUseTests: XCTestCase {
         XCTAssertEqual(manifest.modelRepository, "bartowski/Fara1.5-4B-GGUF")
         XCTAssertEqual(manifest.modelRevision, "b97f335231e01efbbad37bb89b5310340fc10735")
         XCTAssertEqual(manifest.minimumMemoryBytes, 16 * 1_024 * 1_024 * 1_024)
+        XCTAssertEqual(manifest.modelArtifacts.count, 2)
         XCTAssertEqual(manifest.modelArtifacts.map(\.fileName), ["Fara1.5-4B-Q4_K_M.gguf", "mmproj-Fara1.5-4B-f16.gguf"])
         XCTAssertEqual(manifest.modelArtifacts.map(\.byteCount), [2_884_850_784, 672_423_584])
         XCTAssertEqual(manifest.modelArtifacts.map(\.sha256), [

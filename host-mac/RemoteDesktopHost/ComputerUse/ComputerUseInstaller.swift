@@ -127,17 +127,6 @@ actor ComputerUseInstaller {
     private let operations: Operations
     private let launchIdentifier: String
 
-    nonisolated static var nativeTextRootDirectory: URL {
-        HostComputerUseManager.modelDirectoryURL.deletingLastPathComponent()
-            .appendingPathComponent("Native Text Model", isDirectory: true)
-    }
-
-    static func nativeText() -> ComputerUseInstaller {
-        ComputerUseInstaller(manifest: .nativeTextV2,
-                             rootDirectory: nativeTextRootDirectory,
-                             legacyManifest: nil)
-    }
-
     init(
         manifest: ComputerUseArtifactManifest = .current,
         rootDirectory: URL = HostComputerUseManager.modelDirectoryURL,
@@ -145,7 +134,7 @@ actor ComputerUseInstaller {
         legalResourceDirectory: URL? = nil,
         downloadSession: URLSession = .shared,
         downloadChunkByteCount: Int64 = 16 * 1_024 * 1_024,
-        legacyManifest: ComputerUseArtifactManifest? = .legacyVisualOnly,
+        legacyManifest: ComputerUseArtifactManifest? = nil,
         operations: Operations? = nil,
         launchIdentifier: String = ComputerUseInstaller.processLaunchIdentifier
     ) {
