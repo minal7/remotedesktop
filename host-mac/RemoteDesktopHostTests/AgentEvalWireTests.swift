@@ -192,6 +192,36 @@ final class AgentEvalWireTests: XCTestCase {
         XCTAssertTrue(publicRead.allowsStartInteraction)
     }
 
+    func testPolicyReplayAcceptsLegacySingleAndBoundedOrderedObservations() throws {
+        let single = try AgentEvalPolicyReplayRequest.decodeStrict(Data(replayRequest("\"observation\":\(replayObservation(0))").utf8))
+        XCTAssertFalse(single.isSequence)
+        XCTAssertEqual(single.observations.count, 1)
+
+        let sequence = try AgentEvalPolicyReplayRequest.decodeStrict(Data(replayRequest(
+            "\"observations\":[\(replayObservation(0)),\(replayObservation(1))]").utf8))
+        XCTAssertTrue(sequence.isSequence)
+        XCTAssertEqual(sequence.observations.map(\.budget.step), [0, 1])
+
+        let ten = (0..<10).map(replayObservation).joined(separator: ",")
+        XCTAssertEqual(try AgentEvalPolicyReplayRequest.decodeStrict(Data(
+            replayRequest("\"observations\":[\(ten)]").utf8)).observations.count, 10)
+        for observations in ["[]", "[\((0...10).map(replayObservation).joined(separator: ","))]"] {
+            XCTAssertThrowsError(try AgentEvalPolicyReplayRequest.decodeStrict(
+                Data(replayRequest("\"observations\":\(observations)").utf8)))
+        }
+        XCTAssertThrowsError(try AgentEvalPolicyReplayRequest.decodeStrict(Data(
+            replayRequest("\"observation\":\(replayObservation(0)),\"observations\":[\(replayObservation(0))]").utf8)))
+        XCTAssertThrowsError(try AgentEvalPolicyReplayRequest.decodeStrict(Data(replayRequest(
+            "\"observations\":[\(replayObservation(2)),\(replayObservation(1))]").utf8)))
+
+        let legacyResponse = AgentEvalPolicyReplayResponse(rawModelOutput: "Action: Wait.", action: .wait(seconds: 1),
+            rejectionReason: nil, promptVersion: "v1", calls: nil, resultSemantics: nil)
+        let legacyJSON = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(legacyResponse)) as? [String: Any])
+        XCTAssertNil(legacyJSON["calls"])
+        XCTAssertNil(legacyJSON["result_semantics"])
+        XCTAssertEqual(legacyJSON["executed"] as? Bool, false)
+    }
+
     func testRejectsUnknownPolicyAndInvalidBounds() {
         let invalid = [
             #"{"task_id":"t","prompt":"x","start":{"url":"http://localhost/"},"max_steps":41,"policy":"fara15-4b"}"#,
@@ -316,6 +346,14 @@ final class AgentEvalWireTests: XCTestCase {
                              approval: String? = nil) -> String {
         let approvalField = approval.map { ",\"approval_policy\":\($0)" } ?? ""
         return #"{"task_id":"t","prompt":"x","start":\#(start),"max_steps":1,"policy":"fara15-4b"\#(approvalField)}"#
+    }
+
+    private func replayRequest(_ fields: String) -> String {
+        #"{"operation":"policy_replay","policy":"fara15-4b",\#(fields)}"#
+    }
+
+    private func replayObservation(_ step: Int) -> String {
+        #"{"task":"Read the fixture","surface":{"kind":"web","url":"http://127.0.0.1:8765/read.html"},"screenshot":"AA==","elements":[],"focus":null,"history":[],"budget":{"step":\#(step),"max_steps":10}}"#
     }
 }
 #endif

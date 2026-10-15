@@ -3,30 +3,69 @@ import Darwin
 import Foundation
 
 struct AgentEvalPolicyReplayRequest: Decodable {
-    let observation: AgentObservation
+    let observations: [AgentObservation]
+    let isSequence: Bool
+
+    private enum CodingKeys: String, CodingKey, CaseIterable { case operation, policy, observation, observations }
 
     static func decodeStrict(_ data: Data) throws -> Self {
         guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-              Set(object.keys) == ["operation", "policy", "observation"],
+              Set(object.keys).contains("operation"), Set(object.keys).contains("policy"),
               object["operation"] as? String == "policy_replay",
               object["policy"] as? String == AgentPolicyModel.fara15_4b.rawValue else {
             throw AgentEvalWireError.invalidRequest
         }
+        let keys = Set(object.keys)
+        guard keys == ["operation", "policy", "observation"] ||
+              keys == ["operation", "policy", "observations"] else {
+            throw AgentEvalWireError.invalidRequest
+        }
         let request = try JSONDecoder().decode(Self.self, from: data)
-        try request.observation.validate()
+        guard (1...10).contains(request.observations.count) else { throw AgentEvalWireError.invalidRequest }
+        try request.observations.forEach { try $0.validate() }
+        guard let first = request.observations.first,
+              request.observations.allSatisfy({ $0.task == first.task && $0.surface == first.surface }),
+              zip(request.observations, request.observations.dropFirst()).allSatisfy({
+                  $0.0.budget.step < $0.1.budget.step
+              }) else {
+            throw AgentEvalWireError.invalidRequest
+        }
         return request
     }
 
-    private enum CodingKeys: String, CodingKey, CaseIterable { case operation, policy, observation }
-
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        guard Set(container.allKeys) == Set(CodingKeys.allCases) else { throw AgentEvalWireError.invalidRequest }
+        let keys = Set(container.allKeys)
+        guard keys == [.operation, .policy, .observation] ||
+              keys == [.operation, .policy, .observations] else { throw AgentEvalWireError.invalidRequest }
         guard try container.decode(String.self, forKey: .operation) == "policy_replay",
               try container.decode(String.self, forKey: .policy) == AgentPolicyModel.fara15_4b.rawValue else {
             throw AgentEvalWireError.invalidRequest
         }
-        observation = try container.decode(AgentObservation.self, forKey: .observation)
+        if keys.contains(.observation) {
+            observations = [try container.decode(AgentObservation.self, forKey: .observation)]
+            isSequence = false
+        } else {
+            observations = try container.decode([AgentObservation].self, forKey: .observations)
+            isSequence = true
+        }
+    }
+}
+
+struct AgentEvalPolicyReplayCall: Encodable {
+    let index: Int
+    let observationStep: Int
+    let rawModelOutput: String
+    let action: AgentAction?
+    let rejectionReason: String?
+    let promptVersion: String
+
+    private enum CodingKeys: String, CodingKey {
+        case index, action
+        case observationStep = "observation_step"
+        case rawModelOutput = "raw_model_output"
+        case rejectionReason = "rejection_reason"
+        case promptVersion = "prompt_version"
     }
 }
 
@@ -38,12 +77,16 @@ struct AgentEvalPolicyReplayResponse: Encodable {
     let action: AgentAction?
     let rejectionReason: String?
     let promptVersion: String
+    let calls: [AgentEvalPolicyReplayCall]?
+    let resultSemantics: String?
 
     private enum CodingKeys: String, CodingKey {
         case operation, policy, executed, action
         case rawModelOutput = "raw_model_output"
         case rejectionReason = "rejection_reason"
         case promptVersion = "prompt_version"
+        case calls
+        case resultSemantics = "result_semantics"
     }
 }
 
@@ -55,13 +98,24 @@ enum AgentEvalPolicyReplay {
         let runtime = capture.map { OSAtlasLlamaRuntime(inspectFaraExchange: $0.record) } ?? .shared
         let policy = try LlamaVLMPolicy(runtimeInputs: inputs, runtime: runtime)
         do {
-            let output = try await policy.propose(request.observation)
+            var calls: [AgentEvalPolicyReplayCall] = []
+            calls.reserveCapacity(request.observations.count)
+            for (index, observation) in request.observations.enumerated() {
+                let output = try await policy.propose(observation)
+                calls.append(AgentEvalPolicyReplayCall(index: index,
+                    observationStep: observation.budget.step, rawModelOutput: output.rawOutput,
+                    action: output.action, rejectionReason: output.rejectionReason,
+                    promptVersion: policy.promptVersion))
+            }
+            guard let last = calls.last else { throw AgentEvalWireError.invalidRequest }
+            try capture?.requireCapture(expectedCount: request.observations.count)
             await policy.stop()
             if capture != nil { await runtime.shutdown() }
-            try capture?.requireCapture()
-            return AgentEvalPolicyReplayResponse(rawModelOutput: output.rawOutput,
-                action: output.action, rejectionReason: output.rejectionReason,
-                promptVersion: policy.promptVersion)
+            return AgentEvalPolicyReplayResponse(rawModelOutput: last.rawModelOutput,
+                action: last.action, rejectionReason: last.rejectionReason,
+                promptVersion: policy.promptVersion,
+                calls: request.isSequence ? calls : nil,
+                resultSemantics: request.isSequence ? "newly_generated_outputs_with_saved_observation_feedback" : nil)
         } catch {
             await policy.stop()
             // The legacy replay path already shut down the shared runtime on
@@ -141,9 +195,9 @@ private final class FaraExchangeCapture: @unchecked Sendable {
         }
     }
 
-    func requireCapture() throws {
+    func requireCapture(expectedCount: Int) throws {
         let result = lock.withLock { (capturedCount, failed) }
-        guard result.0 > 0, !result.1 else { throw AgentEvalWireError.bootstrapFailure }
+        guard result.0 == expectedCount, !result.1 else { throw AgentEvalWireError.bootstrapFailure }
     }
 
     private func markFailed() {
