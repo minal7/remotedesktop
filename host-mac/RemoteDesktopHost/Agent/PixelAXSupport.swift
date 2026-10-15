@@ -90,3 +90,38 @@ enum PixelExecutionDescription {
         }
     }
 }
+
+enum PixelFocusedRecipient {
+    @MainActor
+    static func current(expectedPID: pid_t?) throws -> AXUIElement {
+        let system = AXUIElementCreateSystemWide()
+        return try authorize(expectedPID: expectedPID, isAXTrusted: AXIsProcessTrusted(),
+            focused: { ElementMarks.focusedElement(system) }, processID: { element in
+                var processID: pid_t = 0
+                return AXUIElementGetPid(element, &processID) == .success ? processID : nil
+            }, attribute: { ElementMarks.read($0, $1, deadline: .now + .milliseconds(10)) })
+    }
+
+    static func authorize<Element>(expectedPID: pid_t?, isAXTrusted: Bool,
+                                   focused: () -> Element?, processID: (Element) -> pid_t?,
+                                   attribute: (Element, String) -> Any?) throws -> Element {
+        guard isAXTrusted, let expectedPID, let element = focused(),
+              let actualPID = processID(element) else {
+            throw AgentEnvironmentError.systemHandoff("The focused control could not be verified safely.")
+        }
+        guard let role = attribute(element, kAXRoleAttribute as String) as? String, !role.isEmpty else {
+            throw AgentEnvironmentError.systemHandoff("The focused control could not be verified safely.")
+        }
+        let subrole = attribute(element, kAXSubroleAttribute as String) as? String ?? ""
+        let name = [kAXTitleAttribute as String, kAXDescriptionAttribute as String,
+                    "AXPlaceholderValue", kAXHelpAttribute as String]
+            .compactMap { attribute(element, $0) as? String }.joined(separator: " ")
+        let protected = attribute(element, "AXProtectedContent") as? Bool == true
+        guard !protected,
+              !AgentCredentialRule.isSensitive(role: role, name: name, state: [subrole]) else {
+            throw AgentEnvironmentError.credentialHandoff
+        }
+        guard actualPID == expectedPID else { throw AgentEnvironmentError.scopeChanged }
+        return element
+    }
+}

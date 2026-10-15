@@ -1,4 +1,6 @@
 import Foundation
+import ApplicationServices
+import CoreGraphics
 import XCTest
 @testable import RemoteDesktopHost
 
@@ -57,6 +59,71 @@ final class AgentSharedSupportTests: XCTestCase {
         XCTAssertNil(AgentTargetBinding.hit(x: 120, y: 120, elements: elements))
     }
 
+    func testKeyboardPostingRequiresTheCurrentSystemFocusedRecipient() throws {
+        let ordinary = FocusedRecipient(pid: 42, attributes: [
+            kAXRoleAttribute as String: "AXTextField",
+            kAXTitleAttribute as String: "Search"
+        ])
+        var requested: [String] = []
+        let events = PostedHostEvents()
+
+        XCTAssertThrowsError(try authorizeAndPost(ordinary, expectedPID: 7, trusted: true,
+            requested: &requested, events: events)) {
+            XCTAssertEqual($0 as? AgentEnvironmentError, .scopeChanged)
+        }
+        XCTAssertEqual(events.count, 0)
+
+        requested.removeAll()
+        XCTAssertNoThrow(try authorizeAndPost(ordinary, expectedPID: 42, trusted: true,
+            requested: &requested, events: events))
+        XCTAssertEqual(events.keyEventCount, 2)
+        XCTAssertFalse(requested.contains(kAXValueAttribute as String))
+    }
+
+    func testKeyboardPostingHandsOffForSecureSystemFocusedRecipientWithoutReadingValue() {
+        let secure = FocusedRecipient(pid: 42, attributes: [
+            kAXRoleAttribute as String: "AXTextField",
+            kAXSubroleAttribute as String: "AXSecureTextField",
+            "AXPlaceholderValue": "Verification code"
+        ])
+        var requested: [String] = []
+        let events = PostedHostEvents()
+
+        XCTAssertThrowsError(try authorizeAndPost(secure, expectedPID: 7, trusted: true,
+            requested: &requested, events: events)) {
+            XCTAssertEqual($0 as? AgentEnvironmentError, .credentialHandoff)
+        }
+        XCTAssertEqual(events.count, 0)
+        XCTAssertFalse(requested.contains(kAXValueAttribute as String))
+    }
+
+    func testKeyboardPostingHandsOffWhenSystemFocusedRecipientIsUnavailable() {
+        let events = PostedHostEvents()
+        var requested: [String] = []
+
+        XCTAssertThrowsError(try authorizeAndPost(nil, expectedPID: 42, trusted: true,
+            requested: &requested, events: events)) {
+            XCTAssertEqual($0 as? AgentEnvironmentError,
+                .systemHandoff("The focused control could not be verified safely."))
+        }
+        XCTAssertEqual(events.count, 0)
+        XCTAssertTrue(requested.isEmpty)
+
+        let unknownRole = FocusedRecipient(pid: 42, attributes: [:])
+        XCTAssertThrowsError(try authorizeAndPost(unknownRole, expectedPID: 42, trusted: true,
+            requested: &requested, events: events)) {
+            XCTAssertEqual($0 as? AgentEnvironmentError,
+                .systemHandoff("The focused control could not be verified safely."))
+        }
+        let ordinary = FocusedRecipient(pid: 42, attributes: [kAXRoleAttribute as String: "AXButton"])
+        XCTAssertThrowsError(try authorizeAndPost(ordinary, expectedPID: 42, trusted: false,
+            requested: &requested, events: events)) {
+            XCTAssertEqual($0 as? AgentEnvironmentError,
+                .systemHandoff("The focused control could not be verified safely."))
+        }
+        XCTAssertEqual(events.count, 0)
+    }
+
     private func authorityRecord(id: Int = 3, role: String = "AXTextField", identifier: String = "query",
                                  value: String, selection: AgentSelection = .init(start: 1, end: 1))
         -> AgentMacAccessibility.EditableAuthorityRecord {
@@ -68,5 +135,33 @@ final class AgentSharedSupportTests: XCTestCase {
                          inView: Bool = true) -> AgentElement {
         .init(id: id, role: "AXButton", name: "Control", value: nil, state: ["enabled"],
               bbox: .init(x: x, y: y, width: width, height: height), inView: inView)
+    }
+
+    private struct FocusedRecipient {
+        let pid: pid_t
+        let attributes: [String: Any]
+    }
+
+    private final class PostedHostEvents: @unchecked Sendable {
+        private let lock = NSLock()
+        private var storage: [CGEvent] = []
+        var count: Int { lock.lock(); defer { lock.unlock() }; return storage.count }
+        var keyEventCount: Int {
+            lock.lock(); defer { lock.unlock() }
+            return storage.filter { $0.type == .keyDown || $0.type == .keyUp }.count
+        }
+        func append(_ event: CGEvent) { lock.lock(); defer { lock.unlock() }; storage.append(event) }
+    }
+
+    private func authorizeAndPost(_ recipient: FocusedRecipient?, expectedPID: pid_t, trusted: Bool,
+                                  requested: inout [String], events: PostedHostEvents) throws {
+        let injector = InputInjector(eventPoster: { events.append($0) }, physicalInputState: { .released })
+        try injector.applyHostKeyStroke(usage: 0x19, modifiers: 1 << 3, ifAllowed: { true }) {
+            _ = try PixelFocusedRecipient.authorize(expectedPID: expectedPID, isAXTrusted: trusted,
+            focused: { recipient }, processID: { $0.pid }, attribute: { element, name in
+                requested.append(name)
+                return element.attributes[name]
+            })
+        }
     }
 }

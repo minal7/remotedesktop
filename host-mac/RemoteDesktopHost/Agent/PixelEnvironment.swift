@@ -283,10 +283,9 @@ final class PixelEnvironment: AgentEnvironment {
             let result = try await type(text, mode: mode, target: target, frame: resolved.frame, targets: resolved.targets, bindings: bindings)
             detail = result
         case let .key(chord):
-            try ensureNonSecureFocus()
             let stroke = try AgentKeyStroke.parse(chord)
             try injector.applyHostKeyStroke(usage: stroke.usage, modifiers: stroke.modifiers,
-                ifAllowed: inputAllowed, beforePosting: {})
+                ifAllowed: inputAllowed, beforePosting: { _ = try ensureNonSecureFocus() })
             detail = "pressed \(chord)"
         case let .select(target, option):
             detail = try await select(option, target: target, frame: resolved.frame, targets: resolved.targets, bindings: bindings)
@@ -515,13 +514,10 @@ final class PixelEnvironment: AgentEnvironment {
 
     private func type(_ text: String, mode: AgentTextMode, target: AgentTarget?, frame: AgentFrame,
                       targets: [AgentElement], bindings: ResolvedPixelTargets?) async throws -> String {
-        guard let snapshot = snapshots[frame.scope.identity] else { throw AgentEnvironmentError.targetGone }
+        guard snapshots[frame.scope.identity] != nil else { throw AgentEnvironmentError.targetGone }
         if let target { try click(screenPoint(target, frame: frame, targets: targets, bindings: bindings), button: .left, count: 1) }
-        let app = snapshot.application.map { AXUIElementCreateApplication($0.processIdentifier) }
-        let focused = app.flatMap(ElementMarks.focusedElement)
-        let role = focused.flatMap { ElementMarks.string($0, kAXRoleAttribute) } ?? "unknown"
-        let name = focused.map(ElementMarks.label) ?? ""
-        if let focused, ElementMarks.isSensitive(focused, role: role, name: name) { throw AgentEnvironmentError.credentialHandoff }
+        let focused = try ensureNonSecureFocus()
+        let name = ElementMarks.label(focused)
         let expectedMark = targets.first ?? (target == nil ? frame.observation.focus.flatMap { focus in
             frame.observation.elements.first(where: { $0.id == focus.id })
         } : nil)
@@ -529,12 +525,21 @@ final class PixelEnvironment: AgentEnvironment {
            AgentCredentialRule.isSensitive(role: expectedMark.role, name: expectedMark.name, state: expectedMark.state) {
             throw AgentEnvironmentError.credentialHandoff
         }
-        let oldValue = focused.flatMap { ElementMarks.string($0, kAXValueAttribute) }
+        let oldValue = ElementMarks.string(focused, kAXValueAttribute)
         let pasted = try await paste(text, replace: mode == .replace, oldValue: oldValue)
         var result = pasted
         if pasted == .rejected {
-            try ensureNonSecureFocus()
-            guard await injector.applyTextPaced(text, ifAllowed: inputAllowed) else { throw CancellationError() }
+            var focusFailure: AgentEnvironmentError?
+            let completed = await injector.applyTextPaced(text, ifAllowed: {
+                guard inputAllowed() else { return false }
+                do { _ = try ensureNonSecureFocus(); return true }
+                catch let error as AgentEnvironmentError { focusFailure = error; return false }
+                catch { focusFailure = .systemHandoff("The focused control could not be verified safely."); return false }
+            })
+            guard completed else {
+                if let focusFailure { throw focusFailure }
+                throw CancellationError()
+            }
             result = .unavailable
         }
         let status = result == .matches ? "matches" : result == .rejected ? "paste rejected" : "unavailable or differs"
@@ -561,10 +566,9 @@ final class PixelEnvironment: AgentEnvironment {
     }
 
     private func postClipboardKey(_ chord: String) throws {
-        try ensureNonSecureFocus()
         let stroke = try AgentKeyStroke.parse(chord)
         try injector.applyHostKeyStroke(usage: stroke.usage, modifiers: stroke.modifiers,
-            ifAllowed: inputAllowed, beforePosting: {})
+            ifAllowed: inputAllowed, beforePosting: { _ = try ensureNonSecureFocus() })
     }
 
     private func select(_ option: String, target: AgentTarget, frame: AgentFrame, targets: [AgentElement],
@@ -681,12 +685,8 @@ final class PixelEnvironment: AgentEnvironment {
             number: window.number, title: window.title)).axState
     }
 
-    private func ensureNonSecureFocus() throws {
-        let processID = lastSnapshot?.application?.processIdentifier ?? NSWorkspace.shared.frontmostApplication?.processIdentifier
-        guard let processID, let focus = ElementMarks.focusedElement(AXUIElementCreateApplication(processID)) else { return }
-        let role = ElementMarks.string(focus, kAXRoleAttribute) ?? "unknown"
-        let name = ElementMarks.label(focus)
-        if ElementMarks.isSensitive(focus, role: role, name: name) { throw AgentEnvironmentError.credentialHandoff }
+    private func ensureNonSecureFocus() throws -> AXUIElement {
+        try PixelFocusedRecipient.current(expectedPID: lastSnapshot?.application?.processIdentifier)
     }
 
     private func startIfNeeded() async throws {
