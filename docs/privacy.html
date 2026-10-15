@@ -37,17 +37,17 @@
     <li>The developer does <strong>not</strong> receive, sell, or share your session data.</li>
     <li>There is no separate Remote Desktop account and no advertising, analytics, or tracking
       SDK. Pairing uses the Apple Account already signed in to iCloud on your devices.</li>
-    <li>Your screen, audio, and input stream <strong>directly between your own devices</strong> — they never pass through a server we control.</li>
+    <li>Your screen, audio, and input use WebRTC between your devices. Depending on network conditions and the configured ICE servers, WebRTC can use a relay instead of a direct path.</li>
     <li>After enrollment, AI prompts, conversation, task results, controls, and approvals use
       only an authenticated local-network connection to your Mac; they do not fall back to
       CloudKit.</li>
   </ul>
 
   <h2>How the connection works</h2>
-  <p>Remote Desktop connects your iPhone or iPad to your own Mac or Windows computer using a
-  direct, peer-to-peer connection (WebRTC). The screen video, audio, and your taps and
-  keystrokes travel straight between your two devices. We never receive, record, or have
-  access to any of that content.</p>
+  <p>Remote Desktop connects your iPhone or iPad to your own Mac or Windows computer using
+  WebRTC. It uses a direct peer-to-peer path when available; depending on network conditions
+  and the ICE configuration, it may use a TURN relay. WebRTC encrypts media and input in transit
+  between the devices. A relay carries that encrypted traffic and may see connection metadata.</p>
 
   <h2>Pairing and signaling</h2>
   <p>To set up a connection, the two devices exchange a small amount of technical connection

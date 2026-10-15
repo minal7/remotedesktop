@@ -44,8 +44,8 @@ checks. The build identity and measurements are **pending**.
 - Browser interaction is visual and does not use a browser extension.
 - Windows remains available for remote desktop; Computer use in this beta runs
   on the Mac.
-- Existing large source files remain documented technical debt: `HostComputerUseManager.swift`
-  is 7,053 lines and `OSAtlasLlamaRuntime.swift` is 3,906 lines. They were not
+- Existing large source files, including `HostComputerUseManager.swift` and
+  `OSAtlasLlamaRuntime.swift`, remain documented technical debt; they were not
   split as part of this release candidate.
 
 ## Privacy

@@ -135,8 +135,8 @@ CloudKit fallback for those messages: a missing, unreachable, or
 unauthenticated broker fails closed before the host receives a task.
 
 WebRTC remains a separate visual sidecar for live screen pixels, host audio,
-and direct input. All planning, policy validation, Foundation Models
-inference, OS-Atlas visual grounding, and action execution remain on the Mac.
+and direct input. Computer use planning, policy validation, visual grounding,
+and action execution remain on the Mac.
 
 ## What works today
 
@@ -165,78 +165,36 @@ inference, OS-Atlas visual grounding, and action execution remain on the Mac.
 - `InputInjector` — consumes `ControlMessage.pointer|scroll|key|text`
   and posts `CGEvent`s with correct button transitions and drag types
 - Full HID → macOS virtual-keycode translation table for common keys
-- GUI-only apps use a local hybrid when no suitable structured tool exists.
-  Its always-installed semantic router opens an explicitly named common app
-  once before interacting and handles bounded literal text and unambiguous
-  current-app navigation deterministically. Remaining ordinary-language steps
-  use Apple's on-device model to select one typed semantic action and bounded
-  arguments. OS-Atlas-Pro-4B grounds pointer targets, and the host composes,
-  validates, approves, and executes the native action.
-  iOS sends one idempotent request through the bounded setup lifecycle; the
-  host streams model download, verification, and runtime-loading progress
-  back to the device row. Setup is the only
-  Computer Use lifecycle permitted on CloudKit.
-- Versioned model installation in Application Support with Apple-silicon,
-  8 GiB memory, free-space, byte-size, and streaming SHA-256 checks before an
-  atomic receipt is activated. An 8–15 GiB Mac uses a 4,096-token compact
-  llama.cpp profile, smaller logical/physical batches, 3 GiB launch headroom,
-  1 GiB post-load headroom, and a 4 GiB process ceiling. Macs with at least
-  16 GiB retain the 8,192-token profile and larger safety margins. Resumable
-  progress is calculated from durable bytes across every artifact, and chat is
-  exposed only after the complete model package loads successfully.
-- The host-composed surface covers 16 semantic operations. `ANSWER` and
-  `REPORT` are aliases for the same evidence-checked visible-facts behavior.
-  Click, double-click, secondary-click, and drag use harmless OS-Atlas primary
-  click carriers only for visual points; the typed plan owns the final verb.
-  Text, four-direction scroll, app opening, Return, hotkeys, wait, completion,
-  clarification, and visible answers are composed directly from validated
-  arguments without visual-model verb selection. The router remains installed
-  regardless of Apple's startup availability and re-checks availability for
-  every non-deterministic step. Its deterministic, host-authored routes remain
-  usable during an Apple-model outage. If no such route matches, the task
-  returns `unable to complete` before any further OS-Atlas inference or host
-  effects; the raw checkpoint path is not revived. Authentication-boundary app
-  switching likewise accepts only a typed `OPEN_APP` route. Direct user input
-  immediately pauses automation, and malformed or out-of-range actions are
-  rejected before any effect.
+## Computer use (Beta)
 
-The v1 visual model is OS-Atlas-Pro-4B, pinned to the public, ungated
-`OS-Copilot/OS-Atlas-Pro-4B` revision
-`06b790b907d82f29bb317ba889e6888805953036`. It runs locally and requires no
-API key or paid service. Pro is selected because the upstream project trains it
-for agentic next-action generation. The Base 4B variant is represented for a
-possible future grounding-only package, but v1 neither downloads nor loads it
-alongside Pro.
+Computer use runs Fara 1.5-4B locally on an Apple silicon Mac with at least
+16 GB of memory. It observes the active Mac window and acts through a visual
+screen-and-input loop; browser interaction uses the screen and does not require
+a browser extension. The model is installed from two pinned, checksummed
+artifacts: the Fara model and its vision projector. Setup checks memory and
+free disk space, reports download progress, resumes interrupted downloads, and
+verifies SHA-256 before activating the installation.
 
-The phone-triggered setup downloads only immutable, verified OS-Atlas Pro 4B
-GGUF model data. Each manifest entry contains its complete HTTPS URL, byte
-count, and SHA-256. Downloaded model files are explicitly non-executable; the
-signed host contains all inference code. Conversion provenance is pinned to
-llama.cpp tag `b9992`, revision
-`6eddde06a4f25d55d538b5d15628dcc2b6882147`.
-
-The signed host bundles and verifies the complete
-[OS-Atlas Apache 2.0 License](https://github.com/OS-Copilot/OS-Atlas/blob/bad08407ab54b5bf6c17a69fe1ced476b9494926/LICENSE),
-the pinned llama.cpp MIT license, and a conversion notice before activating a
-receipt. Missing or tampered installed copies are repaired from the signed app;
-no legal document or executable is fetched during model setup.
+After same-account enrollment, prompts, task status, results, questions,
+approvals, and task controls travel over the authenticated LAN TLS channel.
+CloudKit supports enrollment and Computer use setup; it does not carry task
+prompts or results. Live pixels and direct remote input use the separate
+WebRTC connection. The model may ask for missing information or help, and the
+user can approve or deny consequential actions, stop a task, or take over the
+live Mac view.
 
 ## Computer Use acceptance
 
 The acceptance runners keep hidden component evidence separate from visible
 product behavior:
 
-The strict signed Release sequence—automatic same-account enrollment,
-authenticated LAN TLS prompt, host-local planning/grounding, any required
-approval, and typed terminal result—still requires a fresh end-to-end run on
-the signed-in iPhone Air Simulator. The component and UI tests below establish
-their individual contracts; they are not a substitute for that pending release
-acceptance result.
+The release end-to-end checklist uses the owner's physical iPhone or iPad on
+the same Wi-Fi as the signed host; its timestamps, task IDs, episodes, and
+fixture receipts are the release evidence. Simulator suites are diagnostics
+and do not replace that physical-device check.
 
-- The `RemoteDesktopLiveE2E` suite is the acceptance path for visible login
-  takeover, exact email-send confirmation, approvals, progress, and results on
-  an iOS Simulator. Its final signed Release transport run is pending, so no
-  live result is claimed here.
+- `RemoteDesktopLiveE2E` exercises simulator-only transport and task UI cases;
+  it is not evidence for the physical-device release checklist.
 - `host-mac/scripts/run_doordash_takeover_resume_simulator_live_e2e.py`
   runs only the continuous Release-Simulator DoorDash acceptance through
   direct `xcodebuild`, preserving the person-handled macOS consent, private
@@ -283,15 +241,9 @@ commands, mode boundaries, and privacy guidance.
 - `WireFormat.swift` and `SignalingClient.swift` are duplicated
   between `ios/` and `host-mac/`. Extract to a shared SPM package
   under `protocol/Swift/` before further divergence.
-- Apple's language-model planner requires the Foundation Models framework and
-  an available on-device model. Older or ineligible Macs keep the reviewed
-  deterministic route subset and fail closed for other ordinary-language
-  steps; an open-source typed semantic planner is not yet shipped.
-- The 8–15 GiB compact runtime profile has been exercised on a 32 GiB Apple
-  silicon Mac with its exact 4,096-token limits and measured at about 2.27 GiB
-  peak process footprint. It has not yet been validated on physical 8 GiB Mac
-  hardware, so that hardware tier is supported by bounded-resource tests, not
-  a completed low-memory field qualification.
+- Computer use requires Apple silicon and at least 16 GB of Mac memory. It is
+  limited to basic visual browser and Mac-app tasks and may stop to ask for
+  help.
 - The downloadable v0.2.0 host release predates the current main-branch
   Computer Use hardening. A new signed/notarized release is still required
   before end users receive these changes.
