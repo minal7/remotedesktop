@@ -8,8 +8,18 @@ protocol PixelElementReference: AnyObject {
     var role: String { get }
     var name: String { get }
     var isEnabled: Bool? { get }
+    var identity: AnyHashable? { get }
     func currentScreenRect() -> CGRect?
     func isSecure() -> Bool
+    func acceptsHit(at point: CGPoint, intendedIdentity: AnyHashable,
+                    deadline: ContinuousClock.Instant) -> Bool?
+}
+
+@MainActor
+extension PixelElementReference {
+    var identity: AnyHashable? { nil }
+    func acceptsHit(at point: CGPoint, intendedIdentity: AnyHashable,
+                    deadline: ContinuousClock.Instant) -> Bool? { nil }
 }
 
 struct PixelElementMark {
@@ -70,46 +80,6 @@ struct PixelWindowEvidence {
 }
 
 
-enum PixelTargetRebinding {
-    static func find(_ expected: AgentElement, in current: [PixelElementMark]) -> PixelElementMark? {
-        let matches = current.filter { $0.role == expected.role && $0.name == expected.name }
-        return matches.count == 1 ? matches[0] : nil
-    }
-}
-
-@MainActor
-enum PixelElementReferenceResolver {
-    static func observed(_ target: AgentElement, in marks: [PixelElementMark]) throws -> any PixelElementReference {
-        guard let mark = marks.first(where: { $0.id == target.id && $0.role == target.role && $0.name == target.name }),
-              let reference = mark.reference else { throw AgentEnvironmentError.targetGone }
-        return reference
-    }
-
-    static func rebound(_ target: AgentElement, in marks: [PixelElementMark]) throws -> any PixelElementReference {
-        guard let mark = PixelTargetRebinding.find(target, in: marks), let reference = mark.reference else {
-            throw AgentEnvironmentError.targetGone
-        }
-        return reference
-    }
-
-    static func currentCentre(_ target: AgentElement, reference: any PixelElementReference,
-                              windowBounds: CGRect) throws -> CGPoint {
-        guard reference.role == target.role, reference.name == target.name else { throw AgentEnvironmentError.targetGone }
-        if reference.isSecure() { throw AgentEnvironmentError.credentialHandoff }
-        if reference.isEnabled == false { throw AgentEnvironmentError.disabledTarget }
-        guard let rect = reference.currentScreenRect(), valid(rect),
-              rect.intersects(windowBounds) || reference.role == "AXMenuBarItem" else {
-            throw AgentEnvironmentError.targetGone
-        }
-        return CGPoint(x: rect.midX, y: rect.midY)
-    }
-
-    private static func valid(_ rect: CGRect) -> Bool {
-        !rect.isNull && !rect.isEmpty && rect.minX.isFinite && rect.minY.isFinite &&
-        rect.width.isFinite && rect.height.isFinite
-    }
-}
-
 /// A best-effort, deadline-bounded reader. A slow app contributes an empty mark list.
 @MainActor
 enum ElementMarks {
@@ -118,6 +88,7 @@ enum ElementMarks {
         let role: String
         let name: String
         let rect: CGRect
+        let sourceRect: CGRect
         let state: [String]
         let inWindow: Bool
         let enabled: Bool
@@ -412,6 +383,7 @@ enum ElementMarks {
                   deadline.map({ ContinuousClock.now < $0 }) ?? true else { return }
             visited += 1
             let role = node.role
+            guard !node.isHidden, role != "AXScrollBar" else { return }
             let rect = node.screenRect
             var childViewportBounds = viewportBounds
             if role == "AXScrollArea" || role == "AXClipView" {
@@ -445,11 +417,18 @@ enum ElementMarks {
                 if !enabled { state.append("disabled") }
                 if readOnly { state.append("read_only") }
                 if let rect, valid(rect) {
-                    let inWindow = rect.intersects(windowBounds) &&
-                        (viewportBounds.map { rect.intersection($0.intersection(windowBounds)).contains(CGPoint(x: rect.midX, y: rect.midY)) } ?? true)
-                    if inWindow || role == "AXMenuBarItem" {
-                        candidates.append(Candidate(identity: node.identity, role: role, name: title, rect: rect,
-                            state: state, inWindow: inWindow, enabled: enabled, value: node.value, node: node))
+                    let visibleRect: CGRect
+                    if role == "AXMenuBarItem", viewportBounds == nil { visibleRect = rect }
+                    else {
+                        let clip = viewportBounds.map { $0.intersection(windowBounds) } ?? windowBounds
+                        visibleRect = rect.intersection(clip)
+                    }
+                    if valid(visibleRect) {
+                        let inWindow = role == "AXMenuBarItem" && viewportBounds == nil
+                            ? rect.intersects(windowBounds) : true
+                        candidates.append(Candidate(identity: node.identity, role: role, name: title,
+                            rect: visibleRect, sourceRect: rect, state: state, inWindow: inWindow, enabled: enabled,
+                            value: node.value, node: node))
                     }
                 }
             }
@@ -463,25 +442,26 @@ enum ElementMarks {
         let named = candidates.map { candidate -> Candidate in
             guard candidate.name.isEmpty, let lifted = childText[candidate.identity], !lifted.isEmpty else { return candidate }
             return Candidate(identity: candidate.identity, role: candidate.role, name: lifted.joined(separator: " "),
-                rect: candidate.rect, state: candidate.state, inWindow: candidate.inWindow,
+                rect: candidate.rect, sourceRect: candidate.sourceRect, state: candidate.state, inWindow: candidate.inWindow,
                 enabled: candidate.enabled, value: candidate.value, node: candidate.node)
         }
         let sorted = named.sorted {
             let left = preference($0.role), right = preference($1.role)
-            return left == right ? ($0.rect.minY, $0.rect.minX) < ($1.rect.minY, $1.rect.minX) : left > right
+            return left == right ? ($0.sourceRect.minY, $0.sourceRect.minX) < ($1.sourceRect.minY, $1.sourceRect.minX) : left > right
         }
         var deduplicated: [Candidate] = []
         for candidate in sorted {
             let duplicate = deduplicated.contains { existing in
-                intersectionOverUnion(existing.rect, candidate.rect) >= 0.85
+                intersectionOverUnion(existing.sourceRect, candidate.sourceRect) >= 0.85
             }
             if !duplicate { deduplicated.append(candidate) }
         }
-        let ordered = deduplicated.sorted { ($0.rect.minY, $0.rect.minX) < ($1.rect.minY, $1.rect.minX) }
+        let ordered = deduplicated.sorted { ($0.sourceRect.minY, $0.sourceRect.minX) < ($1.sourceRect.minY, $1.sourceRect.minX) }
         let marks = ordered.enumerated().map { index, candidate in
             PixelElementMark(id: index + 1, role: candidate.role, name: candidate.name, screenRect: candidate.rect,
                 state: candidate.inWindow ? candidate.state : candidate.state + ["read_only", "offscreen"],
-                inView: candidate.inWindow, reference: candidate.node.makeReference(observedName: candidate.name),
+                inView: candidate.inWindow, reference: candidate.node.makeReference(observedName: candidate.name,
+                    visibleRect: candidate.rect),
                 identity: candidate.identity)
         }
         let axState = ordered.isEmpty ? nil : ordered.map { PixelAXElementState(identity: $0.identity, role: $0.role, title: $0.name,
@@ -657,7 +637,7 @@ enum ElementMarks {
         }
     }
 
-    private static func ax(_ value: CFTypeRef?) -> AXUIElement? {
+    fileprivate static func ax(_ value: CFTypeRef?) -> AXUIElement? {
         guard let value, CFGetTypeID(value) == AXUIElementGetTypeID() else { return nil }
         return unsafeBitCast(value, to: AXUIElement.self)
     }
@@ -686,6 +666,7 @@ private struct AXPixelNode: PixelAXNode {
     var value: String? { ElementMarks.normalizedAXValue(ElementMarks.read(element, kAXValueAttribute, deadline: deadline)) }
     var screenRect: CGRect? { ElementMarks.rect(element, deadline: deadline) }
     var isEnabled: Bool? { ElementMarks.read(element, kAXEnabledAttribute, deadline: deadline) as? Bool }
+    var isHidden: Bool { ElementMarks.read(element, kAXHiddenAttribute, deadline: deadline) as? Bool == true }
     var isProtected: Bool { ElementMarks.read(element, "AXProtectedContent", deadline: deadline) as? Bool == true }
     var isSecure: Bool {
         let currentRole = role
@@ -698,8 +679,8 @@ private struct AXPixelNode: PixelAXNode {
         ElementMarks.children(ElementMarks.read(element, kAXChildrenAttribute, deadline: deadline))
             .map { AXPixelNode(element: $0, deadline: deadline) }
     }
-    func makeReference(observedName: String) -> (any PixelElementReference)? {
-        AXPixelElementReference(element: element)
+    func makeReference(observedName: String, visibleRect: CGRect?) -> (any PixelElementReference)? {
+        AXPixelElementReference(element: element, visibleRect: visibleRect)
     }
 }
 
@@ -712,25 +693,65 @@ private struct PixelAXCompositeNode: PixelAXNode {
     var value: String? { nil }
     var screenRect: CGRect? { nil }
     var isEnabled: Bool? { nil }
+    var isHidden: Bool { false }
     var isProtected: Bool { false }
     var isSecure: Bool { false }
     var documentURL: String? { nil }
     func children() -> [any PixelAXNode] { nodes }
-    func makeReference(observedName: String) -> (any PixelElementReference)? { nil }
+    func makeReference(observedName: String, visibleRect: CGRect?) -> (any PixelElementReference)? { nil }
 }
 
 @MainActor
 private final class AXPixelElementReference: PixelElementReference {
     private let element: AXUIElement
+    private let visibleRect: CGRect?
 
-    init(element: AXUIElement) { self.element = element }
+    init(element: AXUIElement, visibleRect: CGRect?) { self.element = element; self.visibleRect = visibleRect }
 
     var role: String { ElementMarks.string(element, kAXRoleAttribute) ?? "unknown" }
+    var identity: AnyHashable? { AnyHashable(PixelAXIdentity(element: element)) }
     var name: String {
         let deadline = ContinuousClock.now + .milliseconds(40)
         return ElementMarks.semanticLabel(for: AXPixelNode(element: element, deadline: deadline), deadline: deadline)
     }
     var isEnabled: Bool? { ElementMarks.bool(element, kAXEnabledAttribute) }
-    func currentScreenRect() -> CGRect? { ElementMarks.currentScreenRect(element) }
+    func currentScreenRect() -> CGRect? {
+        guard let current = ElementMarks.currentScreenRect(element) else { return nil }
+        let clipped = visibleRect.map { current.intersection($0) } ?? current
+        return !clipped.isNull && !clipped.isEmpty ? clipped : nil
+    }
     func isSecure() -> Bool { ElementMarks.isSensitive(element, role: role, name: name) }
+    func acceptsHit(at point: CGPoint, intendedIdentity: AnyHashable,
+                    deadline: ContinuousClock.Instant) -> Bool? {
+        guard ContinuousClock.now < deadline else { return nil }
+        let system = AXUIElementCreateSystemWide()
+        AXUIElementSetMessagingTimeout(system, 0.01)
+        var hit: AXUIElement?
+        guard AXUIElementCopyElementAtPosition(system, Float(point.x), Float(point.y), &hit) == .success,
+              let hit else { return nil }
+        let hitIdentity = AnyHashable(PixelAXIdentity(element: hit))
+        if hitIdentity == intendedIdentity { return true }
+        guard let hitRole = ElementMarks.read(hit, kAXRoleAttribute, deadline: deadline) as? String else { return nil }
+        let hitActionable = PixelTargetSnapping.interactiveRoles.contains(hitRole)
+        if hitActionable { return PixelAXHitIdentity.matches(hit: hitIdentity, target: intendedIdentity,
+            hitActionable: true, parents: []) }
+        var node = hit
+        var parents: [(identity: AnyHashable, actionable: Bool)] = []
+        for _ in 0..<5 {
+            guard ContinuousClock.now < deadline,
+                  let parentValue = ElementMarks.read(node, kAXParentAttribute, deadline: deadline),
+                  let parent = ElementMarks.ax(parentValue),
+                  let parentRole = ElementMarks.read(parent, kAXRoleAttribute, deadline: deadline) as? String else { return nil }
+            let parentIdentity = AnyHashable(PixelAXIdentity(element: parent))
+            let actionable = PixelTargetSnapping.interactiveRoles.contains(parentRole)
+            parents.append((identity: parentIdentity, actionable: actionable))
+            if actionable {
+                return PixelAXHitIdentity.matches(hit: hitIdentity, target: intendedIdentity,
+                    hitActionable: hitActionable, parents: parents)
+            }
+            node = parent
+        }
+        return PixelAXHitIdentity.matches(hit: hitIdentity, target: intendedIdentity,
+            hitActionable: hitActionable, parents: parents)
+    }
 }

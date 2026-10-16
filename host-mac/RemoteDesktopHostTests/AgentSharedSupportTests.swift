@@ -124,6 +124,186 @@ final class AgentSharedSupportTests: XCTestCase {
         XCTAssertEqual(events.count, 0)
     }
 
+    func testElementMarksPruneHiddenScrollbarAndZeroAreaNodesButKeepVisiblePartialControls() throws {
+        let hiddenChild = MarkAXNode(identity: "hidden-child", role: "AXButton",
+            rect: CGRect(x: 10, y: 10, width: 20, height: 20))
+        let hidden = MarkAXNode(identity: "hidden", role: "AXGroup",
+            rect: CGRect(x: 0, y: 0, width: 50, height: 50), hidden: true, children: [hiddenChild])
+        let scrollChild = MarkAXNode(identity: "scroll-child", role: "AXButton",
+            rect: CGRect(x: 70, y: 10, width: 20, height: 20))
+        let scrollbar = MarkAXNode(identity: "scrollbar", role: "AXScrollBar",
+            rect: CGRect(x: 95, y: 0, width: 5, height: 80), children: [scrollChild])
+        let zero = MarkAXNode(identity: "zero", role: "AXButton",
+            rect: CGRect(x: 10, y: 80, width: 0, height: 20))
+        let partial = MarkAXNode(identity: "partial", role: "AXButton",
+            rect: CGRect(x: 95, y: 30, width: 20, height: 20))
+        let clipped = MarkAXNode(identity: "clipped", role: "AXButton",
+            rect: CGRect(x: 65, y: 60, width: 20, height: 20))
+        let outsideClip = MarkAXNode(identity: "outside-clip", role: "AXButton",
+            rect: CGRect(x: 75, y: 60, width: 20, height: 20))
+        let scrollArea = MarkAXNode(identity: "area", role: "AXScrollArea",
+            rect: CGRect(x: 30, y: 50, width: 40, height: 40), children: [clipped, outsideClip])
+        let bounds = CGRect(x: 0, y: 0, width: 100, height: 100)
+
+        let projected = ElementMarks.project(root: MarkAXNode.root([hidden, scrollbar, zero, partial, scrollArea]),
+            windowBounds: bounds)
+
+        XCTAssertEqual(projected.marks.compactMap { $0.identity as? String }, ["partial", "clipped"])
+        XCTAssertEqual(projected.marks.first?.screenRect, CGRect(x: 95, y: 30, width: 5, height: 20))
+        XCTAssertEqual(projected.marks.last?.screenRect, CGRect(x: 65, y: 60, width: 5, height: 20))
+        XCTAssertEqual(hidden.childrenReads, 0)
+        XCTAssertEqual(scrollbar.childrenReads, 0)
+        XCTAssertEqual(hiddenChild.valueReads, 0)
+        let mark = try XCTUnwrap(projected.marks.first)
+        let target = AgentElement(id: mark.id, role: mark.role, name: mark.name, value: nil,
+            state: mark.state, bbox: .init(x: 0, y: 0, width: 1, height: 1), inView: mark.inView)
+        let clippedReference = try XCTUnwrap(mark.reference as? MarkReference)
+        clippedReference.rect = CGRect(x: 95, y: 30, width: 20, height: 20)
+        XCTAssertEqual(try PixelElementReferenceResolver.currentCentre(target,
+            reference: clippedReference, windowBounds: bounds), CGPoint(x: 97.5, y: 40))
+    }
+
+    func testOverlappedMarkPointUsesNearestPointHittingExactOrDescendant() {
+        let bounds = CGRect(x: 10, y: 10, width: 40, height: 40)
+        let reference = MarkReference(role: "AXButton", name: "Save", rect: bounds, identity: "save") { point in
+            point.x > bounds.midX
+        }
+        let mark = PixelElementMark(id: 9, role: "AXButton", name: "Save", screenRect: bounds,
+            state: ["visible"], inView: true, reference: reference, identity: "save")
+
+        let result = PixelTargetSnapping.resolve(CGPoint(x: 30, y: 30), in: [mark],
+            deadline: .now + .milliseconds(300))
+
+        XCTAssertTrue(result.keepsCoordinate)
+        XCTAssertEqual(result.mark?.id, 9)
+        XCTAssertGreaterThan(result.point.x, 30)
+        XCTAssertTrue(bounds.contains(result.point))
+        XCTAssertNotEqual(result.point, CGPoint(x: 30, y: 30))
+    }
+
+    func testOverlapSearchPrefersTheNearestOfMultipleValidatedInteriors() {
+        let rect = CGRect(x: 10, y: 10, width: 40, height: 40)
+        let reference = MarkReference(role: "AXButton", name: "Save", rect: rect, identity: "save") { point in
+            point.x > rect.midX + 5 || point.y > rect.midY + 1
+        }
+        let mark = PixelElementMark(id: 9, role: "AXButton", name: "Save", screenRect: rect,
+            state: ["visible"], inView: true, reference: reference, identity: "save")
+
+        let result = PixelTargetSnapping.resolve(CGPoint(x: 30, y: 30), in: [mark])
+
+        XCTAssertTrue(result.keepsCoordinate)
+        XCTAssertEqual(result.point.x, 30, accuracy: 0.01)
+        XCTAssertGreaterThan(result.point.y, 31)
+        XCTAssertLessThan(result.point.y, 31.1)
+    }
+
+    func testOverlappedMarkKeepsCentreWhenHitIsTheIntendedElement() {
+        let rect = CGRect(x: 10, y: 10, width: 40, height: 40)
+        let reference = MarkReference(role: "AXButton", name: "Save", rect: rect, identity: "save") { _ in true }
+        let mark = PixelElementMark(id: 9, role: "AXButton", name: "Save", screenRect: rect,
+            state: ["visible"], inView: true, reference: reference, identity: "save")
+        let center = CGPoint(x: 30, y: 30)
+
+        let result = PixelTargetSnapping.resolve(center, in: [mark])
+
+        XCTAssertEqual(result.point, center)
+        XCTAssertFalse(result.keepsCoordinate)
+        XCTAssertNil(result.note)
+    }
+
+    func testElementTargetCentreUsesValidatedInteriorOrReportsOverlap() throws {
+        let rect = CGRect(x: 10, y: 10, width: 40, height: 40)
+        let target = AgentElement(id: 9, role: "AXButton", name: "Save", value: nil,
+            state: ["visible"], bbox: .init(x: 0, y: 0, width: 1, height: 1), inView: true)
+        let reference = MarkReference(role: "AXButton", name: "Save", rect: rect, identity: "save") {
+            $0.x > rect.midX
+        }
+        var note: String?
+
+        let adjusted = try PixelElementReferenceResolver.currentCentre(target, reference: reference,
+            windowBounds: rect, note: { note = $0 })
+
+        XCTAssertTrue(rect.contains(adjusted))
+        XCTAssertGreaterThan(adjusted.x, rect.midX)
+        XCTAssertTrue(note?.contains("adjusted click") == true)
+
+        let blocked = MarkReference(role: "AXButton", name: "Save", rect: rect, identity: "save") { _ in false }
+        note = nil
+        let fallback = try PixelElementReferenceResolver.currentCentre(target, reference: blocked,
+            windowBounds: rect, note: { note = $0 })
+        XCTAssertEqual(fallback, CGPoint(x: rect.midX, y: rect.midY))
+        XCTAssertEqual(note, "target overlapped")
+    }
+
+    func testOverlappedCoordinateTieKeepsOriginalPointWithoutChoosingAMark() {
+        let rect = CGRect(x: 10, y: 10, width: 40, height: 40)
+        let first = PixelElementMark(id: 1, role: "AXButton", name: "First", screenRect: rect,
+            state: ["visible"], inView: true,
+            reference: MarkReference(role: "AXButton", name: "First", rect: rect, identity: "first") { _ in true },
+            identity: "first")
+        let second = PixelElementMark(id: 2, role: "AXButton", name: "Second", screenRect: rect,
+            state: ["visible"], inView: true,
+            reference: MarkReference(role: "AXButton", name: "Second", rect: rect, identity: "second") { _ in true },
+            identity: "second")
+        let center = CGPoint(x: 30, y: 30)
+
+        let result = PixelTargetSnapping.resolve(center, in: [first, second])
+
+        XCTAssertEqual(result.point, center)
+        XCTAssertNil(result.mark)
+        XCTAssertEqual(result.note, "target overlapped")
+        XCTAssertTrue(result.keepsCoordinate)
+    }
+
+    func testUnknownCoordinateHitDoesNotStartOverlapSearch() {
+        let rect = CGRect(x: 10, y: 10, width: 40, height: 40)
+        var probes = 0
+        let reference = MarkReference(role: "AXButton", name: "Save", rect: rect, identity: "save") { _ in
+            probes += 1
+            return nil
+        }
+        let mark = PixelElementMark(id: 1, role: "AXButton", name: "Save", screenRect: rect,
+            state: ["visible"], inView: true, reference: reference, identity: "save")
+        let center = CGPoint(x: 30, y: 30)
+
+        let result = PixelTargetSnapping.resolve(center, in: [mark])
+
+        XCTAssertEqual(probes, 1)
+        XCTAssertEqual(result.point, center)
+        XCTAssertEqual(result.note, "target hit could not be verified")
+        XCTAssertTrue(result.keepsCoordinate)
+    }
+
+    func testOverlappedMarkCentreHitIdentityUsesNearestActionableAncestorWithinFiveParents() {
+        XCTAssertTrue(PixelAXHitIdentity.matches(hit: "button", target: "button", parents: []))
+        XCTAssertTrue(PixelAXHitIdentity.matches(hit: "text", target: "button",
+            parents: [("group", false), ("button", true)]))
+        XCTAssertTrue(PixelAXHitIdentity.matches(hit: "leaf", target: "button",
+            parents: [("a", false), ("b", false), ("c", false), ("d", false), ("button", true)]))
+        XCTAssertFalse(PixelAXHitIdentity.matches(hit: "leaf", target: "button",
+            parents: [("sibling-button", true), ("button", true)]))
+        XCTAssertFalse(PixelAXHitIdentity.matches(hit: "child-button", target: "button", hitActionable: true,
+            parents: [("button", true)]))
+        XCTAssertFalse(PixelAXHitIdentity.matches(hit: "leaf", target: "button",
+            parents: [("a", false), ("b", false), ("c", false), ("d", false), ("e", false), ("button", true)]))
+    }
+
+    func testFullyOccludedOrExpiredOverlapSearchKeepsOriginalPointAndAddsNote() {
+        let rect = CGRect(x: 10, y: 10, width: 40, height: 40)
+        let reference = MarkReference(role: "AXButton", name: "Save", rect: rect, identity: "save") { _ in false }
+        let mark = PixelElementMark(id: 1, role: "AXButton", name: "Save", screenRect: rect,
+            state: ["visible"], inView: true, reference: reference, identity: "save")
+        let center = CGPoint(x: 30, y: 30)
+        let occluded = PixelTargetSnapping.resolve(center, in: [mark], deadline: .now + .milliseconds(300))
+        XCTAssertEqual(occluded.point, center)
+        XCTAssertEqual(occluded.note, "target overlapped")
+        XCTAssertTrue(occluded.keepsCoordinate)
+
+        let expired = PixelTargetSnapping.resolve(center, in: [mark], deadline: .now)
+        XCTAssertEqual(expired.point, center)
+        XCTAssertEqual(expired.note, "target overlapped")
+    }
+
     private func authorityRecord(id: Int = 3, role: String = "AXTextField", identifier: String = "query",
                                  value: String, selection: AgentSelection = .init(start: 1, end: 1))
         -> AgentMacAccessibility.EditableAuthorityRecord {
@@ -140,6 +320,60 @@ final class AgentSharedSupportTests: XCTestCase {
     private struct FocusedRecipient {
         let pid: pid_t
         let attributes: [String: Any]
+    }
+
+    private final class MarkAXNode: PixelAXNode {
+        let identity: AnyHashable
+        let role: String
+        let title: String?
+        private(set) var valueReads = 0
+        var value: String? { valueReads += 1; return nil }
+        let screenRect: CGRect?
+        let isEnabled: Bool? = true
+        let isHidden: Bool
+        let isProtected = false
+        let isSecure = false
+        let documentURL: String? = nil
+        private let childNodes: [any PixelAXNode]
+        private(set) var childrenReads = 0
+
+        init(identity: AnyHashable, role: String, rect: CGRect?, hidden: Bool = false,
+             children: [any PixelAXNode] = []) {
+            self.identity = identity; self.role = role; screenRect = rect
+            isHidden = hidden; childNodes = children
+            title = identity as? String
+        }
+        static func root(_ children: [any PixelAXNode]) -> MarkAXNode {
+            MarkAXNode(identity: "root", role: "AXWindow", rect: nil, children: children)
+        }
+        func children() -> [any PixelAXNode] { childrenReads += 1; return childNodes }
+        func makeReference(observedName: String, visibleRect: CGRect?) -> (any PixelElementReference)? {
+            MarkReference(role: role, name: observedName, rect: screenRect, visibleRect: visibleRect,
+                identity: identity, hit: { _ in true })
+        }
+    }
+
+    private final class MarkReference: PixelElementReference {
+        let role: String
+        let name: String
+        var rect: CGRect?
+        private let visibleRect: CGRect?
+        let identity: AnyHashable?
+        private let hit: (CGPoint) -> Bool?
+        init(role: String, name: String, rect: CGRect?, visibleRect: CGRect? = nil, identity: AnyHashable,
+             hit: @escaping (CGPoint) -> Bool?) {
+            self.role = role; self.name = name; self.rect = rect; self.visibleRect = visibleRect
+            self.identity = identity; self.hit = hit
+        }
+        var isEnabled: Bool? { true }
+        func currentScreenRect() -> CGRect? {
+            guard let rect else { return nil }
+            let current = visibleRect.map { rect.intersection($0) } ?? rect
+            return current.isNull || current.isEmpty ? nil : current
+        }
+        func isSecure() -> Bool { false }
+        func acceptsHit(at point: CGPoint, intendedIdentity: AnyHashable,
+                        deadline: ContinuousClock.Instant) -> Bool? { hit(point) }
     }
 
     private final class PostedHostEvents: @unchecked Sendable {

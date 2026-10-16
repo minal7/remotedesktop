@@ -1,11 +1,33 @@
 import CoreGraphics
 import ScreenCaptureKit
 
+@MainActor
+final class PixelResolvedTargets {
+    let references: [Int: any PixelElementReference]
+    private(set) var resolutionNote: String?
+
+    init(references: [Int: any PixelElementReference], resolutionNote: String? = nil) {
+        self.references = references; self.resolutionNote = resolutionNote
+    }
+
+    func appendResolutionNote(_ note: String) {
+        guard !(resolutionNote?.contains(note) ?? false) else { return }
+        resolutionNote = [resolutionNote, note].compactMap { $0 }.joined(separator: "; ")
+    }
+}
+
 struct PixelPointSnap {
     let point: CGPoint
     let mark: PixelElementMark?
+    let note: String?
+    let keepsCoordinate: Bool
+
+    init(point: CGPoint, mark: PixelElementMark?, note: String? = nil, keepsCoordinate: Bool = false) {
+        self.point = point; self.mark = mark; self.note = note; self.keepsCoordinate = keepsCoordinate
+    }
 }
 
+@MainActor
 enum PixelTargetSnapping {
     static let interactiveRoles: Set<String> = [
         "AXButton", "AXLink", "AXTextField", "AXTextArea", "AXTextView", "AXSearchField",
@@ -13,9 +35,9 @@ enum PixelTargetSnapping {
         "AXMenuBarItem", "AXSlider", "AXIncrementor", "AXSwitch", "AXDisclosureTriangle"
     ]
 
-    static func resolve(_ point: CGPoint, in marks: [PixelElementMark], maximumDistance: CGFloat = 12) -> PixelPointSnap {
-        guard point.x.isFinite, point.y.isFinite, maximumDistance.isFinite, maximumDistance >= 0,
-              !marks.contains(where: { $0.screenRect.contains(point) }) else {
+    static func resolve(_ point: CGPoint, in marks: [PixelElementMark], maximumDistance: CGFloat = 12,
+                        deadline: ContinuousClock.Instant = .now + .milliseconds(300)) -> PixelPointSnap {
+        guard point.x.isFinite, point.y.isFinite, maximumDistance.isFinite, maximumDistance >= 0 else {
             return PixelPointSnap(point: point, mark: nil)
         }
         let candidates = marks.filter { mark in
@@ -27,11 +49,84 @@ enum PixelTargetSnapping {
             return (mark, dx * dx + dy * dy)
         }.filter { $0.1 <= maximumDistance * maximumDistance }
             .sorted { $0.1 < $1.1 }
-        guard let nearest = candidates.first,
-              candidates.dropFirst().first.map({ abs($0.1 - nearest.1) > 0.0001 }) ?? true else {
+        let containingCandidates = candidates.filter { $0.0.screenRect.contains(point) }
+        if let containing = uniqueNearest(containingCandidates) {
+            if let reference = containing.0.reference, let identity = containing.0.identity {
+                switch reference.acceptsHit(at: point, intendedIdentity: identity, deadline: deadline) {
+                case true: return PixelPointSnap(point: point, mark: nil)
+                case nil:
+                    return PixelPointSnap(point: point, mark: containing.0,
+                        note: "target hit could not be verified", keepsCoordinate: true)
+                case false:
+                    if let alternative = nearestHitPoint(to: point, in: containing.0.screenRect,
+                        deadline: deadline, matches: { reference.acceptsHit(at: $0, intendedIdentity: identity, deadline: deadline) }) {
+                        return PixelPointSnap(point: alternative, mark: containing.0,
+                            note: "adjusted click within mark \(containing.0.id)", keepsCoordinate: true)
+                    }
+                    return PixelPointSnap(point: point, mark: containing.0, note: "target overlapped", keepsCoordinate: true)
+                }
+            }
             return PixelPointSnap(point: point, mark: nil)
         }
+        if !containingCandidates.isEmpty {
+            return PixelPointSnap(point: point, mark: nil, note: "target overlapped", keepsCoordinate: true)
+        }
+        guard !marks.contains(where: { $0.screenRect.contains(point) }),
+              let nearest = uniqueNearest(candidates) else { return PixelPointSnap(point: point, mark: nil) }
         return PixelPointSnap(point: CGPoint(x: nearest.0.screenRect.midX, y: nearest.0.screenRect.midY), mark: nearest.0)
+    }
+
+    static func resolvedAction(_ action: AgentAction, originalPoint: CGPoint, snap: PixelPointSnap,
+                               imageSize: CGSize, screenBounds: CGRect) -> (action: AgentAction, note: String?) {
+        guard snap.keepsCoordinate else {
+            let rewritten = resolveClick(action, snappedMark: snap.mark)
+            return (rewritten.action, snap.note ?? rewritten.note)
+        }
+        guard snap.point != originalPoint,
+              let pixel = PixelGeometry.imagePoint(snap.point, imageSize: imageSize, screenBounds: screenBounds),
+              case let .click(.point, button, count) = action else { return (action, snap.note) }
+        return (.click(target: .point(x: Double(pixel.x), y: Double(pixel.y)), button: button, count: count), snap.note)
+    }
+
+    private static func uniqueNearest(_ candidates: [(PixelElementMark, CGFloat)]) -> (PixelElementMark, CGFloat)? {
+        guard let nearest = candidates.first,
+              candidates.dropFirst().first.map({ abs($0.1 - nearest.1) > 0.0001 }) ?? true else { return nil }
+        return nearest
+    }
+
+    static func nearestHitPoint(to origin: CGPoint, in rect: CGRect, deadline: ContinuousClock.Instant,
+                                matches: (CGPoint) -> Bool?) -> CGPoint? {
+        // Bounded rays refine observed hits; this is not an exhaustive pixel-level proof.
+        let directions: [(CGFloat, CGFloat)] = [(1, 0), (-1, 0), (0, 1), (0, -1),
+            (1, 1), (1, -1), (-1, 1), (-1, -1)]
+        let points = [0.15, 0.30, 0.45].flatMap { fraction in
+            directions.map { dx, dy in
+                CGPoint(x: origin.x + rect.width * fraction * dx,
+                        y: origin.y + rect.height * fraction * dy)
+            }
+        }.filter { rect.contains($0) }.sorted {
+            let left = ($0.x - origin.x) * ($0.x - origin.x) + ($0.y - origin.y) * ($0.y - origin.y)
+            let right = ($1.x - origin.x) * ($1.x - origin.x) + ($1.y - origin.y) * ($1.y - origin.y)
+            return left == right ? ($0.y, $0.x) < ($1.y, $1.x) : left < right
+        }
+        var best: CGPoint?
+        var bestDistance = CGFloat.infinity
+        for candidate in points {
+            guard ContinuousClock.now < deadline else { return best }
+            guard matches(candidate) == true else { continue }
+            var valid = candidate
+            var invalid = origin
+            for _ in 0..<8 {
+                guard ContinuousClock.now < deadline else { break }
+                let midpoint = CGPoint(x: (valid.x + invalid.x) / 2, y: (valid.y + invalid.y) / 2)
+                guard rect.contains(midpoint) else { break }
+                if matches(midpoint) == true { valid = midpoint } else { invalid = midpoint }
+            }
+            let dx = valid.x - origin.x, dy = valid.y - origin.y
+            let distance = dx * dx + dy * dy
+            if distance < bestDistance { best = valid; bestDistance = distance }
+        }
+        return best
     }
 
     static func resolveClick(_ action: AgentAction, snappedMark: PixelElementMark?) -> (action: AgentAction, note: String?) {

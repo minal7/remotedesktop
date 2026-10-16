@@ -11,11 +11,12 @@ protocol PixelAXNode {
     var value: String? { get }
     var screenRect: CGRect? { get }
     var isEnabled: Bool? { get }
+    var isHidden: Bool { get }
     var isProtected: Bool { get }
     var isSecure: Bool { get }
     var documentURL: String? { get }
     func children() -> [any PixelAXNode]
-    func makeReference(observedName: String) -> (any PixelElementReference)?
+    func makeReference(observedName: String, visibleRect: CGRect?) -> (any PixelElementReference)?
 }
 
 struct PixelAXIdentity: Hashable {
@@ -23,6 +24,71 @@ struct PixelAXIdentity: Hashable {
 
     static func == (lhs: Self, rhs: Self) -> Bool { CFEqual(lhs.element, rhs.element) }
     func hash(into hasher: inout Hasher) { hasher.combine(CFHash(element)) }
+}
+
+enum PixelAXHitIdentity {
+    static func matches<Identity: Equatable>(hit: Identity, target: Identity, hitActionable: Bool = false,
+                                             parents: [(identity: Identity, actionable: Bool)], maximumParents: Int = 5) -> Bool {
+        if hit == target { return true }
+        if hitActionable { return false }
+        return parents.prefix(max(0, maximumParents)).first(where: { $0.actionable })?.identity == target
+    }
+}
+
+enum PixelTargetRebinding {
+    static func find(_ expected: AgentElement, in current: [PixelElementMark]) -> PixelElementMark? {
+        let matches = current.filter { $0.role == expected.role && $0.name == expected.name }
+        return matches.count == 1 ? matches[0] : nil
+    }
+}
+
+@MainActor
+enum PixelElementReferenceResolver {
+    static func observed(_ target: AgentElement, in marks: [PixelElementMark]) throws -> any PixelElementReference {
+        guard let mark = marks.first(where: { $0.id == target.id && $0.role == target.role && $0.name == target.name }),
+              let reference = mark.reference else { throw AgentEnvironmentError.targetGone }
+        return reference
+    }
+
+    static func rebound(_ target: AgentElement, in marks: [PixelElementMark]) throws -> any PixelElementReference {
+        guard let mark = PixelTargetRebinding.find(target, in: marks), let reference = mark.reference else {
+            throw AgentEnvironmentError.targetGone
+        }
+        return reference
+    }
+
+    static func currentCentre(_ target: AgentElement, reference: any PixelElementReference,
+                              windowBounds: CGRect, note: ((String) -> Void)? = nil) throws -> CGPoint {
+        guard reference.role == target.role, reference.name == target.name else { throw AgentEnvironmentError.targetGone }
+        if reference.isSecure() { throw AgentEnvironmentError.credentialHandoff }
+        if reference.isEnabled == false { throw AgentEnvironmentError.disabledTarget }
+        guard let rect = reference.currentScreenRect(), valid(rect),
+              rect.intersects(windowBounds) || reference.role == "AXMenuBarItem" else {
+            throw AgentEnvironmentError.targetGone
+        }
+        let center = CGPoint(x: rect.midX, y: rect.midY)
+        guard let identity = reference.identity else { return center }
+        let deadline = ContinuousClock.now + .milliseconds(300)
+        switch reference.acceptsHit(at: center, intendedIdentity: identity, deadline: deadline) {
+        case true: return center
+        case false:
+            if let point = PixelTargetSnapping.nearestHitPoint(to: center, in: rect, deadline: deadline,
+                matches: { reference.acceptsHit(at: $0, intendedIdentity: identity, deadline: deadline) }) {
+                note?("adjusted click within mark \(target.id)")
+                return point
+            }
+            note?("target overlapped")
+            return center
+        case nil:
+            note?("target hit could not be verified")
+            return center
+        }
+    }
+
+    private static func valid(_ rect: CGRect) -> Bool {
+        !rect.isNull && !rect.isEmpty && rect.minX.isFinite && rect.minY.isFinite &&
+        rect.width.isFinite && rect.height.isFinite
+    }
 }
 
 struct PixelAXElementState {

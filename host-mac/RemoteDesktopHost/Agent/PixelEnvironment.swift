@@ -72,16 +72,6 @@ final class PixelEnvironment: AgentEnvironment {
         let marks: PixelElementMarks?
     }
 
-    private final class ResolvedPixelTargets {
-        let references: [Int: any PixelElementReference]
-        let resolutionNote: String?
-
-        init(references: [Int: any PixelElementReference], resolutionNote: String? = nil) {
-            self.references = references
-            self.resolutionNote = resolutionNote
-        }
-    }
-
     private let taskID: String
     private let injector: InputInjector
     private let registry: AgentAppRegistry
@@ -212,9 +202,12 @@ final class PixelEnvironment: AgentEnvironment {
                 imageSize: CGSize(width: snapshot.image.width, height: snapshot.image.height),
                 screenBounds: snapshot.screenBounds),
            let marks = snapshot.marks {
-            let snap = PixelTargetSnapping.resolve(screenPoint, in: marks.marks)
-            let rewritten = PixelTargetSnapping.resolveClick(action, snappedMark: snap.mark)
-            resolvedAction = rewritten.action; resolutionNote = rewritten.note
+            let snap = PixelTargetSnapping.resolve(screenPoint, in: marks.marks,
+                deadline: .now + .milliseconds(300))
+            let resolved = PixelTargetSnapping.resolvedAction(action, originalPoint: screenPoint, snap: snap,
+                imageSize: CGSize(width: snapshot.image.width, height: snapshot.image.height),
+                screenBounds: snapshot.screenBounds)
+            resolvedAction = resolved.action; resolutionNote = resolved.note
         }
         let targets = try AgentTargetBinding.targets(resolvedAction).compactMap { target -> AgentElement? in
             switch target {
@@ -235,7 +228,7 @@ final class PixelEnvironment: AgentEnvironment {
         let references = try Self.references(for: targets, marks: snapshot?.marks?.marks ?? [])
         return .init(action: resolvedAction, frame: frame, targets: targets, targetContextLabel: label,
             surfaceReadOnly: snapshot.map { AgentSafetyBoundary.readOnly(bundleID: $0.bundleID, appName: $0.appName) } ?? false,
-            hostBinding: ResolvedPixelTargets(references: references, resolutionNote: resolutionNote))
+            hostBinding: PixelResolvedTargets(references: references, resolutionNote: resolutionNote))
     }
 
     func rebind(_ resolved: AgentResolvedAction, in frame: AgentFrame) async throws -> AgentResolvedAction {
@@ -250,18 +243,18 @@ final class PixelEnvironment: AgentEnvironment {
             previous: resolved.targetContextLabel) { x, y in
             SystemBarriers.targetLabel(screenshot: frame.observation.screenshot, x: x, y: y)
         }
-        let oldBindings = resolved.hostBinding as? ResolvedPixelTargets
+        let oldBindings = resolved.hostBinding as? PixelResolvedTargets
         return .init(action: resolved.action, frame: frame, targets: current,
             targetContextLabel: targetContextLabel,
             surfaceReadOnly: snapshot.map { AgentSafetyBoundary.readOnly(bundleID: $0.bundleID, appName: $0.appName) } ?? resolved.surfaceReadOnly,
-            hostBinding: ResolvedPixelTargets(references: references, resolutionNote: oldBindings?.resolutionNote))
+            hostBinding: PixelResolvedTargets(references: references, resolutionNote: oldBindings?.resolutionNote))
     }
 
     func execute(_ resolved: AgentResolvedAction) async throws -> AgentExecutionResult {
         try checkScope(resolved.frame.scope)
         let startWindow = await frontWindowIdentity()
         if let snapshot = snapshots[resolved.frame.scope.identity] { lastSnapshot = snapshot }
-        let bindings = resolved.hostBinding as? ResolvedPixelTargets
+        let bindings = resolved.hostBinding as? PixelResolvedTargets
         var detail: String
         switch resolved.action {
         case let .click(target, button, count):
@@ -513,7 +506,7 @@ final class PixelEnvironment: AgentEnvironment {
     }
 
     private func type(_ text: String, mode: AgentTextMode, target: AgentTarget?, frame: AgentFrame,
-                      targets: [AgentElement], bindings: ResolvedPixelTargets?) async throws -> String {
+                      targets: [AgentElement], bindings: PixelResolvedTargets?) async throws -> String {
         guard snapshots[frame.scope.identity] != nil else { throw AgentEnvironmentError.targetGone }
         if let target { try click(screenPoint(target, frame: frame, targets: targets, bindings: bindings), button: .left, count: 1) }
         let focused = try ensureNonSecureFocus()
@@ -572,7 +565,7 @@ final class PixelEnvironment: AgentEnvironment {
     }
 
     private func select(_ option: String, target: AgentTarget, frame: AgentFrame, targets: [AgentElement],
-                        bindings: ResolvedPixelTargets?) async throws -> String {
+                        bindings: PixelResolvedTargets?) async throws -> String {
         guard let snapshot = snapshots[frame.scope.identity] else { throw AgentEnvironmentError.targetGone }
         let window = snapshot.window
         try click(screenPoint(target, frame: frame, targets: targets, bindings: bindings), button: .left, count: 1)
@@ -588,7 +581,7 @@ final class PixelEnvironment: AgentEnvironment {
     }
 
     private func screenPoint(_ target: AgentTarget, frame: AgentFrame, targets: [AgentElement],
-                             bindings: ResolvedPixelTargets?) throws -> CGPoint {
+                             bindings: PixelResolvedTargets?) throws -> CGPoint {
         guard let snapshot = snapshots[frame.scope.identity] else { throw AgentEnvironmentError.targetGone }
         guard let activeWindowBounds = snapshot.activeWindowBounds, !activeWindowBounds.isEmpty else {
             throw AgentEnvironmentError.unavailable("point is outside the active window \"\(snapshot.title)\"; use open_app to switch apps")
@@ -609,7 +602,7 @@ final class PixelEnvironment: AgentEnvironment {
                 + menuBarBounds()
             let expandedBounds = (dialogs + menuBar).reduce(activeWindowBounds) { $0.union($1) }
             let point = try PixelElementReferenceResolver.currentCentre(element, reference: reference,
-                windowBounds: expandedBounds)
+                windowBounds: expandedBounds, note: { bindings?.appendResolutionNote($0) })
             try requireActiveWindowPoint(point, snapshot: snapshot, dialogs: dialogs, menuBar: menuBar)
             return point
         case let .point(x, y): pixel = CGPoint(x: x, y: y)

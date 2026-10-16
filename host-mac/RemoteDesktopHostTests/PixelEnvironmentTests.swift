@@ -756,6 +756,7 @@ private final class TestPixelAXNode: PixelAXNode {
     private let storedValue: String?
     let screenRect: CGRect?
     let isEnabled: Bool?
+    let isHidden = false
     let isProtected: Bool
     let isSecure: Bool
     let documentURL: String? = nil
@@ -775,8 +776,8 @@ private final class TestPixelAXNode: PixelAXNode {
 
     var value: String? { valueReads += 1; return storedValue }
     func children() -> [any PixelAXNode] { childrenReads += 1; return childNodes }
-    func makeReference(observedName: String) -> (any PixelElementReference)? {
-        TestPixelElementReference(role: role, name: observedName, rect: screenRect,
+    func makeReference(observedName: String, visibleRect: CGRect?) -> (any PixelElementReference)? {
+        TestPixelElementReference(role: role, name: observedName, rect: visibleRect ?? screenRect,
             secure: isSecure, enabled: isEnabled, currentName: { [weak self] in
                 guard let self else { return "" }
                 let deadline = ContinuousClock.now + .milliseconds(40)
