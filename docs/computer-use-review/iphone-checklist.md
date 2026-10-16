@@ -1,6 +1,6 @@
 # Physical iPhone or iPad end-to-end checklist
 
-Use this checklist with the signed release candidate or latest signed host build and the owner's physical iPhone or iPad. Keep the Mac and device on the same Wi-Fi. Record what happened, including failures; do not infer success from a hidden approval card or a final narration alone.
+Use this checklist with the signed release candidate or latest signed host build and the owner's physical iPhone or iPad. Use the connected physical iPad for this run; do not use iPhone Mirroring. Keep the Mac and device on the same Wi-Fi. Record what happened, including failures; do not infer success from a hidden approval card or a final narration alone.
 
 ## Run details
 
