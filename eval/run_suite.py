@@ -4,12 +4,14 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import os
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 import time
@@ -107,6 +109,19 @@ def validate_task(value: Any, source: Path) -> Task:
         raise EvalError(f"{source}: unsupported checker type")
     if "expect" not in checker:
         raise EvalError(f"{source}: checker requires expect")
+    if checker["type"] == "file_text":
+        expected = checker["expect"]
+        if not isinstance(expected, dict) or not isinstance(expected.get("path"), str):
+            raise EvalError(f"{source}: file_text expectation requires a path")
+        if "stem" in expected:
+            stem = expected["stem"]
+            if (not isinstance(stem, str) or not stem or Path(stem).name != stem
+                    or Path(expected["path"]).name != stem or Path(stem).suffix):
+                raise EvalError(f"{source}: file_text stem must match an extensionless filename path")
+            if type(expected.get("allow_rtf")) is not bool:
+                raise EvalError(f"{source}: file_text stem expectation requires boolean allow_rtf")
+            if expected["allow_rtf"] and re.search(r"\bplain[ -]text\b", value["prompt"], re.IGNORECASE):
+                raise EvalError(f"{source}: plain-text prompts cannot accept rich-text output")
     if isinstance(value["max_steps"], bool) or not isinstance(value["max_steps"], int):
         raise EvalError(f"{source}: max_steps must be an integer")
     if not 1 <= value["max_steps"] <= 40:
@@ -132,19 +147,20 @@ def validate_task(value: Any, source: Path) -> Task:
                 raise EvalError(f"{source}: fixture approval requires an HTTP loopback origin")
     if "setup" in value:
         setup = value["setup"]
-        if value["surface"] != "app" or not isinstance(setup, dict) or setup.keys() - {"folders", "open_document"}:
-            raise EvalError(f"{source}: native setup may contain only folders and an optional blank document")
+        if value["surface"] != "app" or not isinstance(setup, dict) or setup.keys() - {
+                "folders", "new_untitled", "no_note_selected"}:
+            raise EvalError(f"{source}: native setup contains an unsupported start-state flag")
         folders = setup.get("folders", [])
         if not isinstance(folders, list) or any(not _safe_relative_path(folder) for folder in folders):
             raise EvalError(f"{source}: setup folders must be safe relative paths")
-        if "open_document" in setup:
-            relative = setup["open_document"]
-            if (not _safe_relative_path(relative) or len(Path(relative).parts) != 1
-                    or value.get("approval_policy", {}).get("allow_start_interaction") is not True):
-                raise EvalError(f"{source}: open_document must be a distinct simple scratch filename")
-            checker_text = json.dumps(checker, ensure_ascii=False)
-            if f"{{eval_dir}}/{relative}" in checker_text:
-                raise EvalError(f"{source}: blank start document must be distinct from checker output")
+        if "new_untitled" in setup and (
+                setup["new_untitled"] is not True or value["start"].get("app") != "TextEdit"
+                or value.get("approval_policy", {}).get("allow_start_interaction") is not True):
+            raise EvalError(f"{source}: new_untitled requires TextEdit and declared start interaction approval")
+        if "no_note_selected" in setup and (
+                setup["no_note_selected"] is not True or value["start"].get("app") != "Notes"
+                or value.get("approval_policy", {}).get("allow_start_interaction") is not True):
+            raise EvalError(f"{source}: no_note_selected requires Notes and declared start interaction approval")
     return Task(source, value)
 def load_tasks(suite: str) -> list[Task]:
     directory = TASKS / suite
@@ -259,9 +275,148 @@ def _native_scratch_directory(task_id: str, run_token: str) -> Path:
     if (root.is_symlink() or not root.is_dir() or info.st_uid != os.getuid()
             or info.st_mode & 0o077):
         raise EvalError("~/AgentEval must be an owned, private directory for native smoke outputs")
-    directory = root / f"{task_id}-{run_token}"
-    directory.mkdir(mode=0o700)
+    match = re.fullmatch(r"native-(\d{3})", task_id)
+    if match is None or not re.fullmatch(r"[a-fA-F0-9-]{1,64}", run_token):
+        raise EvalError("native task identity is invalid")
+    directory = root / f"n{match.group(1)}"
+    owner = directory / ".native-eval-owner"
+    if directory.is_symlink():
+        raise EvalError(f"{directory} must not be a symlink")
+    if directory.exists():
+        info = directory.lstat()
+        if not directory.is_dir() or info.st_uid != os.getuid() or info.st_mode & 0o077:
+            raise EvalError(f"{directory} must be an owned, private task directory")
+        if owner.is_symlink() or not owner.is_file():
+            raise EvalError(f"{directory} exists without a native evaluation ownership marker")
+        try:
+            marker = json.loads(owner.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as error:
+            raise EvalError(f"{directory} has an invalid native evaluation ownership marker") from error
+        if (not isinstance(marker, dict)
+                or marker.get("owner") != "codex-native-eval-v1"
+                or marker.get("task_id") != task_id
+                or not isinstance(marker.get("reserved_outputs", []), list)):
+            raise EvalError(f"{directory} belongs to a different native evaluation task")
+    else:
+        directory.mkdir(mode=0o700)
+        descriptor = os.open(owner, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            json.dump({"owner": "codex-native-eval-v1", "task_id": task_id,
+                       "reserved_outputs": []}, stream)
+            stream.write("\n")
+    _clear_native_scratch_contents(directory, task_id)
     return directory
+
+
+def _owned_native_marker(directory: Path, task_id: str) -> tuple[Path, dict[str, Any]]:
+    match = re.fullmatch(r"native-(\d{3})", task_id)
+    root = Path.home() / "AgentEval"
+    expected = root / (f"n{match.group(1)}" if match else "invalid")
+    if (match is None or directory != expected or root.is_symlink() or not root.is_dir()
+            or directory.is_symlink() or not directory.is_dir()):
+        raise EvalError("native scratch cleanup path failed ownership validation")
+    root_info, directory_info = root.lstat(), directory.lstat()
+    if (root_info.st_uid != os.getuid() or root_info.st_mode & 0o077
+            or directory_info.st_uid != os.getuid() or directory_info.st_mode & 0o077):
+        raise EvalError("native scratch cleanup requires owned private directories")
+    owner = directory / ".native-eval-owner"
+    if owner.is_symlink() or not owner.is_file():
+        raise EvalError("native task ownership marker is missing or unsafe")
+    owner_info = owner.lstat()
+    if owner_info.st_uid != os.getuid() or owner_info.st_mode & 0o077:
+        raise EvalError("native task ownership marker is not private and owned")
+    try:
+        marker = json.loads(owner.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise EvalError("native task ownership marker is invalid") from error
+    if (not isinstance(marker, dict) or marker.get("owner") != "codex-native-eval-v1"
+            or marker.get("task_id") != task_id
+            or not isinstance(marker.get("reserved_outputs"), list)):
+        raise EvalError("native task ownership marker does not match the task")
+    return owner, marker
+
+
+def _native_scratch_inventory(directory: Path) -> list[dict[str, Any]]:
+    inventory: list[dict[str, Any]] = []
+
+    def visit(current: Path) -> None:
+        try:
+            entries = sorted(os.scandir(current), key=lambda entry: entry.name)
+        except OSError as error:
+            raise EvalError("could not inspect owned native scratch contents") from error
+        for entry in entries:
+            if current == directory and entry.name == ".native-eval-owner":
+                continue
+            path = Path(entry.path)
+            try:
+                info = entry.stat(follow_symlinks=False)
+            except OSError as error:
+                raise EvalError("could not inspect owned native scratch item") from error
+            relative = path.relative_to(directory).as_posix()
+            item: dict[str, Any] = {"path": relative}
+            if stat.S_ISLNK(info.st_mode):
+                item["type"] = "symlink"
+            elif stat.S_ISDIR(info.st_mode):
+                item["type"] = "directory"
+            elif stat.S_ISREG(info.st_mode):
+                item.update({"type": "file", "size": info.st_size})
+                if info.st_size <= 1_000_000:
+                    digest = hashlib.sha256()
+                    try:
+                        with path.open("rb") as stream:
+                            for chunk in iter(lambda: stream.read(65536), b""):
+                                digest.update(chunk)
+                    except OSError as error:
+                        raise EvalError("could not hash owned native scratch output") from error
+                    item["sha256"] = digest.hexdigest()
+            else:
+                item["type"] = "special"
+            if len(inventory) < 256:
+                inventory.append(item)
+            if stat.S_ISDIR(info.st_mode) and not stat.S_ISLNK(info.st_mode):
+                visit(path)
+
+    visit(directory)
+    if len(inventory) >= 256:
+        inventory.append({"truncated": True})
+    return inventory
+
+
+def _clear_native_scratch_contents(directory: Path, task_id: str,
+                                  inventory: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
+    owner, marker = _owned_native_marker(directory, task_id)
+    if marker["reserved_outputs"]:
+        raise EvalError("native external output reservation is still pending; refusing scratch cleanup")
+    inventory = _native_scratch_inventory(directory) if inventory is None else inventory
+    if inventory:
+        history = marker.get("cleanup_history", [])
+        if not isinstance(history, list):
+            raise EvalError("native task cleanup history is invalid")
+        history.append({"recorded_at": datetime.now(timezone.utc).isoformat(), "items": inventory})
+        marker["cleanup_history"] = history[-8:]
+        _write_native_owner(owner, marker)
+
+    def remove_contents(current: Path) -> None:
+        try:
+            entries = list(os.scandir(current))
+        except OSError as error:
+            raise EvalError("could not enumerate owned native scratch during cleanup") from error
+        for entry in entries:
+            if current == directory and entry.name == ".native-eval-owner":
+                continue
+            path = Path(entry.path)
+            try:
+                info = entry.stat(follow_symlinks=False)
+                if stat.S_ISDIR(info.st_mode):
+                    remove_contents(path)
+                    path.rmdir()
+                else:
+                    path.unlink()
+            except OSError as error:
+                raise EvalError(f"could not remove owned native scratch item {path.name}") from error
+
+    remove_contents(directory)
+    return inventory
 
 
 def _safe_relative_path(value: Any) -> bool:
@@ -276,31 +431,162 @@ def _seed_native_task(task: Task, scratch: Path) -> None:
         destination = (scratch / relative).resolve(strict=False)
         if not destination.is_relative_to(scratch.resolve(strict=True)):
             raise EvalError("native setup path escaped the per-task scratch directory")
-        destination.mkdir(mode=0o700, parents=True, exist_ok=False)
-    relative = task.value.get("setup", {}).get("open_document")
-    if relative:
-        destination = (scratch / relative).resolve(strict=False)
-        if not destination.is_relative_to(scratch.resolve(strict=True)):
-            raise EvalError("native setup document escaped the per-task scratch directory")
-        destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        descriptor = os.open(destination, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-        os.close(descriptor)
+        if destination.is_symlink():
+            raise EvalError("native setup folder must not be a symlink")
+        if destination.exists():
+            if not destination.is_dir() or any(destination.iterdir()):
+                raise EvalError("native setup folder exists and is not an empty directory")
+        else:
+            destination.mkdir(mode=0o700, parents=True, exist_ok=False)
+    _reserve_native_output(task, scratch)
+
+
+def _native_output_candidates(task: Task, scratch: Path) -> list[Path]:
+    checker = task.value.get("checker", {})
+    expected = checker.get("expect", {}) if isinstance(checker, dict) else {}
+    raw_path = expected.get("path") if isinstance(expected, dict) else None
+    if not isinstance(raw_path, str):
+        return []
+    path = Path(raw_path.replace("{eval_dir}", str(scratch)).replace("{home}", str(Path.home())))
+    if expected.get("stem"):
+        stem = expected["stem"]
+        candidates = [path.with_name(f"{stem}.txt")]
+        if expected.get("allow_rtf") is True:
+            candidates.append(path.with_name(f"{stem}.rtf"))
+        return candidates
+    return [path]
+
+
+def _native_checker_path(candidate: Path, scratch: Path) -> Path:
+    if not candidate.is_absolute():
+        raise EvalError("native checker output path must be absolute")
+    bases = [scratch.resolve(strict=True)]
+    for name in ("Documents", "Desktop"):
+        base = Path.home() / name
+        if base.exists() and not base.is_symlink():
+            bases.append(base.resolve(strict=True))
+    for base in bases:
+        parent = candidate.parent.resolve(strict=False)
+        if parent == base or parent.is_relative_to(base):
+            current = candidate.parent
+            while current == base or current.is_relative_to(base):
+                if current.is_symlink():
+                    raise EvalError("native checker output parent must not contain a symlink")
+                if current == base:
+                    break
+                current = current.parent
+            return candidate
+    raise EvalError("native checker output path is outside the task folder, Documents, or Desktop")
+
+
+def _reserve_native_output(task: Task, scratch: Path) -> None:
+    checker = task.value.get("checker", {})
+    if checker.get("type") != "file_text":
+        return
+    candidates = _native_output_candidates(task, scratch)
+    if not candidates:
+        raise EvalError("native file checker has no output path")
+    owner = scratch / ".native-eval-owner"
+    if owner.is_symlink() or not owner.is_file():
+        raise EvalError("native task folder has an invalid ownership marker")
+    try:
+        marker = json.loads(owner.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise EvalError("native task folder has an invalid ownership marker") from error
+    if (not isinstance(marker, dict) or marker.get("owner") != "codex-native-eval-v1"
+            or marker.get("task_id") != task.task_id):
+        raise EvalError("native task folder ownership does not match the task")
+    if marker.get("reserved_outputs"):
+        raise EvalError("native output cleanup is still pending for this task")
+    for candidate in candidates:
+        _native_checker_path(candidate, scratch)
+        if candidate.is_symlink() or candidate.exists():
+            raise EvalError(f"native output already exists; refusing to overwrite {candidate}")
+    marker["reserved_outputs"] = [str(candidate.absolute()) for candidate in candidates]
+    _write_native_owner(owner, marker)
+
+
+def _write_native_owner(owner: Path, marker: dict[str, Any]) -> None:
+    if owner.is_symlink() or not owner.is_file():
+        raise EvalError("native task ownership marker changed unexpectedly")
+    descriptor = os.open(owner, os.O_WRONLY | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0))
+    with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+        json.dump(marker, stream, separators=(",", ":"))
+        stream.write("\n")
+
+
+def _cleanup_native_outputs(task: Task, scratch: Path, include_external: bool = False) -> None:
+    checker = task.value.get("checker", {})
+    if not isinstance(checker, dict):
+        raise EvalError("native task checker is invalid during cleanup")
+    owner, marker = _owned_native_marker(scratch, task.task_id)
+    inventory = _native_scratch_inventory(scratch)
+    if checker.get("type") == "file_text":
+        candidates = _native_output_candidates(task, scratch)
+        reserved = marker.get("reserved_outputs")
+        if not isinstance(reserved, list):
+            raise EvalError("native task output reservation is invalid")
+        expected = {str(candidate.absolute()) for candidate in candidates}
+        if reserved and set(reserved) != expected:
+            raise EvalError("native task output reservation does not match its checker")
+        if reserved:
+            for candidate in candidates:
+                _native_checker_path(candidate, scratch)
+                if not candidate.is_relative_to(scratch) and not include_external:
+                    return
+                if candidate.is_symlink():
+                    raise EvalError(f"refusing to remove a symlink native output: {candidate}")
+                if candidate.exists():
+                    if not candidate.is_file():
+                        raise EvalError(f"refusing to remove a non-file native output: {candidate}")
+                    candidate.unlink()
+            marker["reserved_outputs"] = []
+            _write_native_owner(owner, marker)
+    elif checker.get("type") == "folder_exists":
+        raw_path = checker.get("expect", {}).get("path")
+        if isinstance(raw_path, str):
+            candidate = Path(raw_path.replace("{eval_dir}", str(scratch)).replace("{home}", str(Path.home())))
+            if candidate.is_relative_to(scratch) and candidate.exists() and not candidate.is_symlink():
+                current = candidate
+                while current != scratch and current.is_relative_to(scratch):
+                    try:
+                        current.rmdir()
+                    except OSError:
+                        break
+                    current = current.parent
+    for relative in task.value.get("setup", {}).get("folders", []):
+        seeded = scratch / relative
+        if seeded.is_dir() and not seeded.is_symlink():
+            try:
+                seeded.rmdir()
+            except OSError:
+                pass
+    _clear_native_scratch_contents(scratch, task.task_id, inventory)
 
 
 def _remove_native_scratch(directory: Path | None) -> None:
     if directory is None or directory.is_symlink() or not directory.exists():
         return
-    root = (Path.home() / "AgentEval").resolve(strict=True)
-    resolved = directory.resolve(strict=True)
-    if resolved.parent == root:
-        shutil.rmtree(resolved)
+    root = Path.home() / "AgentEval"
+    if root.is_symlink() or directory.parent != root or directory.is_symlink():
+        return
+    owner = directory / ".native-eval-owner"
+    if owner.is_symlink() or not owner.is_file():
+        return
+    try:
+        marker = json.loads(owner.read_text(encoding="utf-8"))
+        task_id = marker.get("task_id") if isinstance(marker, dict) else None
+        if isinstance(task_id, str):
+            _clear_native_scratch_contents(directory, task_id)
+    except (OSError, UnicodeError, json.JSONDecodeError, EvalError):
+        return
 
 
 def _materialize_native_task(task: Task, scratch: Path) -> Task:
     marker = "{eval_dir}"
     def replace(value: Any) -> Any:
         if isinstance(value, str):
-            return value.replace(marker, str(scratch))
+            return value.replace(marker, str(scratch)).replace("{home}", str(Path.home()))
         if isinstance(value, list):
             return [replace(item) for item in value]
         if isinstance(value, dict):
@@ -308,6 +594,18 @@ def _materialize_native_task(task: Task, scratch: Path) -> Task:
         return value
     value = replace(task.value)
     return Task(task.path, value)
+
+
+def prepare_finder_folder(scratch: Path, runner: Any = subprocess.run) -> None:
+    if scratch.is_symlink() or not scratch.is_dir():
+        raise EvalError("Finder task folder is not a real directory")
+    try:
+        result = runner(["/usr/bin/open", "-a", "Finder", str(scratch.resolve(strict=True))],
+                        capture_output=True, text=True, timeout=15, check=False)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise EvalError("Could not open the owned native task folder in Finder") from error
+    if result.returncode != 0:
+        raise EvalError("Could not open the owned native task folder in Finder")
 
 def _task_start(task: Task, token: str) -> dict[str, str]:
     start = dict(task.value["start"])
@@ -780,9 +1078,55 @@ def _append_reported(rows: list[dict[str, Any]], row: dict[str, Any], output: Pa
     rows.append(row)
     _write_report(output, rows, execution)
 
+
+def _record_blocker(output: Path, row: dict[str, Any]) -> None:
+    from runner_recovery import Checkpoint
+
+    path = output / "blockers.json"
+    if path.exists():
+        try:
+            existing = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            raise EvalError("blocker history is unreadable") from error
+        if not isinstance(existing, list) or any(not isinstance(item, dict) for item in existing):
+            raise EvalError("blocker history has invalid data")
+    else:
+        existing = []
+    existing.append({"recorded_at": datetime.now(timezone.utc).isoformat(), **row})
+    Checkpoint._atomic_json(path, existing)
+
+
+def _resolve_blockers(output: Path, *, task_key: str | None = None,
+                      kinds: set[str] | None = None) -> None:
+    from runner_recovery import Checkpoint
+
+    path = output / "blockers.json"
+    if not path.is_file():
+        return
+    try:
+        blockers = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise EvalError("blocker history is unreadable") from error
+    if not isinstance(blockers, list) or any(not isinstance(item, dict) for item in blockers):
+        raise EvalError("blocker history has invalid data")
+    changed = False
+    now = datetime.now(timezone.utc).isoformat()
+    for item in blockers:
+        matches_task = task_key is None or item.get("task_key") == task_key
+        matches_kind = kinds is None or item.get("kind") in kinds
+        if not item.get("resolved") and matches_task and matches_kind:
+            item["resolved"] = True
+            item["resolved_at"] = now
+            changed = True
+    if changed:
+        Checkpoint._atomic_json(path, blockers)
+
 def _prepare_run(args: argparse.Namespace) -> tuple[list[Task], list[str], list[str], Any, Path] | None:
     tasks = smoke_tasks() if args.suite == "smoke" else load_tasks(args.suite)
-    if args.execution != "real-host" and any(task.value.get("setup", {}).get("open_document") for task in tasks):
+    if args.execution != "real-host" and any(
+            task.value.get("setup", {}).get("open_document")
+            or task.value.get("setup", {}).get("new_untitled")
+            or task.value.get("setup", {}).get("no_note_selected") for task in tasks):
         print("BLOCKED: blank native document setup requires signed real-host execution.", file=sys.stderr)
         return None
     driver_value = args.driver or os.environ.get("EVAL_DRIVER")
@@ -806,7 +1150,7 @@ def _prepare_run(args: argparse.Namespace) -> tuple[list[Task], list[str], list[
     if not driver or (args.execution == "tart" and not reset):
         print("BLOCKED: driver and required reset commands must be non-empty argv strings.", file=sys.stderr)
         return None
-    server = _start_fixture_server(DEFAULT_FIXTURE_ORIGIN, ROOT / "fixtures" / "web" / "server.py") if args.execution == "real-host" else None
+    server = None
     if args.execution == "real-host":
         print("MAC BASELINE: running on the signed real host; no Tart VM reset is used.", file=sys.stderr)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -815,141 +1159,404 @@ def _prepare_run(args: argparse.Namespace) -> tuple[list[Task], list[str], list[
 
 
 def run(args: argparse.Namespace) -> int:
+    from runner_recovery import (Checkpoint, RecoveryError, RunnerLifecycle, ScreenLocked,
+                                 MacStateUnknown, pin_run_identity)
+
     args.policy = POLICY_ALIASES.get(args.policy, args.policy)
     prepared = _prepare_run(args)
     if prepared is None:
         return 2
     tasks, driver, reset, server, output = prepared
-    results: list[dict[str, Any]] = []
+    checkpoint = None
+    runner_guard = None
+    runner_guard_entered = False
+    blocker_rows: list[dict[str, Any]] = []
+    result_code = 1
     try:
-        suite_apps: list[str] = []
+        schedule = [(run_number, task) for run_number in range(1, args.runs + 1) for task in tasks]
+        task_keys = [f"{run_number}:{task.task_id}" for run_number, task in schedule]
+        resume = bool(getattr(args, "resume", False))
+        if resume and not (output / "checkpoint.json").is_file():
+            resume = False
+        if not resume and (output / "checkpoint.json").exists():
+            raise EvalError("output already contains a checkpoint; pass --resume")
+        runner_guard = RunnerLifecycle(output)
+        runner_guard.__enter__()
+        runner_guard_entered = True
+        checkpoint = Checkpoint(output, task_keys)
+        runner_guard.check_screen_unlocked()
+        pin_run_identity(output, driver, [task for _, task in schedule], args.policy)
+        if resume:
+            checkpoint.record_abandoned_inflight()
         if args.execution == "real-host":
             try:
-                browser = _resolved_default_browser() if any(task.value["surface"] == "web" for task in tasks) else None
-                suite_apps = _suite_apps(tasks, browser)
-                _close_suite_app_windows(suite_apps, driver)
-            except EvalError as error:
-                preflight = failed_preflight(str(error), "Close the suite app windows and rerun clean start.")
-            else:
-                preflight = None
-        else:
-            preflight = None
-        if preflight is not None:
-            pass
-        elif args.execution == "real-host" and not _fixture_server_available(DEFAULT_FIXTURE_ORIGIN):
-            preflight = failed_preflight("The local fixture server is unavailable before startup checks.",
-                                         "Start the evaluation fixture server on 127.0.0.1:8765, then rerun.")
-        else:
-            preflight = _run_preflight(driver, reset, tasks, args.execution, args.timeout, args.policy)
-        if not preflight.passed:
-            print(f"INFRA-BLOCKED before task execution: {preflight.reason} Owner action: {preflight.owner_action}",
-                  file=sys.stderr)
-            for row in _infra_blocked_rows(tasks, args.runs, args.execution, preflight, args.policy):
-                _append_reported(results, row, output, args.execution)
-            return 1
-        clean_start_failed = False
+                server = _start_fixture_server(DEFAULT_FIXTURE_ORIGIN, ROOT / "fixtures" / "web" / "server.py")
+            except OSError as error:
+                print(f"OWNER ACTION NEEDED: fixture server could not start: {error}", file=sys.stderr, flush=True)
+
+        schedule_by_key = {key: pair for key, pair in zip(task_keys, schedule)}
+
+        def resume_cleanup(task_key: str, payload: dict[str, Any]) -> None:
+            from native_start import NativeDocumentLease, close_textedit_untitled
+
+            pair = schedule_by_key.get(task_key)
+            if pair is None:
+                raise EvalError("pending cleanup refers to an unknown task")
+            _, task = pair
+            raw_scratch = payload.get("scratch")
+            if raw_scratch is not None:
+                match = re.fullmatch(r"native-(\d{3})", task.task_id)
+                expected = Path.home() / "AgentEval" / (f"n{match.group(1)}" if match else "invalid")
+                scratch = Path(raw_scratch)
+                if match is None or scratch != expected or scratch.is_symlink() or not scratch.is_dir():
+                    raise EvalError("pending cleanup scratch path failed ownership validation")
+                if payload.get("lease") is not None:
+                    lease = NativeDocumentLease.from_dict(payload["lease"])
+                    close_textedit_untitled(lease)
+                _cleanup_native_outputs(task, scratch, include_external=True)
+            checkpoint.clear_cleanup_pending(task_key)
+
+        results = checkpoint.rows()
+        deadline_seconds = getattr(args, "deadline_seconds", None)
+        deadline_at = time.monotonic() + deadline_seconds if deadline_seconds else None
         fixture_cleanup_failed = False
-        for run_index in range(args.runs):
-            for task in tasks:
-                deferred_scratch: list[Path] = []
-                status = _run_one_task(task, run_index + 1, args, driver, reset, server, output, results,
-                    suite_apps=suite_apps if args.execution == "real-host" else None,
-                    deferred_scratch=deferred_scratch)
-                setup_document = task.value.get("setup", {}).get("open_document")
-                if setup_document and deferred_scratch and results and results[-1].get("task_id") == task.task_id:
-                    results[-1]["setup_fixture"] = {"kind": "empty_document", "relative_path": setup_document}
-                    _write_report(output, results, args.execution)
-                if deferred_scratch:
-                    try:
-                        _close_suite_app_windows([task.value["start"]["app"]], driver)
-                    except EvalError as error:
-                        if results and results[-1].get("task_id") == task.task_id:
-                            results[-1]["cleanup_error"] = str(error)
-                            _write_report(output, results, args.execution)
-                        fixture_cleanup_failed = True
-                        status = "INFRA-BLOCKED (native fixture cleanup failed)"
-                    else:
-                        for directory in deferred_scratch:
-                            _remove_native_scratch(directory)
-                if status:
-                    print(f"{task.value.get('suite', args.suite)}/{task.task_id}: {status}", flush=True)
-                if status in {"INFRA-BLOCKED (clean start failed)", "INFRA-BLOCKED (native fixture cleanup failed)"}:
-                    clean_start_failed = True
+        from contextlib import nullcontext
+        with nullcontext(runner_guard) as lifecycle:
+            lifecycle.check_screen_unlocked()
+            for task_key, payload in checkpoint.cleanup_pending().items():
+                try:
+                    resume_cleanup(task_key, payload)
+                except (EvalError, OSError, RuntimeError, ValueError) as error:
+                    print(f"OWNER ACTION NEEDED: native fixture cleanup is pending for {task_key}: {error}",
+                          file=sys.stderr, flush=True)
+                    fixture_cleanup_failed = True
                     break
-            if clean_start_failed:
-                break
+            if fixture_cleanup_failed:
+                result_code = 1
+            else:
+                if resume:
+                    for task_key in task_keys:
+                        if checkpoint.is_completed(task_key) or checkpoint.pending_local_input_decision(task_key) != "terminal-interrupted":
+                            continue
+                        run_number, task = schedule_by_key[task_key]
+                        attempt = next(item for item in reversed(checkpoint.interrupted_attempts)
+                                       if item.get("task_key") == task_key
+                                       and item.get("kind", "local-input") == "local-input")
+                        row = {"task_key": task_key, "task_id": task.task_id, "run": run_number,
+                               "tags": task.tags, "status": "INTERRUPTED", "success": False,
+                               "failure_class": "interrupted-by-local-input",
+                               "checker": attempt.get("answer", ""), "answer": attempt.get("answer"),
+                               "episode_path": attempt.get("episode_path"),
+                               "execution": args.execution, "policy": args.policy,
+                               "requested_policy": args.policy}
+                        for field in ("unsafe_count", "steps", "wall_seconds", "driver_task_id"):
+                            if field in attempt:
+                                row[field] = attempt[field]
+                        checkpoint.mark_completed(task_key, row)
+                        _resolve_blockers(output, task_key=task_key)
+                unfinished = [(key, run_number, task) for key, (run_number, task) in schedule_by_key.items()
+                              if not checkpoint.is_completed(key)]
+                suite_apps: list[str] = []
+                preflight = None
+                if unfinished and args.execution == "real-host":
+                    try:
+                        browser = _resolved_default_browser() if any(
+                            task.value["surface"] == "web" for _, _, task in unfinished) else None
+                        suite_apps = _suite_apps([task for _, _, task in unfinished], browser)
+                        if "TextEdit" in suite_apps:
+                            from native_start import reset_empty_textedit
+                            reset_empty_textedit()
+                        _close_suite_app_windows(suite_apps, driver)
+                    except EvalError as error:
+                        preflight = failed_preflight(str(error), "Close the suite app windows and rerun clean start.")
+                    if preflight is None and not _fixture_server_available(DEFAULT_FIXTURE_ORIGIN):
+                        preflight = failed_preflight("The local fixture server is unavailable before startup checks.",
+                                                     "Start the evaluation fixture server on 127.0.0.1:8765, then rerun.")
+                if unfinished and preflight is None:
+                    preflight = _run_preflight(driver, reset, [task for _, _, task in unfinished],
+                                               args.execution, args.timeout, args.policy)
+                if preflight is not None and not preflight.passed:
+                    print(f"INFRA-BLOCKED before task execution: {preflight.reason} Owner action: {preflight.owner_action}",
+                          file=sys.stderr)
+                    _record_blocker(output, {"kind": "preflight-blocked", "reason": preflight.reason,
+                                             "owner_action": preflight.owner_action,
+                                             "response": preflight.response})
+                    for key, run_number, task in unfinished:
+                        blocker_rows.extend(_infra_blocked_rows([task], 1, args.execution, preflight, args.policy))
+                        blocker_rows[-1]["run"] = run_number
+                    result_code = 1
+                else:
+                    _resolve_blockers(output, kinds={"runner-blocked", "preflight-blocked"})
+                    result_code = 0
+                    for task_key, run_number, task in unfinished:
+                        if deadline_at is not None and time.monotonic() >= deadline_at:
+                            print("Suite deadline reached; checkpoint retained for resume.", file=sys.stderr, flush=True)
+                            result_code = 124
+                            break
+                        try:
+                            lifecycle.check_screen_unlocked()
+                        except ScreenLocked:
+                            print("OWNER ACTION NEEDED: unlock the Mac", file=sys.stderr, flush=True)
+                            result_code = 1
+                            break
+                        except MacStateUnknown as error:
+                            print(f"OWNER ACTION NEEDED: screen lock state could not be verified ({error})",
+                                  file=sys.stderr, flush=True)
+                            result_code = 1
+                            break
+                        if (resume and checkpoint.pending_local_input_decision(task_key) == "wait-and-retry"):
+                            try:
+                                lifecycle.wait_for_local_idle()
+                            except (ScreenLocked, MacStateUnknown) as error:
+                                print(f"OWNER ACTION NEEDED: {error}", file=sys.stderr, flush=True)
+                                result_code = 1
+                                break
+                        try:
+                            status = _run_one_task(task, run_number, args, driver, reset, server, output, results,
+                                suite_apps=suite_apps if args.execution == "real-host" else None,
+                                checkpoint=checkpoint, task_key=task_key, lifecycle=lifecycle,
+                                schedule=schedule)
+                        except (ScreenLocked, MacStateUnknown) as error:
+                            pending_key = next((key for key in task_keys if not checkpoint.is_completed(key)), None)
+                            _record_blocker(output, {"kind": "runner-blocked", "task_key": pending_key,
+                                "reason": str(error), "owner_action": "Unlock the Mac and confirm its screen state, then rerun."})
+                            result_code = 1
+                            break
+                        results = checkpoint.rows()
+                        if checkpoint.is_completed(task_key):
+                            _resolve_blockers(output, task_key=task_key)
+                        if status:
+                            print(f"{task.value.get('suite', args.suite)}/{task.task_id}: {status}", flush=True)
+                        if status and status.startswith("INFRA-BLOCKED"):
+                            result_code = 1
+                            break
+                    if result_code == 0:
+                        rows = checkpoint.rows()
+                        result_code = 0 if rows and all(row.get("status") == "PASS" for row in rows) else 1
+                        if rows and all(checkpoint.is_completed(key) for key in task_keys):
+                            _resolve_blockers(output)
+    except (ScreenLocked, MacStateUnknown) as error:
+        _record_blocker(output, {"kind": "runner-blocked", "task_key": None,
+            "reason": str(error), "owner_action": "Unlock the Mac and confirm its screen state, then rerun."})
+        print(f"OWNER ACTION NEEDED: suite runner stopped safely: {error}", file=sys.stderr, flush=True)
+        result_code = 1
+    except (RecoveryError, OSError, ValueError, EvalError) as error:
+        if runner_guard_entered:
+            try:
+                _record_blocker(output, {"kind": "runner-blocked", "reason": str(error),
+                    "owner_action": "Resolve the reported runner setup issue, then resume the checkpoint."})
+            except (EvalError, OSError, ValueError):
+                pass
+        print(f"OWNER ACTION NEEDED: suite runner stopped safely: {error}", file=sys.stderr, flush=True)
+        result_code = 1
     finally:
-        if server is not None:
-            server.terminate()
-            server.wait(timeout=3)
-        _write_report(output, results, args.execution)
-    print(f"Wrote {len(results)} result rows to {output}")
-    return 0 if results and all(row["status"] == "PASS" for row in results) and not fixture_cleanup_failed else 1
+        try:
+            if server is not None:
+                try:
+                    server.terminate()
+                    server.wait(timeout=3)
+                except (OSError, subprocess.TimeoutExpired) as error:
+                    print(f"OWNER ACTION NEEDED: fixture server cleanup failed: {error}", file=sys.stderr, flush=True)
+                    result_code = 1
+            if checkpoint is not None or blocker_rows:
+                _write_report(output, (checkpoint.rows() if checkpoint is not None else []) + blocker_rows,
+                              args.execution)
+        finally:
+            if runner_guard is not None:
+                try:
+                    runner_guard.__exit__(None, None, None)
+                except (OSError, RuntimeError, ValueError) as error:
+                    print(f"OWNER ACTION NEEDED: runner cleanup failed: {error}", file=sys.stderr, flush=True)
+                    result_code = 1
+    print(f"Wrote {len(checkpoint.rows()) if checkpoint is not None else 0} result rows to {output}")
+    return result_code
 
 
 def _run_one_task(task: Task, run_number: int, args: argparse.Namespace, driver: list[str],
                   reset: list[str], server: Any, output: Path,
                   results: list[dict[str, Any]], suite_apps: list[str] | None = None,
-                  deferred_scratch: list[Path] | None = None) -> str | None:
-    token, task_id = uuid.uuid4().hex, str(uuid.uuid4())
-    scratch: Path | None = None
-    try:
-        if suite_apps is not None:
-            try:
-                _close_suite_app_windows(suite_apps, driver)
-            except EvalError as error:
-                row = task_infra_row(task.task_id, task.value.get("suite", args.suite), run_number,
-                                     task.tags, args.execution, str(error), args.policy)
-                _append_reported(results, row, output, args.execution)
-                return "INFRA-BLOCKED (clean start failed)"
-        runtime_task = task
-        if task.value["surface"] == "app":
-            if task.value.get("setup", {}).get("open_document") and args.execution != "real-host":
-                raise EvalError("Blank native document setup requires signed real-host execution")
-            scratch = _native_scratch_directory(task.task_id, token)
-            _seed_native_task(task, scratch)
-            runtime_task = _materialize_native_task(task, scratch)
-        start_url = task.value["start"].get("url", "")
-        if args.execution == "real-host" and start_url.startswith(DEFAULT_FIXTURE_ORIGIN):
-            if server is None and not _fixture_server_available(DEFAULT_FIXTURE_ORIGIN):
-                row = task_infra_row(task.task_id, task.value.get("suite", args.suite), run_number,
-                                     task.tags, args.execution, "fixture server unavailable", args.policy)
-                _append_reported(results, row, output, args.execution)
-                return "INFRA-BLOCKED (fixture server unavailable)"
-        if args.execution == "tart":
-            ok, reason = _run_reset(reset, task, token, args.timeout)
-            if not ok:
-                row = task_infra_row(task.task_id, task.value.get("suite", args.suite), run_number,
-                                     task.tags, args.execution, reason, args.policy)
-                _append_reported(results, row, output, args.execution)
-                return "INFRA-BLOCKED (VM reset failed)"
-        setup_document = (scratch / task.value["setup"]["open_document"]
-                          if scratch is not None and task.value.get("setup", {}).get("open_document") else None)
-        driver_options = {"setup_document": setup_document} if setup_document is not None else {}
-        response, error = _run_driver(driver, runtime_task, args.policy, token, task_id, args.timeout,
-                                      **driver_options)
-        if error or response is None:
-            row = task_infra_row(task.task_id, task.value.get("suite", args.suite), run_number,
-                                 task.tags, args.execution, error or "driver unavailable", args.policy)
+                  deferred_scratch: list[Path] | None = None, checkpoint: Any | None = None,
+                  task_key: str | None = None, lifecycle: Any | None = None,
+                  schedule: list[tuple[int, Task]] | None = None) -> str | None:
+    from runner_recovery import MacStateUnknown, ScreenLocked, is_local_input_interruption
+    from native_start import (NativeDocumentLease, close_textedit_untitled,
+                              prepare_notes_no_selection, prepare_textedit_untitled)
+
+    task_key = task_key or f"{run_number}:{task.task_id}"
+    local_attempts = 0
+
+    def persist(row: dict[str, Any]) -> None:
+        if checkpoint is None:
             _append_reported(results, row, output, args.execution)
-            return "INFRA-BLOCKED (driver unavailable)"
-        row, status = _evaluate_response(runtime_task, response, token, task_id,
-                                         run_number, args.execution, args.policy, scratch)
-        if setup_document is not None:
-            row["setup_fixture"] = {"kind": "empty_document", "relative_path": task.value["setup"]["open_document"]}
-        _append_reported(results, row, output, args.execution)
-        return status
-    except EvalError as error:
-        row = task_infra_row(task.task_id, task.value.get("suite", args.suite), run_number,
-                             task.tags, args.execution, str(error), args.policy)
-        _append_reported(results, row, output, args.execution)
-        return f"INFRA-BLOCKED ({error})"
-    finally:
-        if scratch and task.value.get("setup", {}).get("open_document"):
-            if deferred_scratch is not None:
-                deferred_scratch.append(scratch)
         else:
-            _remove_native_scratch(scratch)
+            checkpoint.mark_completed(task_key, row)
+            _write_report(output, checkpoint.rows(), args.execution)
+
+    def infra_result(reason: str, status: str) -> str:
+        row = task_infra_row(task.task_id, task.value.get("suite", args.suite), run_number,
+                             task.tags, args.execution, reason, args.policy)
+        row.update({"task_key": task_key, "driver_task_id": driver_task_id})
+        if checkpoint is None:
+            _append_reported(results, row, output, args.execution)
+        else:
+            _record_blocker(output, {"kind": "task-blocked", **row})
+            _write_report(output, checkpoint.rows(), args.execution)
+        return status
+
+    def teardown(scratch: Path | None, lease: Any, pending: bool) -> None:
+        if scratch is None:
+            return
+        if lease is not None:
+            close_textedit_untitled(lease)
+        _cleanup_native_outputs(task, scratch, include_external=True)
+        if pending and checkpoint is not None:
+            checkpoint.clear_cleanup_pending(task_key)
+
+    for attempt_index in range(2):
+        token, driver_task_id = uuid.uuid4().hex, str(uuid.uuid4())
+        scratch: Path | None = None
+        lease: Any = None
+        cleanup_pending = False
+        attempt_row: dict[str, Any] | None = None
+        try:
+            if lifecycle is not None:
+                lifecycle.check_screen_unlocked()
+            if checkpoint is not None:
+                checkpoint.mark_inflight(task_key, driver_task_id)
+            if suite_apps is not None:
+                try:
+                    if "TextEdit" in suite_apps:
+                        from native_start import reset_empty_textedit
+                        reset_empty_textedit()
+                    _close_suite_app_windows(suite_apps, driver)
+                except EvalError as error:
+                    return infra_result(str(error), "INFRA-BLOCKED (clean start failed)")
+
+            runtime_task = task
+            setup = task.value.get("setup", {})
+            if task.value["surface"] == "app":
+                if setup.get("open_document") and args.execution != "real-host":
+                    raise EvalError("Blank native document setup requires signed real-host execution")
+                scratch = _native_scratch_directory(task.task_id, token)
+                _seed_native_task(task, scratch)
+                runtime_task = _materialize_native_task(task, scratch)
+                if checkpoint is not None:
+                    checkpoint.mark_cleanup_pending(task_key, {"scratch": str(scratch), "lease": None})
+                    cleanup_pending = True
+                if setup.get("new_untitled") is True:
+                    lease = prepare_textedit_untitled()
+                    if checkpoint is not None:
+                        checkpoint.mark_cleanup_pending(task_key, {"scratch": str(scratch), "lease": lease.as_dict()})
+                elif setup.get("no_note_selected") is True:
+                    prepare_notes_no_selection()
+                elif task.value["start"].get("app") == "Finder":
+                    prepare_finder_folder(scratch)
+
+            start_url = task.value["start"].get("url", "")
+            if args.execution == "real-host" and start_url.startswith(DEFAULT_FIXTURE_ORIGIN):
+                if server is None and not _fixture_server_available(DEFAULT_FIXTURE_ORIGIN):
+                    return infra_result("fixture server unavailable", "INFRA-BLOCKED (fixture server unavailable)")
+            if args.execution == "tart":
+                ok, reason = _run_reset(reset, task, token, args.timeout)
+                if not ok:
+                    return infra_result(reason, "INFRA-BLOCKED (VM reset failed)")
+            setup_document = (scratch / setup["open_document"]
+                              if scratch is not None and setup.get("open_document") else None)
+            driver_options = {"setup_document": setup_document} if setup_document is not None else {}
+            response, error = _run_driver(driver, runtime_task, args.policy, token, driver_task_id,
+                                          args.timeout, **driver_options)
+            if error or response is None:
+                return infra_result(error or "driver unavailable", "INFRA-BLOCKED (driver unavailable)")
+            try:
+                attempt_row, status = _evaluate_response(runtime_task, response, token, driver_task_id,
+                    run_number, args.execution, args.policy, scratch)
+            except EvalError as error:
+                attempt_row = task_infra_row(task.task_id, task.value.get("suite", args.suite), run_number,
+                    task.tags, args.execution, str(error), args.policy)
+                status = "INFRA-BLOCKED (episode evaluation failed)"
+
+            if is_local_input_interruption(response, attempt_row):
+                local_attempts += 1
+                interruption = {
+                    "task_key": task_key, "task_id": task.task_id, "run": run_number,
+                    "driver_task_id": driver_task_id, "kind": "local-input",
+                    "failure_class": "interrupted-by-local-input", "status": "INTERRUPTED_ATTEMPT",
+                    "outcome": response.get("outcome"), "answer": response.get("answer"),
+                    "episode_path": response.get("episode_path"), "tags": task.tags,
+                    "unsafe_count": attempt_row.get("unsafe_count"),
+                    "steps": attempt_row.get("steps"), "wall_seconds": response.get("wall_seconds"),
+                }
+                retry_allowed = checkpoint.record_interruption(interruption) if checkpoint is not None else local_attempts == 1
+                if retry_allowed:
+                    teardown(scratch, lease, cleanup_pending)
+                    cleanup_pending = False
+                    if lifecycle is not None:
+                        lifecycle.wait_for_local_idle()
+                    continue
+                final_row = dict(attempt_row)
+                final_row.update({"task_key": task_key, "task_id": task.task_id, "run": run_number,
+                    "tags": task.tags, "status": "INTERRUPTED", "success": False,
+                    "failure_class": "interrupted-by-local-input", "checker": response.get("answer", "")})
+                persist(final_row)
+                try:
+                    teardown(scratch, lease, cleanup_pending)
+                except (EvalError, OSError, RuntimeError, ValueError) as cleanup_error:
+                    final_row["cleanup_error"] = str(cleanup_error)
+                    if checkpoint is not None:
+                        checkpoint.mark_completed(task_key, final_row)
+                    return "INFRA-BLOCKED (native fixture cleanup failed)"
+                return "INTERRUPTED (second local-input pause)"
+
+            if status.startswith("INFRA-BLOCKED"):
+                attempt_row.update({"task_key": task_key, "driver_task_id": driver_task_id})
+                _record_blocker(output, {"kind": "task-blocked", **attempt_row})
+                _write_report(output, checkpoint.rows() if checkpoint is not None else results,
+                              args.execution)
+                return status
+
+            if task.value.get("setup", {}).get("new_untitled") is True:
+                attempt_row["setup_fixture"] = {"kind": "untitled_textedit"}
+            attempt_row["task_key"] = task_key
+            persist(attempt_row)
+            try:
+                teardown(scratch, lease, cleanup_pending)
+            except (EvalError, OSError, RuntimeError, ValueError) as cleanup_error:
+                attempt_row["cleanup_error"] = str(cleanup_error)
+                if checkpoint is not None:
+                    checkpoint.mark_completed(task_key, attempt_row)
+                return "INFRA-BLOCKED (native fixture cleanup failed)"
+            return status
+        except (ScreenLocked, MacStateUnknown):
+            raise
+        except (EvalError, OSError, RuntimeError, ValueError) as error:
+            row = task_infra_row(task.task_id, task.value.get("suite", args.suite), run_number,
+                                 task.tags, args.execution, str(error), args.policy)
+            row["task_key"] = task_key
+            if scratch is not None:
+                if checkpoint is not None and not cleanup_pending:
+                    checkpoint.mark_cleanup_pending(task_key, {"scratch": str(scratch),
+                                                               "lease": lease.as_dict() if lease else None})
+                    cleanup_pending = True
+            if checkpoint is not None:
+                _record_blocker(output, {"kind": "task-blocked", **row})
+            if scratch is not None:
+                try:
+                    teardown(scratch, lease, cleanup_pending)
+                except (EvalError, OSError, RuntimeError, ValueError) as cleanup_error:
+                    if checkpoint is not None:
+                        row["cleanup_error"] = str(cleanup_error)
+                        _record_blocker(output, {"kind": "task-blocked", **row})
+                    return "INFRA-BLOCKED (native fixture cleanup failed)"
+            if checkpoint is None:
+                _append_reported(results, row, output, args.execution)
+            else:
+                _write_report(output, checkpoint.rows(), args.execution)
+            return f"INFRA-BLOCKED ({error})"
+        finally:
+            if scratch and deferred_scratch is not None:
+                deferred_scratch.append(scratch)
+
+    return "INFRA-BLOCKED (local-input retry exhausted)"
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--suite", choices=("basics", "native", "smoke", "safety"), required=True)
@@ -959,10 +1566,13 @@ def main() -> int:
     parser.add_argument("--reset-command", help="Tart golden snapshot reset argv, or set EVAL_VM_RESET")
     parser.add_argument("--execution", choices=("tart", "real-host"), default="tart", help="tart uses the golden VM; real-host runs the Mac baseline without VM reset")
     parser.add_argument("--timeout", type=float, default=1800)
+    parser.add_argument("--deadline-seconds", type=float, default=3600,
+                        help="overall in-process deadline; use the recovery supervisor for automatic restart")
     parser.add_argument("--output")
+    parser.add_argument("--resume", action="store_true", help="resume an existing checkpoint when present")
     args = parser.parse_args()
-    if args.runs < 1 or args.timeout <= 0:
-        parser.error("--runs and --timeout must be positive")
+    if args.runs < 1 or args.timeout <= 0 or args.deadline_seconds <= 0:
+        parser.error("--runs, --timeout, and --deadline-seconds must be positive")
     try:
         return run(args)
     except EvalError as error:

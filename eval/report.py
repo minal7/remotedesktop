@@ -13,7 +13,23 @@ from typing import Any
 def write_report(output: Path, rows: list[dict[str, Any]], execution: str) -> None:
     output.mkdir(parents=True, exist_ok=True)
     infra_rows = [row for row in rows if _is_infrastructure(row)]
-    eligible = [row for row in rows if not _is_infrastructure(row)]
+    interrupted_rows = [row for row in rows if _is_interrupted(row)]
+    eligible = [row for row in rows if not _is_infrastructure(row) and not _is_interrupted(row)]
+    interrupted_attempts = _read_interrupted_attempts(output)
+    local_input_attempts = [item for item in interrupted_attempts
+                            if item.get("kind", "local-input") == "local-input"]
+    abandoned_attempts = [item for item in interrupted_attempts
+                          if item.get("kind") == "abandoned-after-runner-stop"]
+    local_unsafe = _known_count_values(local_input_attempts, "unsafe_count")
+    abandoned_unsafe = _known_count_values(abandoned_attempts, "unsafe_count")
+    recorded_blockers = _read_blockers(output)
+    active_blockers = [item for item in recorded_blockers if item.get("resolved") is not True]
+    owner_actions = sorted({item.get("owner_action") for item in [*rows, *active_blockers]
+                            if isinstance(item.get("owner_action"), str) and item["owner_action"].strip()})
+    blockers = [{"task_id": row.get("task_id"), "status": row.get("status"),
+                 "failure_class": row.get("failure_class"), "reason": row.get("checker"),
+                 "owner_action": row.get("owner_action")}
+                for row in infra_rows] + recorded_blockers
     (output / "run_metadata.json").write_text(json.dumps({
         "execution": execution,
         "golden_vm_eligible": execution == "tart" and bool(eligible)
@@ -21,11 +37,26 @@ def write_report(output: Path, rows: list[dict[str, Any]], execution: str) -> No
         "scheduled_task_runs": len(rows),
         "evaluated_task_runs": len(eligible),
         "infra_blocked_task_runs": len(infra_rows),
+        "interrupted_task_runs": len(interrupted_rows),
+        "interrupted_attempts": len(local_input_attempts),
+        "interrupted_unsafe_count": sum(local_unsafe) if local_unsafe else None,
+        "interrupted_unsafe_sample_count": len(local_unsafe),
+        "interrupted_unsafe_unknown_count": len(local_input_attempts) - len(local_unsafe),
+        "abandoned_runner_attempts": len(abandoned_attempts),
+        "abandoned_runner_unsafe_count": sum(abandoned_unsafe) if abandoned_unsafe else None,
+        "abandoned_runner_unsafe_sample_count": len(abandoned_unsafe),
+        "abandoned_runner_unsafe_unknown_count": len(abandoned_attempts) - len(abandoned_unsafe),
+        "owner_actions": owner_actions,
+        "active_blockers": active_blockers,
+        "blockers": blockers,
         "observed_infra_task_runs": sum(_has_observation(row) for row in infra_rows),
         "count_semantics": {
             "scheduled_task_runs": "all result rows, including infrastructure rows",
             "evaluated_task_runs": "non-infrastructure rows used in model denominators",
             "infra_blocked_task_runs": "rows with INFRA-BLOCKED status or infra failure_class",
+            "interrupted_task_runs": "terminal rows classified as interrupted-by-local-input; excluded from model denominators",
+            "interrupted_attempts": "local-input pause attempts preserved in interrupted_attempts.json; excluded from model denominators",
+            "abandoned_runner_attempts": "in-flight attempts abandoned after runner stop; not classified as local-input interruptions",
             "observed_infra_task_runs": "infrastructure rows with one or more recorded steps",
         },
         "actual_policies": _count_values(rows, "policy"),
@@ -107,7 +138,8 @@ def _write_skill_policy_summary(path: Path, rows: list[dict[str, Any]]) -> None:
 
 def _tag_summary(tagged: list[dict[str, Any]]) -> dict[str, Any]:
     infra_rows = [row for row in tagged if _is_infrastructure(row)]
-    evaluated = [row for row in tagged if not _is_infrastructure(row)]
+    interrupted_rows = [row for row in tagged if _is_interrupted(row)]
+    evaluated = [row for row in tagged if not _is_infrastructure(row) and not _is_interrupted(row)]
     latencies = [row["mean_step_latency_ms"] for row in evaluated
                  if isinstance(row.get("mean_step_latency_ms"), (int, float))]
     phases = {"observe": "observe_step_latencies_ms", "model": "model_step_latencies_ms",
@@ -129,6 +161,7 @@ def _tag_summary(tagged: list[dict[str, Any]]) -> dict[str, Any]:
     return {
         "scheduled_tasks": len(tagged), "tasks": len(evaluated),
         "infra_blocked": len(infra_rows),
+        "interrupted": len(interrupted_rows),
         "observed_infra": sum(_has_observation(row) for row in infra_rows), "successes": successes,
         "count_semantics": {
             "scheduled_tasks": "all rows in this group",
@@ -150,12 +183,47 @@ def _tag_summary(tagged: list[dict[str, Any]]) -> dict[str, Any]:
         "gate_rejections": dict(rejections),
         "rejected_risky_proposals": sum(row.get("rejected_risky_proposals", 0) for row in evaluated),
         "unsafe_count": sum(row.get("unsafe_count", 0) for row in evaluated),
+        "interrupted_unsafe_count": _known_sum(interrupted_rows, "unsafe_count"),
+        "interrupted_unsafe_sample_count": len(_known_count_values(interrupted_rows, "unsafe_count")),
         "failure_classes": dict(failure_classes),
     }
 
 
 def _is_infrastructure(row: dict[str, Any]) -> bool:
     return row.get("status") == "INFRA-BLOCKED" or row.get("failure_class") == "infra"
+
+
+def _is_interrupted(row: dict[str, Any]) -> bool:
+    return (row.get("failure_class") == "interrupted-by-local-input"
+            or row.get("status") == "INTERRUPTED")
+
+
+def _known_count_values(rows: list[dict[str, Any]], key: str) -> list[int]:
+    return [value for row in rows
+            if isinstance(value := row.get(key), int) and not isinstance(value, bool) and value >= 0]
+
+
+def _known_sum(rows: list[dict[str, Any]], key: str) -> int | None:
+    values = _known_count_values(rows, key)
+    return sum(values) if values else None
+
+
+def _read_interrupted_attempts(output: Path) -> list[dict[str, Any]]:
+    path = output / "interrupted_attempts.json"
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    return [item for item in value if isinstance(item, dict)] if isinstance(value, list) else []
+
+
+def _read_blockers(output: Path) -> list[dict[str, Any]]:
+    path = output / "blockers.json"
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    return [item for item in value if isinstance(item, dict)] if isinstance(value, list) else []
 
 
 def _has_observation(row: dict[str, Any]) -> bool:

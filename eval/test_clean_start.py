@@ -89,6 +89,20 @@ class CleanStartTests(unittest.TestCase):
         tasks = run_suite.smoke_tasks()[:3]
         args = SimpleNamespace(execution="real-host", policy="fara15-4b", suite="smoke",
                                timeout=10, runs=1, output=None)
+
+        class UnlockedLifecycle:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def check_screen_unlocked(self):
+                pass
+
         with tempfile.TemporaryDirectory() as directory:
             output = run_suite.Path(directory) / "report"
             close_calls = 0
@@ -103,9 +117,11 @@ class CleanStartTests(unittest.TestCase):
                 reports.append((path, list(rows), execution))
 
             response = {"answer": "ok"}
-            with patch.object(run_suite, "_prepare_run", return_value=(tasks, ["signed-host"], [], None, output)), \
+            with patch.object(run_suite, "_prepare_run", return_value=(tasks, ["/usr/bin/true"], [], None, output)), \
                  patch.object(run_suite, "_resolved_default_browser", return_value="org.example.browser"), \
                  patch.object(run_suite, "_close_suite_app_windows", side_effect=close_apps), \
+                 patch("runner_recovery.RunnerLifecycle", UnlockedLifecycle), \
+                 patch("native_start.reset_empty_textedit"), \
                  patch.object(run_suite, "_run_preflight", return_value=SimpleNamespace(passed=True)), \
                  patch.object(run_suite, "_fixture_server_available", return_value=True), \
                  patch.object(run_suite, "_run_driver", return_value=(response, None)) as driver, \
@@ -116,96 +132,93 @@ class CleanStartTests(unittest.TestCase):
             self.assertEqual(result, 1)
             driver.assert_called_once()
             final_rows = reports[-1][1]
-            self.assertEqual(len(final_rows), 2)
-            self.assertEqual([row["status"] for row in final_rows], ["PASS", "INFRA-BLOCKED"])
-            self.assertIn("Safari window remained", final_rows[-1]["checker"])
+            self.assertEqual([row["status"] for row in final_rows], ["PASS"])
+            blockers = json.loads((output / "blockers.json").read_text())
+            self.assertEqual(len(blockers), 1)
+            self.assertEqual(blockers[0]["kind"], "task-blocked")
+            self.assertEqual(blockers[0]["task_id"], tasks[1].task_id)
+            self.assertEqual(blockers[0]["status"], "INFRA-BLOCKED")
+            self.assertIn("Safari window remained", blockers[0]["checker"])
 
-    def test_completed_result_survives_fixture_cleanup_failure_and_stops_next_task(self) -> None:
-        tasks = run_suite.load_tasks("native")[:2]
+    def test_completed_result_survives_untitled_document_cleanup_failure(self) -> None:
+        from native_start import NativeDocumentLease
+
+        task = run_suite.load_tasks("native")[0]
         args = SimpleNamespace(execution="real-host", policy="fara15-4b", suite="native",
                                timeout=10, runs=1, output=None)
         with tempfile.TemporaryDirectory() as directory:
             previous_home = run_suite.os.environ.get("HOME")
             run_suite.os.environ["HOME"] = directory
             output = run_suite.Path(directory) / "report"
-            reports = []
-            closes = 0
-
-            def close_apps(*_args, **_kwargs):
-                nonlocal closes
-                closes += 1
-                if closes == 3:  # Suite, task start, then post-task fixture cleanup.
-                    raise run_suite.EvalError("fixture window could not be closed")
-
-            def capture_report(path, rows, execution):
-                reports.append((path, json.loads(json.dumps(rows)), execution))
-
+            rows = []
             try:
-                with patch.object(run_suite, "_prepare_run", return_value=(tasks, ["signed-host"], [], None, output)), \
-                     patch.object(run_suite, "_close_suite_app_windows", side_effect=close_apps), \
-                     patch.object(run_suite, "_run_preflight", return_value=SimpleNamespace(passed=True)), \
-                     patch.object(run_suite, "_fixture_server_available", return_value=True), \
-                     patch.object(run_suite, "_run_driver", return_value=({"answer": "created the note"}, None)) as driver, \
+                with patch.object(run_suite, "_close_suite_app_windows"), \
+                     patch("native_start.prepare_textedit_untitled", return_value=NativeDocumentLease(10, 20)), \
+                     patch("native_start.close_textedit_untitled", side_effect=RuntimeError("window close failed")), \
+                     patch.object(run_suite, "_run_driver", return_value=({"answer": "created the document"}, None)) as driver, \
                      patch.object(run_suite, "_evaluate_response", return_value=({
-                         "task_id": tasks[0].task_id, "status": "PASS", "success": True,
+                         "task_id": task.task_id, "status": "PASS", "success": True,
                          "outcome": "completed", "checker_pass": True,
-                     }, "PASS")), \
-                     patch.object(run_suite, "_write_report", side_effect=capture_report):
-                    result = run_suite.run(args)
+                     }, "PASS")):
+                    result = run_suite._run_one_task(task, 1, args, ["signed-host"], [], None,
+                                                     output, rows, suite_apps=["TextEdit"])
             finally:
                 if previous_home is None:
                     run_suite.os.environ.pop("HOME", None)
                 else:
                     run_suite.os.environ["HOME"] = previous_home
 
-            self.assertEqual(result, 1)
+            self.assertIn("cleanup failed", result or "")
             driver.assert_called_once()
-            row = reports[-1][1][0]
+            row = rows[0]
             self.assertEqual(row["status"], "PASS")
             self.assertTrue(row["success"])
             self.assertEqual(row["outcome"], "completed")
-            self.assertEqual(row["cleanup_error"], "fixture window could not be closed")
-            retained = list((run_suite.Path(directory) / "AgentEval").glob("native-001-*/Start.txt"))
-            self.assertEqual(len(retained), 1)
+            self.assertEqual(row["cleanup_error"], "window close failed")
+            scratch = run_suite.Path(directory) / "AgentEval" / "n001"
+            self.assertTrue((scratch / ".native-eval-owner").is_file())
+            self.assertFalse((scratch / "Start.txt").exists())
 
-    def test_successful_fixture_cleanup_closes_before_removing_blank_document(self) -> None:
-        tasks = run_suite.load_tasks("native")[:1]
+    def test_successful_textedit_cleanup_closes_leased_window_then_clears_output_reservation(self) -> None:
+        from native_start import NativeDocumentLease
+
+        task = run_suite.load_tasks("native")[0]
         args = SimpleNamespace(execution="real-host", policy="fara15-4b", suite="native",
                                timeout=10, runs=1, output=None)
         with tempfile.TemporaryDirectory() as directory:
             previous_home = run_suite.os.environ.get("HOME")
             run_suite.os.environ["HOME"] = directory
             output = run_suite.Path(directory) / "report"
-            closes = 0
-            saw_document_during_close = False
+            rows = []
+            observed = {}
             try:
-                def close_apps(*_args, **_kwargs):
-                    nonlocal closes, saw_document_during_close
-                    closes += 1
-                    if closes == 3:  # Post-task close happens while the private fixture still exists.
-                        files = list((run_suite.Path(directory) / "AgentEval").glob("native-001-*/Start.txt"))
-                        saw_document_during_close = len(files) == 1 and files[0].read_bytes() == b""
+                def close_owned(lease):
+                    observed["lease"] = lease.as_dict()
+                    marker = json.loads((run_suite.Path(directory) / "AgentEval" / "n001" / ".native-eval-owner").read_text())
+                    observed["reserved"] = marker["reserved_outputs"]
 
-                with patch.object(run_suite, "_prepare_run", return_value=(tasks, ["signed-host"], [], None, output)), \
-                     patch.object(run_suite, "_close_suite_app_windows", side_effect=close_apps), \
-                     patch.object(run_suite, "_run_preflight", return_value=SimpleNamespace(passed=True)), \
-                     patch.object(run_suite, "_fixture_server_available", return_value=True), \
-                     patch.object(run_suite, "_run_driver", return_value=({"answer": "created the note"}, None)), \
+                with patch.object(run_suite, "_close_suite_app_windows"), \
+                     patch("native_start.prepare_textedit_untitled", return_value=NativeDocumentLease(10, 20)), \
+                     patch("native_start.close_textedit_untitled", side_effect=close_owned), \
+                     patch.object(run_suite, "_run_driver", return_value=({"answer": "created the document"}, None)), \
                      patch.object(run_suite, "_evaluate_response", return_value=({
-                         "task_id": tasks[0].task_id, "status": "PASS", "success": True,
+                         "task_id": task.task_id, "status": "PASS", "success": True,
                          "outcome": "completed", "checker_pass": True,
-                     }, "PASS")), \
-                     patch.object(run_suite, "_write_report"):
-                    result = run_suite.run(args)
+                     }, "PASS")):
+                    result = run_suite._run_one_task(task, 1, args, ["signed-host"], [], None,
+                                                     output, rows, suite_apps=["TextEdit"])
             finally:
                 if previous_home is None:
                     run_suite.os.environ.pop("HOME", None)
                 else:
                     run_suite.os.environ["HOME"] = previous_home
 
-            self.assertEqual(result, 0)
-            self.assertTrue(saw_document_during_close)
-            self.assertEqual(list((run_suite.Path(directory) / "AgentEval").glob("native-001-*/Start.txt")), [])
+            self.assertEqual(result, "PASS")
+            self.assertEqual(observed["lease"], {"pid": 10, "window_id": 20})
+            self.assertEqual(len(observed["reserved"]), 2)
+            marker = json.loads((run_suite.Path(directory) / "AgentEval" / "n001" / ".native-eval-owner").read_text())
+            self.assertEqual(marker["reserved_outputs"], [])
+            self.assertFalse((run_suite.Path(directory) / "AgentEval" / "n001" / "Start.txt").exists())
 
 
 if __name__ == "__main__":

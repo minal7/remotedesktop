@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import subprocess
 import sys
 import threading
 import unittest
@@ -156,11 +157,15 @@ class TaskAndCheckerTests(unittest.TestCase):
         self.assertTrue(all(task.value["surface"] == "app" for task in native))
         self.assertEqual(len({task.value["prompt"] for task in native}), 8)
         self.assertTrue(all(task.value["approval_policy"] == {"allow_start_interaction": True} for task in native))
+        self.assertTrue(all(task.value["setup"]["new_untitled"] is True for task in native[:4]))
+        self.assertEqual(native[2].value["checker"]["expect"]["path"], "{home}/Documents/Handoff")
+        self.assertEqual(native[3].value["checker"]["expect"]["path"], "{home}/Desktop/Review")
+        self.assertTrue(all("plain-text" not in task.value["prompt"].casefold() for task in native[:4]))
         unsafe = {**native[0].value, "setup": {"folders": ["../../Documents"]}}
         with self.assertRaises(run_suite.EvalError):
             run_suite.validate_task(unsafe, Path("native-unsafe.yaml"))
 
-    def test_native_scratch_is_per_task_and_checkers_reject_paths_outside_it(self) -> None:
+    def test_native_scratch_is_short_owned_and_checkers_reject_paths_outside_it(self) -> None:
         from tempfile import TemporaryDirectory
 
         task = next(task for task in run_suite.load_tasks("native") if task.task_id == "native-001")
@@ -168,17 +173,20 @@ class TaskAndCheckerTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             os.environ["HOME"] = directory
             try:
-                scratch = run_suite._native_scratch_directory(task.task_id, "run-token")
+                scratch = run_suite._native_scratch_directory(task.task_id, "a" * 32)
                 materialized = run_suite._materialize_native_task(task, scratch)
-                self.assertIn(str(scratch), materialized.value["prompt"])
+                run_suite._seed_native_task(task, scratch)
+                self.assertEqual(scratch.name, "n001")
+                self.assertIn("AgentEval/n001", materialized.value["prompt"])
                 target = scratch / "Meeting.txt"
-                target.write_text("Meeting notes for Monday\n", encoding="utf-8")
+                target.write_text("Meeting notes for Monday", encoding="utf-8")
                 passed, _ = run_suite._match_expectation(None, materialized.value["checker"], [], "", scratch)
                 self.assertTrue(passed)
                 outside = {"type": "file_text", "expect": {"path": str(Path(directory) / "outside.txt"), "equals": "x"}}
                 self.assertFalse(run_suite._match_expectation(None, outside, [], "", scratch)[0])
+                run_suite._cleanup_native_outputs(task, scratch)
                 run_suite._remove_native_scratch(scratch)
-                self.assertFalse(scratch.exists())
+                self.assertEqual([item.name for item in scratch.iterdir()], [".native-eval-owner"])
                 self.assertTrue((Path(directory) / "AgentEval").is_dir())
             finally:
                 if home is None:
@@ -186,60 +194,159 @@ class TaskAndCheckerTests(unittest.TestCase):
                 else:
                     os.environ["HOME"] = home
 
-    def test_native_blank_start_document_is_seeded_and_forwarded_only_from_private_scratch(self) -> None:
+    def test_native_directory_refuses_unowned_files_and_symlinks(self) -> None:
         from tempfile import TemporaryDirectory
 
-        original = next(task for task in run_suite.load_tasks("native") if task.task_id == "native-001")
-        value = {**original.value, "setup": {"open_document": "Start.txt"}}
-        task = run_suite.validate_task(value, Path("native-blank-start.yaml"))
-        unsafe = {**value, "setup": {"open_document": "../Start.txt"}}
-        with self.assertRaises(run_suite.EvalError):
-            run_suite.validate_task(unsafe, Path("native-unsafe-start.yaml"))
-        no_start_authority = {**value, "approval_policy": {}}
-        with self.assertRaises(run_suite.EvalError):
-            run_suite.validate_task(no_start_authority, Path("native-no-start-authority.yaml"))
-        collision = {**value, "checker": {"type": "file_text", "expect": {
-            "path": "{eval_dir}/Start.txt", "equals": "x"}}}
-        with self.assertRaises(run_suite.EvalError):
-            run_suite.validate_task(collision, Path("native-output-collision.yaml"))
-
+        previous_home = os.environ.get("HOME")
         with TemporaryDirectory() as directory:
-            previous_home = os.environ.get("HOME")
-            previous_eval_root = os.environ.get("REMOTE_DESKTOP_EVAL_ROOT")
             os.environ["HOME"] = directory
-            os.environ["REMOTE_DESKTOP_EVAL_ROOT"] = str(Path(directory) / "episodes")
             try:
-                token = "a" * 32
-                scratch = run_suite._native_scratch_directory(task.task_id, token)
-                run_suite._seed_native_task(task, scratch)
-                document = scratch / "Start.txt"
-                self.assertTrue(document.is_file())
-                self.assertEqual(document.read_bytes(), b"")
-                self.assertEqual(document.stat().st_mode & 0o777, 0o600)
+                root = Path(directory) / "AgentEval"
+                root.mkdir(mode=0o700)
+                unowned = root / "n001"
+                unowned.mkdir(mode=0o700)
+                user_file = unowned / "notes.txt"
+                user_file.write_text("keep", encoding="utf-8")
+                with self.assertRaises(run_suite.EvalError):
+                    run_suite._native_scratch_directory("native-001", "a" * 32)
+                self.assertEqual(user_file.read_text(encoding="utf-8"), "keep")
 
-                driver_script = (
-                    "import json,sys; req=json.load(sys.stdin); "
-                    "print(json.dumps({'task_id':req['task_id'],'outcome':'blocked','answer':'',"
-                    "'episode_path':'/tmp/episode.jsonl','wall_seconds':0,'real_host_app':True,"
-                    "'environment':'pixel','policy':req['policy'],'setup_document':req.get('setup_document')}))"
-                )
-                with patch.object(run_suite, "_prepare_episode_root", return_value=Path(directory) / "episodes"), \
-                     patch.object(run_suite, "_vm_project_root", return_value=None), \
-                     patch.object(run_suite, "_vm_remote_eval_root", return_value=None):
-                    response, error = run_suite._run_driver([sys.executable, "-c", driver_script], task,
-                        "fara15-4b", token, "driver-id", 10, setup_document=document)
-                self.assertIsNone(error)
-                self.assertEqual(response["setup_document"], str(document.resolve()))
+                outside = Path(directory) / "outside"
+                outside.mkdir()
+                (root / "n002").symlink_to(outside, target_is_directory=True)
+                with self.assertRaises(run_suite.EvalError):
+                    run_suite._native_scratch_directory("native-002", "a" * 32)
+                self.assertEqual(list(outside.iterdir()), [])
             finally:
-                run_suite._remove_native_scratch(Path(directory) / "AgentEval" / f"{task.task_id}-{token}")
                 if previous_home is None:
                     os.environ.pop("HOME", None)
                 else:
                     os.environ["HOME"] = previous_home
-                if previous_eval_root is None:
-                    os.environ.pop("REMOTE_DESKTOP_EVAL_ROOT", None)
+
+    def test_owned_native_cleanup_removes_wrong_outputs_without_following_symlinks(self) -> None:
+        from tempfile import TemporaryDirectory
+        import hashlib
+
+        task = next(task for task in run_suite.load_tasks("native") if task.task_id == "native-001")
+        previous_home = os.environ.get("HOME")
+        with TemporaryDirectory() as directory:
+            os.environ["HOME"] = directory
+            try:
+                scratch = run_suite._native_scratch_directory(task.task_id, "c" * 32)
+                run_suite._seed_native_task(task, scratch)
+                unexpected = scratch / "WrongName.txt"
+                unexpected.write_text("failed output", encoding="utf-8")
+                outside = Path(directory) / "outside"
+                outside.mkdir()
+                sentinel = outside / "keep.txt"
+                sentinel.write_text("preserve", encoding="utf-8")
+                (scratch / "link-outside").symlink_to(outside, target_is_directory=True)
+
+                run_suite._cleanup_native_outputs(task, scratch, include_external=True)
+
+                self.assertFalse(unexpected.exists())
+                self.assertFalse((scratch / "link-outside").exists())
+                self.assertEqual(sentinel.read_text(encoding="utf-8"), "preserve")
+                marker = json.loads((scratch / ".native-eval-owner").read_text(encoding="utf-8"))
+                entries = marker["cleanup_history"][-1]["items"]
+                wrong = next(item for item in entries if item["path"] == "WrongName.txt")
+                self.assertEqual(wrong["sha256"], hashlib.sha256(b"failed output").hexdigest())
+                self.assertIn({"path": "link-outside", "type": "symlink"}, entries)
+            finally:
+                if previous_home is None:
+                    os.environ.pop("HOME", None)
                 else:
-                    os.environ["REMOTE_DESKTOP_EVAL_ROOT"] = previous_eval_root
+                    os.environ["HOME"] = previous_home
+
+    def test_documents_output_reservation_refuses_existing_txt_or_rtf(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        task = next(task for task in run_suite.load_tasks("native") if task.task_id == "native-003")
+        previous_home = os.environ.get("HOME")
+        with TemporaryDirectory() as directory:
+            os.environ["HOME"] = directory
+            (Path(directory) / "Documents").mkdir()
+            (Path(directory) / "Desktop").mkdir()
+            try:
+                scratch = run_suite._native_scratch_directory(task.task_id, "b" * 32)
+                run_suite._seed_native_task(task, scratch)
+                run_suite._cleanup_native_outputs(task, scratch, include_external=True)
+                existing = Path(directory) / "Documents" / "Handoff.rtf"
+                existing.write_text("preserve this", encoding="utf-8")
+                with self.assertRaisesRegex(run_suite.EvalError, "refusing to overwrite"):
+                    run_suite._reserve_native_output(task, scratch)
+                self.assertEqual(existing.read_text(encoding="utf-8"), "preserve this")
+                run_suite._cleanup_native_outputs(task, scratch, include_external=True)
+                self.assertEqual(existing.read_text(encoding="utf-8"), "preserve this")
+            finally:
+                if previous_home is None:
+                    os.environ.pop("HOME", None)
+                else:
+                    os.environ["HOME"] = previous_home
+
+    def test_native_checker_requires_exact_stem_content_and_converts_rtf(self) -> None:
+        from tempfile import TemporaryDirectory
+        import native_checkers
+
+        previous_home = os.environ.get("HOME")
+        with TemporaryDirectory() as directory:
+            os.environ["HOME"] = directory
+            scratch = Path(directory) / "AgentEval" / "n001"
+            scratch.mkdir(parents=True)
+            (scratch / ".native-eval-owner").write_text("{}", encoding="utf-8")
+            try:
+                base = scratch / "Meeting"
+                checker = {"type": "file_text", "expect": {
+                    "path": str(base), "stem": "Meeting", "allow_rtf": True,
+                    "equals": "Meeting notes for Monday",
+                }}
+                text_file = scratch / "Meeting.txt"
+                text_file.write_text("Meeting notes for Monday", encoding="utf-8")
+                self.assertTrue(native_checkers.match(checker, [], "", scratch)[0])
+                text_file.write_text("Meeting notes for Monday.\n", encoding="utf-8")
+                self.assertFalse(native_checkers.match(checker, [], "", scratch)[0])
+                text_file.unlink()
+                rich_file = scratch / "Meeting.rtf"
+                rich_file.write_text(r"{\\rtf1 Meeting notes for Monday}", encoding="utf-8")
+                converted = subprocess.CompletedProcess([], 0, "Meeting notes for Monday", "")
+                with patch.object(native_checkers.subprocess, "run", return_value=converted) as textutil:
+                    self.assertTrue(native_checkers.match(checker, [], "", scratch)[0])
+                self.assertEqual(textutil.call_args.args[0][:3], ["/usr/bin/textutil", "-convert", "txt"])
+
+                plain_only = {"type": "file_text", "expect": {**checker["expect"], "allow_rtf": False}}
+                self.assertFalse(native_checkers.match(plain_only, [], "", scratch)[0])
+            finally:
+                if previous_home is None:
+                    os.environ.pop("HOME", None)
+                else:
+                    os.environ["HOME"] = previous_home
+
+    def test_native_untitled_start_is_declarative_and_never_seeds_a_saved_file(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        original = next(task for task in run_suite.load_tasks("native") if task.task_id == "native-001")
+        task = run_suite.validate_task(original.value, Path("native-untitled.yaml"))
+        self.assertTrue(task.value["setup"]["new_untitled"])
+        self.assertNotIn("open_document", task.value["setup"])
+        unsafe = {**original.value, "setup": {"new_untitled": True}, "start": {"app": "Finder"}}
+        with self.assertRaises(run_suite.EvalError):
+            run_suite.validate_task(unsafe, Path("native-unsafe-untitled.yaml"))
+        no_start_authority = {**original.value, "approval_policy": {}}
+        with self.assertRaises(run_suite.EvalError):
+            run_suite.validate_task(no_start_authority, Path("native-no-start-authority.yaml"))
+
+        with TemporaryDirectory() as directory:
+            previous_home = os.environ.get("HOME")
+            os.environ["HOME"] = directory
+            try:
+                scratch = run_suite._native_scratch_directory(task.task_id, "a" * 32)
+                run_suite._seed_native_task(task, scratch)
+                self.assertFalse((scratch / "Start.txt").exists())
+            finally:
+                if previous_home is None:
+                    os.environ.pop("HOME", None)
+                else:
+                    os.environ["HOME"] = previous_home
 
     def test_read_only_notes_checker_requires_notes_surface(self) -> None:
         task = next(task for task in run_suite.load_tasks("native") if task.task_id == "native-008")
@@ -615,16 +722,31 @@ class TaskAndCheckerTests(unittest.TestCase):
         from tempfile import TemporaryDirectory
         from preflight import failed
 
+        class UnlockedLifecycle:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def check_screen_unlocked(self):
+                pass
+
         with TemporaryDirectory() as directory, \
              patch.object(run_suite, "_start_fixture_server", return_value=None), \
              patch.object(run_suite, "_fixture_server_available", return_value=True), \
              patch.object(run_suite, "_resolved_default_browser", return_value="com.apple.Safari") as resolve_browser, \
              patch.object(run_suite, "_close_suite_app_windows") as close_suite_windows, \
+             patch("runner_recovery.RunnerLifecycle", UnlockedLifecycle), \
+             patch("native_start.reset_empty_textedit"), \
              patch.object(run_suite.subprocess, "run", side_effect=AssertionError("tests must not launch subprocesses")), \
              patch.object(run_suite, "_run_preflight", return_value=failed("Screen Recording denied", "Grant Screen Recording")), \
              patch.object(run_suite, "_run_driver", side_effect=AssertionError("tasks must not start")):
             args = type("Args", (), {
-                "suite": "smoke", "driver": "fake-driver", "reset_command": None,
+                "suite": "smoke", "driver": "/usr/bin/true", "reset_command": None,
                 "execution": "real-host", "timeout": 1, "runs": 1, "policy": "fara15-4b",
                 "output": directory,
             })()
@@ -636,7 +758,7 @@ class TaskAndCheckerTests(unittest.TestCase):
             self.assertEqual(metadata["evaluated_task_runs"], 0)
             self.assertEqual(metadata["infra_blocked_task_runs"], len(rows))
             resolve_browser.assert_called_once_with()
-            close_suite_windows.assert_called_once_with(["Finder", "Notes", "TextEdit", "com.apple.Safari"], ["fake-driver"])
+            close_suite_windows.assert_called_once_with(["Finder", "Notes", "TextEdit", "com.apple.Safari"], ["/usr/bin/true"])
 
     def test_missing_first_observation_is_infra_but_recorded_model_failure_is_fail(self) -> None:
         task = run_suite.load_tasks("basics")[0]

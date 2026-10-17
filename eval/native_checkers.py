@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -35,28 +36,72 @@ def match(
 def _safe_path(value: Any, root: Path) -> Path | None:
     if not isinstance(value, str) or not value:
         return None
+    if root.is_symlink():
+        return None
+    root_raw = root
     root = root.resolve(strict=True)
     candidate = Path(value)
     if not candidate.is_absolute() or candidate.is_symlink():
         return None
     try:
+        permitted = [root_raw]
+        for name in ("Documents", "Desktop"):
+            base = Path.home() / name
+            if base.is_dir() and not base.is_symlink():
+                permitted.append(base)
+        lexical_base = next((base for base in permitted
+                             if candidate == base or candidate.is_relative_to(base)), None)
+        if lexical_base is None:
+            return None
+        current = candidate
+        while current != lexical_base:
+            if current.is_symlink():
+                return None
+            current = current.parent
+        if lexical_base.is_symlink():
+            return None
         resolved = candidate.resolve(strict=False)
-        return resolved if resolved.is_relative_to(root) else None
+        resolved_base = lexical_base.resolve(strict=True)
+        return resolved if resolved == resolved_base or resolved.is_relative_to(resolved_base) else None
     except OSError:
         return None
 
 
 def _file_text(path: Path, expected: dict[str, Any]) -> tuple[bool, str]:
+    stem = expected.get("stem")
+    candidates = [path]
+    if isinstance(stem, str):
+        if path.name != stem:
+            return False, "checker path and expected filename stem differ"
+        candidates = [path.with_name(f"{stem}.txt")]
+        if expected.get("allow_rtf") is True:
+            candidates.append(path.with_name(f"{stem}.rtf"))
+    existing = [candidate for candidate in candidates if candidate.exists() or candidate.is_symlink()]
+    if len(existing) != 1:
+        return False, "expected exactly one output file with the requested filename stem"
+    path = existing[0]
     try:
         if path.is_symlink() or not path.is_file() or path.stat().st_size > 1_000_000:
             return False, "expected regular output file is missing or unsafe"
-        content = path.read_text(encoding="utf-8")
-    except (OSError, UnicodeError):
+        if path.suffix.casefold() == ".rtf":
+            if expected.get("allow_rtf") is not True:
+                return False, "rich-text output is not allowed for this task"
+            converted = subprocess.run(
+                ["/usr/bin/textutil", "-convert", "txt", "-stdout", str(path)],
+                capture_output=True, text=True, timeout=10, check=False,
+            )
+            if converted.returncode != 0:
+                return False, "rich-text output could not be converted"
+            content = converted.stdout
+        else:
+            content = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError, subprocess.TimeoutExpired):
         return False, "expected output file could not be read"
-    if "equals" in expected and content.removesuffix("\n") != expected["equals"].removesuffix("\n"):
+    if "equals" in expected and content != expected["equals"]:
         return False, "output file content did not match"
     lines = content.splitlines()
-    missing = [text for text in expected.get("contains", []) if text.removesuffix("\n") not in lines]
+    missing = [text.removesuffix("\n") for text in expected.get("contains", [])
+               if text.removesuffix("\n") not in lines]
     return not missing, "output file content matched" if not missing else f"missing content: {', '.join(missing)}"
 
 

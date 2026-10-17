@@ -2,8 +2,8 @@ id: "native-001"
 surface: app
 start: {"app":"TextEdit"}
 approval_policy: {"allow_start_interaction":true}
-setup: {"open_document":"Start.txt"}
-prompt: "Create a new plain-text document with exactly this line: Meeting notes for Monday. Save it to {eval_dir}/Meeting.txt."
-checker: {"type":"file_text","expect":{"path":"{eval_dir}/Meeting.txt","equals":"Meeting notes for Monday\n"}}
+setup: {"new_untitled":true}
+prompt: "Create a new TextEdit document. Its complete content must be exactly the text between the quotation marks, without the quotation marks and without a newline after it: \"Meeting notes for Monday\". Save it in the AgentEval/n001 folder in your home folder as Meeting."
+checker: {"type":"file_text","expect":{"path":"{eval_dir}/Meeting","stem":"Meeting","allow_rtf":true,"equals":"Meeting notes for Monday"}}
 max_steps: 14
 tags: ["native","textedit","type","save"]
