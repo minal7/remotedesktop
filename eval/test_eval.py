@@ -187,6 +187,90 @@ class TaskAndCheckerTests(unittest.TestCase):
             self.assertEqual(sum("activate" in call[1].get("input", "") for call in calls), 1)
             self.assertGreaterEqual(clock[0], 5.0)
 
+    def test_finder_open_timeout_reports_stage_without_changing_call(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as directory:
+            scratch = Path(directory) / "n007"
+            scratch.mkdir()
+            calls = []
+
+            def runner(argv, **kwargs):
+                calls.append((argv, kwargs))
+                raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
+
+            with self.assertRaisesRegex(
+                    run_suite.EvalError,
+                    r"Could not open the owned native task folder in Finder .*stage=finder-open-osascript.*failure=timeout.*timeout_seconds=5"):
+                run_suite.prepare_finder_folder(scratch, runner=runner)
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(calls[0][0], ["/usr/bin/osascript", "-", str(scratch.resolve())])
+            self.assertEqual(calls[0][1]["timeout"], 5)
+            self.assertEqual(calls[0][1]["check"], False)
+
+    def test_finder_open_nonzero_reports_only_exit_and_numeric_appleevent_code(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as directory:
+            scratch = Path(directory) / "n007"
+            scratch.mkdir()
+            calls = []
+            private_detail = "/Users/example/Private Folder/secret-note.txt"
+
+            def runner(argv, **kwargs):
+                calls.append((argv, kwargs))
+                return subprocess.CompletedProcess(
+                    argv, 1, "", f"execution error: could not open {private_detail} (-1712)\n")
+
+            with self.assertRaises(run_suite.EvalError) as raised:
+                run_suite.prepare_finder_folder(scratch, runner=runner)
+            message = str(raised.exception)
+            self.assertIn("stage=finder-open-osascript", message)
+            self.assertIn("failure=nonzero-exit", message)
+            self.assertIn("exit_code=1", message)
+            self.assertIn("apple_event_code=-1712", message)
+            self.assertNotIn(private_detail, message)
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(calls[0][0], ["/usr/bin/osascript", "-", str(scratch.resolve())])
+            self.assertEqual(calls[0][1]["timeout"], 5)
+            self.assertEqual(calls[0][1]["check"], False)
+
+    def test_finder_open_nonzero_ignores_embedded_parenthesized_numbers(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as directory:
+            scratch = Path(directory) / "n007"
+            scratch.mkdir()
+
+            def runner(argv, **kwargs):
+                return subprocess.CompletedProcess(
+                    argv, 1, "", "failed for /private/thing (123) and item (456)\nno numeric trailer")
+
+            with self.assertRaises(run_suite.EvalError) as raised:
+                run_suite.prepare_finder_folder(scratch, runner=runner)
+            message = str(raised.exception)
+            self.assertIn("exit_code=1", message)
+            self.assertNotIn("apple_event_code", message)
+            self.assertNotIn("/private/thing", message)
+
+    def test_finder_open_oserror_reports_type_errno_without_message(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as directory:
+            scratch = Path(directory) / "n007"
+            scratch.mkdir()
+
+            def runner(argv, **kwargs):
+                raise OSError(13, "private path and note title", "/private/sensitive")
+
+            with self.assertRaises(run_suite.EvalError) as raised:
+                run_suite.prepare_finder_folder(scratch, runner=runner)
+            message = str(raised.exception)
+            self.assertIn("failure=PermissionError", message)
+            self.assertIn("errno=13", message)
+            self.assertNotIn("private path", message)
+            self.assertNotIn("sensitive", message)
+
     def test_default_episode_root_is_private_application_support_location(self) -> None:
         from tempfile import TemporaryDirectory
 

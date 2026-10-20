@@ -638,10 +638,30 @@ end run
     try:
         result = runner(["/usr/bin/osascript", "-", expected_path], input=open_source,
                         capture_output=True, text=True, timeout=5, check=False)
-    except (OSError, subprocess.TimeoutExpired) as error:
-        raise EvalError("Could not open the owned native task folder in Finder") from error
+    except subprocess.TimeoutExpired as error:
+        raise EvalError(
+            "Could not open the owned native task folder in Finder "
+            "(stage=finder-open-osascript, failure=timeout, timeout_seconds=5)"
+        ) from error
+    except OSError as error:
+        # Keep diagnostics useful without exposing paths or AppleScript output.
+        details = ["stage=finder-open-osascript", f"failure={type(error).__name__}"]
+        if type(getattr(error, "errno", None)) is int:
+            details.append(f"errno={error.errno}")
+        raise EvalError(
+            "Could not open the owned native task folder in Finder (" + ", ".join(details) + ")"
+        ) from error
     if result.returncode != 0:
-        raise EvalError("Could not open the owned native task folder in Finder")
+        details = ["stage=finder-open-osascript", "failure=nonzero-exit",
+                   f"exit_code={result.returncode}"]
+        # osascript commonly appends the AppleEvent error number as a parenthesized
+        # integer. Extract only that numeric code; never include stderr itself.
+        numeric_code = re.search(r"\((-?\d{1,6})\)\s*$", result.stderr or "")
+        if numeric_code:
+            details.append(f"apple_event_code={numeric_code.group(1)}")
+        raise EvalError(
+            "Could not open the owned native task folder in Finder (" + ", ".join(details) + ")"
+        )
     probe_source = '''tell application "System Events"
     set matchingProcesses to every process whose bundle identifier is "com.apple.finder"
     if (count of matchingProcesses) is not 1 then return "0|false|0|"
