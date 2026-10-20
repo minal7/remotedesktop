@@ -602,16 +602,64 @@ def _materialize_native_task(task: Task, scratch: Path) -> Task:
     return Task(task.path, value)
 
 
-def prepare_finder_folder(scratch: Path, runner: Any = subprocess.run) -> None:
+def prepare_finder_folder(scratch: Path, runner: Any = subprocess.run, *,
+                          monotonic: Any = time.monotonic,
+                          sleep: Any = time.sleep) -> None:
     if scratch.is_symlink() or not scratch.is_dir():
         raise EvalError("Finder task folder is not a real directory")
+    expected_path = str(scratch.resolve(strict=True))
+    open_source = '''on run argv
+    set folderAlias to POSIX file (item 1 of argv) as alias
+    tell application id "com.apple.finder"
+        activate
+        open folderAlias
+    end tell
+end run
+'''
     try:
-        result = runner(["/usr/bin/open", "-a", "Finder", str(scratch.resolve(strict=True))],
-                        capture_output=True, text=True, timeout=15, check=False)
+        result = runner(["/usr/bin/osascript", "-", expected_path], input=open_source,
+                        capture_output=True, text=True, timeout=5, check=False)
     except (OSError, subprocess.TimeoutExpired) as error:
         raise EvalError("Could not open the owned native task folder in Finder") from error
     if result.returncode != 0:
         raise EvalError("Could not open the owned native task folder in Finder")
+    probe_source = '''tell application "System Events"
+    set matchingProcesses to every process whose bundle identifier is "com.apple.finder"
+    if (count of matchingProcesses) is not 1 then return "0|false|0|"
+    set finderPID to unix id of first item of matchingProcesses
+    set isFrontmost to frontmost of first item of matchingProcesses
+end tell
+tell application id "com.apple.finder"
+    set windowCount to count of Finder windows
+    set targetPath to ""
+    if windowCount > 0 then set targetPath to POSIX path of (target of front Finder window as alias)
+end tell
+return (finderPID as text) & "|" & (isFrontmost as text) & "|" & (windowCount as text) & "|" & targetPath
+'''
+    deadline = monotonic() + 5
+    last_state = "no Finder window observed"
+    while monotonic() < deadline:
+        try:
+            probe = runner(["/usr/bin/osascript", "-"], input=probe_source,
+                           capture_output=True, text=True, timeout=2, check=False)
+            if probe.returncode == 0:
+                fields = probe.stdout.strip().split("|", 3)
+                if len(fields) == 4:
+                    pid, frontmost, window_count, target_path = fields
+                    last_state = f"pid={pid}, frontmost={frontmost}, windows={window_count}, target={target_path!r}"
+                    if (pid.isdigit() and int(pid) > 0 and frontmost.casefold() == "true"
+                            and window_count == "1"
+                            and target_path
+                            and str(Path(target_path).resolve(strict=True)) == expected_path):
+                        return
+                else:
+                    last_state = "Finder readiness response was malformed"
+            else:
+                last_state = (probe.stderr or "Finder readiness probe failed").strip().replace("\n", " ")[:300]
+        except (OSError, subprocess.TimeoutExpired) as error:
+            last_state = str(error)[:300]
+        sleep(0.1)
+    raise EvalError(f"Finder did not show exactly one frontmost window for the owned task folder; {last_state}")
 
 def _task_start(task: Task, token: str) -> dict[str, str]:
     start = dict(task.value["start"])

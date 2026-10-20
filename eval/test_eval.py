@@ -109,6 +109,58 @@ class FixtureServerTests(unittest.TestCase):
 
 
 class TaskAndCheckerTests(unittest.TestCase):
+    def test_finder_setup_waits_for_one_frontmost_owned_folder_window(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as directory:
+            scratch = Path(directory) / "n007"
+            scratch.mkdir()
+            replies = iter(("412|true|0|", f"412|true|1|{scratch}/"))
+            calls = []
+
+            def runner(argv, **kwargs):
+                calls.append((argv, kwargs))
+                if len(calls) == 1:
+                    return subprocess.CompletedProcess(argv, 0, "", "")
+                return subprocess.CompletedProcess(argv, 0, next(replies), "")
+
+            clock = [0.0]
+            run_suite.prepare_finder_folder(
+                scratch, runner=runner, monotonic=lambda: clock[0],
+                sleep=lambda duration: clock.__setitem__(0, clock[0] + duration),
+            )
+            self.assertEqual(len(calls), 3)
+            self.assertEqual(calls[0][0], ["/usr/bin/osascript", "-", str(scratch.resolve())])
+            self.assertIn("activate", calls[0][1]["input"])
+
+    def test_finder_setup_times_out_on_wrong_or_ambiguous_window(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as directory:
+            scratch = Path(directory) / "n007"
+            scratch.mkdir()
+            other = Path(directory) / "other"
+            other.mkdir()
+            calls = []
+
+            def runner(argv, **kwargs):
+                calls.append((argv, kwargs))
+                if len(calls) == 1:
+                    return subprocess.CompletedProcess(argv, 0, "", "")
+                states = (f"412|true|1|{other}", f"412|false|1|{scratch}",
+                          f"412|true|2|{scratch}")
+                state = states[min(len(calls) - 2, len(states) - 1)]
+                return subprocess.CompletedProcess(argv, 0, state, "")
+
+            clock = [0.0]
+            with self.assertRaisesRegex(run_suite.EvalError, "exactly one frontmost window.*windows=2"):
+                run_suite.prepare_finder_folder(
+                    scratch, runner=runner, monotonic=lambda: clock[0],
+                    sleep=lambda duration: clock.__setitem__(0, clock[0] + duration),
+                )
+            self.assertEqual(sum("activate" in call[1].get("input", "") for call in calls), 1)
+            self.assertGreaterEqual(clock[0], 5.0)
+
     def test_default_episode_root_is_private_application_support_location(self) -> None:
         from tempfile import TemporaryDirectory
 
