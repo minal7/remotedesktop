@@ -371,7 +371,15 @@ final class PixelEnvironment: AgentEnvironment {
             return appWindows.first(where: { $0.windowID == windowID &&
                 ElementMarks.focusedWindowMatches(focusedBounds, selectedBounds: $0.frame) })
         }
-        let displayForWindow = target.flatMap { window in
+        let mainTarget: SCWindow? = {
+            guard target == nil, let application = app, let appRoot, let mainWindow = ElementMarks.mainWindow(appRoot), let bounds = ElementMarks.bounds(mainWindow) else { return nil }
+            let title = ElementMarks.string(mainWindow, kAXTitleAttribute)
+            guard let windowID = AgentMacAccessibility.matchingWindowID(ownerPID: application.processIdentifier,
+                bounds: bounds, focusedTitle: title, requireUnique: true) else { return nil }
+            return appWindows.first { $0.windowID == windowID && ElementMarks.focusedWindowMatches(bounds, selectedBounds: $0.frame) }
+        }()
+        let actionTarget = target ?? mainTarget, usesMainFallback = target == nil && mainTarget != nil
+        let displayForWindow = actionTarget.flatMap { window in
             let center = CGPoint(x: window.frame.midX, y: window.frame.midY)
             return content.displays.first(where: { $0.frame.contains(center) })
                 ?? content.displays.max { lhs, rhs in
@@ -411,7 +419,7 @@ final class PixelEnvironment: AgentEnvironment {
         var screenshotBounds = captureBounds
         if windowCapture, let resized = PixelGeometry.resize(image, width: 1280), let target {
             image = resized; screenshotBounds = target.frame; actualCropMode = .frontmostWindow
-        } else if capturePreference == .frontmostWindow, let rect = marks?.contentRect ?? target?.frame,
+        } else if !usesMainFallback, capturePreference == .frontmostWindow, let rect = marks?.contentRect ?? target?.frame,
            let crop = PixelGeometry.cropWithBounds(image, screenRect: rect, captureBounds: captureBounds) {
             image = PixelGeometry.resize(crop.image, width: 1280) ?? crop.image
             screenshotBounds = crop.screenBounds; actualCropMode = .frontmostWindow
@@ -438,10 +446,10 @@ final class PixelEnvironment: AgentEnvironment {
         }
         return .init(window: axWindow, application: app, identity: identity, bundleID: app?.bundleIdentifier ?? "unknown",
             appName: app?.localizedName ?? "",
-            title: target?.title ?? "Visible desktop", url: marks?.browserURL, image: image, screenshot: png,
+            title: actionTarget?.title ?? "Visible desktop", url: marks?.browserURL, image: image, screenshot: png,
             elements: elements, focus: focus, screenBounds: screenshotBounds,
-            activeWindowBounds: target?.frame, activeWindowNumber: target?.windowID,
-            activeWindowOwnerProcessID: target?.owningApplication?.processID,
+            activeWindowBounds: actionTarget?.frame, activeWindowNumber: actionTarget?.windowID,
+            activeWindowOwnerProcessID: actionTarget?.owningApplication?.processID,
             visibleWindowCount: visibleAppWindowCount, marks: marks)
     }
 

@@ -92,8 +92,9 @@ final class PixelEnvironmentTests: XCTestCase {
 
     func testFocusedWindowSelectionUsesFrontmostCGOrderAndRequiresMatchingTitle() {
         let frame = CGRect(x: 10, y: 20, width: 500, height: 400)
-        func entry(_ number: UInt32, _ title: String?) -> [String: Any] {
-            var value: [String: Any] = [kCGWindowOwnerPID as String: NSNumber(value: Int32(42)),
+        func entry(_ number: UInt32, _ title: String?, owner: Int32 = 42, layer: Int = 0) -> [String: Any] {
+            var value: [String: Any] = [kCGWindowOwnerPID as String: NSNumber(value: owner),
+                kCGWindowLayer as String: layer,
                 kCGWindowBounds as String: frame.dictionaryRepresentation,
                 kCGWindowNumber as String: NSNumber(value: number)]
             if let title { value[kCGWindowName as String] = title }
@@ -110,6 +111,17 @@ final class PixelEnvironmentTests: XCTestCase {
             focusedTitle: nil, entries: candidates), 16_742)
         XCTAssertNil(AgentMacAccessibility.matchingWindowID(ownerPID: 42, bounds: frame,
             focusedTitle: "Safety controls", entries: []))
+        XCTAssertEqual(AgentMacAccessibility.matchingWindowID(ownerPID: 42, bounds: frame,
+            focusedTitle: "Safety controls", entries: candidates, requireUnique: true), 16_799)
+        XCTAssertNil(AgentMacAccessibility.matchingWindowID(ownerPID: 42, bounds: frame,
+            focusedTitle: "Safety controls", entries: candidates + [entry(16_800, "Safety controls")], requireUnique: true))
+        XCTAssertNil(AgentMacAccessibility.matchingWindowID(ownerPID: 42, bounds: frame,
+            focusedTitle: "Safety controls", entries: [entry(16_801, "Safety controls", owner: 43)], requireUnique: true))
+        XCTAssertNil(AgentMacAccessibility.matchingWindowID(ownerPID: 42, bounds: frame,
+            focusedTitle: "Safety controls", entries: [entry(16_802, "Safety controls", layer: 1)], requireUnique: true))
+        XCTAssertNil(AgentMacAccessibility.matchingWindowID(ownerPID: 42, bounds: frame, focusedTitle: "Stale title", entries: candidates, requireUnique: true))
+        XCTAssertNil(AgentMacAccessibility.matchingWindowID(ownerPID: 42, bounds: frame.offsetBy(dx: 10, dy: 0), focusedTitle: "Safety controls", entries: candidates, requireUnique: true))
+        XCTAssertNil(AgentMacAccessibility.matchingWindowID(ownerPID: 42, bounds: frame, focusedTitle: "Safety controls", entries: [], requireUnique: true))
     }
 
     func testFinitePointMappingDoesNotAddASecondImageBoundsGuard() throws {

@@ -6,6 +6,22 @@ import XCTest
 
 @MainActor
 final class AgentSharedSupportTests: XCTestCase {
+    func testMainWindowFallbackKeepsFullDisplayMappingInsideCurrentActionBoundary() throws {
+        let display = CGRect(x: 0, y: 0, width: 1920, height: 1080)
+        let mainWindow = CGRect(x: 404, y: 175, width: 920, height: 436)
+        let imageSize = CGSize(width: 1280, height: 720)
+        let pixel = CGPoint(x: 1280 * 500.0 / 1920.0, y: 720 * 250.0 / 1080.0)
+        let screenPoint = try XCTUnwrap(PixelEnvironment.mapPoint(pixel, imageSize: imageSize, screenBounds: display))
+        XCTAssertEqual(screenPoint.x, 500, accuracy: 0.01)
+        XCTAssertEqual(screenPoint.y, 250, accuracy: 0.01)
+        XCTAssertTrue(PixelWindowActionBoundary.allows(screenPoint, windowBounds: mainWindow,
+            menuBarBounds: [], sameAppDialogBounds: []))
+        let outsidePixel = CGPoint(x: 1280 * 100.0 / 1920.0, y: 720 * 250.0 / 1080.0)
+        let outsidePoint = try XCTUnwrap(PixelEnvironment.mapPoint(outsidePixel, imageSize: imageSize, screenBounds: display))
+        XCTAssertFalse(PixelWindowActionBoundary.allows(outsidePoint, windowBounds: mainWindow,
+            menuBarBounds: [], sameAppDialogBounds: []))
+    }
+
     func testAuthorityDigestIsStableAndIncludesFullValueSelectionAndIdentity() throws {
         let base = authorityRecord(value: "prefix-hidden-suffix")
         XCTAssertEqual(try AgentMacAccessibility.AuthorityDigest.encode([base]),

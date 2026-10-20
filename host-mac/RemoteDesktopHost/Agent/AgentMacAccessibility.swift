@@ -68,15 +68,21 @@ final class AgentMacAccessibility {
     private(set) var captureSize = CGSize.zero
 
     static func matchingWindowID(ownerPID: Int32, bounds: CGRect, focusedTitle: String?,
-                                 entries: [[String: Any]]? = nil) -> UInt32? {
+                                 entries: [[String: Any]]? = nil, requireUnique: Bool = false) -> UInt32? {
         let windows = entries ?? (CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? [])
         let candidates = windows.filter {
+            if requireUnique && $0[kCGWindowLayer as String] as? Int != 0 { return false }
             guard $0[kCGWindowOwnerPID as String] as? Int32 == ownerPID,
                   let raw = $0[kCGWindowBounds as String] as? [String: Any],
                   let frame = CGRect(dictionaryRepresentation: raw as CFDictionary) else { return false }
             return ElementMarks.focusedWindowMatches(bounds, selectedBounds: frame)
         }
         let title = focusedTitle.flatMap { $0.isEmpty ? nil : $0 }
+        if requireUnique {
+            let matches = title.map { title in candidates.filter { $0[kCGWindowName as String] as? String == title } } ?? candidates
+            guard matches.count == 1 else { return nil }
+            return matches[0][kCGWindowNumber as String] as? UInt32
+        }
         let selected = title.flatMap { title in candidates.first { $0[kCGWindowName as String] as? String == title } }
             ?? (title == nil ? candidates.first : nil)
         return selected?[kCGWindowNumber as String] as? UInt32

@@ -563,6 +563,10 @@ enum ElementMarks {
         ax(read(app, kAXFocusedWindowAttribute, deadline: ContinuousClock.now + .milliseconds(10)))
     }
 
+    static func mainWindow(_ app: AXUIElement) -> AXUIElement? {
+        ax(read(app, kAXMainWindowAttribute, deadline: ContinuousClock.now + .milliseconds(10)))
+    }
+
     static func bounds(_ element: AXUIElement) -> CGRect? {
         rect(element, deadline: ContinuousClock.now + .milliseconds(10))
     }
