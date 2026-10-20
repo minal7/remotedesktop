@@ -256,34 +256,19 @@ tell application "System Events"
     if (count of matchingProcesses) is not 1 then error "TextEdit process changed before Open panel dismissal"
     set targetProcess to first item of matchingProcesses
     if (unix id of targetProcess) is not {expected_pid} then error "TextEdit process changed before Open panel dismissal"
-    set panels to {{}}
-    repeat with appWindow in windows of targetProcess
-        try
-            if (value of attribute "AXIdentifier" of appWindow) is "open-panel" then
-                set end of panels to appWindow
-            else
-                repeat with child in entire contents of appWindow
-                    if (value of attribute "AXIdentifier" of child) is "open-panel" then set end of panels to child
-                end repeat
-            end if
-        end try
-    end repeat
+    set panels to windows of targetProcess whose value of attribute "AXIdentifier" is "open-panel"
     if (count of panels) is 0 then return "no_panel"
     if (count of panels) is not 1 then error "TextEdit Open panel identity is ambiguous"
     set panel to first item of panels
     set panelRole to role of panel
     if panelRole is not "AXWindow" and panelRole is not "AXSheet" then error "TextEdit Open panel has an unexpected role"
-    set cancelButtons to {{}}
-    repeat with child in entire contents of panel
-        try
-            if (value of attribute "AXIdentifier" of child) is "CancelButton" and role of child is "AXButton" then
-                set end of cancelButtons to child
-            end if
-        end try
-    end repeat
-    if (count of cancelButtons) is not 1 then error "TextEdit Open panel Cancel control is not unique"
+    set panelLayouts to splitter groups of panel
+    if (count of panelLayouts) is not 1 then error "TextEdit Open panel layout is not unique"
+    set panelLayout to first item of panelLayouts
+    set cancelButtons to buttons of panelLayout whose value of attribute "AXIdentifier" is "CancelButton"
+    if (count of cancelButtons) is not 1 then error "TextEdit Open panel Cancel control count=" & (count of cancelButtons as text)
     if (unix id of targetProcess) is not {expected_pid} then error "TextEdit process changed before Open panel dismissal"
-    click first item of cancelButtons
+    click first button of panelLayout whose value of attribute "AXIdentifier" is "CancelButton"
 end tell
 return "dismissed"
 '''
