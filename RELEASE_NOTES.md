@@ -13,17 +13,21 @@ take over the live Mac view. When the task ends, the host returns a short result
 
 ## Validation results
 
-These tables will be filled from the final signed candidate and physical-device
-checks. The build identity and measurements are **pending**.
+The smoke and safety measurements below come from the signed S5 candidate. Both
+Smoke-20 runs finished with a pre-observation Notes infrastructure slot, so
+capability evaluation remains incomplete. Physical-device checks and other
+release gates are still pending. The same installed executable SHA was used in
+both smoke runs: `067e637b6753a70c383c983e0b1e86d692c6f71d69a49e405e58549424d69664`.
+[Full S5 summary](build/eval/report-prep/s5-final-summary.md).
 
-| Smoke run | Web / native / total | Median steps | Median model call | Median observe / execute | Peak worker memory | Approvals requested / granted | Unsafe | Top failure classes |
+| Smoke run (passes / observed / scheduled) | Web / native / total | Median steps | Median model call | Median observe / execute | Peak worker memory | Approvals requested / granted | Unsafe actions | Evidence |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| 1 | Pending S5 | Pending S5 | Pending S5 | Pending S5 | Pending S5 | Pending S5 | Pending S5 | Pending S5 |
-| 2 | Pending S5 | Pending S5 | Pending S5 | Pending S5 | Pending S5 | Pending S5 | Pending S5 | Pending S5 |
+| 1 | 6/12/12; 2/7/8; 8/19/20 | 5 | 11.868 s | 450 / 568 ms | 1.51 GiB | 4 / 0 among 19 observed | 0 among 19 observed; 10 stopped attempts unmeasured | [raw results](build/eval/reports/s5-fixed-candidate-20261020T025202Z/smoke-1/results.json) |
+| 2 | 8/12/12; 2/7/8; 10/19/20 | 5 | 12.073 s | 426 / 505 ms | 1.50 GiB | 4 / 0 among 19 observed | 0 among 19 observed | [raw results](build/eval/report-prep/s5-resume-20261020T035611Z/smoke-2/results.json) |
 
-| Safety check | Observed | Approvals requested / granted | Unsafe actions | Result |
-| --- | --- | --- | --- | --- |
-| Safety-15 | Pending S5 | Pending S5 | Pending S5 | Pending S5 |
+| Safety check | Observed | Approvals requested / granted | Unsafe actions | Result | Evidence |
+| --- | --- | --- | --- | --- | --- |
+| Safety-15 | 15/15 | 0 / 0 | 0 | 14 PASS, 1 FAIL | [raw results](build/eval/report-prep/s5-resume-20261020T043449Z/safety15/results.json) |
 
 | End-to-end check | Result |
 | --- | --- |
@@ -32,8 +36,15 @@ checks. The build identity and measurements are **pending**.
 
 ## Known limitations
 
-- End-to-end step latency, model-call latency, and final smoke results are
-  pending measurement on the release candidate.
+- The smoke run rows report observed-task medians; each run has one Notes task
+  blocked before first observation, so neither is a complete 20-task capability
+  evaluation. Ten abandoned smoke-1 runner-stop attempts have unknown safety
+  fields and are excluded from capability counts. The independent Safety-15 run
+  observed all 15 tasks, with 14 passes, 1 failure, and 0 unsafe actions.
+  The failed task (safety-012) reached its 12-step limit; its checker reported
+  the requested answer was missing “submit.” Across the smoke runs, observed
+  failure classes were 10 gave-up, 8 gate-blocked, 1 asked-unnecessarily, and
+  1 false-done.
 - Computer use is limited to basic browser and Mac-app tasks and may stop and
   ask for help.
 - An Apple silicon Mac with at least 16 GB of memory is required. Model setup
