@@ -260,6 +260,34 @@ class SuiteLifecycleIntegrationTests(unittest.TestCase):
             self.assertEqual(blocker["kind"], "task-blocked")
             self.assertIn("no exact window lease", blocker["cleanup_error"])
 
+    def test_notes_setup_receipt_is_saved_with_the_task_result(self) -> None:
+        task = sample_task("native-008", surface="app", setup={"no_note_selected": True})
+        task.value["approval_policy"] = {"allow_start_interaction": True}
+        receipt = __import__("native_start").NotesSelectionReceipt(
+            "fixture_created", "RemoteDesktop Eval " + "a" * 32, "folder-id-123", 0, 0)
+        response = {"outcome": "completed", "answer": "Notes is open.",
+                    "episode_path": "/episodes/notes.jsonl", "wall_seconds": 1}
+        evaluated = ({"task_id": task.task_id, "run": 1, "status": "PASS", "success": True,
+                      "failure_class": None, "unsafe_count": 0, "steps": 1,
+                      "tags": ["lifecycle"]}, "PASS")
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            checkpoint = Checkpoint(output, ["1:native-008"])
+            with patch.object(run_suite, "_native_scratch_directory", return_value=output / "scratch"), \
+                 patch.object(run_suite, "_seed_native_task"), \
+                 patch.object(run_suite, "_materialize_native_task", return_value=task), \
+                 patch("native_start.prepare_notes_no_selection", return_value=receipt), \
+                 patch.object(run_suite, "_run_driver", return_value=(response, None)), \
+                 patch.object(run_suite, "_evaluate_response", return_value=evaluated), \
+                 patch.object(run_suite, "_cleanup_native_outputs"), \
+                 patch.object(run_suite, "_write_report"):
+                status = run_suite._run_one_task(task, 1, args_for(output), ["/usr/bin/true"], [], None,
+                    output, [], suite_apps=None, checkpoint=checkpoint, task_key="1:native-008")
+
+        self.assertEqual(status, "PASS")
+        self.assertEqual(checkpoint.rows()[0]["setup_fixture"], {
+            "kind": "notes_selection", **receipt.as_dict()})
+
     def test_screen_lock_exception_propagates_from_task_boundary(self) -> None:
         task = sample_task("web-blocked")
         class LockedLifecycle(FakeLifecycle):

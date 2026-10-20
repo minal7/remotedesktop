@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import subprocess
+import re
 import unittest
 from unittest.mock import patch
 
@@ -229,25 +230,109 @@ class NativeStartTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             native_start.close_textedit_untitled({"pid": 1, "window_id": -1})
 
-    def test_notes_setup_only_clears_selection(self):
+    def test_notes_setup_returns_verified_empty_selection_without_mutation(self):
         calls = []
 
         def runner(argv, **kwargs):
             calls.append(kwargs["input"])
-            return subprocess.CompletedProcess(argv, 0, "", "")
+            return subprocess.CompletedProcess(argv, 0, "already_clear|||0|0", "")
 
-        native_start.prepare_notes_no_selection(runner)
-        self.assertIn("set selection to {}", calls[0])
-        self.assertNotIn("delete", calls[0].casefold())
+        result = native_start.prepare_notes_no_selection(runner)
+        self.assertEqual(result.as_dict(), {
+            "status": "already_clear", "folder_name": None, "folder_id": None,
+            "folder_note_count": None, "selected_note_count": 0,
+        })
+        self.assertEqual(len(calls), 1)
+        self.assertLess(calls[0].index("activate"), calls[0].index("initialSelectionCount"))
+        self.assertIn("count of selection", calls[0])
+        self.assertNotIn("set selection", calls[0])
+        self.assertLess(calls[0].index('return "already_clear|||0|0"'), calls[0].index("make new folder"))
         self.assertNotIn("make new note", calls[0].casefold())
+
+    def test_notes_setup_creates_and_verifies_unique_empty_default_folder(self):
+        calls = []
+
+        def runner(argv, **kwargs):
+            source = kwargs["input"]
+            calls.append(source)
+            name = re.search(r'set folderName to "([^"]+)"', source).group(1)
+            self.assertRegex(name, r"^RemoteDesktop Eval [0-9a-f]{32}$")
+            return subprocess.CompletedProcess(argv, 0, f"fixture_created|{name}|folder-id-123|0|0", "")
+
+        result = native_start.prepare_notes_no_selection(runner)
+        self.assertEqual(result.as_dict(), {
+            "status": "fixture_created", "folder_name": result.folder_name,
+            "folder_id": "folder-id-123", "folder_note_count": 0,
+            "selected_note_count": 0,
+        })
+        source = calls[0]
+        self.assertIn("default account", source)
+        self.assertIn("make new folder at defaultAccount", source)
+        self.assertIn("show fixtureFolder", source)
+        self.assertIn("count of notes of fixtureFolder", source)
+        self.assertIn("count of selection", source)
+        self.assertIn("set end of folderOutlines to contents of candidateOutline", source)
+        self.assertNotIn('name of candidateOutline is "Folders"', source)
+        self.assertIn('windows of notesProcess whose subrole is "AXStandardWindow"', source)
+        self.assertIn("set folderRowObject to contents of folderRowReference", source)
+        self.assertIn("set rowElements to UI elements of folderRowObject", source)
+        self.assertIn('value of attribute "AXRole" of folderCellObject is "AXCell"', source)
+        self.assertIn("set cellElements to UI elements of folderCellObject", source)
+        self.assertIn("set folderNodeObject to contents of folderNodeReference", source)
+        self.assertIn("text fields of folderNodeObject", source)
+        self.assertNotIn('value of attribute "AXIdentifier"', source)
+        self.assertIn("set selected of ownedFolderRow to true", source)
+        self.assertIn("delay 0.2", source)
+        self.assertNotIn("rows of first item of notes", source)
+        self.assertNotIn("set selection", source)
+        self.assertNotIn("delete", source.casefold())
+        self.assertNotIn("make new note", source.casefold())
+
+    def test_notes_setup_does_not_swallow_unverified_empty_state(self):
+        def runner(argv, **kwargs):
+            return subprocess.CompletedProcess(argv, 1, "", "selection query rejected")
+
+        with self.assertRaisesRegex(RuntimeError, "Notes eval setup failed") as raised:
+            native_start.prepare_notes_no_selection(runner)
+        self.assertNotIn("TextEdit", str(raised.exception))
+        self.assertNotIn("set selection to {}", str(raised.exception))
+
+    def test_notes_setup_rejects_nonempty_or_still_selected_fixture(self):
+        def runner(argv, **kwargs):
+            source = kwargs["input"]
+            name = re.search(r'set folderName to "([^"]+)"', source).group(1)
+            return subprocess.CompletedProcess(argv, 0, f"fixture_created|{name}|folder-id-123|1|0", "")
+
+        with self.assertRaisesRegex(RuntimeError, "invalid selection receipt"):
+            native_start.prepare_notes_no_selection(runner)
+
+    def test_notes_folder_row_failure_reports_only_owned_folder_identity(self):
+        def runner(argv, **kwargs):
+            source = kwargs["input"]
+            name = re.search(r'set folderName to "([^\"]+)"', source).group(1)
+            return subprocess.CompletedProcess(argv, 0, f"setup_error|select-owned-folder-row|{name}|folder-id-owned|-2700", "")
+
+        with self.assertRaisesRegex(RuntimeError, "select-owned-folder-row") as raised:
+            native_start.prepare_notes_no_selection(runner)
+        self.assertIn("folder-id-owned", str(raised.exception))
+        self.assertIn("AppleScript error -2700", str(raised.exception))
+        self.assertNotIn("personal", str(raised.exception).casefold())
 
     def test_notes_setup_timeout_becomes_bounded_runtime_error(self):
         def runner(argv, **kwargs):
-            raise subprocess.TimeoutExpired(argv, kwargs["timeout"], output="private", stderr="private")
+            raise subprocess.TimeoutExpired(argv, kwargs["timeout"], output="private note", stderr="private note")
 
-        with self.assertRaisesRegex(RuntimeError, "AppleScript evaluation timed out after 15s") as raised:
+        with self.assertRaisesRegex(RuntimeError, "Notes eval setup failed: AppleScript evaluation timed out after 15s") as raised:
             native_start.prepare_notes_no_selection(runner)
-        self.assertNotIn("private", str(raised.exception))
+        self.assertNotIn("private note", str(raised.exception))
+
+    def test_notes_setup_errors_do_not_expose_script_stderr(self):
+        def runner(argv, **kwargs):
+            return subprocess.CompletedProcess(argv, 1, "", "sensitive account note text")
+
+        with self.assertRaisesRegex(RuntimeError, "Notes eval setup failed") as raised:
+            native_start.prepare_notes_no_selection(runner)
+        self.assertNotIn("sensitive account note text", str(raised.exception))
 
     def test_fresh_launch_rejects_contradictory_reset_diagnostics(self):
         runner = unittest.mock.Mock()

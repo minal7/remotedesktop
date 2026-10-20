@@ -1540,6 +1540,7 @@ def _run_one_task(task: Task, run_number: int, args: argparse.Namespace, driver:
 
     task_key = task_key or f"{run_number}:{task.task_id}"
     local_attempts = 0
+    notes_setup_receipt: dict[str, Any] | None = None
 
     def persist(row: dict[str, Any]) -> None:
         if checkpoint is None:
@@ -1552,6 +1553,8 @@ def _run_one_task(task: Task, run_number: int, args: argparse.Namespace, driver:
         row = task_infra_row(task.task_id, task.value.get("suite", args.suite), run_number,
                              task.tags, args.execution, reason, args.policy)
         row.update({"task_key": task_key, "driver_task_id": driver_task_id})
+        if notes_setup_receipt is not None:
+            row["setup_fixture"] = {"kind": "notes_selection", **notes_setup_receipt}
         if checkpoint is None:
             _append_reported(results, row, output, args.execution)
         else:
@@ -1576,6 +1579,7 @@ def _run_one_task(task: Task, run_number: int, args: argparse.Namespace, driver:
         attempt_row: dict[str, Any] | None = None
         textedit_reset = None
         textedit_reset_before = None
+        notes_setup_receipt = None
         textedit_creation_started = False
         try:
             if lifecycle is not None:
@@ -1650,7 +1654,7 @@ def _run_one_task(task: Task, run_number: int, args: argparse.Namespace, driver:
                     if checkpoint is not None:
                         checkpoint.mark_cleanup_pending(task_key, {"scratch": str(scratch), "lease": lease.as_dict()})
                 elif setup.get("no_note_selected") is True:
-                    prepare_notes_no_selection()
+                    notes_setup_receipt = prepare_notes_no_selection().as_dict()
                 elif task.value["start"].get("app") == "Finder":
                     prepare_finder_folder(scratch)
 
@@ -1711,6 +1715,8 @@ def _run_one_task(task: Task, run_number: int, args: argparse.Namespace, driver:
 
             if status.startswith("INFRA-BLOCKED"):
                 attempt_row.update({"task_key": task_key, "driver_task_id": driver_task_id})
+                if notes_setup_receipt is not None:
+                    attempt_row["setup_fixture"] = {"kind": "notes_selection", **notes_setup_receipt}
                 _record_blocker(output, {"kind": "task-blocked", **attempt_row})
                 _write_report(output, checkpoint.rows() if checkpoint is not None else results,
                               args.execution)
@@ -1723,6 +1729,8 @@ def _run_one_task(task: Task, run_number: int, args: argparse.Namespace, driver:
                              if textedit_reset is not None and textedit_reset_before is not None else None,
                     "fresh_pid": lease.pid if lease is not None else None,
                     "lease": lease.as_dict() if lease is not None else None}
+            if notes_setup_receipt is not None:
+                attempt_row["setup_fixture"] = {"kind": "notes_selection", **notes_setup_receipt}
             attempt_row["task_key"] = task_key
             persist(attempt_row)
             try:
@@ -1739,6 +1747,8 @@ def _run_one_task(task: Task, run_number: int, args: argparse.Namespace, driver:
             row = task_infra_row(task.task_id, task.value.get("suite", args.suite), run_number,
                                  task.tags, args.execution, str(error), args.policy)
             row["task_key"] = task_key
+            if notes_setup_receipt is not None:
+                row["setup_fixture"] = {"kind": "notes_selection", **notes_setup_receipt}
             if scratch is not None:
                 if checkpoint is not None and not cleanup_pending:
                     checkpoint.mark_cleanup_pending(task_key, {"scratch": str(scratch),
