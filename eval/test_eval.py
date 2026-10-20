@@ -109,6 +109,32 @@ class FixtureServerTests(unittest.TestCase):
 
 
 class TaskAndCheckerTests(unittest.TestCase):
+    def test_task_id_selection_repeats_only_selected_tasks_across_runs(self) -> None:
+        tasks = run_suite.load_tasks("demo")
+        selected = run_suite._select_tasks(tasks, ["native-010", "demo-002"])
+        self.assertEqual([task.task_id for task in selected], ["demo-002", "native-010"])
+        schedule = run_suite._schedule_tasks(selected, 2)
+        self.assertEqual([(number, task.task_id) for number, task in schedule], [
+            (1, "demo-002"), (1, "native-010"),
+            (2, "demo-002"), (2, "native-010"),
+        ])
+        keys = [f"{number}:{task.task_id}" for number, task in schedule]
+        self.assertEqual(keys, ["1:demo-002", "1:native-010", "2:demo-002", "2:native-010"])
+
+    def test_task_id_selection_rejects_unknown_duplicate_and_empty(self) -> None:
+        tasks = run_suite.load_tasks("demo")
+        with self.assertRaisesRegex(run_suite.EvalError, "unknown task ID"):
+            run_suite._select_tasks(tasks, ["not-in-demo"])
+        with self.assertRaisesRegex(run_suite.EvalError, "duplicate --task-id"):
+            run_suite._select_tasks(tasks, ["demo-001", "demo-001"])
+        with self.assertRaisesRegex(run_suite.EvalError, "at least one"):
+            run_suite._select_tasks(tasks, [])
+
+    def test_unspecified_task_ids_preserve_full_suite(self) -> None:
+        tasks = run_suite.load_tasks("demo")
+        self.assertEqual(run_suite._select_tasks(tasks, None), tasks)
+        self.assertEqual(len(run_suite._schedule_tasks(tasks, 1)), len(tasks))
+
     def test_finder_setup_waits_for_one_frontmost_owned_folder_window(self) -> None:
         from tempfile import TemporaryDirectory
 
@@ -213,7 +239,7 @@ class TaskAndCheckerTests(unittest.TestCase):
         for task in tasks:
             run_suite.validate_task(task.value, task.path)
 
-        for task_id in ("demo-001", "demo-002", "demo-003", "demo-004", "native-009", "native-011"):
+        for task_id in ("demo-001", "demo-002", "demo-003", "demo-004", "native-009"):
             task = next(item for item in tasks if item.task_id == task_id)
             self.assertEqual(task.value["checker"]["type"], "manual_review")
             # Claimed success words in the answer cannot satisfy a manual-review gate.
@@ -227,6 +253,132 @@ class TaskAndCheckerTests(unittest.TestCase):
         self.assertEqual(submit.value["checker"]["type"], "dom")
         self.assertNotIn("allow_fixture_commit", submit.value["approval_policy"])
         self.assertEqual(submit.value["approval_policy"], {"allow_fixture_interaction": True})
+
+    def test_demo_cli_and_folder_checker_requires_real_output(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with patch.object(sys, "argv", ["run_suite.py", "--suite", "demo", "--execution", "real-host",
+                                         "--task-id", "demo-001", "--task-id", "native-010"]), \
+             patch.object(run_suite, "run", return_value=0) as run:
+            self.assertEqual(run_suite.main(), 0)
+        self.assertEqual(run.call_args.args[0].suite, "demo")
+        self.assertEqual(run.call_args.args[0].task_ids, ["demo-001", "native-010"])
+        task = next(item for item in run_suite.load_tasks("demo") if item.task_id == "native-011")
+        self.assertEqual(task.value["checker"]["type"], "folder_exists")
+
+        with TemporaryDirectory() as directory, patch.object(Path, "home", return_value=Path(directory)):
+            desktop = Path(directory) / "Desktop"
+            desktop.mkdir()
+            scratch = run_suite._native_scratch_directory(task.task_id, "a" * 32)
+            runtime = run_suite._materialize_native_task(task, scratch)
+            records = [{"type": "step", "step": 0, "observation": {"surface": {"kind": "app"}}}, {"type": "footer", "outcome": "success"}]
+            response = {"outcome": "completed", "answer": "done", "episode_path": "/unused", "wall_seconds": 1}
+            with patch.object(run_suite, "_episode_records", return_value=records):
+                missing, _ = run_suite._evaluate_response(
+                    runtime, response, "a" * 32, "driver-task", 1, "real-host", native_root=scratch
+                )
+            self.assertNotEqual(missing["status"], "PASS")
+            self.assertFalse(missing["success"])
+            output = desktop / "Q4 Reports"
+            output.mkdir()
+            output_info = output.stat()
+            with patch.object(run_suite, "_episode_records", return_value=records):
+                created, _ = run_suite._evaluate_response(
+                    runtime, response, "a" * 32, "driver-task", 1, "real-host", native_root=scratch
+                )
+            self.assertEqual(created["status"], "PASS")
+            self.assertIn(f"inode={output_info.st_ino}", created["checker"])
+            self.assertIn(f"mtime_ns={output_info.st_mtime_ns}", created["checker"])
+
+    def test_folder_reservation_refuses_preexisting_directory_and_symlink(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        task = next(item for item in run_suite.load_tasks("demo") if item.task_id == "native-011")
+        with TemporaryDirectory() as directory, patch.object(Path, "home", return_value=Path(directory)):
+            desktop = Path(directory) / "Desktop"
+            desktop.mkdir()
+            output = desktop / "Q4 Reports"
+            scratch = run_suite._native_scratch_directory(task.task_id, "b" * 32)
+            output.mkdir()
+            with self.assertRaisesRegex(run_suite.EvalError, "already exists"):
+                run_suite._seed_native_task(task, scratch)
+            output.rmdir()
+            outside = Path(directory) / "outside"
+            outside.mkdir()
+            output.symlink_to(outside, target_is_directory=True)
+            with self.assertRaisesRegex(run_suite.EvalError, "already exists"):
+                run_suite._seed_native_task(task, scratch)
+            self.assertTrue(outside.is_dir())
+
+    def test_folder_cleanup_is_empty_only_and_resumes_owned_reservation(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        task = next(item for item in run_suite.load_tasks("demo") if item.task_id == "native-011")
+        with TemporaryDirectory() as directory, patch.object(Path, "home", return_value=Path(directory)):
+            desktop = Path(directory) / "Desktop"
+            desktop.mkdir()
+            scratch = run_suite._native_scratch_directory(task.task_id, "c" * 32)
+            run_suite._seed_native_task(task, scratch)
+            output = desktop / "Q4 Reports"
+            output.mkdir()
+            content = output / "keep.txt"
+            content.write_text("preserve")
+            with self.assertRaisesRegex(run_suite.EvalError, "non-empty"):
+                run_suite._cleanup_native_outputs(task, scratch, include_external=True)
+            with self.assertRaisesRegex(run_suite.EvalError, "reservation is still pending"):
+                run_suite._native_scratch_directory(task.task_id, "d" * 32)
+            self.assertEqual(content.read_text(), "preserve")
+            content.unlink()
+            run_suite._cleanup_native_outputs(task, scratch, include_external=True)
+            self.assertFalse(output.exists())
+
+    def test_folder_cleanup_rejects_old_or_unowned_directory(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        task = next(item for item in run_suite.load_tasks("demo") if item.task_id == "native-011")
+        with TemporaryDirectory() as directory, patch.object(Path, "home", return_value=Path(directory)):
+            desktop = Path(directory) / "Desktop"
+            desktop.mkdir()
+            scratch = run_suite._native_scratch_directory(task.task_id, "f" * 32)
+            run_suite._seed_native_task(task, scratch)
+            output = desktop / "Q4 Reports"
+            output.mkdir()
+            owner = scratch / ".native-eval-owner"
+            marker = json.loads(owner.read_text())
+            marker["reserved_output_ns"] = output.stat().st_ctime_ns + 1
+            owner.write_text(json.dumps(marker))
+            with self.assertRaisesRegex(run_suite.EvalError, "unknown external output"):
+                run_suite._cleanup_native_outputs(task, scratch, include_external=True)
+            marker["reserved_output_ns"] = 0
+            owner.write_text(json.dumps(marker))
+            from types import SimpleNamespace
+            original_lstat = Path.lstat
+            def foreign_owner(path: Path):
+                info = original_lstat(path)
+                if path == output:
+                    return SimpleNamespace(st_mode=info.st_mode, st_uid=info.st_uid + 1,
+                                           st_ctime_ns=info.st_ctime_ns)
+                return info
+            with patch.object(Path, "lstat", foreign_owner):
+                with self.assertRaisesRegex(run_suite.EvalError, "unknown external output"):
+                    run_suite._cleanup_native_outputs(task, scratch, include_external=True)
+            self.assertTrue(output.is_dir())
+
+    def test_folder_cleanup_refuses_symlink_replaced_after_reservation(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        task = next(item for item in run_suite.load_tasks("demo") if item.task_id == "native-011")
+        with TemporaryDirectory() as directory, patch.object(Path, "home", return_value=Path(directory)):
+            desktop = Path(directory) / "Desktop"
+            desktop.mkdir()
+            scratch = run_suite._native_scratch_directory(task.task_id, "e" * 32)
+            run_suite._seed_native_task(task, scratch)
+            outside = Path(directory) / "outside"
+            outside.mkdir()
+            (desktop / "Q4 Reports").symlink_to(outside, target_is_directory=True)
+            with self.assertRaisesRegex(run_suite.EvalError, "symlink native output"):
+                run_suite._cleanup_native_outputs(task, scratch, include_external=True)
+            self.assertTrue(outside.is_dir())
 
     def test_demo_native_ids_allocate_and_clean_owned_scratch(self) -> None:
         from tempfile import TemporaryDirectory

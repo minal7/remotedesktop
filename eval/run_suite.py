@@ -487,11 +487,15 @@ def _native_checker_path(candidate: Path, scratch: Path) -> Path:
 
 def _reserve_native_output(task: Task, scratch: Path) -> None:
     checker = task.value.get("checker", {})
-    if checker.get("type") != "file_text":
+    if checker.get("type") not in {"file_text", "folder_exists"}:
         return
     candidates = _native_output_candidates(task, scratch)
     if not candidates:
-        raise EvalError("native file checker has no output path")
+        raise EvalError("native filesystem checker has no output path")
+    external_directory = checker.get("type") == "folder_exists" and len(candidates) == 1 \
+        and not candidates[0].is_relative_to(scratch)
+    if checker.get("type") == "folder_exists" and not external_directory:
+        return
     owner = scratch / ".native-eval-owner"
     if owner.is_symlink() or not owner.is_file():
         raise EvalError("native task folder has an invalid ownership marker")
@@ -509,6 +513,8 @@ def _reserve_native_output(task: Task, scratch: Path) -> None:
         if candidate.is_symlink() or candidate.exists():
             raise EvalError(f"native output already exists; refusing to overwrite {candidate}")
     marker["reserved_outputs"] = [str(candidate.absolute()) for candidate in candidates]
+    if external_directory:
+        marker["reserved_output_ns"] = time.time_ns()
     _write_native_owner(owner, marker)
 
 
@@ -527,8 +533,10 @@ def _cleanup_native_outputs(task: Task, scratch: Path, include_external: bool = 
         raise EvalError("native task checker is invalid during cleanup")
     owner, marker = _owned_native_marker(scratch, task.task_id)
     inventory = _native_scratch_inventory(scratch)
-    if checker.get("type") == "file_text":
-        candidates = _native_output_candidates(task, scratch)
+    candidates = _native_output_candidates(task, scratch) if checker.get("type") in {"file_text", "folder_exists"} else []
+    external_directory = checker.get("type") == "folder_exists" and len(candidates) == 1 \
+        and not candidates[0].is_relative_to(scratch)
+    if checker.get("type") == "file_text" or external_directory:
         reserved = marker.get("reserved_outputs")
         if not isinstance(reserved, list):
             raise EvalError("native task output reservation is invalid")
@@ -543,10 +551,21 @@ def _cleanup_native_outputs(task: Task, scratch: Path, include_external: bool = 
                 if candidate.is_symlink():
                     raise EvalError(f"refusing to remove a symlink native output: {candidate}")
                 if candidate.exists():
-                    if not candidate.is_file():
+                    if external_directory:
+                        info = candidate.lstat()
+                        if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid()
+                                or type(marker.get("reserved_output_ns")) is not int
+                                or info.st_ctime_ns < marker["reserved_output_ns"]):
+                            raise EvalError("refusing to remove an unknown external output directory")
+                        if any(candidate.iterdir()):
+                            raise EvalError("refusing to remove a non-empty external output directory")
+                        candidate.rmdir()
+                    elif not candidate.is_file():
                         raise EvalError(f"refusing to remove a non-file native output: {candidate}")
-                    candidate.unlink()
+                    else:
+                        candidate.unlink()
             marker["reserved_outputs"] = []
+            marker.pop("reserved_output_ns", None)
             _write_native_owner(owner, marker)
     elif checker.get("type") == "folder_exists":
         raw_path = checker.get("expect", {}).get("path")
@@ -1189,8 +1208,35 @@ def _resolve_blockers(output: Path, *, task_key: str | None = None,
     if changed:
         Checkpoint._atomic_json(path, blockers)
 
+def _select_tasks(tasks: list[Task], requested: list[str] | None) -> list[Task]:
+    """Apply an explicit task-ID selection without changing suite order."""
+    if requested is None:
+        return tasks
+    if not requested or any(not isinstance(task_id, str) or not task_id.strip() for task_id in requested):
+        raise EvalError("--task-id requires at least one non-empty task ID")
+    if len(set(requested)) != len(requested):
+        duplicates = sorted({task_id for task_id in requested if requested.count(task_id) > 1})
+        raise EvalError(f"duplicate --task-id value(s): {', '.join(duplicates)}")
+    known = {task.task_id for task in tasks}
+    unknown = [task_id for task_id in requested if task_id not in known]
+    if unknown:
+        raise EvalError(f"unknown task ID(s) for this suite: {', '.join(unknown)}")
+    selected = set(requested)
+    result = [task for task in tasks if task.task_id in selected]
+    if not result:
+        raise EvalError("--task-id selection matched no tasks")
+    return result
+
+
+def _schedule_tasks(tasks: list[Task], runs: int) -> list[tuple[int, Task]]:
+    if runs < 1:
+        raise EvalError("runs must be positive")
+    return [(run_number, task) for run_number in range(1, runs + 1) for task in tasks]
+
+
 def _prepare_run(args: argparse.Namespace) -> tuple[list[Task], list[str], list[str], Any, Path] | None:
     tasks = smoke_tasks() if args.suite == "smoke" else load_tasks(args.suite)
+    tasks = _select_tasks(tasks, getattr(args, "task_ids", None))
     if args.execution != "real-host" and any(
             task.value.get("setup", {}).get("open_document")
             or task.value.get("setup", {}).get("new_untitled")
@@ -1241,7 +1287,7 @@ def run(args: argparse.Namespace) -> int:
     blocker_rows: list[dict[str, Any]] = []
     result_code = 1
     try:
-        schedule = [(run_number, task) for run_number in range(1, args.runs + 1) for task in tasks]
+        schedule = _schedule_tasks(tasks, args.runs)
         task_keys = [f"{run_number}:{task.task_id}" for run_number, task in schedule]
         resume = bool(getattr(args, "resume", False))
         if resume and not (output / "checkpoint.json").is_file():
@@ -1708,7 +1754,9 @@ def _run_one_task(task: Task, run_number: int, args: argparse.Namespace, driver:
     return "INFRA-BLOCKED (local-input retry exhausted)"
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--suite", choices=("basics", "native", "smoke", "safety"), required=True)
+    parser.add_argument("--suite", choices=("basics", "native", "smoke", "safety", "demo"), required=True)
+    parser.add_argument("--task-id", dest="task_ids", action="append",
+                        help="select a task ID; repeat to select multiple tasks (default: the full suite)")
     parser.add_argument("--policy", choices=sorted(SUPPORTED_POLICIES | set(POLICY_ALIASES)), default="fara")
     parser.add_argument("--runs", type=int, default=1)
     parser.add_argument("--driver", help="driver argv, or set EVAL_DRIVER; invoked without a shell")

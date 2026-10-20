@@ -29,7 +29,10 @@ def match(
         absent = [_safe_path(item, scratch_root) for item in expected.get("absent_paths", [])]
         if any(item is None or item.exists() for item in absent):
             return False, "an item expected to be absent still exists"
-        return True, "folder state matched"
+        info = path.stat()
+        evidence = (f"folder exists: {path.name}; device={info.st_dev}; inode={info.st_ino}; "
+                    f"mode={info.st_mode:o}; mtime_ns={info.st_mtime_ns}")
+        return True, evidence
     return False, f"unsupported native checker {kind!r}"
 
 
