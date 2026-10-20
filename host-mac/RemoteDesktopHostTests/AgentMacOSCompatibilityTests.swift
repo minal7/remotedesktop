@@ -104,7 +104,7 @@ final class AgentMacOSCompatibilityTests: XCTestCase {
     func testFaraPromptUsesVersionedGeneralMacOSAppendixAndKeepsNativeActionFormat() throws {
         let url = try XCTUnwrap(Bundle.main.url(forResource: "v2-fara", withExtension: "txt", subdirectory: "policy/prompts"))
         let appendix = try String(contentsOf: url, encoding: .utf8)
-        XCTAssertLessThanOrEqual(appendix.split(whereSeparator: \.isWhitespace).count, 90)
+        XCTAssertLessThanOrEqual(appendix.split(whereSeparator: \.isWhitespace).count, 125)
         XCTAssertEqual(LlamaVLMPolicy.promptResourceName(for: .fara15_4b), "v2-fara")
         let prompt = LlamaVLMPolicy.nativePrompt(appendix, model: .fara15_4b)
         XCTAssertTrue(appendix.contains("operating macOS"))

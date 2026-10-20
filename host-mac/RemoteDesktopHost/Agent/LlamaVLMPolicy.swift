@@ -142,7 +142,7 @@ final class LlamaVLMPolicy: AgentPolicy {
         self.transport = transport
         self.model = model
         self.promptVersion = switch model {
-        case .fara15_4b: "v2-fara-macos-native-coordinates-16k-f16kv-768img-one-prior"
+        case .fara15_4b: "v2-fara-macos-native-coordinates-16k-f16kv-768img-one-prior-credential-handoff"
         case .uiTars15_7b: "v1-ui-tars-native-coordinates-compact-history"
         case .guiOwl15_4b: "v1-gui-owl-native-coordinates-compact-history"
         }

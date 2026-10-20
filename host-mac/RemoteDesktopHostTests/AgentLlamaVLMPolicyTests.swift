@@ -13,7 +13,7 @@ final class AgentLlamaVLMPolicyTests: XCTestCase {
 
         let output = try await policy.propose(observation)
 
-        XCTAssertEqual(policy.promptVersion, "v2-fara-macos-native-coordinates-16k-f16kv-768img-one-prior")
+        XCTAssertEqual(policy.promptVersion, "v2-fara-macos-native-coordinates-16k-f16kv-768img-one-prior-credential-handoff")
         XCTAssertEqual(output.rawOutput, raw)
         XCTAssertEqual(output.action, .click(target: .point(x: 1, y: 2), button: nil, count: nil))
         let input = try XCTUnwrap(transport.inputs.first)
@@ -28,6 +28,29 @@ final class AgentLlamaVLMPolicyTests: XCTestCase {
         XCTAssertTrue(input.messages[1].content.textValue?.contains(#""elements":[{"bbox":[250,250,500,500]"#) == true)
         XCTAssertEqual(input.messages[1].content.imageValues, [png])
         XCTAssertFalse(input.messages[1].content.textValue?.contains(png.base64EncodedString()) == true)
+        XCTAssertEqual(transport.callCount, 1)
+    }
+
+    func testLiveFaraPromptCarriesLocalCredentialHandoffRuleAndKeepsClarificationAction() async throws {
+        let transport = RecordingAgentVLMTransport(response: try completion(
+            arguments: #"{"action":"ask_user_question","question":"Please take over and confirm when ready."}"#))
+        let (policy, observation, _) = try fixture(transport: transport)
+
+        let output = try await policy.propose(observation)
+
+        XCTAssertEqual(output.action, .askUser(question: "Please take over and confirm when ready.", choices: nil))
+        let input = try XCTUnwrap(transport.inputs.first)
+        let systemPrompt = try XCTUnwrap(input.messages.first?.content.textValue)
+        XCTAssertTrue(systemPrompt.contains("You are operating macOS."))
+        XCTAssertTrue(systemPrompt.contains("Never request, receive, send in chat, repeat, invent, or type passwords"))
+        XCTAssertTrue(systemPrompt.contains("take over and enter credentials locally"))
+        XCTAssertTrue(systemPrompt.contains("non-secret confirmation (“Done”)"))
+        XCTAssertTrue(systemPrompt.contains(#"{"action":"open_app","name":"App name"}"#))
+        XCTAssertTrue(systemPrompt.contains("cmd+s saves"))
+        XCTAssertTrue(systemPrompt.contains("cmd+shift+g"))
+        XCTAssertTrue(systemPrompt.contains("ask_user_question"))
+        XCTAssertTrue(systemPrompt.contains("<tools>") && systemPrompt.contains("<tool_call>"))
+        XCTAssertEqual(input.messages.first?.role, .system)
         XCTAssertEqual(transport.callCount, 1)
     }
 
