@@ -59,22 +59,42 @@ struct AgentEvalPreflightRequest: Decodable {
 
     private static func validateTrustSeeds(_ seeds: [AgentEvalTrustSeed], probeURL: String) throws {
         let apps: Set<String> = ["Safari", "TextEdit", "Finder", "Notes"]
-        guard (1...5).contains(seeds.count), Set(seeds).count == seeds.count else { throw AgentEvalWireError.invalidRequest }
+        guard (1...32).contains(seeds.count), Set(seeds).count == seeds.count else { throw AgentEvalWireError.invalidRequest }
         for seed in seeds {
             if seed.kind == "app" {
                 guard apps.contains(seed.identity) else { throw AgentEvalWireError.invalidRequest }
             } else if seed.kind == "web" {
-                guard seed.identity == "http://127.0.0.1:8765",
-                      let parts = URLComponents(string: seed.identity), parts.scheme == "http",
-                      parts.host == "127.0.0.1", parts.port == 8765, parts.user == nil, parts.password == nil,
-                      parts.path.isEmpty, parts.query == nil, parts.fragment == nil,
-                      let probe = URLComponents(string: probeURL), probe.host == parts.host, probe.port == parts.port else {
+                if seed.identity == "http://127.0.0.1:8765" {
+                    guard let parts = URLComponents(string: seed.identity), parts.scheme == "http",
+                          parts.host == "127.0.0.1", parts.port == 8765, parts.user == nil, parts.password == nil,
+                          parts.path.isEmpty, parts.query == nil, parts.fragment == nil,
+                          let probe = URLComponents(string: probeURL), probe.host == parts.host, probe.port == parts.port else {
+                        throw AgentEvalWireError.invalidRequest
+                    }
+                } else if !isCanonicalHTTPSOrigin(seed.identity) {
                     throw AgentEvalWireError.invalidRequest
                 }
             } else { throw AgentEvalWireError.invalidRequest }
         }
         guard Set(seeds.filter { $0.kind == "app" }.map(\.identity)).isSubset(of: apps),
-              seeds.filter({ $0.kind == "web" }).count <= 1 else { throw AgentEvalWireError.invalidRequest }
+              seeds.filter({ $0.kind == "web" }).count <= 32 else { throw AgentEvalWireError.invalidRequest }
+    }
+
+    private static func isCanonicalHTTPSOrigin(_ identity: String) -> Bool {
+        guard let parts = URLComponents(string: identity), parts.scheme == "https",
+              let host = parts.host, !host.isEmpty, host == host.lowercased(), parts.port == nil,
+              parts.user == nil, parts.password == nil, parts.path.isEmpty,
+              parts.query == nil, parts.fragment == nil,
+              !host.contains(":"), host.utf8.count <= 253, !host.hasSuffix(".") else { return false }
+        let labels = host.split(separator: ".", omittingEmptySubsequences: false)
+        guard !labels.isEmpty, labels.allSatisfy({ label in
+            let scalars = Array(label.unicodeScalars)
+            guard (1...63).contains(scalars.count),
+                  let first = scalars.first, let last = scalars.last,
+                  CharacterSet.alphanumerics.contains(first), CharacterSet.alphanumerics.contains(last) else { return false }
+            return scalars.allSatisfy { CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyz0123456789-").contains($0) }
+        }) else { return false }
+        return identity == "https://\(host)"
     }
 }
 
@@ -187,7 +207,17 @@ enum AgentEvalPreflight {
                 "Resolve the installed app or persistent trust-store issue, then rerun preflight.",
                 checks: checks, policy: model.rawValue, modelStatus: "loaded")
         }
-        guard seedResult.trustedSurfaces.count == request.trustSeeds.count else {
+        let appBundles = ["Safari": "com.apple.Safari", "TextEdit": "com.apple.TextEdit",
+                          "Finder": "com.apple.finder", "Notes": "com.apple.Notes"]
+        let expectedReceipts = request.trustSeeds.compactMap { seed -> AgentEvalTrustReceipt? in
+            if seed.kind == "app", let bundleID = appBundles[seed.identity] {
+                return .init(kind: "app", identity: bundleID)
+            }
+            if seed.kind == "web" { return .init(kind: "web", identity: seed.identity) }
+            return nil
+        }
+        guard expectedReceipts.count == request.trustSeeds.count,
+              seedResult.trustedSurfaces == expectedReceipts else {
             return blocked("trust", "The host did not verify every requested suite trust identity.",
                 "Use the current signed host app evaluation driver, then rerun preflight.",
                 checks: checks, policy: model.rawValue, modelStatus: "loaded")

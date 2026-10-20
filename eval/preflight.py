@@ -19,12 +19,68 @@ TRUSTED_APP_BUNDLES = {
 }
 TRUST_STORE_SUFFIX = ("Library", "Application Support", "RemoteDesktopHost", "AgentTrust")
 DEFAULT_FIXTURE_ORIGIN = "http://127.0.0.1:8765"
+MAX_TRUST_SEEDS = 32
+
+
+def _valid_dns_host(host: str) -> bool:
+    if not host.isascii() or len(host) > 253 or host.endswith("."):
+        return False
+    labels = host.lower().split(".")
+    return all(1 <= len(label) <= 63 and label[0].isalnum() and label[-1].isalnum()
+               and all(character.isalnum() or character == "-" for character in label)
+               for label in labels)
+
+
+def _canonical_task_origin(value: Any) -> str:
+    if not isinstance(value, str) or not value or any(character.isspace() or ord(character) < 0x20 for character in value):
+        raise ValueError("web task start URL must be an absolute URL without whitespace")
+    try:
+        parts = urlsplit(value)
+        host = parts.hostname
+        port = parts.port
+    except ValueError as error:
+        raise ValueError("web task start URL is invalid") from error
+    if not parts.scheme or not parts.netloc or not host or parts.username is not None or parts.password is not None:
+        raise ValueError("web task start URL must have a host and no user information")
+    scheme = parts.scheme.lower()
+    if scheme == "http":
+        if host.lower() == "127.0.0.1" and port == 8765:
+            return DEFAULT_FIXTURE_ORIGIN
+        raise ValueError("only the declared loopback HTTP fixture origin may be seeded")
+    if scheme != "https" or port not in (None, 443):
+        raise ValueError("web task start URL must use HTTPS or the loopback fixture")
+    if ":" in host or not _valid_dns_host(host):
+        raise ValueError("web task start URL has an invalid host")
+    canonical_host = host.lower()
+    authority = f"[{canonical_host}]" if ":" in canonical_host else canonical_host
+    return f"https://{authority}"
+
+
+def _canonical_web_origin(identity: Any) -> bool:
+    if identity == DEFAULT_FIXTURE_ORIGIN:
+        return True
+    if not isinstance(identity, str):
+        return False
+    try:
+        parts = urlsplit(identity)
+        host = parts.hostname
+        port = parts.port
+    except ValueError:
+        return False
+    if (parts.scheme != "https" or not host or port is not None or parts.username is not None
+            or parts.password is not None or parts.path or parts.query or parts.fragment):
+        return False
+    if ":" in host or not _valid_dns_host(host):
+        return False
+    canonical_host = host.lower()
+    authority = f"[{canonical_host}]" if ":" in canonical_host else canonical_host
+    return identity == f"https://{authority}"
 
 
 def trust_seeds_for_tasks(tasks: list[dict[str, Any]]) -> list[dict[str, str]]:
     """Derive the bounded app/origin trust request from declared suite task values."""
     apps: set[str] = set()
-    has_web = has_fixture = False
+    origins: set[str] = set()
     for task in tasks:
         start = task.get("start", {})
         if task.get("surface") == "app":
@@ -33,20 +89,14 @@ def trust_seeds_for_tasks(tasks: list[dict[str, Any]]) -> list[dict[str, str]]:
                 raise ValueError(f"suite requested an app outside the approved trust set: {name}")
             apps.add(name)
         elif task.get("surface") == "web":
-            has_web = True
-            try:
-                parts = urlsplit(start.get("url", ""))
-                has_fixture |= (parts.scheme == "http" and parts.hostname == "127.0.0.1"
-                                and parts.port == 8765)
-            except ValueError:
-                pass
+            apps.add("Safari")
+            origins.add(_canonical_task_origin(start.get("url")))
         else:
             raise ValueError("suite task has an unsupported surface for trust seeding")
-    if has_web:
-        apps.add("Safari")
     seeds = [{"kind": "app", "identity": name} for name in sorted(apps)]
-    if has_fixture:
-        seeds.append({"kind": "web", "identity": DEFAULT_FIXTURE_ORIGIN})
+    seeds.extend({"kind": "web", "identity": origin} for origin in sorted(origins))
+    if len(seeds) > MAX_TRUST_SEEDS:
+        raise ValueError(f"suite requires more than {MAX_TRUST_SEEDS} trust seeds")
     return seeds
 
 
@@ -117,7 +167,7 @@ def _trust_receipt_is_valid(response: dict[str, Any], seeds: list[dict[str, str]
         kind, identity = seed["kind"], seed["identity"]
         if kind == "app" and identity in TRUSTED_APP_BUNDLES:
             expected.add(("app", TRUSTED_APP_BUNDLES[identity]))
-        elif kind == "web" and identity == "http://127.0.0.1:8765":
+        elif kind == "web" and _canonical_web_origin(identity):
             expected.add(("web", identity))
         else:
             return False
@@ -169,7 +219,7 @@ def invoke(command: list[str], probe_url: str, env: dict[str, str], timeout: flo
 
 
 def _trust_seed_request_is_valid(seeds: list[dict[str, str]]) -> bool:
-    if not isinstance(seeds, list) or not 1 <= len(seeds) <= 5:
+    if not isinstance(seeds, list) or not 1 <= len(seeds) <= MAX_TRUST_SEEDS:
         return False
     seen: set[tuple[str, str]] = set()
     for seed in seeds:
@@ -178,7 +228,7 @@ def _trust_seed_request_is_valid(seeds: list[dict[str, str]]) -> bool:
         kind, identity = seed["kind"], seed["identity"]
         if kind == "app" and identity in TRUSTED_APP_BUNDLES:
             key = (kind, identity)
-        elif kind == "web" and identity == "http://127.0.0.1:8765":
+        elif kind == "web" and _canonical_web_origin(identity):
             key = (kind, identity)
         else:
             return False

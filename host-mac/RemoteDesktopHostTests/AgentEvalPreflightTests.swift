@@ -61,6 +61,7 @@ final class AgentEvalPreflightTests: XCTestCase {
         XCTAssertEqual(request.trustSeeds, [
             .init(kind: "app", identity: "Finder"), .init(kind: "app", identity: "Notes"),
             .init(kind: "app", identity: "Safari"), .init(kind: "app", identity: "TextEdit"),
+            .init(kind: "web", identity: "https://www.google.com"),
             .init(kind: "web", identity: "http://127.0.0.1:8765"),
         ])
         XCTAssertThrowsError(try AgentEvalPreflightRequest.decodeStrict(
@@ -69,10 +70,17 @@ final class AgentEvalPreflightTests: XCTestCase {
             Data("{\"operation\":\"preflight\",\"probe_url\":\"http://127.0.0.1/\",\"task_id\":\"x\"}".utf8)))
         XCTAssertThrowsError(try AgentEvalPreflightRequest.decodeStrict(
             Data("{\"operation\":\"preflight\",\"probe_url\":\"http://127.0.0.1/\",\"policy\":\"unknown\"}".utf8)))
-        for invalid in ["http://127.0.0.1:8765@evil.test", "http://127.0.0.1:9999", "https://127.0.0.1:8765"] {
+        for invalid in ["http://127.0.0.1:8765@evil.test", "http://127.0.0.1:9999", "https://127.0.0.1:8765",
+                        "https://example.test/path", "https://user@example.test", "https://example.test#fragment",
+                        "https://example.test:443", "https://example.test:8443", "https://EXAMPLE.test", "ftp://example.test",
+                        "https://exa_mple.test", "https://example.test%2f.evil", "https://[2001:db8::1]"] {
             let body = "{\"operation\":\"preflight\",\"probe_url\":\"http://127.0.0.1:8765/\",\"trust_seeds\":[{\"kind\":\"app\",\"identity\":\"Safari\"},{\"kind\":\"web\",\"identity\":\"\(invalid)\"}]}"
             XCTAssertThrowsError(try AgentEvalPreflightRequest.decodeStrict(Data(body.utf8)))
         }
+        let duplicate = "{\"operation\":\"preflight\",\"probe_url\":\"http://127.0.0.1:8765/\",\"trust_seeds\":[{\"kind\":\"web\",\"identity\":\"https://example.test\"},{\"kind\":\"web\",\"identity\":\"https://example.test\"}]}"
+        XCTAssertThrowsError(try AgentEvalPreflightRequest.decodeStrict(Data(duplicate.utf8)))
+        let unknownKind = "{\"operation\":\"preflight\",\"probe_url\":\"http://127.0.0.1:8765/\",\"trust_seeds\":[{\"kind\":\"other\",\"identity\":\"https://example.test\"}]}"
+        XCTAssertThrowsError(try AgentEvalPreflightRequest.decodeStrict(Data(unknownKind.utf8)))
     }
 
     func testPermissionFailureStopsBeforePixelOrModel() async throws {
@@ -122,7 +130,7 @@ final class AgentEvalPreflightTests: XCTestCase {
         XCTAssertEqual(response.checks.map(\.name),
             ["host_process", "accessibility", "screen_recording", "pixel_environment", "model", "trust"])
         XCTAssertTrue(response.checks.allSatisfy { $0.status == "passed" })
-        XCTAssertEqual(response.trustedSurfaces.count, 5)
+        XCTAssertEqual(response.trustedSurfaces.count, 6)
         XCTAssertTrue(response.trustStorePath.hasSuffix("RemoteDesktopHost/AgentTrust"))
     }
 
@@ -137,6 +145,23 @@ final class AgentEvalPreflightTests: XCTestCase {
         XCTAssertEqual(response.checks.last?.name, "model")
         XCTAssertEqual(response.modelStatus, "failed")
         XCTAssertTrue(response.blockedReason?.contains("server health check failed") == true)
+    }
+
+    func testPreflightRejectsTrustReceiptsThatDoNotExactlyMatchRequestedSeeds() async throws {
+        let request = try AgentEvalPreflightRequest.decodeStrict(requestData())
+        let dependencies = AgentEvalPreflightDependencies(
+            signedHostCheck: { true }, accessibilityCheck: { true }, screenRecordingCheck: { true },
+            pixelReadinessCheck: { .init(ready: true, detail: "Pixel ready") },
+            modelCheck: { _ in nil }, trustSeeder: { seeds in
+                let matching = try self.seedReceipts(seeds)
+                var receipts = matching.trustedSurfaces
+                receipts[0] = .init(kind: "app", identity: "org.example.Unrequested")
+                return .init(trustedSurfaces: receipts, storePath: matching.storePath)
+            })
+        let response = await AgentEvalPreflight.run(request, dependencies: dependencies)
+        XCTAssertEqual(response.outcome, "infra_blocked")
+        XCTAssertEqual(response.checks.last?.name, "trust")
+        XCTAssertEqual(response.trustedSurfaces, [])
     }
 
     func testPreflightSeedIsVisibleToAnotherTaskUsingSamePersistentStore() async throws {
@@ -163,12 +188,13 @@ final class AgentEvalPreflightTests: XCTestCase {
             })
         let response = await AgentEvalPreflight.run(request, dependencies: dependencies)
         XCTAssertEqual(response.outcome, "ready")
-        XCTAssertEqual(response.trustedSurfaces.count, 5)
+        XCTAssertEqual(response.trustedSurfaces.count, 6)
         let taskStore = try AgentHostFactory.persistentTrustStore(directory: directory)
         for identity in ["com.apple.Safari", "com.apple.TextEdit", "com.apple.finder", "com.apple.Notes"] {
             XCTAssertTrue(try taskStore.isTrusted(kind: .app, identity: identity))
         }
         XCTAssertTrue(try taskStore.isTrusted(kind: .web, identity: "http://127.0.0.1:8765"))
+        XCTAssertTrue(try taskStore.isTrusted(kind: .web, identity: "https://www.google.com"))
         let scope = AgentScope(taskID: "different-run", kind: .app, identity: "com.apple.Safari")
         let target = AgentElement(id: 1, role: "button", name: "Open", value: nil, state: ["enabled"],
                                   bbox: .init(x: 1, y: 1, width: 10, height: 10), inView: true)
@@ -182,7 +208,7 @@ final class AgentEvalPreflightTests: XCTestCase {
     }
 
     private func requestData(policy: String = "fara15-4b") -> Data {
-        let seeds = #"[{"kind":"app","identity":"Finder"},{"kind":"app","identity":"Notes"},{"kind":"app","identity":"Safari"},{"kind":"app","identity":"TextEdit"},{"kind":"web","identity":"http://127.0.0.1:8765"}]"#
+        let seeds = #"[{"kind":"app","identity":"Finder"},{"kind":"app","identity":"Notes"},{"kind":"app","identity":"Safari"},{"kind":"app","identity":"TextEdit"},{"kind":"web","identity":"https://www.google.com"},{"kind":"web","identity":"http://127.0.0.1:8765"}]"#
         return Data("{\"operation\":\"preflight\",\"probe_url\":\"\(probeURL)\",\"policy\":\"\(policy)\",\"trust_seeds\":\(seeds)}".utf8)
     }
 
