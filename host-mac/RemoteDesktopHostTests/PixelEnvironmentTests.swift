@@ -90,7 +90,7 @@ final class PixelEnvironmentTests: XCTestCase {
         XCTAssertNil(PixelGeometry.point(CGPoint(x: 100, y: 2), imageSize: CGSize(width: 100, height: 100), screenBounds: bounds))
     }
 
-    func testFocusedWindowSelectionUsesFrontmostCGOrderAndRequiresMatchingTitle() {
+    func testFocusedWindowSelectionUsesTitleOrUniqueGeometry() {
         let frame = CGRect(x: 10, y: 20, width: 500, height: 400)
         func entry(_ number: UInt32, _ title: String?, owner: Int32 = 42, layer: Int = 0) -> [String: Any] {
             var value: [String: Any] = [kCGWindowOwnerPID as String: NSNumber(value: owner),
@@ -122,6 +122,26 @@ final class PixelEnvironmentTests: XCTestCase {
         XCTAssertNil(AgentMacAccessibility.matchingWindowID(ownerPID: 42, bounds: frame, focusedTitle: "Stale title", entries: candidates, requireUnique: true))
         XCTAssertNil(AgentMacAccessibility.matchingWindowID(ownerPID: 42, bounds: frame.offsetBy(dx: 10, dy: 0), focusedTitle: "Safety controls", entries: candidates, requireUnique: true))
         XCTAssertNil(AgentMacAccessibility.matchingWindowID(ownerPID: 42, bounds: frame, focusedTitle: "Safety controls", entries: [], requireUnique: true))
+
+        let axTitle = "RemoteDesktop Eval 1234 – No notes"
+        let cgTitle = "RemoteDesktop Eval 1234"
+        let decoratedTitleCandidate = [entry(16_900, cgTitle)]
+        XCTAssertEqual(AgentMacAccessibility.matchingWindowID(ownerPID: 42, bounds: frame,
+            focusedTitle: axTitle, entries: decoratedTitleCandidate), 16_900)
+        XCTAssertEqual(AgentMacAccessibility.matchingWindowID(ownerPID: 42, bounds: frame,
+            focusedTitle: axTitle, entries: decoratedTitleCandidate, requireUnique: true), 16_900)
+        XCTAssertNil(AgentMacAccessibility.matchingWindowID(ownerPID: 42, bounds: frame,
+            focusedTitle: axTitle, entries: [entry(16_901, cgTitle), entry(16_902, "No notes")]))
+        XCTAssertNil(AgentMacAccessibility.matchingWindowID(ownerPID: 42, bounds: frame,
+            focusedTitle: axTitle, entries: [entry(16_903, cgTitle, owner: 43)]))
+        XCTAssertNil(AgentMacAccessibility.matchingWindowID(ownerPID: 42, bounds: frame,
+            focusedTitle: axTitle, entries: [entry(16_904, cgTitle, layer: 1)]))
+        XCTAssertNil(AgentMacAccessibility.matchingWindowID(ownerPID: 42, bounds: frame.offsetBy(dx: 10, dy: 0),
+            focusedTitle: axTitle, entries: decoratedTitleCandidate))
+        XCTAssertNil(AgentMacAccessibility.matchingWindowID(ownerPID: 42, bounds: frame,
+            focusedTitle: axTitle, entries: [entry(16_905, cgTitle), entry(16_906, "other")], requireUnique: true))
+        XCTAssertEqual(AgentMacAccessibility.matchingWindowID(ownerPID: 42, bounds: frame,
+            focusedTitle: cgTitle, entries: [entry(16_907, "other"), entry(16_908, cgTitle)]), 16_908)
     }
 
     func testFinitePointMappingDoesNotAddASecondImageBoundsGuard() throws {

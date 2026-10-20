@@ -71,21 +71,21 @@ final class AgentMacAccessibility {
                                  entries: [[String: Any]]? = nil, requireUnique: Bool = false) -> UInt32? {
         let windows = entries ?? (CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? [])
         let candidates = windows.filter {
-            if requireUnique && $0[kCGWindowLayer as String] as? Int != 0 { return false }
-            guard $0[kCGWindowOwnerPID as String] as? Int32 == ownerPID,
-                  let raw = $0[kCGWindowBounds as String] as? [String: Any],
-                  let frame = CGRect(dictionaryRepresentation: raw as CFDictionary) else { return false }
+            guard (!requireUnique || $0[kCGWindowLayer as String] as? Int == 0),
+                  $0[kCGWindowOwnerPID as String] as? Int32 == ownerPID,
+                  let frame = ($0[kCGWindowBounds as String] as? [String: Any]).flatMap({ CGRect(dictionaryRepresentation: $0 as CFDictionary) }) else { return false }
             return ElementMarks.focusedWindowMatches(bounds, selectedBounds: frame)
         }
         let title = focusedTitle.flatMap { $0.isEmpty ? nil : $0 }
-        if requireUnique {
-            let matches = title.map { title in candidates.filter { $0[kCGWindowName as String] as? String == title } } ?? candidates
-            guard matches.count == 1 else { return nil }
-            return matches[0][kCGWindowNumber as String] as? UInt32
+        let matches = title.map { title in candidates.filter { $0[kCGWindowName as String] as? String == title } } ?? []
+        if let first = matches.first {
+            guard !requireUnique || matches.count == 1 else { return nil }
+            return first[kCGWindowNumber as String] as? UInt32
         }
-        let selected = title.flatMap { title in candidates.first { $0[kCGWindowName as String] as? String == title } }
-            ?? (title == nil ? candidates.first : nil)
-        return selected?[kCGWindowNumber as String] as? UInt32
+        if title == nil { guard !requireUnique || candidates.count == 1 else { return nil }; return candidates.first?[kCGWindowNumber as String] as? UInt32 }
+        let geometry = candidates.filter { $0[kCGWindowLayer as String] as? Int == 0 }
+        guard geometry.count == 1 else { return nil }
+        return geometry.first?[kCGWindowNumber as String] as? UInt32
     }
 
     func window() throws -> Window {
