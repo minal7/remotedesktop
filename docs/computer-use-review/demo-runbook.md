@@ -10,7 +10,7 @@ The D2 run window ended early. The Mac is free for the owner's physical Release 
 
 - Charge the Mac and device; confirm both are on the same Wi-Fi.
 - Turn on Do Not Disturb on the Mac.
-- Owner confirms Desktop and Documents are clean enough for the demo. The Notes task was withheld from D2 after a startup timeout; diagnosis remains pending. Do not retry Notes until the startup issue is resolved, and never inspect or modify unrelated notes.
+- Owner confirms Desktop and Documents are clean enough for the demo. D2’s evaluation-only AppleEvent startup/selection requests for Notes timed out before observation; this is not evidence of a production Notes failure. The owner confirmed the test Notes account is ready, so the owner-led D4 Notes task may proceed without waiting for an evaluation repair. Read back only the task-created note; never inspect or modify unrelated notes.
 - Owner confirms Safari is signed in to the test Google account for Gmail. Do not sign in during the demo.
 - Warm the model with one harmless dummy task. This is preparation, not one of the eight tasks or a rehearsal result.
 - If the owner already has a dictation shortcut disabled, leave it that way. If a shortcut is available and causes interruptions, the owner may turn that shortcut off; this is optional. Never disable Apple Intelligence or Siri as a runbook instruction, and Codex does not change system settings.
