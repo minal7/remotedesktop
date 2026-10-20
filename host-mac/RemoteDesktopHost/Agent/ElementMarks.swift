@@ -423,9 +423,9 @@ enum ElementMarks {
                         let clip = viewportBounds.map { $0.intersection(windowBounds) } ?? windowBounds
                         visibleRect = rect.intersection(clip)
                     }
-                    if valid(visibleRect) {
-                        let inWindow = role == "AXMenuBarItem" && viewportBounds == nil
-                            ? rect.intersects(windowBounds) : true
+                    let inWindow = role == "AXMenuBarItem" && viewportBounds == nil ? rect.intersects(windowBounds) :
+                        visibleRect.contains(CGPoint(x: rect.midX, y: rect.midY))
+                    if valid(visibleRect) && (inWindow || role == "AXMenuBarItem") {
                         candidates.append(Candidate(identity: node.identity, role: role, name: title,
                             rect: visibleRect, sourceRect: rect, state: state, inWindow: inWindow, enabled: enabled,
                             value: node.value, node: node))
