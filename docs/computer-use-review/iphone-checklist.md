@@ -1,6 +1,6 @@
 # Physical-device demo checklist
 
-Use the signed release build on the owner's physical iPhone or iPad and the release host on the Mac. Keep both on the same Wi-Fi. Do not use iPhone Mirroring. The owner performs device interactions, account sign-ins, and any system-settings work. Record failures as they happen; a disappearing approval card, final narration, or missing evidence is not a pass.
+Use the signed release build on the owner's physical iPhone or iPad and the release host on the Mac. Keep both on the same Wi-Fi. Do not use iPhone Mirroring. Before recording results, Codex verifies that the installed Mac host version, build, and executable SHA match a notarized Release built from the accepted source; stop if a Debug build or another identity is installed. The existing e9996b2 package is older-source packaging evidence only. B3 currently has a signed Debug build installed, so physical Release checks remain blocked until a current-source Release is installed and verified. [Previous-source notarized package](../../build/eval/report-prep/mac-release-20261020T093832Z/notarized-package.json), [B3 identity and outcome](../../build/eval/report-prep/b3-terminal-summary-20261020.json). The owner performs device interactions, account sign-ins, and any system-settings work. Record failures as they happen; a disappearing approval card, final narration, or missing evidence is not a pass.
 
 This checklist covers D4: three ordinary demo tasks plus Deny, Approve, ask-user, Stop, and Take over/Resume. It is separate from the five-per-task demo rehearsals and from M1 G4's threshold of at least six of eight demo tasks at four of five rehearsals.
 
@@ -16,13 +16,14 @@ This checklist covers D4: three ordinary demo tasks plus Deny, Approve, ask-user
 | Remote Desktop app version and build | |
 | Same Wi-Fi confirmed | |
 | Safari test Google account confirmed (if needed) | |
+| Isolated test Notes account confirmed (if needed) | |
 | Owner | |
 
 Record start and end timestamps, pass/fail, task ID, and host episode path for every row. Codex verifies episode actions, observations, result, and terminal outcome plus fixture/file receipts where applicable. Leave every result and evidence cell blank until the physical run.
 
 ## Three ordinary demo tasks
 
-Run each once from the physical device, using the release build and ordinary prompt. These three are selected from the eight-task catalog; they do not replace D2 rehearsals.
+Run each once from the physical device, using the release build and ordinary prompt. These three are selected from the eight-task catalog; they do not replace D2 rehearsals. Before the Notes task, confirm the intended test Notes account is isolated for this run. Earlier UI evidence showed other Notes content. If the owner cannot confirm isolation, record the Notes task as blocked. Create and independently read back only the task-created note; do not use, inspect, or modify unrelated notes.
 
 | # | Prompt | Start / end | Pass / fail | Task ID | Host episode path | Receipt / notes |
 | --- | --- | --- | --- | --- | --- | --- |
