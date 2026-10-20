@@ -5,7 +5,7 @@ enum AgentCredentialRule {
         if AgentContractValidation.isSecureRoleOrState(role: role, state: state) { return true }
         let normalized = role.lowercased().filter(\.isLetter)
         guard ["textfield", "textbox", "textarea", "combobox", "editor"].contains(where: normalized.contains) else { return false }
-        let pattern = #"\b(password|passcode|username|one[\s-]*time\s*(?:code|password)|(?:verification|authentication|security)\s*code|otp)\b"#
+        let pattern = #"\b(credentials?|password|passcode|username|one[\s-]*time\s*(?:code|password)|(?:verification|authentication|security)\s*code|otp)\b"#
         return name.range(of: pattern, options: [.regularExpression, .caseInsensitive]) != nil
     }
 }

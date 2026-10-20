@@ -11,7 +11,7 @@ enum AgentProgressNarration {
 
     static func text(modelText: String?, action: AgentAction?, observation: AgentObservation,
                      afterSensitiveContext: Bool = false) -> String {
-        if afterSensitiveContext || hasSensitiveContext(observation) {
+        if afterSensitiveContext || hasSensitiveContext(observation) || AgentCredentialRule.isSensitive(role: "textfield", name: modelText ?? "", state: []) {
             return "I’m handling a sensitive control carefully."
         }
         guard let modelText = modelText?.trimmingCharacters(in: .whitespacesAndNewlines), !modelText.isEmpty else {

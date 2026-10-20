@@ -396,9 +396,8 @@ final class AgentLoop {
                    observeMS: observeMS, policyMS: policyMS, gateMS: gateMS)
         history.append(.init(action: action, result: noted("rejected: \(reason)", note))); stepIndex += 1
         rejectionStreak += 1; corrections.append(reason)
-        return askAfterRejections()
+        return reason.localizedCaseInsensitiveContains("credential") ? nil : askAfterRejections()
     }
-
     private func askAfterRejections() -> AgentLoopResult? {
         guard rejectionStreak >= 3 else { return nil }
         let question = AgentUserQuestion(id: UUID(), question: "The last three actions could not be safely completed. How should I proceed?", choices: nil)

@@ -144,6 +144,10 @@ final class AgentMacOSCompatibilityTests: XCTestCase {
         XCTAssertLessThanOrEqual(sentence.count, 120)
         XCTAssertEqual(AgentProgressNarration.text(modelText: nil, action: .type(target: nil, text: "private", mode: .append),
             observation: ordinary), "Entering the requested text.")
+        let credentialText = AgentProgressNarration.text(modelText: "Please provide your verification code.",
+            action: .askUser(question: "Which option?", choices: nil), observation: ordinary)
+        XCTAssertEqual(credentialText, "I’m handling a sensitive control carefully.")
+        XCTAssertFalse(credentialText.contains("verification code"))
 
         let secure = AgentObservation(task: "A generic task", surface: ordinary.surface, screenshot: "",
             elements: [AgentElement(id: 1, role: "AXSecureTextField", name: "Password", value: nil,

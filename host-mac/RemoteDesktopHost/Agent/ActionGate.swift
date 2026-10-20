@@ -89,7 +89,7 @@ final class AgentActionGate {
             return .init(risk: .high, fingerprint: signature, reason: nil, trustKey: nil, deniedReason: "This surface is read-only.")
         }
         if isCredentialEntry(resolved) {
-            return .init(risk: .high, fingerprint: signature, reason: nil, trustKey: nil, deniedReason: "Credential fields are blocked; hand off to the user.")
+            return .init(risk: .high, fingerprint: signature, reason: nil, trustKey: nil, deniedReason: "Credentials require you to take over on your Mac; never send passwords or codes in chat.")
         }
         let risk = riskTier(for: resolved)
         let decision = allowPolicy.decision(for: resolved.action, in: scope)
@@ -127,11 +127,12 @@ final class AgentActionGate {
         }
     }
     private func isCredentialEntry(_ resolved: AgentResolvedAction) -> Bool {
+        let message: String? = switch resolved.action { case .askUser(let q, let c): ([q] + (c ?? [])).joined(separator: " "); case .done(let a), .fail(let a): a; default: nil }
+        if let message, AgentCredentialRule.isSensitive(role: "textfield", name: message, state: []) { return true }
         switch resolved.action { case .type, .key, .select: break; default: return false }
         if resolved.targets.contains(where: isSensitive) { return true }
         guard let focus = resolved.frame.observation.focus else { return false }
-        if AgentCredentialRule.isSensitive(role: focus.role, name: focus.name, state: []) { return true }
-        return resolved.frame.observation.elements.first(where: { $0.id == focus.id }).map(isSensitive) == true
+        return AgentCredentialRule.isSensitive(role: focus.role, name: focus.name, state: []) || resolved.frame.observation.elements.first(where: { $0.id == focus.id }).map(isSensitive) == true
     }
     private func isSensitive(_ element: AgentElement) -> Bool {
         AgentCredentialRule.isSensitive(role: element.role, name: element.name, state: element.state)

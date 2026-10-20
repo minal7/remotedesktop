@@ -150,11 +150,24 @@ final class AgentActionGateTests: XCTestCase {
         for action in [AgentAction.type(target: nil, text: "private", mode: .replace), .select(target: .element(id: 4), option: "private")] {
             let result = try gate.evaluate(.init(action: action, frame: secureFrame, targets: [secure]), expectedScope: scope).result
             XCTAssertEqual(result.decision, .rejected)
-            XCTAssertTrue(result.reason.contains("Credential fields are blocked"))
+            XCTAssertEqual(result.reason, "Credentials require you to take over on your Mac; never send passwords or codes in chat.")
         }
         let code = element(5, "textfield", "One-time code", value: "")
         XCTAssertEqual(try gate.evaluate(.init(action: .type(target: .element(id: 5), text: "123456", mode: .replace),
             frame: frame(scope, elements: [code]), targets: [code]), expectedScope: scope).result.decision, .rejected)
+    }
+
+    func testCredentialLanguageInQuestionsAndCompletionAlwaysRequiresOwnerHandoff() throws {
+        let scope = webScope(), gate = AgentActionGate(trustStore: MemoryTrustStore(trusted: ["web:https://example.test"]), allowPolicy: TestAllowPolicy())
+        for action in [AgentAction.askUser(question: "Please provide your credentials to continue.", choices: ["Password", "Verification code"]),
+                       .done(answer: "Credentials verified; no further value is needed."),
+                       .fail(reason: "Your passcode was checked; I will stop here.")] {
+            let result = try gate.evaluate(resolved(action, scope), expectedScope: scope).result
+            XCTAssertEqual(result.decision, .rejected)
+            XCTAssertEqual(result.reason, "Credentials require you to take over on your Mac; never send passwords or codes in chat.")
+        }
+        let ordinary = AgentAction.askUser(question: "Which option should I choose?", choices: ["A", "B"])
+        XCTAssertEqual(try gate.evaluate(resolved(ordinary, scope), expectedScope: scope).result.decision, .allowed)
     }
 
     func testSupplyingFilesAlwaysRequiresApproval() throws {

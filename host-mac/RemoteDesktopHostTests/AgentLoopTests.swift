@@ -354,7 +354,7 @@ final class AgentLoopTests: XCTestCase {
 
         let handoff = try await loop.run()
         guard case .handoff(let reason) = handoff else { return XCTFail("Expected credential handoff") }
-        XCTAssertTrue(reason.contains("Credential fields are blocked"))
+        XCTAssertTrue(reason.contains("Credentials require you to take over on your Mac"))
         XCTAssertFalse(loop.didFinish)
         XCTAssertNil(recorder.footer)
         XCTAssertEqual(recorder.steps.count, 1)
@@ -363,9 +363,29 @@ final class AgentLoopTests: XCTestCase {
 
         let resumed = try await loop.run()
         XCTAssertEqual(resumed, .completed(answer: "Continued after owner intervention"))
-        XCTAssertTrue(environment.lastContext?.history.last?.result.contains("Credential fields are blocked") == true)
+        XCTAssertTrue(environment.lastContext?.history.last?.result.contains("Credentials require you to take over on your Mac") == true)
         XCTAssertEqual(recorder.steps.count, 2)
         XCTAssertEqual(recorder.footer?.outcome, "success")
+    }
+
+    func testCredentialQuestionAfterRepeatedRejectionsHandsOffWithoutPendingQuestion() async throws {
+        let environment = TestEnvironment(frames: [webFrame(), webFrame(), webFrame()])
+        let policy = TestPolicy([.malformed("first invalid reply"), .malformed("second invalid reply"),
+            .action(.askUser(question: "Please provide your password or verification code.", choices: nil))])
+        let recorder = TestRecorder(), loop = try makeLoop(environment: environment, policy: policy,
+            recorder: recorder, journal: TestJournal(), trustedWeb: true)
+        let outcome = try await loop.run()
+        guard case .handoff(let reason) = outcome else { return XCTFail("Credential solicitation must hand off") }
+        XCTAssertEqual(reason, "Credentials require you to take over on your Mac; never send passwords or codes in chat.")
+        XCTAssertNil(loop.pendingQuestion)
+        XCTAssertTrue(environment.executed.isEmpty)
+        XCTAssertEqual(recorder.steps.last?.execution.status, .notExecuted)
+        do {
+            _ = try await loop.resume(answer: "123456")
+            XCTFail("A credential handoff must not accept a model-created clarification answer")
+        } catch {
+            XCTAssertEqual(error as? AgentLoopError, .noPendingQuestion)
+        }
     }
 
     func testExecutionCredentialHandoffStopsBeforeASecondModelAction() async throws {
