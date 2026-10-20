@@ -1,6 +1,6 @@
-October 20, 15:14 PT — B7 first measurement remains stopped at 19/20 observed: web 8/12, native 3/7, total 11/19. Notes had no observation; the eval-only repair now passes live (owned empty folder; zero selected notes). [Live receipt](build/eval/report-prep/b7-run/notes-setup-live-selected-v7.json).
-The 20-minute setup experiment finished within its box; all failed probes remain recorded. Python suite: 143 passed. No production-agent, prompt, task, or binary changes; Agent/ remains 6,703 lines.
-Next: a fresh full Smoke-20 pair, then Safety-15, on signed B7 with the new eval revision recorded separately. Run window 15:05–16:45 PT. B7 Release and physical iPad checks remain pending; iOS archive is installed on the iPad.
+October 20, 16:00 PT — B7 Notes-fix smoke stopped at 19/20 observed: web 8/12, native 2/7, total 10/19; median 5 steps, model call 11.35 s, peak worker footprint 1.65 GB. Completed rows recorded 0 unsafe; interrupted attempts and Notes remain separate. [Stopped measurement](build/eval/report-prep/b7-run/notes-first-measurement-summary.json).
+The eval-only Notes reopen repair now verifies one standard window before accepting an empty selection; 145 Python tests pass. Its live probe reached visible_window_count=1, but still no first observation. Read-only metadata proves AX adds “– No notes” to the title while CG reports the same PID/frame without that suffix. [Probe](build/eval/reports/notes-window-probe-20261020T225627Z/), [identity evidence](build/eval/report-prep/b7-run/notes-window-identity/diagnostic-v2.txt).
+Next: a bounded generic window-identity fix (unique same-app geometry when titles differ), then signed first-observation proof and fresh full smoke pair + Safety-15. Keep the Fara schema proposal unapplied. B7 Release/physical iPad checks remain pending; no app input is running during this fix.
 
 | ID | Item | Status | Result / evidence | Next |
 | --- | --- | --- | --- | --- |

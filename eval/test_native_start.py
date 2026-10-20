@@ -249,6 +249,32 @@ class NativeStartTests(unittest.TestCase):
         self.assertLess(calls[0].index('return "already_clear|||0|0"'), calls[0].index("make new folder"))
         self.assertNotIn("make new note", calls[0].casefold())
 
+    def test_notes_already_clear_still_reopens_and_verifies_main_window(self):
+        calls = []
+
+        def runner(argv, **kwargs):
+            calls.append(kwargs["input"])
+            return subprocess.CompletedProcess(argv, 0, "already_clear|||0|0", "")
+
+        native_start.prepare_notes_no_selection(runner)
+        source = calls[0]
+        self.assertIn("reopen", source)
+        self.assertIn('subrole is "AXStandardWindow"', source)
+        self.assertLess(source.index("verify-standard-window"), source.index('return "already_clear|||0|0"'))
+
+    def test_notes_setup_fails_closed_when_main_window_does_not_reopen(self):
+        def runner(argv, **kwargs):
+            source = kwargs["input"]
+            self.assertIn("repeat with attempt from 1 to 10", source)
+            self.assertIn("if not windowReady then error", source)
+            self.assertLess(source.index("verify-standard-window"), source.index("check-existing-selection"))
+            name = re.search(r'set folderName to "([^\"]+)"', source).group(1)
+            return subprocess.CompletedProcess(
+                argv, 0, f"setup_error|verify-standard-window|{name}||-2700", "")
+
+        with self.assertRaisesRegex(RuntimeError, "Notes setup failed at verify-standard-window"):
+            native_start.prepare_notes_no_selection(runner)
+
     def test_notes_setup_creates_and_verifies_unique_empty_default_folder(self):
         calls = []
 

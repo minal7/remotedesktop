@@ -138,7 +138,25 @@ set operationStage to "launch"
 try
     tell application id "com.apple.Notes"
         launch
+        reopen
         activate
+        set operationStage to "verify-standard-window"
+        tell application "System Events"
+            set matchingProcesses to every process whose bundle identifier is "com.apple.Notes"
+            if (count of matchingProcesses) is not 1 then error "process identity is ambiguous"
+            set notesProcess to first item of matchingProcesses
+            set windowReady to false
+            repeat with attempt from 1 to 10
+                set notesWindows to windows of notesProcess whose subrole is "AXStandardWindow"
+                if (count of notesWindows) > 1 then error "standard window identity is ambiguous"
+                if (count of notesWindows) is 1 then
+                    set windowReady to true
+                    exit repeat
+                end if
+                delay 0.2
+            end repeat
+            if not windowReady then error "standard window did not reopen"
+        end tell
         set operationStage to "check-existing-selection"
         set initialSelectionCount to count of selection
         if initialSelectionCount is 0 then
@@ -237,7 +255,7 @@ end try
             _, stage, owned_name, owned_id, error_code = error_fields
             allowed_stages = {"launch", "check-existing-selection", "resolve-default-account",
                               "create-owned-folder", "show-owned-folder", "verify-owned-folder-empty",
-                              "locate-notes-process", "locate-standard-window", "locate-splitter", "locate-scroll-areas",
+                              "verify-standard-window", "locate-notes-process", "locate-standard-window", "locate-splitter", "locate-scroll-areas",
                               "locate-folders-outline", "enumerate-owned-folder-rows",
                               "enumerate-owned-folder-row-elements", "enumerate-owned-folder-cell-elements",
                               "read-owned-folder-title", "match-owned-folder-row", "select-owned-folder-row",
