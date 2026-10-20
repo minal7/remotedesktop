@@ -13,60 +13,43 @@ take over the live Mac view. When the task ends, the host returns a short result
 
 ## Validation results
 
-The S5 smoke and safety measurements below are historical results from the S5
-candidate. One terminal S6 smoke run was later measured on source HEAD
-`16c93bc` with installed executable SHA
-`9da7f70891dc53baae4f11e5cc7afc45f854ef2ddce98a024a9b0ad622db4139`. It also
-had a pre-observation Notes infrastructure slot, so this single run is not a
-complete capability evaluation. A separate S6 Safety-15 completed with 15 observed rows, 12 PASS, 1 FAIL, and 2 BLOCKED; 0 unsafe actions, 1 approval request, and 0 grants. Its original outer receipt had a postprocessing TypeError after the complete stage; checkpoint/results and matching source/binary identities support the reconciled terminal summary. The S6 measurements are from the signed Debug executable, not the Release package. The current-code Mac 0.3.0 (1) Release archive/export from source `a85738b3d832dbb72a33c4bbf99237c3d98c878b` is notarized and passes strict signature, stapler, Gatekeeper, and Release trust checks; all 13 archive/export Mach-O files are equivalent after signature removal. Its executable SHA is `b9abc03aa161869f1f9ba03f91bd94f4cd1ce9c9e829ee124a194bdb5ae02324`; ZIP SHA is `9bd36748c2d9956ca8ed2bcedbfd660c285b6b4435997c19a06b225117c78cc2`. The notarized Release app is now installed at `/Applications/RemoteDesktopHost.app`; its executable SHA, strict signature, and Gatekeeper acceptance were verified. It remains unpublished, and no Release physical-task run is claimed. [Installation verification](build/eval/report-prep/release-installed-20261020.json). The earlier `9f82815` notarized package is historical. [Current Release receipt](build/eval/report-prep/mac-release-20261020T053706Z/notarized-package.json), [archive/export equivalence](build/eval/report-prep/mac-release-20261020T053706Z/archive-export-macho-equivalence.json). [S5 summary](build/eval/report-prep/s5-final-summary.md),
-[S6 summary](build/eval/report-prep/s6-final-summary.json), [S6 raw results](build/eval/reports/s6-fara-smoke-20261020T045140Z/smoke-1/results.json).
+### Latest measured candidate: B2 signed Debug
 
-D2 completed its selected 25-attempt evaluation subset (five runs each of
-Wikipedia, Google Flights, Apple, TextEdit, and Finder) on signed evaluation/
-Debug source `9a9a9016786489490a40808e41700554cdb10df2`, eval tree
-`57e86f058e0187dc6ec9edcaad1b2e9a4455fbc1`, executable SHA
-`9878f2f709be7e39ae2cc1fbeb0bb456f7c184c82d4fe6b1338494db371aa627`. It is
-distinct from the notarized Release artifact below. The reviewed outcomes were
-20 pass, 3 fail, and 2 incomplete; the raw runner statuses remain 9 PASS, 15
-BLOCKED, and 1 FAIL. Across 25 observed attempts, unsafe actions were 0 and
-approval requests/grants were 0/0. One abandoned pre-observation attempt has
-unknown safety outside the 25-slot denominator. Median completed model call was
-11.395 s (170 calls), observe 488.5 ms (170 samples), and positive execute 518
-ms (144 samples); D2 worker memory was not measured. Fifteen of the catalog's
-40 attempts were withheld. The selected subset does not meet full-catalog G4.
-[Reviewed D2 report](build/eval/report-prep/d2-final-reviewed-summary-20261020.json),
-[terminal receipt](build/eval/report-prep/d2-terminal-receipt-20261020.json).
+B2 source HEAD `e9996b22f65d626b5af7e8240149d5a5b93dbbed`, signed Debug executable SHA `0420ff3edae8f8de21b9b333edc510dad3497a362da554622121c7b4be9eeaec`. Full Swift passed 1,123 tests / 0 failures / 30 unchanged opt-in skips; Python passed 133/0. The smoke is incomplete: 18 observed of 20 catalog tasks, 10 PASS / 5 FAIL / 3 BLOCKED; 19 were selected, with native-007 pending pre-observation infrastructure and native-008 withheld. Independent Safety-15 observed 15/15: 10 PASS / 2 FAIL / 3 BLOCKED, 0 unsafe, 3 approval requests / 0 grants. Three pre-observation attempts have unknown safety outside the observed denominators. Smoke median: 5 steps, model 11.2765 s (124 calls), observe 421.5 ms, positive execute 493 ms. Safety median: 1 step, model 10.3855 s (30 calls), observe 644.5 ms, positive execute 489.5 ms. Across 366 memory samples, maximum current footprint was 1,593,430,072 bytes and maximum worker-reported peak was 1,593,561,144 bytes. ([B2 combined summary](build/eval/report-prep/b2-validation-20261020T085211Z-combined-summary.md), [raw aggregate and provenance](build/eval/report-prep/b2-validation-20261020T085211Z-combined-summary.json), [Swift acceptance](build/eval/report-prep/s3-full-swift-20261020T084535.288181Z/acceptance.json), [Python log](build/eval/report-prep/d2-origin-trust-python-20261020.log))
 
-| Smoke run (passes / observed / scheduled) | Web / native / total | Median steps | Median model call | Median observe / execute | Peak worker memory | Approvals requested / granted | Unsafe actions | Evidence |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| 1 | 6/12/12; 2/7/8; 8/19/20 | 5 | 11.868 s | 450 / 568 ms | 1.51 GiB | 4 / 0 among 19 observed | 0 among 19 observed; 10 stopped attempts unmeasured | [raw results](build/eval/reports/s5-fixed-candidate-20261020T025202Z/smoke-1/results.json) |
-| 2 | 8/12/12; 2/7/8; 10/19/20 | 5 | 12.073 s | 426 / 505 ms | 1.50 GiB | 4 / 0 among 19 observed | 0 among 19 observed | [raw results](build/eval/report-prep/s5-resume-20261020T035611Z/smoke-2/results.json) |
-| S6 (one run) | 8/12/12; 3/7/8; 11/19/20 | 5 | 12.203 s | 420 / 520 ms | 1.465 GiB (1,573,294,088 bytes) | 3 / 0 among 19 observed | 0 among 19 observed; Notes unobserved | [summary](build/eval/report-prep/s6-final-summary.json) / [raw results](build/eval/reports/s6-fara-smoke-20261020T045140Z/smoke-1/results.json) |
+The same-source Mac 0.3.0 (1) package from `e9996b2` passed G7 structure, strict signature, stapler, Gatekeeper, Release trust, notarization, and 13-file Mach-O equivalence checks. Notarized executable SHA `dc8f8b39770f633c694c4e2b94b10dcf2439ade11d1953e49c4fd13ab52d1bbe`; ZIP SHA `01104546382479849c4501839e40d9d20450798d30034267422a44a310d16629`. It is unpublished and installed with the expected executable identity. The current GUI remains at Setup Step 1 with Screen Recording required, and Check Again left the state unchanged; no physical task run is claimed. The earlier notarized package from `a85738b` predates B1/B2. ([current notarized package](build/eval/report-prep/mac-release-20261020T093832Z/notarized-package.json), [Mach-O signature comparison receipt](build/eval/report-prep/mac-release-20261020T093832Z/notarized-package.json), [ZIP](build/eval/report-prep/mac-release-20261020T093832Z/RemoteDesktopHost-macOS-0.3.0.zip), [historical package](build/eval/report-prep/mac-release-20261020T053706Z/notarized-package.json))
 
-| Safety check | Observed | Approvals requested / granted | Unsafe actions | Result | Evidence |
-| --- | --- | --- | --- | --- | --- |
-| S5 Safety-15 (historical) | 15/15 | 0 / 0 | 0 | 14 PASS, 1 FAIL | [raw results](build/eval/report-prep/s5-resume-20261020T043449Z/safety15/results.json) |
-| S6 Safety-15 | 15/15 | 1 / 0 | 0 | 12 PASS, 1 FAIL, 2 BLOCKED; 1 gave-up, 1 gate-blocked, 1 didn’t-finish | [terminal summary](build/eval/report-prep/s6-safety-final-summary.json) / [raw results](build/eval/reports/s6-safety15-20261020T052221Z/safety15/results.json) |
+### D2 selected Debug demo campaign
 
-| End-to-end check | Result |
-| --- | --- |
-| D4 physical device: three demo tasks and interaction receipts | Pending; checklist not run on Release build |
-| D2 demo rehearsals | Selected 25/40-attempt Debug subset terminal: 20 evidence-reviewed/automatic pass, 3 fail, 2 incomplete; 15 attempts withheld. The full eight-task reliability target remains open. |
-| Current-code Mac Release artifact | Notarized, verified, and installed with matching executable SHA; unpublished. No Release physical-device run. iOS remains a Development install, not TestFlight. |
+D2 completed 25 of 25 selected attempts from the 40-attempt catalog. Evidence-reviewed/automatic outcomes were 20 pass, 3 fail, 2 incomplete; 15 catalog attempts were withheld. Three of five selected tasks met 4/5, below G4's requirement of at least six of eight tasks. The D2 run did not measure Release performance or worker memory. ([D2 reviewed summary](build/eval/report-prep/d2-final-reviewed-summary-20261020.json), [terminal receipt](build/eval/report-prep/d2-terminal-receipt-20261020.json))
+
+### Historical S5 and S6 Debug measurements
+
+These prior candidate measurements are retained as history and do not describe B2 or the current Release archive.
+
+| Run (passes / observed / scheduled) | Web / native / total | Median steps | Model call | Observe / execute | Peak memory | Safety | Evidence |
+| --- | --- | ---: | ---: | ---: | ---: | --- | --- |
+| S5 Smoke-1 | 6/12/12; 2/7/8; 8/19/20 | 5 | 11.868 s | 450 / 568 ms | 1.51 GiB | 0 unsafe / 19 observed; 10 stopped attempts unmeasured | [S5 results](build/eval/reports/s5-fixed-candidate-20261020T025202Z/smoke-1/results.json) |
+| S5 Smoke-2 | 8/12/12; 2/7/8; 10/19/20 | 5 | 12.073 s | 426 / 505 ms | 1.50 GiB | 0 unsafe / 19 observed | [S5 results](build/eval/report-prep/s5-resume-20261020T035611Z/smoke-2/results.json) |
+| S6 Smoke-20 (one run) | 8/12/12; 3/7/8; 11/19/20 | 5 | 12.203 s | 420 / 520 ms | 1.465 GiB | 0 unsafe / 19 observed; Notes unobserved | [S6 summary](build/eval/report-prep/s6-final-summary.json) |
+| S5 Safety-15 | 14 PASS, 1 FAIL / 15 observed | 1 | 11.388 s | 369 / 488 ms | 1.46 GiB | 0 unsafe / 15 | [S5 results](build/eval/report-prep/s5-resume-20261020T043449Z/safety15/results.json) |
+| S6 Safety-15 | 12 PASS, 1 FAIL, 2 BLOCKED / 15 observed | 1 | 13.368 s | 439.5 / 515 ms | 1.46 GiB | 0 unsafe / 15 | [S6 summary](build/eval/report-prep/s6-safety-final-summary.json) |
+
+S5 smoke had one Notes infrastructure slot in each segment. S6's only smoke observed 19/20; its separate Safety-15 outer receipt had a postprocessing TypeError after completion, reconciled against the final checkpoint/results and matching source/binary identities. These are historical candidate results. ([S5 summary](build/eval/report-prep/s5-final-summary.md), [S6 summary](build/eval/report-prep/s6-final-summary.json))
 
 ## Current ship-gate snapshot
 
 | Gate | Current evidence | Status |
 | --- | --- | --- |
-| G1: Smoke-20 target on two consecutive runs | [S6 smoke summary](build/eval/report-prep/s6-final-summary.json): one Debug run, 11/20 scheduled (Notes infra before observation) | FAIL / incomplete |
-| G2: Safety-15, zero unsafe | [S6 Safety summary](build/eval/report-prep/s6-safety-final-summary.json): 15/15 observed, 0 unsafe; 12 PASS, 1 FAIL, 2 BLOCKED | PASS on measured safety criterion |
+| G1: Smoke-20 target on two consecutive runs | [B2 smoke summary](build/eval/report-prep/b2-validation-20261020T085211Z-combined-summary.md): 18/20 catalog rows observed, 10 strict PASS; 19 selected. Native-007 pending infra; native-008 withheld. | FAIL / incomplete |
+| G2: Safety-15, zero unsafe | [B2 Safety summary](build/eval/report-prep/b2-validation-20261020T085211Z-combined-summary.json): 15/15 observed, 0 unsafe; 10 PASS, 2 FAIL, 3 BLOCKED; 3 requests / 0 grants. One abandoned pre-observation attempt has unknown safety outside the denominator. | Observed zero-unsafe criterion met; broader ship gates pending |
 | G4: demo reliability | [D2 reviewed summary](build/eval/report-prep/d2-final-reviewed-summary-20261020.json): 3 of 5 selected tasks reached ≥4/5; 3 of 8 catalog tasks are demonstrated at that threshold. Fifteen attempts across Gmail, Notes, and physical approval were withheld. G4 requires ≥4/5 on at least 6 of 8 tasks; the separate full rehearsal goal is ≥4/5 on all 8 tasks. | Not met; full-catalog evidence incomplete |
 | G5: safety controls | Physical-device Deny/Approve/ask_user/Stop/Take over/Resume checklist not run on Release build | Pending |
-| G6: Swift, Python, lint | [Swift acceptance](build/eval/report-prep/s3-full-swift-20261020T062356.644861Z/acceptance.json), [Python tests](build/eval/report-prep/d2-origin-trust-python-20261020.log), lint passed; 1,120 Swift pass / 0 fail / 30 skips; Python 133/0 | PASS |
-| G7: release bundle structure | [bundle audit](build/eval/report-prep/mac-release-20261020T053706Z/g7-bundle-audit.json): source `a85738b`, Fara-only shipping manifest/runtime selection; legacy prompt/license resources remain audited | PASS structurally |
-| G8: notarized host verification | [notarized package](build/eval/report-prep/mac-release-20261020T053706Z/notarized-package.json): strict signature, stapler, Gatekeeper, Release trust all passed | PASS |
-| G9: model latency and memory | [S6 smoke summary](build/eval/report-prep/s6-final-summary.json): Debug median 12.203 s exceeds 12 s; peak 1.465 GiB is below 6 GB | FAIL latency; PASS memory |
-| G10: release copy and Beta docs | D2 selected-subset evidence is documented and the one-page draft PDF is rendered/reviewed; remaining Release and physical-check evidence is pending | Incomplete |
+| G6: Swift, Python, lint | [Swift acceptance](build/eval/report-prep/s3-full-swift-20261020T084535.288181Z/acceptance.json), [Python tests](build/eval/report-prep/d2-origin-trust-python-20261020.log): 1,123 Swift pass / 0 fail / 30 unchanged skips; Python 133/0; lint status is separate. | Current verification evidence; remaining gates pending |
+| G7: release bundle structure | [Current-source audit](build/eval/report-prep/mac-release-20261020T093832Z/g7-bundle-audit.json): B2 source `e9996b2`; Fara runtime selection and bundle structure passed. | PASS structurally |
+| G8: notarized host verification | Current-source [notarized package](build/eval/report-prep/mac-release-20261020T093832Z/notarized-package.json): strict signature, stapler, Gatekeeper, and Release trust passed. ZIP SHA `01104546382479849c4501839e40d9d20450798d30034267422a44a310d16629`; 13 Mach-O files equivalent after signature removal. [Installed identity](build/eval/report-prep/mac-release-20261020T093832Z/installed-release-receipt.json) matches; GUI permission check remains blocked. | PASS; GUI/physical readiness pending |
+| G9: model latency and memory | [B2 summary](build/eval/report-prep/b2-validation-20261020T085211Z-combined-summary.md): smoke model-call median 11.2765 s (124 calls); maximum sampled current footprint 1.593 GB and reported peak 1.594 GB, below the 6 GB limit. The smoke is incomplete and is not a Release measurement. | Measured Debug values within thresholds; full gate pending |
+| G10: release copy and Beta docs | B2 metrics and Release provenance are being reconciled; physical Release evidence is absent. | Incomplete |
 
 The S6 Safety-15 outer receipt had a postprocessing TypeError after the complete stage; the reconciled final summary preserves that caveat. This gate table is not a final RC sign-off.
 
