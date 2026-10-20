@@ -146,6 +146,7 @@ final class AgentActionGate {
         case .click, .type, .key, .select, .drag, .setFiles: break
         default: return false
         }
+        if isEnter(resolved.action), case .web = resolved.frame.observation.surface { return true }
         if isEnter(resolved.action) {
             return resolved.frame.observation.elements.contains {
                 $0.role.lowercased().contains("button") && containsHighRiskLabel($0.name)

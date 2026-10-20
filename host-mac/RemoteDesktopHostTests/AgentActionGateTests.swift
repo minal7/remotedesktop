@@ -58,17 +58,47 @@ final class AgentActionGateTests: XCTestCase {
         XCTAssertEqual(result.riskTier, "low")
     }
 
-    func testEnterNeedsApprovalOnlyWhenCommitButtonIsPresent() throws {
-        let scope = webScope(), gate = AgentActionGate(trustStore: MemoryTrustStore(trusted: ["web:https://example.test"]), allowPolicy: TestAllowPolicy())
-        let field = element(10, "textbox", "Search", value: "")
-        let plain = AgentResolvedAction(action: .key(chord: "enter"), frame: frame(scope, elements: [field]), targets: [])
-        XCTAssertEqual(try gate.evaluate(plain, expectedScope: scope).result.decision, .allowed)
-        let misleadingField = element(12, "textbox", "Submit", value: "")
-        let noButton = AgentResolvedAction(action: .key(chord: "enter"), frame: frame(scope, elements: [misleadingField]), targets: [misleadingField])
-        XCTAssertEqual(try gate.evaluate(noButton, expectedScope: scope).result.decision, .allowed)
-        let submit = element(11, "button", "Submit")
-        let commit = AgentResolvedAction(action: .key(chord: "enter"), frame: frame(scope, elements: [field, submit]), targets: [])
-        XCTAssertEqual(try gate.evaluate(commit, expectedScope: scope).result.decision, .needsApproval)
+    func testWebEnterAndReturnRequireApprovalWithoutReliableNonCommitSemantics() throws {
+        let scope = webScope()
+        let gate = AgentActionGate(trustStore: MemoryTrustStore(trusted: ["web:https://example.test"]), allowPolicy: TestAllowPolicy())
+        let country = element(12, "AXPopUpButton", "Country")
+        let countryFocus = AgentFocus(id: 12, role: "AXPopUpButton", name: "Country", valuePrefix: "", selection: .init(start: 0, end: 0))
+        let ambiguous = AgentResolvedAction(action: .key(chord: "enter"), frame: frame(scope, elements: [country], focus: countryFocus), targets: [])
+        let approval = try XCTUnwrap(gate.evaluate(ambiguous, expectedScope: scope).approval)
+        XCTAssertEqual(approval.riskTier, .high)
+        let exactApproval = try XCTUnwrap(gate.evaluate(ambiguous, expectedScope: scope).approval)
+        XCTAssertEqual(try gate.resolveApproval(exactApproval.id, approved: true, resolved: ambiguous, expectedScope: scope).result.decision, .allowed)
+        XCTAssertEqual(try gate.resolveApproval(exactApproval.id, approved: true, resolved: ambiguous, expectedScope: scope).result.decision, .rejected)
+
+        let changedFocus = AgentFocus(id: 13, role: "AXTextArea", name: "Message", valuePrefix: "", selection: .init(start: 0, end: 0))
+        let textArea = element(13, "AXTextArea", "Message")
+        let textareaEnter = AgentResolvedAction(action: .key(chord: "enter"), frame: frame(scope, elements: [textArea], focus: changedFocus), targets: [])
+        XCTAssertEqual(try gate.resolveApproval(approval.id, approved: true, resolved: textareaEnter, expectedScope: scope).result.decision, .rejected)
+
+        let textareaApproval = try XCTUnwrap(gate.evaluate(textareaEnter, expectedScope: scope).approval)
+        XCTAssertEqual(textareaApproval.riskTier, .high)
+        let declined = try gate.resolveApproval(textareaApproval.id, approved: false, resolved: textareaEnter, expectedScope: scope)
+        XCTAssertEqual(declined.result.decision, .rejected)
+        XCTAssertEqual(try gate.resolveApproval(textareaApproval.id, approved: true, resolved: textareaEnter, expectedScope: scope).result.decision, .rejected)
+
+        let returnKey = AgentResolvedAction(action: .key(chord: "return"), frame: frame(scope), targets: [])
+        XCTAssertEqual(try gate.evaluate(returnKey, expectedScope: scope).result.decision, .needsApproval)
+        let navigation = AgentResolvedAction(action: .key(chord: "tab"), frame: frame(scope), targets: [])
+        XCTAssertEqual(try gate.evaluate(navigation, expectedScope: scope).result.decision, .allowed)
+    }
+
+    func testNativeEnterKeepsOrdinaryFileActionsLowRiskAndRiskyLabelsHigh() throws {
+        let scope = AgentScope(taskID: "task-1", kind: .app, identity: "com.example.editor")
+        let gate = AgentActionGate(trustStore: MemoryTrustStore(trusted: ["app:com.example.editor"]), allowPolicy: TestAllowPolicy())
+        let save = element(20, "AXButton", "Save")
+        let saveEnter = AgentResolvedAction(action: .key(chord: "enter"), frame: .init(observation: observation(.app(bundleID: "com.example.editor", title: "Document"), elements: [save]), scope: scope), targets: [])
+        XCTAssertEqual(try gate.evaluate(saveEnter, expectedScope: scope).result.decision, .allowed)
+        let replace = element(21, "AXButton", "Replace")
+        let replaceEnter = AgentResolvedAction(action: .key(chord: "enter"), frame: .init(observation: observation(.app(bundleID: "com.example.editor", title: "Document"), elements: [replace]), scope: scope), targets: [])
+        XCTAssertEqual(try gate.evaluate(replaceEnter, expectedScope: scope).result.decision, .needsApproval)
+        let delete = element(22, "AXButton", "Delete")
+        let deleteEnter = AgentResolvedAction(action: .key(chord: "enter"), frame: .init(observation: observation(.app(bundleID: "com.example.editor", title: "Document"), elements: [delete]), scope: scope), targets: [])
+        XCTAssertEqual(try gate.evaluate(deleteEnter, expectedScope: scope).result.decision, .needsApproval)
     }
 
     func testApprovalBindsActionTypedTextAndFullURL() throws {
@@ -185,7 +215,8 @@ final class AgentActionGateTests: XCTestCase {
         let displayOrderButton = element(40, "AXButton", "Display order")
         let enterDisplayOrder = AgentResolvedAction(action: .key(chord: "enter"),
             frame: frame(scope, elements: [displayOrderButton]), targets: [])
-        XCTAssertEqual(try gate.evaluate(enterDisplayOrder, expectedScope: scope).result.decision, .allowed)
+        XCTAssertEqual(try gate.evaluate(enterDisplayOrder, expectedScope: scope).result.decision, .needsApproval,
+            "Web Enter remains ambiguous even when a nearby button label is low risk; its classification differs from clicking that button.")
         let orderButton = element(41, "AXButton", "Order")
         let clickOrder = resolved(.click(target: .element(id: 41), button: nil, count: nil), scope,
             elements: [orderButton])
