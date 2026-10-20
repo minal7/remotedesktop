@@ -687,8 +687,12 @@ final class OSAtlasLlamaRuntimeTests: XCTestCase {
 
     func testFaraContextBudgetTrimsOldestDesktopHistoryAndPreservesCurrentFileState() async throws {
         let events = RuntimeEventLog(), launcher = FakeLlamaLauncher(events: events)
+        let desktopBudget = OSAtlasLlamaResourceProfile.fara.contextSize
+            - ComputerUseFaraModel.contextImageTokensPerScreenshot
+            - ComputerUseFaraModel.maximumCompletionTokens
+            - ComputerUseFaraModel.contextSafetyReserveTokens
         let transport = FakeTransportMaker(events: events, completionDataResponses: [try faraWaitResponse()],
-            inputTokenCounts: [7_000, 6_000, 5_000])
+            inputTokenCounts: [desktopBudget + 1, desktopBudget + 1, desktopBudget])
         let runtime = textRuntime(launcher, transports: transport)
         let endpoint = try await runtime.activateFara(faraInputs), png = try faraTestPNG()
         let first = "Oldest history narrative", second = "Newer history narrative"
@@ -733,7 +737,12 @@ final class OSAtlasLlamaRuntimeTests: XCTestCase {
 
     func testFaraContextBudgetRejectsOversizedCurrentObservationWithoutCompletion() async throws {
         let events = RuntimeEventLog(), launcher = FakeLlamaLauncher(events: events)
-        let transport = FakeTransportMaker(events: events, completionDataResponses: [try faraWaitResponse()], inputTokenCounts: [6_000])
+        let desktopBudget = OSAtlasLlamaResourceProfile.fara.contextSize
+            - ComputerUseFaraModel.contextImageTokensPerScreenshot
+            - ComputerUseFaraModel.maximumCompletionTokens
+            - ComputerUseFaraModel.contextSafetyReserveTokens
+        let transport = FakeTransportMaker(events: events, completionDataResponses: [try faraWaitResponse()],
+            inputTokenCounts: [desktopBudget + 1])
         let runtime = textRuntime(launcher, transports: transport)
         let endpoint = try await runtime.activateFara(faraInputs)
         let input = ComputerUseFaraModel.Input(goal: "Keep the current task and observation.", screenshotPNG: try faraTestPNG(),
@@ -747,7 +756,12 @@ final class OSAtlasLlamaRuntimeTests: XCTestCase {
 
     func testFaraContextBudgetKeepsShortBoundaryInputAndHistory() async throws {
         let events = RuntimeEventLog(), launcher = FakeLlamaLauncher(events: events)
-        let transport = FakeTransportMaker(events: events, completionDataResponses: [try faraWaitResponse()], inputTokenCounts: [5_568])
+        let desktopBudget = OSAtlasLlamaResourceProfile.fara.contextSize
+            - ComputerUseFaraModel.contextImageTokensPerScreenshot
+            - ComputerUseFaraModel.maximumCompletionTokens
+            - ComputerUseFaraModel.contextSafetyReserveTokens
+        let transport = FakeTransportMaker(events: events, completionDataResponses: [try faraWaitResponse()],
+            inputTokenCounts: [desktopBudget])
         let runtime = textRuntime(launcher, transports: transport)
         let endpoint = try await runtime.activateFara(faraInputs), png = try faraTestPNG()
         let prior = "Recent history remains when the complete request fits."
@@ -772,8 +786,13 @@ final class OSAtlasLlamaRuntimeTests: XCTestCase {
 
     func testFaraContextBudgetReservesRecentBrowserScreenshotWindowAndClarifications() async throws {
         let events = RuntimeEventLog(), launcher = FakeLlamaLauncher(events: events)
+        let browserImages = 3 // Two retained history screenshots plus the current screenshot.
+        let initialBrowserBudget = OSAtlasLlamaResourceProfile.fara.contextSize
+            - browserImages * ComputerUseFaraModel.contextImageTokensPerScreenshot
+            - ComputerUseFaraModel.maximumCompletionTokens
+            - ComputerUseFaraModel.contextSafetyReserveTokens
         let transport = FakeTransportMaker(events: events, completionDataResponses: [try faraWaitResponse()],
-            inputTokenCounts: [4_000, 4_000, 4_000])
+            inputTokenCounts: [initialBrowserBudget + 1, initialBrowserBudget + 1, initialBrowserBudget + 1])
         let runtime = textRuntime(launcher, transports: transport)
         let endpoint = try await runtime.activateFara(faraInputs), png = try faraTestPNG()
         let originalGoal = "Continue the browser task after a clarification."
@@ -883,7 +902,12 @@ final class OSAtlasLlamaRuntimeTests: XCTestCase {
     func testFaraCorrectionBudgetOverflowStopsBeforeSecondCompletion() async throws {
         let events = RuntimeEventLog()
         let invalid = try faraCompletionResponse(#"{"action":"type","text":"x","keys":["Enter"]}"#)
-        let transport = FakeTransportMaker(events: events, completionDataResponses: [invalid], inputTokenCounts: [5_568, 5_569])
+        let desktopBudget = OSAtlasLlamaResourceProfile.fara.contextSize
+            - ComputerUseFaraModel.contextImageTokensPerScreenshot
+            - ComputerUseFaraModel.maximumCompletionTokens
+            - ComputerUseFaraModel.contextSafetyReserveTokens
+        let transport = FakeTransportMaker(events: events, completionDataResponses: [invalid],
+            inputTokenCounts: [desktopBudget, desktopBudget + 1])
         let runtime = textRuntime(FakeLlamaLauncher(events: events), transports: transport)
         let endpoint = try await runtime.activateFara(faraInputs)
         do {
@@ -2716,7 +2740,12 @@ extension OSAtlasLlamaRuntimeTests {
 
     func testAgentActionRejectsInactiveWorkerAndContextOverflow() async throws {
         let events = RuntimeEventLog(), launcher = FakeLlamaLauncher(events: events)
-        let transport = FakeTransportMaker(events: events, inputTokenCounts: [6_000])
+        let agentBudget = OSAtlasLlamaResourceProfile.fara.contextSize
+            - OSAtlasLlamaLaunchConfiguration.reservedAgentImageTokens(
+                imageCount: 1, for: .fara15_4b)
+            - OSAtlasLlamaHTTPClient.agentMaximumCompletionTokens
+            - ComputerUseFaraModel.contextSafetyReserveTokens
+        let transport = FakeTransportMaker(events: events, inputTokenCounts: [agentBudget + 1])
         let runtime = textRuntime(launcher, transports: transport)
         do {
             let endpoint = try await runtime.activateFara(faraInputs)
