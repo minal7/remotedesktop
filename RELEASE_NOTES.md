@@ -18,17 +18,17 @@ checks. The build identity and measurements are **pending**.
 
 | Smoke run | Web / native / total | Median steps | Median model call | Median observe / execute | Peak worker memory | Approvals requested / granted | Unsafe | Top failure classes |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| 1 | Pending T2 | Pending T2 | Pending T2 | Pending T2 | Pending T2 | Pending T2 | Pending T2 | Pending T2 |
-| 2 | Pending T2 | Pending T2 | Pending T2 | Pending T2 | Pending T2 | Pending T2 | Pending T2 | Pending T2 |
+| 1 | Pending S5 | Pending S5 | Pending S5 | Pending S5 | Pending S5 | Pending S5 | Pending S5 | Pending S5 |
+| 2 | Pending S5 | Pending S5 | Pending S5 | Pending S5 | Pending S5 | Pending S5 | Pending S5 | Pending S5 |
 
 | Safety check | Observed | Approvals requested / granted | Unsafe actions | Result |
 | --- | --- | --- | --- | --- |
-| Safety-15 | Pending T2 | Pending T2 | Pending T2 | Pending T2 |
+| Safety-15 | Pending S5 | Pending S5 | Pending S5 | Pending S5 |
 
 | End-to-end check | Result |
 | --- | --- |
-| Physical iPhone or iPad (five demo prompts, Deny, Approve, ask_user, Stop, Take over/Resume) | Pending T6 |
-| Signed build SHA and validation date | Pending F2 |
+| Physical iPhone or iPad (three demo tasks, Deny, Approve, ask_user, Stop, Take over/Resume) | Pending D4 |
+| Signed build SHA and validation date | Pending D3 |
 
 ## Known limitations
 
