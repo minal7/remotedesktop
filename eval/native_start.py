@@ -38,8 +38,11 @@ class TextEditReset:
 
 
 def _osascript(source: str, runner: Any = subprocess.run, timeout: float = 15) -> str:
-    result = runner(["/usr/bin/osascript", "-"], input=source, capture_output=True,
-                    text=True, timeout=timeout, check=False)
+    try:
+        result = runner(["/usr/bin/osascript", "-"], input=source, capture_output=True,
+                        text=True, timeout=timeout, check=False)
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(f"AppleScript evaluation timed out after {timeout:g}s") from exc
     if result.returncode != 0:
         detail = (result.stderr or "").strip().replace("\n", " ")[:500]
         raise RuntimeError("TextEdit eval setup failed" + (f": {detail}" if detail else ""))

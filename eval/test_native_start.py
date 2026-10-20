@@ -180,6 +180,14 @@ class NativeStartTests(unittest.TestCase):
         self.assertNotIn("delete", calls[0].casefold())
         self.assertNotIn("make new note", calls[0].casefold())
 
+    def test_notes_setup_timeout_becomes_bounded_runtime_error(self):
+        def runner(argv, **kwargs):
+            raise subprocess.TimeoutExpired(argv, kwargs["timeout"], output="private", stderr="private")
+
+        with self.assertRaisesRegex(RuntimeError, "AppleScript evaluation timed out after 15s") as raised:
+            native_start.prepare_notes_no_selection(runner)
+        self.assertNotIn("private", str(raised.exception))
+
     def test_fresh_launch_rejects_contradictory_reset_diagnostics(self):
         runner = unittest.mock.Mock()
         contradictory = native_start.TextEditReset("not_running", 48125, 0)
