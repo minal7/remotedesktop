@@ -121,6 +121,51 @@ class NativeStartTests(unittest.TestCase):
                 native_start.TextEditReset("has_documents", 48125, 1), runner=runner)
         runner.assert_not_called()
 
+    def test_open_panel_dismissal_targets_only_standard_cancel_control(self):
+        calls = []
+
+        def runner(argv, **kwargs):
+            calls.append(kwargs["input"])
+            return subprocess.CompletedProcess(argv, 0, "dismissed", "")
+
+        result = native_start.dismiss_empty_textedit_open_panel(48125, runner=runner)
+        self.assertEqual(result, "dismissed")
+        self.assertEqual(len(calls), 1)
+        source = calls[0]
+        self.assertIn('if documentCount is not 0 then return "has_documents"', source)
+        self.assertIn('AXIdentifier" of child) is "open-panel"', source)
+        self.assertIn('AXIdentifier" of child) is "CancelButton"', source)
+        self.assertIn("click first item of cancelButtons", source)
+        self.assertIn("if appPID is not 48125", source)
+        self.assertNotIn('whose name is "Open"', source)
+        self.assertNotIn("Untitled", source)
+
+    def test_open_panel_without_documents_is_noop_when_panel_absent(self):
+        calls = []
+
+        def runner(argv, **kwargs):
+            calls.append(kwargs["input"])
+            return subprocess.CompletedProcess(argv, 0, "no_panel", "")
+
+        self.assertEqual(native_start.dismiss_empty_textedit_open_panel(48125, runner), "no_panel")
+        self.assertEqual(len(calls), 1)
+
+    def test_open_panel_is_not_dismissed_when_any_document_exists(self):
+        calls = []
+
+        def runner(argv, **kwargs):
+            calls.append(kwargs["input"])
+            return subprocess.CompletedProcess(argv, 0, "has_documents", "")
+
+        self.assertEqual(native_start.dismiss_empty_textedit_open_panel(48125, runner), "has_documents")
+        self.assertEqual(len(calls), 1)
+
+    def test_open_panel_dismissal_rejects_invalid_process_identity(self):
+        runner = unittest.mock.Mock()
+        with self.assertRaises(ValueError):
+            native_start.dismiss_empty_textedit_open_panel(0, runner)
+        runner.assert_not_called()
+
     def test_prepare_creates_one_document_after_expected_pid_check(self):
         calls = []
 

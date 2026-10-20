@@ -243,6 +243,7 @@ class SuiteLifecycleIntegrationTests(unittest.TestCase):
                  patch.object(run_suite, "_close_suite_app_windows"), \
                  patch("native_start.reset_empty_textedit", return_value=__import__("native_start").TextEditReset("not_running", None, 0)), \
                  patch("native_start.launch_fresh_textedit", return_value=123), \
+                 patch("native_start.dismiss_empty_textedit_open_panel", return_value="no_panel"), \
                  patch("native_start.prepare_textedit_untitled", side_effect=RuntimeError("open panel unavailable")), \
                  patch.object(run_suite, "_cleanup_native_outputs") as cleanup_native, \
                  patch.object(run_suite, "_write_report"):
@@ -289,6 +290,7 @@ class SuiteLifecycleIntegrationTests(unittest.TestCase):
                  patch.object(run_suite, "_evaluate_response", return_value=evaluated), \
                  patch("native_start.reset_empty_textedit", return_value=__import__("native_start").TextEditReset("not_running", None, 0)), \
                  patch("native_start.launch_fresh_textedit", return_value=123), \
+                 patch("native_start.dismiss_empty_textedit_open_panel", return_value="no_panel"), \
                  patch("native_start.prepare_textedit_untitled", return_value=native_lease), \
                  patch("native_start.close_textedit_untitled", side_effect=RuntimeError("close failed")), \
                  patch.object(run_suite, "_close_suite_app_windows"), \

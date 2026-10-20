@@ -237,6 +237,62 @@ end tell
     raise RuntimeError("Fresh TextEdit launch did not produce a running process")
 
 
+def dismiss_empty_textedit_open_panel(expected_pid: int, runner: Any = subprocess.run) -> str:
+    """Dismiss only TextEdit's standard Open panel when its process has no documents."""
+    if type(expected_pid) is not int or expected_pid <= 0:
+        raise ValueError("invalid expected TextEdit process identity")
+    source = f'''tell application "System Events"
+    set matchingProcesses to every process whose bundle identifier is "com.apple.TextEdit"
+    if (count of matchingProcesses) is not 1 then error "TextEdit process is not uniquely running"
+    set appPID to unix id of first item of matchingProcesses
+end tell
+if appPID is not {expected_pid} then error "TextEdit process changed before Open panel check"
+tell application id "com.apple.TextEdit"
+    set documentCount to count of documents
+end tell
+if documentCount is not 0 then return "has_documents"
+tell application "System Events"
+    set matchingProcesses to every process whose bundle identifier is "com.apple.TextEdit"
+    if (count of matchingProcesses) is not 1 then error "TextEdit process changed before Open panel dismissal"
+    set targetProcess to first item of matchingProcesses
+    if (unix id of targetProcess) is not {expected_pid} then error "TextEdit process changed before Open panel dismissal"
+    set panels to {{}}
+    repeat with appWindow in windows of targetProcess
+        try
+            if (value of attribute "AXIdentifier" of appWindow) is "open-panel" then
+                set end of panels to appWindow
+            else
+                repeat with child in entire contents of appWindow
+                    if (value of attribute "AXIdentifier" of child) is "open-panel" then set end of panels to child
+                end repeat
+            end if
+        end try
+    end repeat
+    if (count of panels) is 0 then return "no_panel"
+    if (count of panels) is not 1 then error "TextEdit Open panel identity is ambiguous"
+    set panel to first item of panels
+    set panelRole to role of panel
+    if panelRole is not "AXWindow" and panelRole is not "AXSheet" then error "TextEdit Open panel has an unexpected role"
+    set cancelButtons to {{}}
+    repeat with child in entire contents of panel
+        try
+            if (value of attribute "AXIdentifier" of child) is "CancelButton" and role of child is "AXButton" then
+                set end of cancelButtons to child
+            end if
+        end try
+    end repeat
+    if (count of cancelButtons) is not 1 then error "TextEdit Open panel Cancel control is not unique"
+    if (unix id of targetProcess) is not {expected_pid} then error "TextEdit process changed before Open panel dismissal"
+    click first item of cancelButtons
+end tell
+return "dismissed"
+'''
+    result = _osascript(source, runner=runner)
+    if result not in {"has_documents", "no_panel", "dismissed"}:
+        raise RuntimeError("TextEdit Open panel check returned an invalid status")
+    return result
+
+
 def lease_json(lease: NativeDocumentLease) -> str:
     """Stable JSON representation for runner checkpoint state."""
     return json.dumps(lease.as_dict(), separators=(",", ":"))

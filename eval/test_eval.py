@@ -875,6 +875,28 @@ class TaskAndCheckerTests(unittest.TestCase):
             self.assertEqual(reset_textedit.call_count, 2)
             launch_textedit.assert_not_called()
 
+        with TemporaryDirectory() as directory, \
+             patch.object(run_suite, "_start_fixture_server", return_value=None), \
+             patch.object(run_suite, "_fixture_server_available", return_value=True), \
+             patch.object(run_suite, "_resolved_default_browser", return_value="com.apple.Safari"), \
+             patch.object(run_suite, "_close_suite_app_windows") as close_suite_windows, \
+             patch("runner_recovery.RunnerLifecycle", UnlockedLifecycle), \
+             patch("native_start.reset_empty_textedit",
+                   return_value=TextEditReset("has_documents", 48125, 1)) as reset_textedit, \
+             patch.object(run_suite, "_run_preflight", side_effect=AssertionError("preflight must not run")), \
+             patch.object(run_suite, "_run_driver", side_effect=AssertionError("tasks must not start")):
+            args = type("Args", (), {
+                "suite": "smoke", "driver": "/usr/bin/true", "reset_command": None,
+                "execution": "real-host", "timeout": 1, "runs": 1, "policy": "fara15-4b",
+                "output": directory,
+            })()
+            self.assertEqual(run_suite.run(args), 1)
+            rows = json.loads((Path(directory) / "results.json").read_text())
+            self.assertEqual(len(rows), len(run_suite.smoke_tasks()))
+            self.assertTrue(all(row["status"] == "INFRA-BLOCKED" for row in rows))
+            reset_textedit.assert_called_once_with()
+            close_suite_windows.assert_not_called()
+
     def test_missing_first_observation_is_infra_but_recorded_model_failure_is_fail(self) -> None:
         task = run_suite.load_tasks("basics")[0]
         response = {"task_id": str(uuid.uuid4()), "outcome": "failed", "answer": "",
