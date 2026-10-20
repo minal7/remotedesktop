@@ -1,4 +1,8 @@
 import pathlib
+import os
+import subprocess
+import tempfile
+import textwrap
 import unittest
 
 
@@ -159,6 +163,156 @@ class ReleaseWorkflowSecurityContractTests(unittest.TestCase):
             "Nested code is missing a secure timestamp",
             validation_block,
         )
+
+    def test_version_resolver_uses_platform_versions_and_rejects_mismatches(self) -> None:
+        resolver = self._resolve_version_script()
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            repository = pathlib.Path(temporary_directory)
+            self._initialize_test_repository(repository)
+            head_sha = self._git(repository, "rev-parse", "HEAD")
+
+            accepted = self._run_resolver(
+                repository,
+                resolver,
+                event="workflow_dispatch",
+                requested_version="0.3.0",
+                publish="false",
+                event_sha=head_sha,
+            )
+            self.assertEqual(accepted.returncode, 0, accepted.stderr)
+            outputs = dict(line.split("=", 1) for line in accepted.outputs.splitlines())
+            self.assertEqual(outputs["version"], "0.3.0")
+            self.assertEqual(outputs["macos_version"], "0.3.0")
+            self.assertEqual(outputs["macos_build"], "1")
+            self.assertEqual(outputs["windows_version"], "0.2.1")
+            self.assertEqual(outputs["tag_name"], "v0.3.0")
+            self.assertEqual(outputs["publish"], "false")
+
+            old_windows_version = self._run_resolver(
+                repository,
+                resolver,
+                event="workflow_dispatch",
+                requested_version="0.2.1",
+                publish="false",
+                event_sha=head_sha,
+            )
+            self.assertNotEqual(old_windows_version.returncode, 0)
+            self.assertIn("does not match macOS host version 0.3.0", old_windows_version.stdout)
+
+            wrong_event_sha = self._run_resolver(
+                repository,
+                resolver,
+                event="workflow_dispatch",
+                requested_version="0.3.0",
+                publish="false",
+                event_sha="0" * 40,
+            )
+            self.assertNotEqual(wrong_event_sha.returncode, 0)
+            self.assertIn("does not match immutable event commit", wrong_event_sha.stdout)
+
+            self._git(repository, "tag", "v0.3.0", head_sha)
+            published = self._run_resolver(
+                repository,
+                resolver,
+                event="workflow_dispatch",
+                requested_version="0.3.0",
+                publish="true",
+                event_sha=head_sha,
+            )
+            self.assertEqual(published.returncode, 0, published.stderr)
+            published_outputs = dict(
+                line.split("=", 1) for line in published.outputs.splitlines()
+            )
+            self.assertEqual(published_outputs["publish"], "true")
+            self.assertEqual(published_outputs["artifact_suffix"], "")
+
+            self._git(repository, "tag", "-f", "v0.3.0", "HEAD^")
+            wrong_tag_sha = self._run_resolver(
+                repository,
+                resolver,
+                event="workflow_dispatch",
+                requested_version="0.3.0",
+                publish="true",
+                event_sha=head_sha,
+            )
+            self.assertNotEqual(wrong_tag_sha.returncode, 0)
+            self.assertIn("points to", wrong_tag_sha.stdout)
+
+    def _resolve_version_script(self) -> str:
+        lines = self.workflow.splitlines()
+        step = lines.index("      - name: Resolve version")
+        run_marker = lines.index("        run: |", step)
+        script_lines = []
+        for line in lines[run_marker + 1 :]:
+            if line and not line.startswith("          "):
+                break
+            script_lines.append(line[10:] if line else "")
+        return textwrap.dedent("\n".join(script_lines))
+
+    def _initialize_test_repository(self, repository: pathlib.Path) -> None:
+        (repository / "host-windows").mkdir()
+        (repository / "host-mac").mkdir()
+        (repository / "host-windows" / "Cargo.toml").write_text(
+            '[package]\nname = "test"\nversion = "0.2.1"\n', encoding="utf-8"
+        )
+        (repository / "host-mac" / "project.yml").write_text(
+            "settings:\n  MARKETING_VERSION: 0.3.0\n"
+            "  CURRENT_PROJECT_VERSION: 1\n",
+            encoding="utf-8",
+        )
+        self._git(repository, "init", "-q")
+        self._git(repository, "add", ".")
+        self._git(repository, "-c", "user.name=Contract Test", "-c",
+                  "user.email=contract@example.test", "-c", "commit.gpgsign=false",
+                  "commit", "-m", "fixture")
+        (repository / "fixture.txt").write_text("second commit\n", encoding="utf-8")
+        self._git(repository, "add", "fixture.txt")
+        self._git(repository, "-c", "user.name=Contract Test", "-c",
+                  "user.email=contract@example.test", "-c", "commit.gpgsign=false",
+                  "commit", "-m", "second fixture")
+
+    def _git(self, repository: pathlib.Path, *arguments: str) -> str:
+        result = subprocess.run(
+            ["git", "-C", str(repository), *arguments],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        return result.stdout.strip()
+
+    def _run_resolver(
+        self,
+        repository: pathlib.Path,
+        script: str,
+        *,
+        event: str,
+        requested_version: str,
+        publish: str,
+        event_sha: str,
+    ) -> subprocess.CompletedProcess[str]:
+        with tempfile.NamedTemporaryFile(dir=repository, delete=False) as output_file:
+            output_path = pathlib.Path(output_file.name)
+        try:
+            environment = {
+                "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+                "GITHUB_EVENT_NAME": event,
+                "GITHUB_REF": "refs/heads/main",
+                "GITHUB_SHA": event_sha,
+                "GITHUB_OUTPUT": str(output_path),
+                "REQUESTED_VERSION": requested_version,
+                "REQUESTED_PUBLISH": publish,
+            }
+            result = subprocess.run(
+                ["/bin/bash", "-c", script],
+                cwd=repository,
+                env=environment,
+                capture_output=True,
+                text=True,
+            )
+            result.outputs = output_path.read_text(encoding="utf-8")
+            return result
+        finally:
+            output_path.unlink(missing_ok=True)
 
 
 if __name__ == "__main__":

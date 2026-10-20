@@ -9,14 +9,14 @@
 | F1 | Release copy and versions | Implemented; measurements pending | Host 0.3.0 (1), iOS 1.2 (1), Beta labels and privacy/support/README. | Fill final suite/demo measurements. |
 | F2 | Ship gates + PR | Pending | G1/G2/G4/G5/G8/G9 need current evidence; G6 must cover final source; G7 bundle audit and G10 final measurements pending. | M1 then M5. |
 | S1 | Native fixture and runner repair | Tested; eval only | 98 Python tests passed in 4.117 s; 3/3 signed-app native start probes reached one frontmost Untitled window. Evidence: build/eval/reports/s1-start-probes-20261017T003100Z/report.json and s1-eval-unit.log. Installed SHA 2bced38eab2cfa4852566471bc5cde2d63a6801019dd24f419252a8c80ab59a3 unchanged. Agent 6,673 lines. | S2 native-8 on unchanged app; historical partial run 2 excluded. |
-| S2 | Native-8 re-baseline | Pending | No agent change or installation before this measurement. | Announce hands-off window; detached one-run baseline. |
+| S2 | Native-8 re-baseline | Resuming October 19, 17:35–18:25 PT | Same pinned app and checkpoint in build/eval/reports/s2-native-baseline-20261017T004500Z/. Owner pause Oct 16 preserved one completed task and one local-input interruption. No agent changes. | Resume at native-002; completed tasks never replay; report complete baseline before S3. |
 | S3 | Compile mark follow-ups | Pending | Source patch retained, not installed. | Full Swift green after S2. |
 | S4 | Apply latency candidate | Pending | One previous image and 768 image-token cap, same signed build as S3. | Verify request flags. |
 | S5 | Smoke-20 twice + safety-15 | Pending | One frozen signed build; detached and resumable. | Target 14/20 each, web 10/12, native 4/8, zero unsafe, median model ≤12 s. |
 | S6 | One generic failure fix | Conditional | Two-hour limit; choose from S5 evidence. | One measured smoke delta. |
 | D1 | Eight demo task YAMLs | Pending | Prompts/checkers only; no task-specific production code. | Define after Saturday measurements. |
 | D2 | Five rehearsals per demo | Pending | Preserve every episode and failed attempt. | Per-task pass/time table. |
-| D3 | Release archive + notarization | Pending | Developer ID setup ready; owner credentials only if required. | Strict verification, notarization, iOS archive. |
+| D3 | Release archive + notarization | Pending; version pipeline repaired | Release workflow preserves Mac 0.3.0 (1) and Windows 0.2.1 independently; 7 focused contract tests passed, including actual resolver execution and SHA/tag mismatch rejection. Developer ID setup ready. | Signed archive, notarization and iOS archive; credentials owner-only if required. |
 | D4 | Physical-device checklist | Pending | Owner operates physical iPad/iPhone; Codex verifies episodes. | Deny/Approve/ask_user/Stop/Take over/Resume. |
 | M1 | Final ship gates | Pending | No waivers inferred. | Gate table on release build. |
 | M2 | Demo video | Pending | Owner films device; raw footage retained; speed changes labelled. | 2–3 minute package. |
