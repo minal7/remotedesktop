@@ -135,17 +135,20 @@ final class AgentSharedSupportTests: XCTestCase {
             rect: CGRect(x: 95, y: 0, width: 5, height: 80), children: [scrollChild])
         let zero = MarkAXNode(identity: "zero", role: "AXButton",
             rect: CGRect(x: 10, y: 80, width: 0, height: 20))
+        // Partial visibility is accepted only while the original centre remains visible.
         let partial = MarkAXNode(identity: "partial", role: "AXButton",
-            rect: CGRect(x: 95, y: 30, width: 20, height: 20))
+            rect: CGRect(x: 95, y: 30, width: 8, height: 20))
         let clipped = MarkAXNode(identity: "clipped", role: "AXButton",
-            rect: CGRect(x: 65, y: 60, width: 20, height: 20))
+            rect: CGRect(x: 65, y: 60, width: 8, height: 20))
         let outsideClip = MarkAXNode(identity: "outside-clip", role: "AXButton",
             rect: CGRect(x: 75, y: 60, width: 20, height: 20))
+        let outsideCentre = MarkAXNode(identity: "outside-centre", role: "AXButton",
+            rect: CGRect(x: 95, y: 10, width: 14, height: 20))
         let scrollArea = MarkAXNode(identity: "area", role: "AXScrollArea",
             rect: CGRect(x: 30, y: 50, width: 40, height: 40), children: [clipped, outsideClip])
         let bounds = CGRect(x: 0, y: 0, width: 100, height: 100)
 
-        let projected = ElementMarks.project(root: MarkAXNode.root([hidden, scrollbar, zero, partial, scrollArea]),
+        let projected = ElementMarks.project(root: MarkAXNode.root([hidden, scrollbar, zero, partial, scrollArea, outsideCentre]),
             windowBounds: bounds)
 
         XCTAssertEqual(projected.marks.compactMap { $0.identity as? String }, ["partial", "clipped"])
