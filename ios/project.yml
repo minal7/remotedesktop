@@ -22,8 +22,12 @@ targets:
     platform: iOS
     sources:
       - path: RemoteDesktop
+        excludes:
+          - PrivacyInfo.xcprivacy
       - path: RemoteDesktop/Transport/WebRTCAliases.swift
       - path: ../protocol/Swift
+      - path: RemoteDesktop/PrivacyInfo.xcprivacy
+        buildPhase: resources
     dependencies:
       - package: LiveKitWebRTC
         product: LiveKitWebRTC
