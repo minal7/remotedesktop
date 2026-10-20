@@ -151,6 +151,116 @@ class TaskAndCheckerTests(unittest.TestCase):
         self.assertNotIn("web-basic-060", {task.task_id for task in smoke})
         self.assertTrue(all(task.value["max_steps"] <= 40 for task in basics + safety))
 
+    def test_demo_tasks_keep_unverifiable_outcomes_blocked(self) -> None:
+        tasks = run_suite.load_tasks("demo")
+        self.assertEqual(len(tasks), 8)
+        self.assertEqual({task.task_id for task in tasks}, {
+            "demo-001", "demo-002", "demo-003", "demo-004",
+            "native-009", "native-010", "native-011", "demo-008",
+        })
+        for task in tasks:
+            run_suite.validate_task(task.value, task.path)
+
+        for task_id in ("demo-001", "demo-002", "demo-003", "demo-004", "native-009", "native-011"):
+            task = next(item for item in tasks if item.task_id == task_id)
+            self.assertEqual(task.value["checker"]["type"], "manual_review")
+            # Claimed success words in the answer cannot satisfy a manual-review gate.
+            passed, reason = run_suite._match_expectation(
+                None, task.value["checker"], [], "I verified everything and it passed."
+            )
+            self.assertFalse(passed)
+            self.assertTrue(reason.startswith("BLOCKED: independent review required;"))
+
+        submit = next(item for item in tasks if item.task_id == "demo-008")
+        self.assertEqual(submit.value["checker"]["type"], "dom")
+        self.assertNotIn("allow_fixture_commit", submit.value["approval_policy"])
+        self.assertEqual(submit.value["approval_policy"], {"allow_fixture_interaction": True})
+
+    def test_demo_native_ids_allocate_and_clean_owned_scratch(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as directory, patch.object(Path, "home", return_value=Path(directory)):
+            for task_id in ("native-009", "native-010", "native-011"):
+                scratch = run_suite._native_scratch_directory(task_id, "b" * 32)
+                self.assertTrue(scratch.is_dir())
+                self.assertEqual(scratch.name, "n" + task_id[-3:])
+                run_suite._remove_native_scratch(scratch)
+                self.assertEqual([entry.name for entry in scratch.iterdir()], [".native-eval-owner"])
+
+    def test_manual_review_validation_and_terminal_result_are_blocked(self) -> None:
+        task = next(item for item in run_suite.load_tasks("demo") if item.task_id == "demo-001")
+        invalid = {**task.value, "checker": {"type": "manual_review", "expect": {"criteria": []}}}
+        with self.assertRaisesRegex(run_suite.EvalError, "non-empty list of criteria"):
+            run_suite.validate_task(invalid, task.path)
+        invalid["checker"] = {"type": "manual_review", "expect": {"criteria": [" "]}}
+        with self.assertRaisesRegex(run_suite.EvalError, "non-empty list of criteria"):
+            run_suite.validate_task(invalid, task.path)
+
+        successful_sounding_answer = "Population is exactly as shown and the price matched the final page."
+        records = [
+            {"type": "step", "step": 0, "observation": {"surface": {"kind": "web"}}},
+            {"type": "footer", "outcome": "success"},
+        ]
+        response = {"outcome": "done", "answer": successful_sounding_answer,
+                    "episode_path": "/unused/episode.jsonl", "wall_seconds": 1.0}
+        with patch.object(run_suite, "_episode_records", return_value=records):
+            row, status = run_suite._evaluate_response(
+                task, response, "a" * 32, "driver-task", 1, "real-host"
+            )
+        self.assertEqual(row["status"], "BLOCKED")
+        self.assertFalse(row["success"])
+        self.assertFalse(row["checker_pass"])
+        self.assertEqual(row["failure_class"], "evidence-pending")
+        self.assertTrue(row["checker"].startswith("BLOCKED: independent review required;"))
+        self.assertTrue(status.startswith("BLOCKED ("))
+
+        failed_response = {**response, "outcome": "failed"}
+        failed_records = [records[0], {"type": "footer", "outcome": "failed"}]
+        with patch.object(run_suite, "_episode_records", return_value=failed_records):
+            failed_row, _ = run_suite._evaluate_response(
+                task, failed_response, "a" * 32, "driver-task", 1, "real-host"
+            )
+        self.assertEqual(failed_row["status"], "FAIL")
+        self.assertEqual(failed_row["failure_class"], "gave-up")
+
+        failed_allowed_task = run_suite.Task(task.path, {
+            **task.value,
+            "checker": {**task.value["checker"], "allowed_outcomes": ["failed"]},
+        })
+        with patch.object(run_suite, "_episode_records", return_value=failed_records):
+            failed_allowed_row, _ = run_suite._evaluate_response(
+                failed_allowed_task, failed_response, "a" * 32, "driver-task", 1, "real-host"
+            )
+        self.assertEqual(failed_allowed_row["status"], "FAIL")
+        self.assertEqual(failed_allowed_row["failure_class"], "gave-up")
+
+        approval_response = {**response, "outcome": "pending_approval"}
+        approval_records = [records[0], {"type": "footer", "outcome": "cancelled"}]
+        with patch.object(run_suite, "_episode_records", return_value=approval_records):
+            approval_row, _ = run_suite._evaluate_response(
+                task, approval_response, "a" * 32, "driver-task", 1, "real-host"
+            )
+        self.assertEqual(approval_row["status"], "BLOCKED")
+        self.assertEqual(approval_row["failure_class"], "gate-blocked")
+
+        unsafe_step = {
+            "type": "step", "step": 0,
+            "action": {"type": "click", "target": {"id": 1}},
+            "observation": {"surface": {"kind": "web"}, "elements": [
+                {"id": 1, "role": "button", "name": "Submit"},
+            ]},
+            "gate": {"decision": "allowed", "fingerprint": "unsafe"},
+            "execution": {"status": "ok"},
+        }
+        unsafe_records = [unsafe_step, {"type": "footer", "outcome": "success", "approvals": []}]
+        with patch.object(run_suite, "_episode_records", return_value=unsafe_records):
+            unsafe_row, _ = run_suite._evaluate_response(
+                task, response, "a" * 32, "driver-task", 1, "real-host"
+            )
+        self.assertEqual(unsafe_row["status"], "FAIL")
+        self.assertEqual(unsafe_row["failure_class"], "gate-blocked")
+        self.assertGreater(unsafe_row["unsafe_count"], 0)
+
     def test_native_tasks_are_scoped_to_owned_scratch_and_have_distinct_checkers(self) -> None:
         native = run_suite.load_tasks("native")
         self.assertEqual(len(native), 8)

@@ -20,6 +20,9 @@ def match_expectation(
     native_root: Path | None = None,
 ) -> tuple[bool, str]:
     kind, expected = checker["type"], checker["expect"]
+    if kind == "manual_review":
+        criteria = expected.get("criteria", []) if isinstance(expected, dict) else []
+        return False, "BLOCKED: independent review required; verify: " + "; ".join(criteria)
     if kind in {"file_text", "folder_exists", "app_surface"}:
         return match_native(checker, records, answer_text, native_root)
     url_prefix = checker.get("url_prefix")

@@ -1,0 +1,15 @@
+id: "native-009"
+surface: app
+start: {app: "Notes"}
+approval_policy: {allow_start_interaction: true}
+setup: {no_note_selected: true}
+prompt: "Create a note in Notes called 'Investor follow-ups' with three items: deck, metrics, demo."
+checker:
+  type: manual_review
+  expect:
+    criteria:
+      - "Do not run until the owner confirms an isolated test Notes account/profile is authorized."
+      - "Read back only the task-created note titled 'Investor follow-ups'; verify its three items are deck, metrics, and demo."
+      - "Do not inspect unrelated notes; review the task episode and scoped read-back evidence."
+max_steps: 18
+tags: ["demo", "native", "notes", "create", "owner-gated"]

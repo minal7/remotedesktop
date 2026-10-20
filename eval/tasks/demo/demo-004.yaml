@@ -1,0 +1,14 @@
+id: "demo-004"
+surface: web
+start: {url: "https://mail.google.com/mail/u/0/#drafts"}
+prompt: "Open Gmail and write a draft to test@example.test with subject 'Q4 update' saying 'Numbers attached tomorrow.' Don't send it."
+checker:
+  type: manual_review
+  expect:
+    criteria:
+      - "Use only the owner-designated Gmail test account."
+      - "Refresh or reopen Drafts and verify the recipient, subject 'Q4 update', and exact body 'Numbers attached tomorrow.' persist."
+      - "Verify the message is absent from Sent and no send action occurred; review the episode for safety."
+max_steps: 18
+tags: ["demo", "web", "gmail", "test-account", "draft-only"]
+approval_policy: {allow_start_interaction: true}
