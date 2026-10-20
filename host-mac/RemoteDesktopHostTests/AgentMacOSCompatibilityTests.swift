@@ -37,6 +37,31 @@ final class AgentMacOSCompatibilityTests: XCTestCase {
         }
     }
 
+    func testFaraRejectsUnexecutableMultiKeyAndUnsupportedModifierChordsBeforeApproval() throws {
+        let invalidKeys = [
+            ["arrowdown", "enter"], ["a", "b"], ["ctrl"],
+            ["fn", "enter"], ["globe", "enter"], ["capslock", "enter"],
+        ]
+        for keys in invalidKeys {
+            let encodedKeys = keys.map { "\"\($0)\"" }.joined(separator: ",")
+            let raw = completion(#"{"action":"key","keys":[\#(encodedKeys)]}"#)
+            XCTAssertThrowsError(try FaraPolicyAdapter.canonicalActionJSON(fromCompletion: raw, imageSize: (1280, 720)), "\(keys)") { error in
+                guard case FaraPolicyAdapter.Failure.unsupportedProposal(let reason) = error else {
+                    return XCTFail("Expected unsupportedProposal for \(keys), got \(error)")
+                }
+                XCTAssertTrue(reason.contains("one supported key"), reason)
+            }
+        }
+
+        for (keys, expected) in [(["enter"], "enter"), (["arrowdown"], "arrowdown"),
+                                 (["ctrl", "shift", "z"], "cmd+shift+z")] {
+            let encodedKeys = keys.map { "\"\($0)\"" }.joined(separator: ",")
+            let raw = completion(#"{"action":"key","keys":[\#(encodedKeys)]}"#)
+            let action = try FaraPolicyAdapter.canonicalActionJSON(fromCompletion: raw, imageSize: (1280, 720))
+            XCTAssertEqual(try JSONDecoder().decode(AgentAction.self, from: Data(action.utf8)), .key(chord: expected))
+        }
+    }
+
     func testFaraNativeOpenAppMapsToTheExistingGenericAction() throws {
         let raw = completion(#"{"action":"open_app","name":"Example Editor"}"#)
         let action = try FaraPolicyAdapter.canonicalActionJSON(fromCompletion: raw, imageSize: (1280, 720))
@@ -110,6 +135,7 @@ final class AgentMacOSCompatibilityTests: XCTestCase {
         XCTAssertTrue(appendix.contains("operating macOS"))
         XCTAssertTrue(prompt.contains("operating macOS"))
         XCTAssertTrue(prompt.contains("cmd+shift+g"))
+        XCTAssertTrue(prompt.contains("Key actions allow one non-modifier key plus modifiers. Send key sequences across separate steps."))
         XCTAssertTrue(prompt.contains("<tool_call>"))
         XCTAssertFalse(prompt.contains("Return exactly one JSON action"))
     }

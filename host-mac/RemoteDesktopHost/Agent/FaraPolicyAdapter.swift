@@ -1,7 +1,6 @@
 import Foundation
 
-/// Converts the model-native computer_use arguments into the single host
-/// AgentAction contract. Raw completion bytes remain owned by the episode.
+/// Adapts native Fara actions to the host contract; raw completion bytes stay in the episode.
 enum FaraPolicyAdapter {
     static let maximumCompletionBytes = 1_048_576
     static let maximumActionBytes = 32_768
@@ -61,12 +60,10 @@ enum FaraPolicyAdapter {
         guard let nativeKey = keys.last?.lowercased(), !nativeKey.isEmpty else { throw Failure.invalidCompletion }
         let key = ["arrowleft": "left", "arrowright": "right"][nativeKey] ?? nativeKey
         let modifiers = Set(keys.dropLast().map { $0.lowercased() })
-        let hasControl = modifiers.contains("ctrl") || modifiers.contains("control")
-        let hasOption = modifiers.contains("alt") || modifiers.contains("option") || modifiers.contains("opt")
+        let hasControl = modifiers.contains("ctrl") || modifiers.contains("control"), hasOption = modifiers.contains("alt") || modifiers.contains("option") || modifiers.contains("opt")
         if hasOption && key == "tab" {
             throw Failure.unsupportedProposal("Use open_app to switch apps.")
         }
-        let native = keys.map { $0.lowercased() }.joined(separator: "+")
         let mapped: String?
         if hasControl && modifiers.count == 2 && modifiers.contains("shift") && key == "z" { mapped = "cmd+shift+z" }
         else if hasControl && modifiers.count == 1 && ["a", "c", "v", "x", "z", "y", "s", "o", "n", "w", "t", "f", "l", "p", "q"].contains(key) {
@@ -78,8 +75,11 @@ enum FaraPolicyAdapter {
         else if modifiers.isEmpty && key == "home" { mapped = "cmd+left" }
         else if modifiers.isEmpty && key == "end" { mapped = "cmd+right" }
         else { mapped = nil }
-        guard let mapped else { return (keys.joined(separator: "+"), nil) }
-        return (mapped, "mapped \(native) → \(mapped)")
+        let chord = mapped ?? keys.joined(separator: "+")
+        guard (try? AgentKeyStroke.parse(chord)) != nil else {
+            throw Failure.unsupportedProposal("Use one supported key plus supported modifiers per key action.")
+        }
+        return (chord, mapped.map { "mapped \(keys.map { $0.lowercased() }.joined(separator: "+")) → \($0)" })
     }
 
     private static func canonicalAction(_ proposal: ComputerUseFaraAction,

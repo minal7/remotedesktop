@@ -98,6 +98,7 @@ final class AgentLlamaVLMPolicyTests: XCTestCase {
             (#"{"action":"mouse_move","coordinate":[502,496]}"#, "Moving the pointer without a click is not available in this host action contract."),
             (#"{"action":"left_click_drag","coordinate":[8,9]}"#, "This host action contract requires both drag endpoints; Fara supplied only the destination."),
             (#"{"action":"visit_url","url":"file:///tmp/example.txt"}"#, "Only absolute HTTP and HTTPS URLs are supported."),
+            (#"{"action":"key","keys":["arrowdown","enter"]}"#, "Use one supported key plus supported modifiers per key action."),
             (#"{"action":"web_search","query":"weather"}"#, "Search is unavailable in the current computer-use action contract."),
             (#"{"action":"read_page_answer_question","question":"What is shown?"}"#, "Page-reading actions are unavailable in the current computer-use action contract."),
             (#"{"action":"pause_and_memorize_fact","fact":"remember this"}"#, "Memory actions are unavailable in the current computer-use action contract."),
