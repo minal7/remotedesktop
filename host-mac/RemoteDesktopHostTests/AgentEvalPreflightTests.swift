@@ -83,6 +83,31 @@ final class AgentEvalPreflightTests: XCTestCase {
         XCTAssertThrowsError(try AgentEvalPreflightRequest.decodeStrict(Data(unknownKind.utf8)))
     }
 
+    func testFocusProbeRequestAcceptsOnlyOnePositiveIntegerPID() throws {
+        let valid = Data("{\"operation\":\"focus_probe\",\"expected_pid\":1234}".utf8)
+        XCTAssertEqual(try AgentEvalFocusProbeRequest.decodeStrict(valid).expectedPID, 1234)
+        for body in [
+            "{\"operation\":\"focus_probe\",\"expected_pid\":true}",
+            "{\"operation\":\"focus_probe\",\"expected_pid\":0}",
+            "{\"operation\":\"focus_probe\",\"expected_pid\":-1}",
+            "{\"operation\":\"focus_probe\",\"expected_pid\":1.5}",
+            "{\"operation\":\"focus_probe\",\"expected_pid\":2147483648}",
+            "{\"operation\":\"focus_probe\",\"expected_pid\":1234,\"url\":\"https://example.test\"}",
+            "{\"operation\":\"preflight\",\"expected_pid\":1234}",
+        ] {
+            XCTAssertThrowsError(try AgentEvalFocusProbeRequest.decodeStrict(Data(body.utf8)), body)
+        }
+    }
+
+    func testFocusProbeSkippedReadDoesNotInventAXError() {
+        let skipped = AgentEvalFocusProbeAttribute.skipped("deadline elapsed")
+        XCTAssertFalse(skipped.attempted)
+        XCTAssertNil(skipped.timeoutSetErrorCode)
+        XCTAssertNil(skipped.axErrorCode)
+        XCTAssertNil(skipped.typeValid)
+        XCTAssertEqual(skipped.reason, "deadline elapsed")
+    }
+
     func testPermissionFailureStopsBeforePixelOrModel() async throws {
         let request = try AgentEvalPreflightRequest.decodeStrict(requestData())
         var laterCheckCalled = false

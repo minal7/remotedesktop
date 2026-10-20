@@ -50,6 +50,9 @@ enum DebugAgentEvalCommand {
                     response = .invalidRequest()
                 }
                 encoded = try JSONEncoder().encode(response)
+            } else if root?["operation"] as? String == "focus_probe" {
+                let request = try AgentEvalFocusProbeRequest.decodeStrict(data)
+                encoded = try JSONEncoder().encode(AgentEvalFocusProbe.run(request))
             } else {
                 let request = try AgentEvalRequest.decodeStrict(data)
                 let response = try await DebugAgentEvalSession(request: request).run()

@@ -191,6 +191,7 @@
 		DAF36F7B8D29F77D04ED9E03 /* GUIOwlPolicyAdapterTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 96CF5920816C4ECAAD177BC4 /* GUIOwlPolicyAdapterTests.swift */; };
 		DB1C5586C1AF5855621E5BDD /* StrictSemanticJSONParserTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2A9655C63C742BB34DEE93A3 /* StrictSemanticJSONParserTests.swift */; };
 		DCC563908A2927CCB425A5DC /* ElementMarks.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8DF9D05CEED9772C53B8ADB2 /* ElementMarks.swift */; };
+		E02DA78817B872CDEDD2E025 /* AgentEvalFocusProbe.swift in Sources */ = {isa = PBXBuildFile; fileRef = 22F6FCC31C0572EB0F1E4F18 /* AgentEvalFocusProbe.swift */; };
 		E1CF8EC0E49913ED6C927764 /* RemoteDesktopReleaseScopeGateTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5B684FE1C3F3FD58E65648EA /* RemoteDesktopReleaseScopeGateTests.swift */; };
 		E47AD513E1617BE306A6B446 /* NOTICE.txt in Resources */ = {isa = PBXBuildFile; fileRef = 11941D3F38B1D9FBA3206FF2 /* NOTICE.txt */; };
 		E51BB18EB309E40205D5D5EB /* FARA-MIT-LICENSE.txt in Resources */ = {isa = PBXBuildFile; fileRef = 8BCFAE93042C0A470F48F853 /* FARA-MIT-LICENSE.txt */; };
@@ -281,6 +282,7 @@
 		21AA8449441EA6B2D9F913A1 /* HostAgentLifecycleTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HostAgentLifecycleTests.swift; sourceTree = "<group>"; };
 		223DE94B0A9BC84EA5C29244 /* AgentTrajectoryRecorderTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentTrajectoryRecorderTests.swift; sourceTree = "<group>"; };
 		22E0B1015DEC570F8CC3A9B1 /* ComputerUseTextClarificationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseTextClarificationTests.swift; sourceTree = "<group>"; };
+		22F6FCC31C0572EB0F1E4F18 /* AgentEvalFocusProbe.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentEvalFocusProbe.swift; sourceTree = "<group>"; };
 		2308523237AF376A5A4FB280 /* SignalingEnvelope.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SignalingEnvelope.swift; sourceTree = "<group>"; };
 		2316219C43CE95DE019E8B57 /* ComputerUseGUIOwlModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseGUIOwlModelTests.swift; sourceTree = "<group>"; };
 		245468562563D0F8AF76EAA6 /* ComputerUseDesktopExecutor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseDesktopExecutor.swift; sourceTree = "<group>"; };
@@ -499,6 +501,7 @@
 			children = (
 				D126E8A7329440FB81BC5C93 /* AgentEvalApprovalPolicy.swift */,
 				F624E766FD26C9ECA552F11C /* AgentEvalBootstrap.swift */,
+				22F6FCC31C0572EB0F1E4F18 /* AgentEvalFocusProbe.swift */,
 				2F6CCD5E6FB7536A6EE441AF /* AgentEvalPolicyReplay.swift */,
 				8C412D22E76D172AE4BDC7B0 /* AgentEvalPreflight.swift */,
 				61FC3547D73E81A2E0F2EB69 /* AgentEvalRunStore.swift */,
@@ -1095,6 +1098,7 @@
 				8E04B64CC46C4590295A4393 /* AgentCredentialRule.swift in Sources */,
 				82C7714459A140DD1C7F4739 /* AgentEvalApprovalPolicy.swift in Sources */,
 				126638C8688A102CDD3E0DA3 /* AgentEvalBootstrap.swift in Sources */,
+				E02DA78817B872CDEDD2E025 /* AgentEvalFocusProbe.swift in Sources */,
 				F375AA74E45E8269C36F228D /* AgentEvalPolicyReplay.swift in Sources */,
 				C17E69F8082DA6A2832AE77E /* AgentEvalPreflight.swift in Sources */,
 				23BAFA18578E5392E276EA12 /* AgentEvalRunStore.swift in Sources */,
