@@ -1,3 +1,7 @@
+October 20, 14:57 PT — B7 first measurement stopped at 19/20 observed: web 8/12, native 3/7, total 11/19; Notes setup failed before observation. [Reconciled measurement](build/eval/report-prep/b7-run/first-measurement-summary.json).
+Next experiment (20-minute box): repair eval-only Notes setup using a verified empty, task-owned folder in the authorized default account; retain every previous result and infrastructure failure. No production-agent change.
+Then measure on the same signed B7 executable with the new evaluation revision explicitly recorded. Current installation is Debug B7; B6 Release packaging evidence below is historical, and the exact iOS archive is now installed on the iPad with physical checks pending.
+
 | ID | Item | Status | Result / evidence | Next |
 | --- | --- | --- | --- | --- |
 | T1 | Native calibration | Accepted | 20/20 correct window; 10 exact + 8 descendant; both misses retained. Owner-approved threshold: 20/20 correct window and ≥18/20 intended element or verified descendant. | No further calibration approval before ship. |
