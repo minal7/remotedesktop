@@ -1475,6 +1475,10 @@ def _run_one_task(task: Task, run_number: int, args: argparse.Namespace, driver:
                         raise EvalError("TextEdit untitled setup requires a verified native reset")
                     from native_start import launch_fresh_textedit
                     fresh_pid = launch_fresh_textedit(textedit_reset)
+                    # Launch Services can still restore a saved named document after -F.
+                    # Close those restored windows through the signed, owner-safe path,
+                    # then immediately create our own document in this same process.
+                    _close_suite_app_windows(suite_apps, driver)
                     textedit_creation_started = True
                     lease = prepare_textedit_untitled(fresh_pid)
                     if checkpoint is not None:

@@ -22,8 +22,11 @@ class CleanStartTests(unittest.TestCase):
             previous_home = run_suite.os.environ.get("HOME")
             run_suite.os.environ["HOME"] = directory
             try:
+                clean_count = 0
                 def clean(*_args, **_kwargs):
-                    events.append("clean-start")
+                    nonlocal clean_count
+                    clean_count += 1
+                    events.append("clean-start" if clean_count == 1 else "clean-start-after-launch")
 
                 reset_results = iter([TextEditReset("quit", 123, 0),
                                       TextEditReset("not_running", None, 0)])
@@ -63,8 +66,8 @@ class CleanStartTests(unittest.TestCase):
                 else:
                     run_suite.os.environ["HOME"] = previous_home
         self.assertEqual(result, "PASS")
-        self.assertEqual(events, ["reset-quit", "clean-start", "reset-not_running", "fresh-launch", "create-document",
-                                  "driver", "close-lease"])
+        self.assertEqual(events, ["reset-quit", "clean-start", "reset-not_running", "fresh-launch",
+                                  "clean-start-after-launch", "create-document", "driver", "close-lease"])
 
     def test_unowned_textedit_document_blocks_before_fresh_launch(self) -> None:
         from native_start import TextEditReset
