@@ -508,8 +508,8 @@ final class PixelEnvironment: AgentEnvironment {
     }
 
     private func capture(_ display: SCDisplay, excluding windows: [SCWindow]) async throws -> CGImage {
-        var config = SCStreamConfiguration(); config.width = 1280
-        config.height = max(1, Int(1280 * display.frame.height / display.frame.width)); config.showsCursor = false
+        let height = max(1, Int(1280 * display.frame.height / display.frame.width)); guard let size = PixelGeometry.boundedPixelSize(width: 1280, height: height, maximumWidth: 1280) else { throw AgentEnvironmentError.unavailable("Could not bound the display capture size.") }
+        var config = SCStreamConfiguration(); config.width = size.width; config.height = size.height; config.showsCursor = false
         return try await SCScreenshotManager.captureImage(contentFilter: .init(display: display, excludingWindows: windows), configuration: config)
     }
 

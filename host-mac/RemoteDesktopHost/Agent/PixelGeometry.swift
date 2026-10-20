@@ -232,14 +232,24 @@ enum PixelGeometry {
         return (cropped, actualBounds)
     }
 
+    static func boundedPixelSize(width: Int, height: Int, maximumWidth: Int) -> (width: Int, height: Int)? {
+        guard width > 0, height > 0, maximumWidth > 0 else { return nil }
+        let scale = min(Double(min(maximumWidth, ComputerUseModelImagePolicy.maximumPixelDimension)) / Double(width),
+            Double(ComputerUseModelImagePolicy.maximumPixelDimension) / Double(height),
+            sqrt(Double(ComputerUseModelImagePolicy.maximumPixelCount) / (Double(width) * Double(height))))
+        var w = min(ComputerUseModelImagePolicy.maximumPixelDimension, max(1, Int((Double(width) * scale).rounded())))
+        var h = min(ComputerUseModelImagePolicy.maximumPixelDimension, max(1, Int((Double(height) * scale).rounded())))
+        while w * h > ComputerUseModelImagePolicy.maximumPixelCount { if h >= w { h -= 1 } else { w -= 1 } }
+        return (w, h)
+    }
+
     static func resize(_ image: CGImage, width: Int) -> CGImage? {
-        guard width > 0, image.width > 0, image.height > 0,
-              let context = CGContext(data: nil, width: width,
-                height: max(1, Int((Double(image.height) * Double(width) / Double(image.width)).rounded())),
+        guard let size = boundedPixelSize(width: image.width, height: image.height, maximumWidth: width),
+              let context = CGContext(data: nil, width: size.width, height: size.height,
                 bitsPerComponent: 8, bytesPerRow: 0, space: CGColorSpaceCreateDeviceRGB(),
                 bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
         context.interpolationQuality = .high
-        context.draw(image, in: CGRect(x: 0, y: 0, width: context.width, height: context.height))
+        context.draw(image, in: CGRect(x: 0, y: 0, width: size.width, height: size.height))
         return context.makeImage()
     }
 

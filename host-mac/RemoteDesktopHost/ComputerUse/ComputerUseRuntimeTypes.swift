@@ -92,6 +92,8 @@ struct ComputerUseScreenObservation: Sendable {
 /// Common transport bounds for the supported local vision models.
 enum ComputerUseModelImagePolicy {
     static let maximumPNGBytes = 2 * 1_024 * 1_024
+    static let maximumPixelDimension = 4_096
+    static let maximumPixelCount = 4_194_304
     static func validatePNG(_ data: Data) throws {
         guard data.count <= maximumPNGBytes,
               data.starts(with: [137, 80, 78, 71, 13, 10, 26, 10]),
@@ -100,7 +102,8 @@ enum ComputerUseModelImagePolicy {
               let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, [kCGImageSourceShouldCache: false] as CFDictionary) as? [CFString: Any],
               let width = (properties[kCGImagePropertyPixelWidth] as? NSNumber)?.intValue,
               let height = (properties[kCGImagePropertyPixelHeight] as? NSNumber)?.intValue,
-              (1...4096).contains(width), (1...4096).contains(height), width * height <= 4_194_304 else {
+              (1...maximumPixelDimension).contains(width), (1...maximumPixelDimension).contains(height),
+              width * height <= maximumPixelCount else {
             throw OSAtlasLlamaRuntimeError.invalidVisionInput
         }
     }
