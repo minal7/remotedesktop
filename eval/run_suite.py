@@ -1284,8 +1284,8 @@ def run(args: argparse.Namespace) -> int:
                             task.value["surface"] == "web" for _, _, task in unfinished) else None
                         suite_apps = _suite_apps([task for _, _, task in unfinished], browser)
                         if "TextEdit" in suite_apps:
-                            from native_start import reset_empty_textedit
-                            reset_before = reset_empty_textedit()
+                            from native_start import dismiss_empty_textedit_open_panel, reset_empty_textedit
+                            reset_before = reset_empty_textedit(quit_if_empty=False)
                             print(f"TextEdit reset before suite clean start: {reset_before.as_dict()}", file=sys.stderr)
                             if reset_before.status == "has_documents":
                                 raise EvalError(
@@ -1294,9 +1294,13 @@ def run(args: argparse.Namespace) -> int:
                                     f"{reset_before.document_count if reset_before.document_count is not None else 'unknown'}); "
                                     "owner action required"
                                 )
+                            if reset_before.status == "empty":
+                                panel_status = dismiss_empty_textedit_open_panel(reset_before.pid)
+                                if panel_status == "has_documents":
+                                    raise EvalError("TextEdit acquired an unowned document before suite clean start")
                         _close_suite_app_windows(suite_apps, driver)
                         if "TextEdit" in suite_apps:
-                            reset_after = reset_empty_textedit()
+                            reset_after = reset_empty_textedit(quit_if_empty=False)
                             print(f"TextEdit reset after suite clean start: {reset_after.as_dict()}", file=sys.stderr)
                             if reset_after.status == "has_documents":
                                 raise EvalError(
@@ -1467,8 +1471,8 @@ def _run_one_task(task: Task, run_number: int, args: argparse.Namespace, driver:
             if suite_apps is not None:
                 try:
                     if "TextEdit" in suite_apps:
-                        from native_start import reset_empty_textedit
-                        textedit_reset_before = reset_empty_textedit()
+                        from native_start import dismiss_empty_textedit_open_panel, reset_empty_textedit
+                        textedit_reset_before = reset_empty_textedit(quit_if_empty=False)
                         if textedit_reset_before.status == "has_documents":
                             raise EvalError(
                                 "TextEdit has unowned documents before task clean start "
@@ -1476,11 +1480,15 @@ def _run_one_task(task: Task, run_number: int, args: argparse.Namespace, driver:
                                 f"{textedit_reset_before.document_count if textedit_reset_before.document_count is not None else 'unknown'}); "
                                 "owner action required"
                             )
+                        if textedit_reset_before.status == "empty":
+                            panel_status = dismiss_empty_textedit_open_panel(textedit_reset_before.pid)
+                            if panel_status == "has_documents":
+                                raise EvalError("TextEdit acquired an unowned document before task clean start")
                     else:
                         textedit_reset_before = None
                     _close_suite_app_windows(suite_apps, driver)
                     if "TextEdit" in suite_apps:
-                        textedit_reset = reset_empty_textedit()
+                        textedit_reset = reset_empty_textedit(quit_if_empty=False)
                         if textedit_reset.status == "has_documents":
                             raise EvalError(
                                 "TextEdit reset found unowned documents "
@@ -1507,16 +1515,22 @@ def _run_one_task(task: Task, run_number: int, args: argparse.Namespace, driver:
                 if setup.get("new_untitled") is True:
                     if textedit_reset is None:
                         raise EvalError("TextEdit untitled setup requires a verified native reset")
-                    from native_start import launch_fresh_textedit
-                    fresh_pid = launch_fresh_textedit(textedit_reset)
-                    # Launch Services can still restore a saved document after -F.
-                    # Dismiss only the standard empty Open panel; restored documents
-                    # are refused below before the signed clean-start or document setup.
+                    launched_fresh = textedit_reset.status == "not_running"
+                    if launched_fresh:
+                        from native_start import launch_fresh_textedit
+                        fresh_pid = launch_fresh_textedit(textedit_reset)
+                    elif textedit_reset.status == "empty" and textedit_reset.pid is not None:
+                        fresh_pid = textedit_reset.pid
+                    else:
+                        raise EvalError("TextEdit setup has no verified empty process")
+                    # Reuse a running zero-document process to avoid reopening its autosaved
+                    # untitled document. Launch Services restoration remains fail-closed.
                     from native_start import dismiss_empty_textedit_open_panel
                     panel_status = dismiss_empty_textedit_open_panel(fresh_pid)
                     if panel_status == "has_documents":
-                        raise EvalError("TextEdit has unowned documents after fresh launch; owner action required")
-                    _close_suite_app_windows(suite_apps, driver)
+                        raise EvalError("TextEdit has unowned documents before document setup; owner action required")
+                    if launched_fresh:
+                        _close_suite_app_windows(suite_apps, driver)
                     textedit_creation_started = True
                     lease = prepare_textedit_untitled(fresh_pid)
                     if checkpoint is not None:

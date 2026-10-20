@@ -126,7 +126,8 @@ end tell
 
 
 def reset_empty_textedit(runner: Any = subprocess.run, *, monotonic: Any = time.monotonic,
-                         sleep: Any = time.sleep, pid_probe: Any = os.kill) -> TextEditReset:
+                         sleep: Any = time.sleep, pid_probe: Any = os.kill,
+                         quit_if_empty: bool = True) -> TextEditReset:
     process_probe = '''tell application "System Events"
     set matchingProcesses to every process whose bundle identifier is "com.apple.TextEdit"
     if (count of matchingProcesses) is 0 then return "not_running"
@@ -171,6 +172,8 @@ end tell
         raise RuntimeError("TextEdit process changed during document probe")
     if documents:
         return TextEditReset("has_documents", pid, documents)
+    if not quit_if_empty:
+        return TextEditReset("empty", pid, 0)
     quit_source = f'''tell application id "com.apple.TextEdit"
     if (count of documents) is 0 then
         tell application "System Events"

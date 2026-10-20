@@ -894,7 +894,7 @@ class TaskAndCheckerTests(unittest.TestCase):
             rows = json.loads((Path(directory) / "results.json").read_text())
             self.assertEqual(len(rows), len(run_suite.smoke_tasks()))
             self.assertTrue(all(row["status"] == "INFRA-BLOCKED" for row in rows))
-            reset_textedit.assert_called_once_with()
+            reset_textedit.assert_called_once_with(quit_if_empty=False)
             close_suite_windows.assert_not_called()
 
     def test_missing_first_observation_is_infra_but_recorded_model_failure_is_fail(self) -> None:

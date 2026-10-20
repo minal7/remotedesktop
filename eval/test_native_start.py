@@ -57,6 +57,19 @@ class NativeStartTests(unittest.TestCase):
         self.assertEqual(result, native_start.TextEditReset("quit", 48125, 0))
         self.assertIn("quit", calls[3])
 
+    def test_zero_document_reset_can_retain_process_for_next_untitled_task(self):
+        calls = []
+
+        def runner(argv, **kwargs):
+            calls.append(kwargs.get("input", ""))
+            value = ["48125", "0", "48125"][len(calls) - 1]
+            return subprocess.CompletedProcess(argv, 0, value, "")
+
+        result = native_start.reset_empty_textedit(runner=runner, quit_if_empty=False)
+        self.assertEqual(result, native_start.TextEditReset("empty", 48125, 0))
+        self.assertEqual(len(calls), 3)
+        self.assertTrue(all("quit" not in source for source in calls))
+
     def test_reset_times_out_if_old_pid_does_not_exit(self):
         calls = []
 

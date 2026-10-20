@@ -28,8 +28,8 @@ class CleanStartTests(unittest.TestCase):
                     clean_count += 1
                     events.append("clean-start" if clean_count == 1 else "clean-start-after-launch")
 
-                reset_results = iter([TextEditReset("quit", 123, 0),
-                                      TextEditReset("not_running", None, 0)])
+                reset_results = iter([TextEditReset("empty", 123, 0),
+                                      TextEditReset("empty", 123, 0)])
 
                 def reset(*_args, **_kwargs):
                     result = next(reset_results)
@@ -43,7 +43,7 @@ class CleanStartTests(unittest.TestCase):
 
                 def prepare(pid, **_kwargs):
                     events.append("create-document")
-                    self.assertEqual(pid, 124)
+                    self.assertEqual(pid, 123)
                     return NativeDocumentLease(pid, 77)
 
                 def drive(*_args, **_kwargs):
@@ -54,7 +54,7 @@ class CleanStartTests(unittest.TestCase):
                      patch("native_start.reset_empty_textedit", side_effect=reset), \
                      patch("native_start.launch_fresh_textedit", side_effect=launch), \
                      patch("native_start.dismiss_empty_textedit_open_panel",
-                           side_effect=lambda pid: events.append(f"dismiss-open-panel-{pid}")), \
+                           side_effect=lambda pid: (events.append(f"dismiss-open-panel-{pid}") or "dismissed")), \
                      patch("native_start.prepare_textedit_untitled", side_effect=prepare), \
                      patch("native_start.close_textedit_untitled", side_effect=lambda *_: events.append("close-lease")), \
                      patch.object(run_suite, "_run_driver", side_effect=drive), \
@@ -68,9 +68,9 @@ class CleanStartTests(unittest.TestCase):
                 else:
                     run_suite.os.environ["HOME"] = previous_home
         self.assertEqual(result, "PASS")
-        self.assertEqual(events, ["reset-quit", "clean-start", "reset-not_running", "fresh-launch",
-                                  "dismiss-open-panel-124",
-                                  "clean-start-after-launch", "create-document", "driver", "close-lease"])
+        self.assertEqual(events, ["reset-empty", "dismiss-open-panel-123", "clean-start",
+                                  "reset-empty", "dismiss-open-panel-123", "create-document",
+                                  "driver", "close-lease"])
 
     def test_unowned_textedit_document_blocks_before_fresh_launch(self) -> None:
         from native_start import TextEditReset
@@ -102,7 +102,7 @@ class CleanStartTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory, \
              patch.dict(run_suite.os.environ, {"HOME": directory}), \
              patch.object(run_suite, "_close_suite_app_windows") as clean_start, \
-             patch("native_start.reset_empty_textedit", side_effect=lambda: next(reset_results)), \
+             patch("native_start.reset_empty_textedit", side_effect=lambda **_kwargs: next(reset_results)), \
              patch("native_start.launch_fresh_textedit", return_value=48125), \
              patch("native_start.dismiss_empty_textedit_open_panel", return_value="has_documents"), \
              patch("native_start.prepare_textedit_untitled") as prepare, \
