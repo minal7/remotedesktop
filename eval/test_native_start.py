@@ -12,23 +12,40 @@ class NativeStartTests(unittest.TestCase):
         calls = []
 
         def runner(argv, **kwargs):
-            calls.append(kwargs.get("input", ""))
-            value = "not_running" if len(calls) == 1 else "48125:1"
+            source = kwargs.get("input", "")
+            calls.append(source)
+            if len(calls) == 1:
+                value = "not_running"
+            else:
+                value = ["48125", "1", "48125"][len(calls) - 2]
             return subprocess.CompletedProcess(argv, 0, value, "")
 
         self.assertEqual(native_start.reset_empty_textedit(runner=runner),
                          native_start.TextEditReset("not_running", None, 0))
         result = native_start.reset_empty_textedit(runner=runner)
         self.assertEqual(result, native_start.TextEditReset("has_documents", 48125, 1))
-        self.assertEqual(len(calls), 2)
+        self.assertEqual(len(calls), 4)
         self.assertNotIn("quit", calls[-1])
+
+    def test_not_running_reset_executes_only_system_events_probe(self):
+        calls = []
+
+        def runner(argv, **kwargs):
+            calls.append(kwargs["input"])
+            return subprocess.CompletedProcess(argv, 0, "not_running", "")
+
+        result = native_start.reset_empty_textedit(runner=runner)
+        self.assertEqual(result, native_start.TextEditReset("not_running", None, 0))
+        self.assertEqual(len(calls), 1)
+        self.assertIn('tell application "System Events"', calls[0])
+        self.assertNotIn('tell application id "com.apple.TextEdit"', calls[0])
 
     def test_zero_document_reset_quits_and_waits_for_exact_pid_exit(self):
         calls = []
 
         def runner(argv, **kwargs):
             calls.append(kwargs.get("input", ""))
-            value = "48125:0" if len(calls) == 1 else "quit"
+            value = ["48125", "0", "48125", "quit"][len(calls) - 1]
             return subprocess.CompletedProcess(argv, 0, value, "")
 
         result = native_start.reset_empty_textedit(
@@ -38,14 +55,14 @@ class NativeStartTests(unittest.TestCase):
             if (pid, signal) == (48125, 0) else None,
         )
         self.assertEqual(result, native_start.TextEditReset("quit", 48125, 0))
-        self.assertIn("quit", calls[1])
+        self.assertIn("quit", calls[3])
 
     def test_reset_times_out_if_old_pid_does_not_exit(self):
         calls = []
 
         def runner(argv, **kwargs):
             calls.append(kwargs.get("input", ""))
-            value = "48125:0" if len(calls) == 1 else "quit"
+            value = ["48125", "0", "48125", "quit"][len(calls) - 1]
             return subprocess.CompletedProcess(argv, 0, value, "")
 
         ticks = iter([0.0, 0.0, 4.0])
@@ -59,7 +76,7 @@ class NativeStartTests(unittest.TestCase):
 
         def runner(argv, **kwargs):
             calls.append(kwargs.get("input", ""))
-            value = "48125:0" if len(calls) == 1 else "has_documents"
+            value = ["48125", "0", "48125", "has_documents"][len(calls) - 1]
             return subprocess.CompletedProcess(argv, 0, value, "")
 
         result = native_start.reset_empty_textedit(runner=runner)
@@ -71,14 +88,15 @@ class NativeStartTests(unittest.TestCase):
         def runner(argv, **kwargs):
             source = kwargs.get("input", "")
             sources.append(source)
-            if len(sources) == 1:
-                return subprocess.CompletedProcess(argv, 0, "48125:0", "")
+            if len(sources) < 4:
+                value = ["48125", "0", "48125"][len(sources) - 1]
+                return subprocess.CompletedProcess(argv, 0, value, "")
             return subprocess.CompletedProcess(argv, 1, "", "process changed")
 
         with self.assertRaisesRegex(RuntimeError, "process changed"):
             native_start.reset_empty_textedit(runner=runner)
-        self.assertIn("if currentPID is not 48125", sources[1])
-        self.assertLess(sources[1].index("if currentPID is not 48125"), sources[1].index("        quit\n"))
+        self.assertIn("if currentPID is not 48125", sources[3])
+        self.assertLess(sources[3].index("if currentPID is not 48125"), sources[3].index("        quit\n"))
 
     def test_fresh_launch_uses_exact_bundle_and_no_document_argument(self):
         calls = []

@@ -124,29 +124,48 @@ end tell
 
 def reset_empty_textedit(runner: Any = subprocess.run, *, monotonic: Any = time.monotonic,
                          sleep: Any = time.sleep, pid_probe: Any = os.kill) -> TextEditReset:
-    source = '''tell application "System Events"
+    process_probe = '''tell application "System Events"
     set matchingProcesses to every process whose bundle identifier is "com.apple.TextEdit"
     if (count of matchingProcesses) is 0 then return "not_running"
-    set appPID to unix id of first item of matchingProcesses
+    if (count of matchingProcesses) is not 1 then error "TextEdit process identity is ambiguous"
+    return (unix id of first item of matchingProcesses) as text
 end tell
-tell application id "com.apple.TextEdit"
-    set documentCount to count of documents
-end tell
-return (appPID as text) & ":" & (documentCount as text)
 '''
-    output = _osascript(source, runner=runner)
+    output = _osascript(process_probe, runner=runner)
     if output == "not_running":
         return TextEditReset("not_running", None, 0)
     try:
-        pid_text, documents_text = output.split(":", 1)
-        pid = int(pid_text)
-        documents = int(documents_text)
+        pid = int(output)
     except ValueError as error:
         raise RuntimeError("TextEdit reset returned an invalid process identity") from error
     if pid <= 0:
         raise RuntimeError("TextEdit reset returned an invalid process identity")
+
+    document_probe = '''tell application id "com.apple.TextEdit"
+    set documentCount to count of documents
+end tell
+'''
+    try:
+        documents = int(_osascript(document_probe, runner=runner))
+    except ValueError as error:
+        raise RuntimeError("TextEdit reset returned an invalid document count") from error
     if documents < 0:
         raise RuntimeError("TextEdit reset returned an invalid document count")
+
+    # The app-targeted query can race with termination/relaunch. Require the same
+    # unique process before acting on the document count it returned.
+    verify_probe = '''tell application "System Events"
+    set matchingProcesses to every process whose bundle identifier is "com.apple.TextEdit"
+    if (count of matchingProcesses) is not 1 then error "TextEdit process changed during document probe"
+    return (unix id of first item of matchingProcesses) as text
+end tell
+'''
+    try:
+        verified_pid = int(_osascript(verify_probe, runner=runner))
+    except ValueError as error:
+        raise RuntimeError("TextEdit reset returned an invalid verified process identity") from error
+    if verified_pid != pid:
+        raise RuntimeError("TextEdit process changed during document probe")
     if documents:
         return TextEditReset("has_documents", pid, documents)
     quit_source = f'''tell application id "com.apple.TextEdit"
