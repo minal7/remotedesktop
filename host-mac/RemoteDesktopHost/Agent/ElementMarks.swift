@@ -571,8 +571,9 @@ enum ElementMarks {
         rect(element, deadline: ContinuousClock.now + .milliseconds(10))
     }
 
-    static func focusedElement(_ app: AXUIElement) -> AXUIElement? {
-        ax(read(app, kAXFocusedUIElementAttribute, deadline: ContinuousClock.now + .milliseconds(10)))
+    static func focusedElement(_ app: AXUIElement, timeout: Duration = .milliseconds(10)) -> AXUIElement? {
+        ax(read(app, kAXFocusedUIElementAttribute, deadline: ContinuousClock.now + timeout,
+            maximumMessagingTimeout: Float(min(0.1, Double(timeout.components.seconds) + Double(timeout.components.attoseconds) / 1e18))))
     }
 
     static func string(_ element: AXUIElement, _ attribute: String) -> String? {
@@ -604,10 +605,10 @@ enum ElementMarks {
         rect(element, deadline: ContinuousClock.now + .milliseconds(10))
     }
 
-    static func read(_ element: AXUIElement, _ attribute: String, deadline: ContinuousClock.Instant) -> CFTypeRef? {
+    static func read(_ element: AXUIElement, _ attribute: String, deadline: ContinuousClock.Instant, maximumMessagingTimeout: Float = 0.01) -> CFTypeRef? {
         let remaining = deadline - ContinuousClock.now
         guard remaining > .zero else { return nil }
-        let seconds = min(0.01, max(0.001, Double(remaining.components.seconds) + Double(remaining.components.attoseconds) / 1e18))
+        let seconds = Float(min(Double(maximumMessagingTimeout), max(0.001, Double(remaining.components.seconds) + Double(remaining.components.attoseconds) / 1e18)))
         AXUIElementSetMessagingTimeout(element, Float(seconds))
         var value: CFTypeRef?
         guard AXUIElementCopyAttributeValue(element, attribute as CFString, &value) == .success else { return nil }

@@ -162,7 +162,7 @@ enum PixelFocusedRecipient {
     static func current(expectedPID: pid_t?) throws -> AXUIElement {
         let system = AXUIElementCreateSystemWide()
         return try authorize(expectedPID: expectedPID, isAXTrusted: AXIsProcessTrusted(),
-            focused: { ElementMarks.focusedElement(system) }, processID: { element in
+            focused: { ElementMarks.focusedElement(system, timeout: .milliseconds(100)) }, processID: { element in
                 var processID: pid_t = 0
                 return AXUIElementGetPid(element, &processID) == .success ? processID : nil
             }, attribute: { ElementMarks.read($0, $1, deadline: .now + .milliseconds(10)) })
