@@ -2,7 +2,7 @@
 %“Œ‹ž ReportLab Generated PDF document (opensource)
 1 0 obj
 <<
-/F1 2 0 R /F2 3 0 R
+/F1 2 0 R /F2 3 0 R /F3 13 0 R
 >>
 endobj
 2 0 obj
@@ -19,132 +19,137 @@ endobj
 <<
 /A <<
 /S /URI /Type /Action /URI (file:///Users/michael/Documents/ChatGPT/remote-desktop-repair/build/eval/report-prep/s5-final-summary.md)
->> /Border [ 0 0 0 ] /Rect [ 54 586 96.24 596 ] /Subtype /Link /Type /Annot
+>> /Border [ 0 0 0 ] /Rect [ 696.16 461.2 741.056 470.6 ] /Subtype /Link /Type /Annot
 >>
 endobj
 5 0 obj
 <<
 /A <<
 /S /URI /Type /Action /URI (file:///Users/michael/Documents/ChatGPT/remote-desktop-repair/build/eval/report-prep/s5-final-summary.md)
->> /Border [ 0 0 0 ] /Rect [ 54 562 96.24 572 ] /Subtype /Link /Type /Annot
+>> /Border [ 0 0 0 ] /Rect [ 696.16 425 741.056 434.4 ] /Subtype /Link /Type /Annot
 >>
 endobj
 6 0 obj
 <<
 /A <<
-/S /URI /Type /Action /URI (file:///Users/michael/Documents/ChatGPT/remote-desktop-repair/build/eval/report-prep/s6-final-summary.md)
->> /Border [ 0 0 0 ] /Rect [ 54 538 89.568 548 ] /Subtype /Link /Type /Annot
+/S /URI /Type /Action /URI (file:///Users/michael/Documents/ChatGPT/remote-desktop-repair/build/eval/report-prep/s5-final-summary.json)
+>> /Border [ 0 0 0 ] /Rect [ 696.16 388.8 740.184 398.2 ] /Subtype /Link /Type /Annot
 >>
 endobj
 7 0 obj
 <<
 /A <<
-/S /URI /Type /Action /URI (file:///Users/michael/Documents/ChatGPT/remote-desktop-repair/build/eval/report-prep/s6-safety-final-summary.json)
->> /Border [ 0 0 0 ] /Rect [ 54 514 87.352 524 ] /Subtype /Link /Type /Annot
+/S /URI /Type /Action /URI (file:///Users/michael/Documents/ChatGPT/remote-desktop-repair/build/eval/report-prep/s6-final-summary.json)
+>> /Border [ 0 0 0 ] /Rect [ 696.16 362 731.728 371.4 ] /Subtype /Link /Type /Annot
 >>
 endobj
 8 0 obj
 <<
 /A <<
-/S /URI /Type /Action /URI (file:///Users/michael/Documents/ChatGPT/remote-desktop-repair/build/eval/report-prep/s6-final-summary.md)
->> /Border [ 0 0 0 ] /Rect [ 249.64 480.4 308.328 490 ] /Subtype /Link /Type /Annot
+/S /URI /Type /Action /URI (file:///Users/michael/Documents/ChatGPT/remote-desktop-repair/build/eval/report-prep/s6-safety-final-summary.json)
+>> /Border [ 0 0 0 ] /Rect [ 696.16 325.8 730.4 335.2 ] /Subtype /Link /Type /Annot
 >>
 endobj
 9 0 obj
 <<
 /A <<
-/S /URI /Type /Action /URI (file:///Users/michael/Documents/ChatGPT/remote-desktop-repair/build/eval/report-prep/s5-final-summary.md)
->> /Border [ 0 0 0 ] /Rect [ 312.776 480.4 379.464 490 ] /Subtype /Link /Type /Annot
+/S /URI /Type /Action /URI (file:///Users/michael/Documents/ChatGPT/remote-desktop-repair/build/eval/reports/s2-native-baseline-20261017T004500Z/results.json)
+>> /Border [ 0 0 0 ] /Rect [ 696.16 299 737.96 308.4 ] /Subtype /Link /Type /Annot
 >>
 endobj
 10 0 obj
 <<
 /A <<
-/S /URI /Type /Action /URI (file:///Users/michael/Documents/ChatGPT/remote-desktop-repair/build/eval/report-prep/s6-safety-final-summary.json)
->> /Border [ 0 0 0 ] /Rect [ 439.191 440.2 515.232 451 ] /Subtype /Link /Type /Annot
+/S /URI /Type /Action /URI (file:///Users/michael/Documents/ChatGPT/remote-desktop-repair/build/eval/report-prep/s6-final-summary.md)
+>> /Border [ 0 0 0 ] /Rect [ 139.296 246.58 230.534 255.7 ] /Subtype /Link /Type /Annot
 >>
 endobj
 11 0 obj
 <<
 /A <<
-/S /URI /Type /Action /URI (file:///Users/michael/Documents/ChatGPT/remote-desktop-repair/build/eval/report-prep/s5-final-summary.md)
->> /Border [ 0 0 0 ] /Rect [ 520.236 440.2 531.243 451 ] /Subtype /Link /Type /Annot
+/S /URI /Type /Action /URI (file:///Users/michael/Documents/ChatGPT/remote-desktop-repair/build/eval/report-prep/s6-completed-call-tag-metrics.json)
+>> /Border [ 0 0 0 ] /Rect [ 236.7356 246.58 320.784 255.7 ] /Subtype /Link /Type /Annot
 >>
 endobj
 12 0 obj
 <<
 /A <<
-/S /URI /Type /Action /URI (file:///Users/michael/Documents/ChatGPT/remote-desktop-repair/build/eval/report-prep/s5-final-summary.md)
->> /Border [ 0 0 0 ] /Rect [ 54 428.2 115.515 439 ] /Subtype /Link /Type /Annot
+/S /URI /Type /Action /URI (file:///Users/michael/Documents/ChatGPT/remote-desktop-repair/build/eval/report-prep/s6-safety-final-summary.json)
+>> /Border [ 0 0 0 ] /Rect [ 326.9856 246.58 383.5904 255.7 ] /Subtype /Link /Type /Annot
 >>
 endobj
 13 0 obj
 <<
-/A <<
-/S /URI /Type /Action /URI (file:///Users/michael/Documents/ChatGPT/remote-desktop-repair/build/eval/report-prep/s6-final-summary.md)
->> /Border [ 0 0 0 ] /Rect [ 188.559 365.2 254.583 376 ] /Subtype /Link /Type /Annot
+/BaseFont /Courier /Encoding /WinAnsiEncoding /Name /F3 /Subtype /Type1 /Type /Font
 >>
 endobj
 14 0 obj
 <<
 /A <<
-/S /URI /Type /Action /URI (file:///Users/michael/Documents/ChatGPT/remote-desktop-repair/build/eval/reports/s6-fara-smoke-20261020T045140Z/smoke-1/results.json)
->> /Border [ 0 0 0 ] /Rect [ 533.205 346.2 551.205 357 ] /Subtype /Link /Type /Annot
+/S /URI /Type /Action /URI (file:///Users/michael/Documents/ChatGPT/remote-desktop-repair/build/eval/report-prep/mac-release-20261020T053706Z/notarized-package.json)
+>> /Border [ 0 0 0 ] /Rect [ 409.9632 205.36 467.847 215.2 ] /Subtype /Link /Type /Annot
 >>
 endobj
 15 0 obj
 <<
 /A <<
-/S /URI /Type /Action /URI (file:///Users/michael/Documents/ChatGPT/remote-desktop-repair/build/eval/reports/s6-fara-smoke-20261020T045140Z/smoke-1/results.json)
->> /Border [ 0 0 0 ] /Rect [ 54 334.2 97.011 345 ] /Subtype /Link /Type /Annot
+/S /URI /Type /Action /URI (file:///Users/michael/Documents/ChatGPT/remote-desktop-repair/build/eval/report-prep/mac-release-20261020T053706Z/archive-export-macho-equivalence.json)
+>> /Border [ 0 0 0 ] /Rect [ 470.1266 205.36 569.486 215.2 ] /Subtype /Link /Type /Annot
 >>
 endobj
 16 0 obj
 <<
 /A <<
-/S /URI /Type /Action /URI (file:///Users/michael/Documents/ChatGPT/remote-desktop-repair/build/eval/patch-prep/demo-runner/rehearsal_scope.json)
->> /Border [ 0 0 0 ] /Rect [ 54 271.2 104.517 282 ] /Subtype /Link /Type /Annot
+/S /URI /Type /Action /URI (file:///Users/michael/Documents/ChatGPT/remote-desktop-repair/build/eval/report-prep/d1-demo-checkers-20261019T192957-0700.log)
+>> /Border [ 0 0 0 ] /Rect [ 174.534 149.28 218.462 158.4 ] /Subtype /Link /Type /Annot
 >>
 endobj
 17 0 obj
 <<
 /A <<
-/S /URI /Type /Action /URI (file:///Users/michael/Documents/ChatGPT/remote-desktop-repair/build/eval/report-prep/mac-release-20261020T020341Z/notarized-package.json)
->> /Border [ 0 0 0 ] /Rect [ 109.521 271.2 207.567 282 ] /Subtype /Link /Type /Annot
+/S /URI /Type /Action /URI (file:///Users/michael/Documents/ChatGPT/remote-desktop-repair/build/eval/report-prep/ios-release-1.2.1/physical-iphone-install-20261020.json)
+>> /Border [ 0 0 0 ] /Rect [ 220.5748 149.28 276.7616 158.4 ] /Subtype /Link /Type /Annot
 >>
 endobj
 18 0 obj
 <<
 /A <<
-/S /URI /Type /Action /URI (file:///Users/michael/Documents/ChatGPT/remote-desktop-repair/docs/privacy.html)
->> /Border [ 0 0 0 ] /Rect [ 54 228.2 83.502 239 ] /Subtype /Link /Type /Annot
+/S /URI /Type /Action /URI (file:///Users/michael/Documents/ChatGPT/remote-desktop-repair/build/eval/report-prep/ios-release-1.2.1/physical-iphone-version-20261020.json)
+>> /Border [ 0 0 0 ] /Rect [ 278.8744 149.28 325.3332 158.4 ] /Subtype /Link /Type /Annot
 >>
 endobj
 19 0 obj
 <<
 /A <<
-/S /URI /Type /Action /URI (file:///Users/michael/Documents/ChatGPT/remote-desktop-repair/README.md)
->> /Border [ 0 0 0 ] /Rect [ 88.506 228.2 157.527 239 ] /Subtype /Link /Type /Annot
+/S /URI /Type /Action /URI (file:///Users/michael/Documents/ChatGPT/remote-desktop-repair/host-mac/RemoteDesktopHost/ComputerUse/ComputerUseArtifactManifest.swift)
+>> /Border [ 0 0 0 ] /Rect [ 439.746 149.28 491.274 158.4 ] /Subtype /Link /Type /Annot
 >>
 endobj
 20 0 obj
 <<
 /A <<
-/S /URI /Type /Action /URI (file:///Users/michael/Documents/ChatGPT/remote-desktop-repair/build/eval/report-prep/s6-final-summary.md)
->> /Border [ 0 0 0 ] /Rect [ 381.728 191.4 440.416 201 ] /Subtype /Link /Type /Annot
+/S /URI /Type /Action /URI (file:///Users/michael/Documents/ChatGPT/remote-desktop-repair/README.md)
+>> /Border [ 0 0 0 ] /Rect [ 493.3868 149.28 550.8276 158.4 ] /Subtype /Link /Type /Annot
 >>
 endobj
 21 0 obj
 <<
 /A <<
-/S /URI /Type /Action /URI (file:///Users/michael/Documents/ChatGPT/remote-desktop-repair/build/eval/report-prep/s6-safety-final-summary.json)
->> /Border [ 0 0 0 ] /Rect [ 444.864 191.4 512.456 201 ] /Subtype /Link /Type /Annot
+/S /URI /Type /Action /URI (file:///Users/michael/Documents/ChatGPT/remote-desktop-repair/docs/computer-use-review/investor-metrics.md)
+>> /Border [ 0 0 0 ] /Rect [ 552.9404 149.28 653.9064 158.4 ] /Subtype /Link /Type /Annot
 >>
 endobj
 22 0 obj
 <<
-/Annots [ 4 0 R 5 0 R 6 0 R 7 0 R 8 0 R 9 0 R 10 0 R 11 0 R 12 0 R 13 0 R 
-  14 0 R 15 0 R 16 0 R 17 0 R 18 0 R 19 0 R 20 0 R 21 0 R ] /Contents 26 0 R /MediaBox [ 0 0 612 792 ] /Parent 25 0 R /Resources <<
+/A <<
+/S /URI /Type /Action /URI (file:///Users/michael/Documents/ChatGPT/remote-desktop-repair/RELEASE_NOTES.md)
+>> /Border [ 0 0 0 ] /Rect [ 592.9363 117.26 660.3517 125.3 ] /Subtype /Link /Type /Annot
+>>
+endobj
+23 0 obj
+<<
+/Annots [ 4 0 R 5 0 R 6 0 R 7 0 R 8 0 R 9 0 R 10 0 R 11 0 R 12 0 R 14 0 R 
+  15 0 R 16 0 R 17 0 R 18 0 R 19 0 R 20 0 R 21 0 R 22 0 R ] /Contents 27 0 R /MediaBox [ 0 0 792 612 ] /Parent 26 0 R /Resources <<
 /Font 1 0 R /ProcSet [ /PDF /Text /ImageB /ImageC /ImageI ]
 >> /Rotate 0 
   /Trans <<
@@ -152,68 +157,69 @@ endobj
 >> /Type /Page
 >>
 endobj
-23 0 obj
-<<
-/PageMode /UseNone /Pages 25 0 R /Type /Catalog
->>
-endobj
 24 0 obj
 <<
-/Author (\(anonymous\)) /CreationDate (D:20261019223542-07'00') /Creator (\(unspecified\)) /Keywords () /ModDate (D:20261019223542-07'00') /Producer (ReportLab PDF Library - \(opensource\)) 
-  /Subject (\(unspecified\)) /Title (\(anonymous\)) /Trapped /False
+/PageMode /UseNone /Pages 26 0 R /Type /Catalog
 >>
 endobj
 25 0 obj
 <<
-/Count 1 /Kids [ 22 0 R ] /Type /Pages
+/Author (\(anonymous\)) /CreationDate (D:20261019224921-07'00') /Creator (\(unspecified\)) /Keywords () /ModDate (D:20261019224921-07'00') /Producer (ReportLab PDF Library - \(opensource\)) 
+  /Subject (\(unspecified\)) /Title (Computer Use \(Beta\): investor metrics - draft) /Trapped /False
 >>
 endobj
 26 0 obj
 <<
-/Filter [ /ASCII85Decode /FlateDecode ] /Length 2682
+/Count 1 /Kids [ 23 0 R ] /Type /Pages
+>>
+endobj
+27 0 obj
+<<
+/Filter [ /ASCII85Decode /FlateDecode ] /Length 4291
 >>
 stream
-GauHM9lo&K'#"0DoMKV]1r2sB508hTaf`BJ;H<GK$Ud;sa!AJ%5WbRk+288@U*Ws:/B5(h-*g,#U!`i.]$V^0j'Q9pO)oi0$(P95+:_(W5Wm5BaYaJS8+lIM5OLI+/N4*NOFZGH[bpP+ja3-WJ9]T(8Ib([_81CWoR7L3M1T?TT$r?-0nVm@R=bIUn<o,7W/?7b/1js*e#["$fSg+mNgHi/OR[R,ne[\k"dA!#]&d[U?sCQeQ6[uUr]Y'$Gn<"HDA]!KG(>'/YXmuNq-Z3khfHoZ->`0.hV".rNiS_DnZSX1an)gT>sTbS4S17nU(:U3f)-3]Y-2VfMfin.Ci^>(YmQ&r$%Qk.\\>Zq>f5*"1]V"\VqqT'm/G%TL=bq8@!"IMO7DtVbK8SZE!.FI!QT?b\=`+E"!\E]m_TA@?=\Y"p"d\4J[VMm;/Q@trcX0kK#-euc!EaLgK<[h<-Ub@TS?e-)"I:E(;mNr,<^C1$,(8P_:8Z`@5PV<%`Um25*uc!E-jNpS)Ig$H;-1eDlIruW2p+77HXN)6-7'(Mk"Ob#aWpRfeR+VIfW!W,?#A*@l_S2F%1kZR06\=:sNEZMNg.rOAe+pk(OF1K6Y]$-QF<eE06s8UUA(-s2'88*Ei?>DnAQ0E8a6Hpd%,pdJ"m/LR4hfF5osl+bR%FB%N+1[3t\&ON#DNH%3P@;rAU%Da&:SjL2\]2Be!"DeRbt32S!mVHKp*gF21<6+q$/`;k;u3KZi(VltSP15e-cJm+19;[^\Mc0He1G\]aH0o0[8od5X8S`TXnBg^?m*J0%+f#JjtHXaSl+72p*^tCV;>B__DrD)iHflT/bi,uoLV(-oMD5r6+]"h(NU=o'S=?l-T4'&GIa1H=s]:6>i4CP0&1s=Ug,LQnrT$\p1iSo]NS_*srdINMl2Sim5Gu!T!.-Nslj<*lP?V;e]-/WaF"#^a]&Z:nA*AF%jIOjqL5k`MD]9RLZ0`>%`FT<]*l3Da!X\A&4CE['!V\^p9oDR!G=UQI9A]qIk$JunjFhleQZ4;u7hFFm^T^=T%@\mSfTt?(l?#VCQhEs*#8j7f<_1H:$,[7GDR3_*Kl0]]t#=q2TOfSXu43>'9ku`tZO(;O8nJ8]kADnnUN6YNu/St">_<.A][O98E">m*`6f?82DDmk]GrTD_VE>jE[G:_;Z4"-n*SdZuJb<k(`/B]BlcZZLo;l4"f<9R+/p"aDDn4);I='^kg6fFTXtb+1+m9ra(b`-cQ/V*>D\bH2$`^^u((=n>YB)Fj8g^-L"GuW:/>(u`giC@Z]MJo7dC`54R@mH7.TUd7KSLU%E:OE>qD_PQR-OanN%=_n`<&.DbF)"ABjnk98h),S'98.4L*\9#E5@q)A]>FeOuEQP"C>WB(7=?ucg%"Tj&N5B6CI@^4uiQBJ.M6NU189]?ouN>S,Z]/S8_,;go.X20fJ=eFhOd%ds_r]js!)ueF2\%4WC/i2$[fr;I2ol'O9WfQKc+U'.=O4%GZ#AaSfL/5!dr+#!]7dOPq#-GF/=NI^@rB,>$'Vn7T*-^FLY]8JAO^R,IH^BV@+pA)lfR/)Qh]oAWWRC#,KsGY-F*guSTqk)91mgg!-a8!5gScY9*k:8^(Al_Ye)MWH/02gA>b2bbFTdW86+-CO,QY[;BNBd78Bk:6uMOD)9RiJ5Kc@+T>[#P.1t1V^o8VR>u!%@s,4WjIiDqQH'rmZpIMfF>JF"CLe%QNS])#Tc7"CJO+XmOMtYOGt/m&V+L@A0p+7n!okEU+.;E-pRr;J4-*[/<t:8?6uQW*Z%)X4@dIBNYu:4W`\;ohT.PR;P[a'EKrkI@IbqmGU7;].o3K.:DNlM9;JGR$at'[VAYFP@l6W]8SLpAfdXX,'<4V61R_ps3=@2*qX*iN@fqeP8n_C'faPu'.iYMPU7(u7_U_<ofA5>4h%m9N.'bk;W;e7s.a?Yu9dL/:*X_?^VEXJ;L3jCW^%]E;/lRrjfIn"AlMWhpgH5jmRZ7YCP,hKVKn=D4'r>,)E'n-j7F&kB;TFU-2"<>J`pFsc%e;IPPV29Xd3L;#P>+\RUsCmS?!H="::RDK=?i#<Oq&g^G\'JhT6XV+85?uVPgB3iXQ6(Kam+_#Qe1Lce"KrZSMMf?:?jb7M@)"s"O@\hd@<i5[cL[NQ4)d4$Qf3?8Y;9TOddC]Nf*HNQCJ$u`tAu_/j@:k!iRUAmjS#VStc<6OPYtJ=L^XrL9&O#=d9l&a[st&J(MM,O(tZS95?K@q/$g#h\]b4-p%_7Saf%Q_r^S&TpN*n[b)h<5F*Lg<Us-+;F^-FBNT4<f7LFR48Yjr"D*kKfsl3q"=<7fWYLCMC2JZg$\b2&J[ccVii;$[oEe-%JOIB"U!Vfk-Dp!=X<:C+b"A)*`.##VBQ@h'TIdK_@h-MDZoqNO?q#JEGj<_iat:+]?g]d$q3D;J?NlfpUgQeR7CA,/bYorfO?XH%qit*&:`Sp-:U'1CmW_L[b<Z09qqI"Gp1&u2=e<i]'k2b@7%.[6%q13=Ts"i"kS.HWLm(u8SKc;jW_9$gA]j]l`PTmLBd^p&-:aba2RQD>APq32849luZLo95',fq<$tl@)Ajh[_ETBmTArHUK2(UM78atb)#,dJ'CsItP)U:[]Dcp*ronXQ(?s%AJ@JZEkM&rTQ'uO,:mfpQ+5OK6_lGcOG_pSJa/:G)B~>endstream
+Gb!#_=``=e&q9SYQq'._%PbJ%4o(8H]2#G09VlJs0-Dq]&`F',d7WN@n(32E+N4F>q64kX,Var9Sj'mVSnSS0iK$fb#74l^Ao)cFR*aOQJI.O0D"`R2T"Xsc%<i7W(H1<Vj-k^1gs\Ae1YK7,2^pO>Y+&+p/7FPj\7="^R,,Gif<`"V$Td'[fAhT</DF[iTZ'UE9af.LifW(//Q9oo0"8Yc_Ce$#H[e1g',IF0/5e]EKm\pAP5W;f)9OdtXA&T*>\"Su2;Oi0D5(h4pY!TrD"]6GrBu;Db<)TZ_A:^[_QEhdR2F0I%3+cHZ&'FCo!!rn+c0m@m[+dM_A!&UjuWGT)k53A:2<Y/FXB3`JhBRu_R6r:Bbn^$+hRN:-$bJeZ/83rmOpcFb.iH'%U4@IAX*u]O];tsA]NM8rH6*D(1'_IkLFHqeNGVP@aZTiJooK2l1.=B)DTs(]o]Mk_4@3Q/<i`G*rS]sGb"P+b&Wo);>LQ0I,7iB48(P1Z8jfj]M#(=FpkY?T>&b$f"L;$EDdT6\!mh`eV4uh^6gLHP3&M+;W`G%p5ra(FWj+Q7ZSu^508*K#g;f!g975%/YSIlS!@,^?uNml4C]F;1&5)ZFlgqZah5uE*ZWGdSDV(m%n2egC*?_V(PPO5Q=cCh7"8_2Dlk:+5BnA!mP!9oIFiKJGCKRXDp0BH<^g:pSWkaI^FWr@al[`BW;(Y`YUL-7d?Kn<a#'7:o/J39oG'i[04)dL^sEIr[ZGrh's@$5/"7!LBU7!qUd?R9Yob8IjG3@0-oasd.slnT)ZAkl425m+(^U-AFks;lG\'LmW*:D,(kPsQS*8oUKk(]Y@6sb=c4Z]V;s@mO^CF!`<n^^31HeG;7bX`7JHm;Dd'J5Hed";G?<^bVI^4[RrC_LoLm;i;pk@7%q\JTDLUPX,MAr+\THk[A,n8`MRY9?]&?Xs"meX%\GNp7grpb,B=iV8=W2sODgVe2!%oA1RHYI-qr#?@F7>?qsZ6Tfhgj:\7iGNt'q@E&Zlb&J$Zc&^ZA<OPfa0D?(+/^seb9sa:7T]hEfLa(><BfoiA8\4S10O,mMqp3tp;RCqmed;m]s&W+Q3@86-QO/BrtOR:TlG^8VI%1b6Z3R>FY'3RfUTqKP3bb8`',O]2Yj^(\=U>]CehRl<&CH%GB:_UrfD25:PFh]!q_4%l;L4#<jqHlOU#HWR3MRE\]OmaW^ad-9hH>-Ysu7cNseR]$];<+]5/!8kl,DJORU+Y/J(VL7(:0+cUQF3\@6+'Xfn<lU)]A8U(<#!=!2nF8!<6/G(Z[3lEl4/6b$oTL;8I93mV"\,9uf\8g\g`if,Sf4665?d<M+1C:I^dr7^e86[\;?;O*E"a/G.pPIkR%=!\k&-N(BTPJf+\G)I"[RsSssEY(2%]sqKaB1*2Q-Y`qSgotdMUc-J&kF,m#!flm"1Q`OV3`,d7J<'5`Fj*_@ECRKZ@,r1"3$690k]%.KL(+!0idrY8c\;fW?^_790/@4\er6=jmN*>>_q6)*G5M:,mLfn4^]2n%7CF"#K+HO4=9EqaO[(<?fFJ*4Lurga@CQOuM"B"MC_)88\ta;%1N(\%c3POP,=-5$UOZ``EbEWA/>NfXU3c"M7pr?<k#\L$-UZWT9t/m&3h.%EjA_YrFRrV)OPB)^+],[Y%T:=*K\b`#g-1n>`^]#"@k^5C2^,f"_8WR1@C_eJ(fR>>KABnE]mBRBn)*j&1+(=tpR1226(R=FQY3Dn"u_0S#Bgs)jo*rI(j(@q?f`K3N5=D,+m=;Q*@ei8,1-/L&HGsD&?)qtd<>\pToUg9$p*W)Z=eZ0QrM/AC0=U!-.[Dor3W2D^LhSd*Mj:#5FKPpn2.(jnj6*?("M:.+k.EfnKcI:/5Gm+;4qL,6ClQl;)Vs7[bSkDQeRn]q,//[/[`-"3rAF.lc9$Qrj4Q+3Ll9GkcFP@3=ZAuFq&'dar'tP+EN-<2F5@P\4&(r`frSugq7N6$Y>+frU(2,PqDp(DuX>=T/5p5<Vk1=bSnQu=YCDA1fJNS>LYZ&=ck:[X/^l>TnlHr(6]i0%NY1_<)!Q]p/Yt\28INMh;crN)nT=b;3Q+g7@H$'Y0cDLaB&^bY-9I.%>BuhfI3>]6*t@#8=fHMHHs/!arGJJU7X"I)r0+JHDp]*"Jossqj`D).\"L9<4dOe!W\-o@LjR:h9+D/Y3S"'GJ_kcZCF_=giQ"OcM@(&T`Jc)"TGJ=>!9qLG@=9][S3mg_Qg&g<#4b\\!PR_pljO-kY<YQ-oX9rM0(ZM9,U7a2C/&Vrr;R!GFI8gmP]+IY+o-uqa$Sg(0_::[Zg-J[eWL2Ul'qV5[/T6X\J/[lr^-qo'QaPTDbFofNo#eTDbF#%u0SK)c1b0rJ:=#%GAa9!8kE/lMe=9:qp3%>L(j2VR@ds9V6+H?+5*>cf&r_dE-`LW;Sas2%>=GNCM[+CSRIiDP9OhYJX5lZH1U1[/IQSrG>&;K@\]:Q6F^@'Kq^ed]&%7@F.@7"HAi!"JgLS@aHqA?FpNTCN@U'S)A!#<nC&"9F!JRX_)C$WSI\)dH/.R4[F>Heal4rj:n+d-m,0?;@O`:qWt\>qk?)FBUVkOXA8$:VNe,jSaqc@6*+gR<uGY<knd7j`i'\.k*PGNO(&)V8Y%SIErl3J/@(GF4%hFk%>t7p5h@PDTF'!)1pQ9\C9]+Jl&'!^7;[7nA6qcG\2KU.2/,#;W59gBeKPAo`EF6-;)RQrfcs\ocf*E,/BMB.\P+ETLDl%`:`>q8pe$:7X<@+e]fbfLU\!VR]gNqQ2.%A57PbR/Kr+n!6"Zi1T[/=%.;6LL1oL<.+c!m>f=(QJ(*:8L#EuU)Y]YA0KAO7hWST:W^bcOnVh:\O7N6HcOj_s4ZZaFRLY;s>D6Hcgg"k!C-TZ5)eU)A`T*LhDF3^Td0pp]rq!Yt8GH]rL6c4(@C7]JJ`si+KeIli.-AA9+4hlUC>Z0`'/2q*>'Ker$-T?"j-Rj+>>kXUeNH:H/DhKh[#!=\D+RPcAms.s8*-B`R2[Qcd1))j"*!$hD?9:o4Z>-O@%<Ys'h,W?:f2E+o13hMhNu[-C>uP,S!u^3#4+F`Ja*;fa^&D$LVdn8EH12Z\D<EcRqR<p%.[T=i7K'"VC_3<-%C7$Rk?W"nqU+qiomJEIHG^^\.ZP\+G**/-i<kB,++u*%JmZE;]/W98#-)0Y(!)K+fnO57Oj4+r6f/s+5g;AOOPNnK!4:;MAdD=9p.8m)^M21co\f'op/C68/SbKSl5e=cCV%65q[91(YlGF0_b$060BsUQ]OWho^%r^<0^S*R"_,rcoF5Ug^2*l.jf6Q+L>SE^,[XA?h45^h+LR0.`BqQunB]MBU2$-D0hs8nPo7c>$"k_OPI3X%;)t0Q7"lWAje8K@'AbXLfo=IW=k@PkHFD@<*g>JY&9AV8]`\,q%8p'8l+k&3e_&S;(A7n*]-[H'P19G&P+5tI3[X9!Vf)F=cK!+Za`S+TaX=nIO!ktap'r_,n@@t$-S>*%*DjGEoWb=^e0uO]j%Y>JNnL7NE!.<+^f-?b):T)FqAM+Q'HTVC&gjV*;sR`2d^Z4.4*&1[Ei%M7$YuF66fBE)S;I+'.17\0S<8e9,<pfD=VLB/SUJ[Ji>ol!VsJhl8:fCoDo)S`P%=?0P=L./Titk`+-:%[=n)R&,lLFlCN+$k4Q6u6A6K^N>W10h\PeWNqDE(I75XSW"M_VL(&P\V@V&A,RBgja,U@f.7VN@MV>5V^q7#$IcFske_o&jIoe;R=<ZkaC<IW(g=]%7+_O@*_8Q:jUE;"bF^SiL.9,>CNJ3qDA)]f"p1+cK>41XlK9u406(;bn1PtR/,'@k.G&jM?sAD<,nP$R7QQDsP?+QN)/qgT#@4"&Y`A<fcCEa.h^f%2gFf2Q+dT2$&6WP1:&qHAT]^?eh67T@ulH*<.lIW0Z,-P41SmF<<2l_F&85IW1CM&qOeDV@.VDsJ_dR+OTIjfCi^^,j[*L=sBuZR'ZS[fpFbE*LK#<r_fepY,>[$[+lrl,BF!#jk^=B23SD62iVa#:h5<;aCU&eeM-85XAENbH^U%n1GN+Y"jhB$;?0')iqi3@081KUlpZbkt$c&-/16"-,OYG[>I4;QIroqs7VU-(D1&M^Ar'`3maG@3*WBo2#rZ^^bh5."Z!SiAUU3CkpLNeb5-)0<-,,(odX6PX$JQ708,Vp+:"NsW+%s6Yp]<C!#)8[,Vj_gjl`@'m.2<4E`>o@gfAW`/O.CY-ALSaPZH6c*%uk%9#PFom>_L?O%R_H6L/4sJc@;"C;[m?S,WMdQMUa~>endstream
 endobj
 xref
-0 27
+0 28
 0000000000 65535 f 
 0000000061 00000 n 
-0000000102 00000 n 
-0000000209 00000 n 
-0000000321 00000 n 
-0000000558 00000 n 
-0000000795 00000 n 
-0000001033 00000 n 
-0000001280 00000 n 
-0000001525 00000 n 
-0000001771 00000 n 
-0000002027 00000 n 
-0000002274 00000 n 
-0000002516 00000 n 
-0000002763 00000 n 
-0000003038 00000 n 
+0000000113 00000 n 
+0000000220 00000 n 
+0000000332 00000 n 
+0000000579 00000 n 
+0000000824 00000 n 
+0000001073 00000 n 
+0000001320 00000 n 
+0000001574 00000 n 
+0000001843 00000 n 
+0000002093 00000 n 
+0000002359 00000 n 
+0000002620 00000 n 
+0000002726 00000 n 
+0000003009 00000 n 
 0000003307 00000 n 
-0000003561 00000 n 
-0000003840 00000 n 
-0000004056 00000 n 
-0000004269 00000 n 
-0000004516 00000 n 
-0000004772 00000 n 
-0000005103 00000 n 
-0000005173 00000 n 
-0000005454 00000 n 
-0000005515 00000 n 
+0000003579 00000 n 
+0000003867 00000 n 
+0000004155 00000 n 
+0000004435 00000 n 
+0000004654 00000 n 
+0000004908 00000 n 
+0000005134 00000 n 
+0000005465 00000 n 
+0000005535 00000 n 
+0000005850 00000 n 
+0000005911 00000 n 
 trailer
 <<
 /ID 
-[<bd03473fd56341e251568bd5190d74e9><bd03473fd56341e251568bd5190d74e9>]
+[<2f458ef5e965abf95153f4501e0a2d6f><2f458ef5e965abf95153f4501e0a2d6f>]
 % ReportLab generated PDF document -- digest (opensource)
 
-/Info 24 0 R
-/Root 23 0 R
-/Size 27
+/Info 25 0 R
+/Root 24 0 R
+/Size 28
 >>
 startxref
-8289
+10294
 %%EOF

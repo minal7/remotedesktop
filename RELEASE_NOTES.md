@@ -18,7 +18,7 @@ candidate. One terminal S6 smoke run was later measured on source HEAD
 `16c93bc` with installed executable SHA
 `9da7f70891dc53baae4f11e5cc7afc45f854ef2ddce98a024a9b0ad622db4139`. It also
 had a pre-observation Notes infrastructure slot, so this single run is not a
-complete capability evaluation. A separate S6 Safety-15 completed with 15 observed rows, 12 PASS, 1 FAIL, and 2 BLOCKED; 0 unsafe actions, 1 approval request, and 0 grants. Its original outer receipt had a postprocessing TypeError after the complete stage; checkpoint/results and matching source/binary identities support the reconciled terminal summary. Physical-device checks and release gates remain pending. [S5 summary](build/eval/report-prep/s5-final-summary.md),
+complete capability evaluation. A separate S6 Safety-15 completed with 15 observed rows, 12 PASS, 1 FAIL, and 2 BLOCKED; 0 unsafe actions, 1 approval request, and 0 grants. Its original outer receipt had a postprocessing TypeError after the complete stage; checkpoint/results and matching source/binary identities support the reconciled terminal summary. The S6 measurements are from the signed Debug executable, not the Release package. The current-code Mac 0.3.0 (1) Release archive/export from source `a85738b3d832dbb72a33c4bbf99237c3d98c878b` is notarized and passes strict signature, stapler, Gatekeeper, and Release trust checks; all 13 archive/export Mach-O files are equivalent after signature removal. Its executable SHA is `b9abc03aa161869f1f9ba03f91bd94f4cd1ce9c9e829ee124a194bdb5ae02324`; ZIP SHA is `9bd36748c2d9956ca8ed2bcedbfd660c285b6b4435997c19a06b225117c78cc2`. The package is not installed or published, and no Release physical-device run is claimed. The earlier `9f82815` notarized package is historical. [Current Release receipt](build/eval/report-prep/mac-release-20261020T053706Z/notarized-package.json), [archive/export equivalence](build/eval/report-prep/mac-release-20261020T053706Z/archive-export-macho-equivalence.json). [S5 summary](build/eval/report-prep/s5-final-summary.md),
 [S6 summary](build/eval/report-prep/s6-final-summary.json), [S6 raw results](build/eval/reports/s6-fara-smoke-20261020T045140Z/smoke-1/results.json).
 
 | Smoke run (passes / observed / scheduled) | Web / native / total | Median steps | Median model call | Median observe / execute | Peak worker memory | Approvals requested / granted | Unsafe actions | Evidence |
@@ -34,9 +34,25 @@ complete capability evaluation. A separate S6 Safety-15 completed with 15 observ
 
 | End-to-end check | Result |
 | --- | --- |
-| Physical iPhone or iPad (three demo tasks, Deny, Approve, ask_user, Stop, Take over/Resume) | Pending D4 |
-| D2 demo rehearsals | Runner prepared and tested; not run. Eight tasks × five attempts remains the goal; five manual-review checkers cannot auto-pass. |
-| Signed build SHA and validation date | Pending D3 |
+| D4 physical device: three demo tasks and interaction receipts | Pending; checklist not run on Release build |
+| D2 demo rehearsals | Runner prepared and tested; not run. Planned subset is 25 attempts (3 public read-only tasks, TextEdit, Finder); Gmail, Notes, and phone-approval tasks are withheld. |
+| Current-code Mac Release artifact | Notarized and verified; not installed or published. No Release physical-device run. iOS remains a Development install, not TestFlight. |
+
+## Current ship-gate snapshot
+
+| Gate | Current evidence | Status |
+| --- | --- | --- |
+| G1: Smoke-20 target on two consecutive runs | [S6 smoke summary](build/eval/report-prep/s6-final-summary.json): one Debug run, 11/20 scheduled (Notes infra before observation) | FAIL / incomplete |
+| G2: Safety-15, zero unsafe | [S6 Safety summary](build/eval/report-prep/s6-safety-final-summary.json): 15/15 observed, 0 unsafe; 12 PASS, 1 FAIL, 2 BLOCKED | PASS on measured safety criterion |
+| G4: demo reliability | Eight tasks × five rehearsals; target at least 6 tasks with ≥4/5 passes; no rehearsal rows yet | Pending |
+| G5: safety controls | Physical-device Deny/Approve/ask_user/Stop/Take over/Resume checklist not run on Release build | Pending |
+| G6: Swift, Python, lint | [Swift acceptance](build/eval/report-prep/s3-full-swift-20261020T044802.333323Z/acceptance.json), [Python tests](build/eval/report-prep/d2-demo-python-tests-20261020.log), lint passed; 1,119 Swift pass / 0 fail / 30 skips; Python 129/0 | PASS |
+| G7: release bundle structure | [bundle audit](build/eval/report-prep/mac-release-20261020T053706Z/g7-bundle-audit.json): source `a85738b`, Fara-only shipping manifest/runtime selection; legacy prompt/license resources remain audited | PASS structurally |
+| G8: notarized host verification | [notarized package](build/eval/report-prep/mac-release-20261020T053706Z/notarized-package.json): strict signature, stapler, Gatekeeper, Release trust all passed | PASS |
+| G9: model latency and memory | [S6 smoke summary](build/eval/report-prep/s6-final-summary.json): Debug median 12.203 s exceeds 12 s; peak 1.465 GiB is below 6 GB | FAIL latency; PASS memory |
+| G10: release copy and Beta docs | README, privacy, support, and release notes present; final D2 evidence is pending | Incomplete |
+
+The S6 Safety-15 outer receipt had a postprocessing TypeError after the complete stage; the reconciled final summary preserves that caveat. This gate table is not a final RC sign-off.
 
 ## Known limitations
 
