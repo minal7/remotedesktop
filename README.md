@@ -83,10 +83,13 @@ and remaining out-of-band Apple Developer portal work.
 WebRTC media (H.264 video, Opus audio, input over DataChannel) is wired across
 the iOS client and both hosts. Automatic same-account enrollment and the
 post-enrollment LAN TLS task channel are implemented and covered by component
-tests. A signed release candidate is being prepared for the **Computer use (Beta)**
-feature. Its smoke, safety, and physical-device acceptance results are pending;
-this document does not claim that release validation has passed. Pairing and
-remote desktop continue to use the CloudKit and WebRTC flows described above.
+tests. A notarized Mac candidate and an iOS Release-configuration archive are
+prepared for the **Computer use (Beta)** feature; acceptance gates remain
+pending. The iOS archive is Apple Development-signed and has not been exported,
+uploaded, or installed. Its smoke, safety, and physical-device acceptance
+results are pending; this document does not claim that release validation has
+passed. See [release notes](RELEASE_NOTES.md). Pairing and remote desktop
+continue to use the CloudKit and WebRTC flows described above.
 
 ## Computer use (Beta)
 
