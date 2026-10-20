@@ -721,6 +721,7 @@ class TaskAndCheckerTests(unittest.TestCase):
     def test_preflight_abort_writes_infra_rows_without_running_tasks(self) -> None:
         from tempfile import TemporaryDirectory
         from preflight import failed
+        from native_start import TextEditReset
 
         class UnlockedLifecycle:
             def __init__(self, *_args, **_kwargs):
@@ -741,7 +742,9 @@ class TaskAndCheckerTests(unittest.TestCase):
              patch.object(run_suite, "_resolved_default_browser", return_value="com.apple.Safari") as resolve_browser, \
              patch.object(run_suite, "_close_suite_app_windows") as close_suite_windows, \
              patch("runner_recovery.RunnerLifecycle", UnlockedLifecycle), \
-             patch("native_start.reset_empty_textedit"), \
+             patch("native_start.reset_empty_textedit",
+                   return_value=TextEditReset("not_running", None, 0)) as reset_textedit, \
+             patch("native_start.launch_fresh_textedit") as launch_textedit, \
              patch.object(run_suite.subprocess, "run", side_effect=AssertionError("tests must not launch subprocesses")), \
              patch.object(run_suite, "_run_preflight", return_value=failed("Screen Recording denied", "Grant Screen Recording")), \
              patch.object(run_suite, "_run_driver", side_effect=AssertionError("tasks must not start")):
@@ -759,6 +762,8 @@ class TaskAndCheckerTests(unittest.TestCase):
             self.assertEqual(metadata["infra_blocked_task_runs"], len(rows))
             resolve_browser.assert_called_once_with()
             close_suite_windows.assert_called_once_with(["Finder", "Notes", "TextEdit", "com.apple.Safari"], ["/usr/bin/true"])
+            self.assertEqual(reset_textedit.call_count, 2)
+            launch_textedit.assert_not_called()
 
     def test_missing_first_observation_is_infra_but_recorded_model_failure_is_fail(self) -> None:
         task = run_suite.load_tasks("basics")[0]

@@ -240,17 +240,24 @@ class SuiteLifecycleIntegrationTests(unittest.TestCase):
             with patch.object(run_suite, "_native_scratch_directory", return_value=scratch), \
                  patch.object(run_suite, "_seed_native_task"), \
                  patch.object(run_suite, "_materialize_native_task", return_value=task), \
+                 patch.object(run_suite, "_close_suite_app_windows"), \
+                 patch("native_start.reset_empty_textedit", return_value=__import__("native_start").TextEditReset("not_running", None, 0)), \
+                 patch("native_start.launch_fresh_textedit", return_value=123), \
                  patch("native_start.prepare_textedit_untitled", side_effect=RuntimeError("open panel unavailable")), \
-                 patch.object(run_suite, "_cleanup_native_outputs"), \
+                 patch.object(run_suite, "_cleanup_native_outputs") as cleanup_native, \
                  patch.object(run_suite, "_write_report"):
                 status = run_suite._run_one_task(task, 1, args_for(output), ["driver"], [], None,
-                    output, [], checkpoint=checkpoint, task_key="1:native-001")
+                    output, [], suite_apps=["TextEdit"], checkpoint=checkpoint, task_key="1:native-001")
 
-            self.assertEqual(status, "INFRA-BLOCKED (open panel unavailable)")
+            self.assertEqual(status, "INFRA-BLOCKED (TextEdit document identity unavailable)")
             self.assertFalse(checkpoint.is_completed("1:native-001"))
-            self.assertEqual(checkpoint.cleanup_pending(), {})
+            pending = checkpoint.cleanup_pending()["1:native-001"]
+            self.assertEqual(pending["lease"], None)
+            self.assertEqual(pending["scratch"], str(scratch))
+            cleanup_native.assert_not_called()
             blocker = json.loads((output / "blockers.json").read_text())[0]
             self.assertEqual(blocker["kind"], "task-blocked")
+            self.assertIn("no exact window lease", blocker["cleanup_error"])
 
     def test_screen_lock_exception_propagates_from_task_boundary(self) -> None:
         task = sample_task("web-blocked")
@@ -280,11 +287,14 @@ class SuiteLifecycleIntegrationTests(unittest.TestCase):
                           "tags": ["lifecycle"]}, "PASS")
             with patch.object(run_suite, "_run_driver", return_value=(response, None)), \
                  patch.object(run_suite, "_evaluate_response", return_value=evaluated), \
+                 patch("native_start.reset_empty_textedit", return_value=__import__("native_start").TextEditReset("not_running", None, 0)), \
+                 patch("native_start.launch_fresh_textedit", return_value=123), \
                  patch("native_start.prepare_textedit_untitled", return_value=native_lease), \
                  patch("native_start.close_textedit_untitled", side_effect=RuntimeError("close failed")), \
+                 patch.object(run_suite, "_close_suite_app_windows"), \
                  patch.object(run_suite, "_write_report"):
                 status = run_suite._run_one_task(task, 1, args_for(output), ["driver"], [], None,
-                    output, [], checkpoint=checkpoint, task_key="1:native-001")
+                    output, [], suite_apps=["TextEdit"], checkpoint=checkpoint, task_key="1:native-001")
 
             self.assertEqual(status, "INFRA-BLOCKED (native fixture cleanup failed)")
             self.assertEqual(checkpoint.rows()[0]["status"], "PASS")

@@ -1265,9 +1265,20 @@ def run(args: argparse.Namespace) -> int:
                         suite_apps = _suite_apps([task for _, _, task in unfinished], browser)
                         if "TextEdit" in suite_apps:
                             from native_start import reset_empty_textedit
-                            reset_empty_textedit()
+                            reset_before = reset_empty_textedit()
+                            print(f"TextEdit reset before suite clean start: {reset_before.as_dict()}", file=sys.stderr)
                         _close_suite_app_windows(suite_apps, driver)
-                    except EvalError as error:
+                        if "TextEdit" in suite_apps:
+                            reset_after = reset_empty_textedit()
+                            print(f"TextEdit reset after suite clean start: {reset_after.as_dict()}", file=sys.stderr)
+                            if reset_after.status == "has_documents":
+                                raise EvalError(
+                                    "TextEdit retained unowned documents after suite clean start "
+                                    f"(pid={reset_after.pid}, documents="
+                                    f"{reset_after.document_count if reset_after.document_count is not None else 'unknown'}); "
+                                    "owner action required"
+                                )
+                    except (EvalError, RuntimeError) as error:
                         preflight = failed_preflight(str(error), "Close the suite app windows and rerun clean start.")
                     if preflight is None and not _fixture_server_available(DEFAULT_FIXTURE_ORIGIN):
                         preflight = failed_preflight("The local fixture server is unavailable before startup checks.",
@@ -1418,6 +1429,9 @@ def _run_one_task(task: Task, run_number: int, args: argparse.Namespace, driver:
         lease: Any = None
         cleanup_pending = False
         attempt_row: dict[str, Any] | None = None
+        textedit_reset = None
+        textedit_reset_before = None
+        textedit_creation_started = False
         try:
             if lifecycle is not None:
                 lifecycle.check_screen_unlocked()
@@ -1427,10 +1441,23 @@ def _run_one_task(task: Task, run_number: int, args: argparse.Namespace, driver:
                 try:
                     if "TextEdit" in suite_apps:
                         from native_start import reset_empty_textedit
-                        reset_empty_textedit()
+                        textedit_reset_before = reset_empty_textedit()
+                    else:
+                        textedit_reset_before = None
                     _close_suite_app_windows(suite_apps, driver)
+                    if "TextEdit" in suite_apps:
+                        textedit_reset = reset_empty_textedit()
+                        if textedit_reset.status == "has_documents":
+                            raise EvalError(
+                                "TextEdit reset found unowned documents "
+                                f"(status={textedit_reset.status}, pid={textedit_reset.pid}, "
+                                f"documents={textedit_reset.document_count if textedit_reset.document_count is not None else 'unknown'}); "
+                                "owner action required"
+                            )
                 except EvalError as error:
                     return infra_result(str(error), "INFRA-BLOCKED (clean start failed)")
+                except RuntimeError as error:
+                    return infra_result(str(error), "INFRA-BLOCKED (TextEdit reset failed)")
 
             runtime_task = task
             setup = task.value.get("setup", {})
@@ -1444,7 +1471,12 @@ def _run_one_task(task: Task, run_number: int, args: argparse.Namespace, driver:
                     checkpoint.mark_cleanup_pending(task_key, {"scratch": str(scratch), "lease": None})
                     cleanup_pending = True
                 if setup.get("new_untitled") is True:
-                    lease = prepare_textedit_untitled()
+                    if textedit_reset is None:
+                        raise EvalError("TextEdit untitled setup requires a verified native reset")
+                    from native_start import launch_fresh_textedit
+                    fresh_pid = launch_fresh_textedit(textedit_reset)
+                    textedit_creation_started = True
+                    lease = prepare_textedit_untitled(fresh_pid)
                     if checkpoint is not None:
                         checkpoint.mark_cleanup_pending(task_key, {"scratch": str(scratch), "lease": lease.as_dict()})
                 elif setup.get("no_note_selected") is True:
@@ -1515,7 +1547,12 @@ def _run_one_task(task: Task, run_number: int, args: argparse.Namespace, driver:
                 return status
 
             if task.value.get("setup", {}).get("new_untitled") is True:
-                attempt_row["setup_fixture"] = {"kind": "untitled_textedit"}
+                attempt_row["setup_fixture"] = {"kind": "untitled_textedit",
+                    "reset": {"before_clean_start": textedit_reset_before.as_dict(),
+                              "after_clean_start": textedit_reset.as_dict()}
+                             if textedit_reset is not None and textedit_reset_before is not None else None,
+                    "fresh_pid": lease.pid if lease is not None else None,
+                    "lease": lease.as_dict() if lease is not None else None}
             attempt_row["task_key"] = task_key
             persist(attempt_row)
             try:
@@ -1537,9 +1574,15 @@ def _run_one_task(task: Task, run_number: int, args: argparse.Namespace, driver:
                     checkpoint.mark_cleanup_pending(task_key, {"scratch": str(scratch),
                                                                "lease": lease.as_dict() if lease else None})
                     cleanup_pending = True
+            unknown_textedit_document = textedit_creation_started and lease is None
+            if unknown_textedit_document:
+                row["cleanup_error"] = (
+                    "TextEdit document creation may have succeeded, but no exact window lease was returned; "
+                    "preserving cleanup-pending state for owner review"
+                )
             if checkpoint is not None:
                 _record_blocker(output, {"kind": "task-blocked", **row})
-            if scratch is not None:
+            if scratch is not None and not unknown_textedit_document:
                 try:
                     teardown(scratch, lease, cleanup_pending)
                 except (EvalError, OSError, RuntimeError, ValueError) as cleanup_error:
@@ -1551,6 +1594,8 @@ def _run_one_task(task: Task, run_number: int, args: argparse.Namespace, driver:
                 _append_reported(results, row, output, args.execution)
             else:
                 _write_report(output, checkpoint.rows(), args.execution)
+            if unknown_textedit_document:
+                return "INFRA-BLOCKED (TextEdit document identity unavailable)"
             return f"INFRA-BLOCKED ({error})"
         finally:
             if scratch and deferred_scratch is not None:

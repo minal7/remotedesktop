@@ -11,6 +11,79 @@ import run_suite
 
 
 class CleanStartTests(unittest.TestCase):
+    def test_native_task_orders_clean_start_reset_fresh_launch_then_single_document(self) -> None:
+        from native_start import NativeDocumentLease, TextEditReset
+
+        task = run_suite.load_tasks("native")[0]
+        args = SimpleNamespace(execution="real-host", policy="fara15-4b", suite="native",
+                               timeout=10, runs=1, output=None)
+        events = []
+        with tempfile.TemporaryDirectory() as directory:
+            previous_home = run_suite.os.environ.get("HOME")
+            run_suite.os.environ["HOME"] = directory
+            try:
+                def clean(*_args, **_kwargs):
+                    events.append("clean-start")
+
+                reset_results = iter([TextEditReset("quit", 123, 0),
+                                      TextEditReset("not_running", None, 0)])
+
+                def reset(*_args, **_kwargs):
+                    result = next(reset_results)
+                    events.append(f"reset-{result.status}")
+                    return result
+
+                def launch(value, **_kwargs):
+                    events.append("fresh-launch")
+                    self.assertEqual(value.status, "not_running")
+                    return 124
+
+                def prepare(pid, **_kwargs):
+                    events.append("create-document")
+                    self.assertEqual(pid, 124)
+                    return NativeDocumentLease(pid, 77)
+
+                def drive(*_args, **_kwargs):
+                    events.append("driver")
+                    return {"answer": "done"}, None
+
+                with patch.object(run_suite, "_close_suite_app_windows", side_effect=clean), \
+                     patch("native_start.reset_empty_textedit", side_effect=reset), \
+                     patch("native_start.launch_fresh_textedit", side_effect=launch), \
+                     patch("native_start.prepare_textedit_untitled", side_effect=prepare), \
+                     patch("native_start.close_textedit_untitled", side_effect=lambda *_: events.append("close-lease")), \
+                     patch.object(run_suite, "_run_driver", side_effect=drive), \
+                     patch.object(run_suite, "_evaluate_response", return_value=({"status": "PASS"}, "PASS")):
+                    result = run_suite._run_one_task(task, 1, args, ["signed-host"], [], None,
+                                                     run_suite.Path(directory) / "report", [],
+                                                     suite_apps=["TextEdit"])
+            finally:
+                if previous_home is None:
+                    run_suite.os.environ.pop("HOME", None)
+                else:
+                    run_suite.os.environ["HOME"] = previous_home
+        self.assertEqual(result, "PASS")
+        self.assertEqual(events, ["reset-quit", "clean-start", "reset-not_running", "fresh-launch", "create-document",
+                                  "driver", "close-lease"])
+
+    def test_unowned_textedit_document_blocks_before_fresh_launch(self) -> None:
+        from native_start import TextEditReset
+
+        task = run_suite.load_tasks("native")[0]
+        args = SimpleNamespace(execution="real-host", policy="fara15-4b", suite="native",
+                               timeout=10, runs=1, output=None)
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.object(run_suite, "_close_suite_app_windows"), \
+             patch("native_start.reset_empty_textedit",
+                   return_value=TextEditReset("has_documents", 48125, 1)), \
+             patch("native_start.launch_fresh_textedit") as launch, \
+             patch.object(run_suite, "_run_driver") as driver:
+            result = run_suite._run_one_task(task, 1, args, ["signed-host"], [], None,
+                                             run_suite.Path(directory), [], suite_apps=["TextEdit"])
+        self.assertIn("INFRA-BLOCKED", result or "")
+        launch.assert_not_called()
+        driver.assert_not_called()
+
     def test_suite_apps_are_mapped_to_bundle_ids(self) -> None:
         apps = run_suite._suite_apps(run_suite.smoke_tasks(), resolved_default_browser="org.example.browser")
         self.assertEqual(run_suite._suite_bundle_ids(apps), [
@@ -141,7 +214,7 @@ class CleanStartTests(unittest.TestCase):
             self.assertIn("Safari window remained", blockers[0]["checker"])
 
     def test_completed_result_survives_untitled_document_cleanup_failure(self) -> None:
-        from native_start import NativeDocumentLease
+        from native_start import NativeDocumentLease, TextEditReset
 
         task = run_suite.load_tasks("native")[0]
         args = SimpleNamespace(execution="real-host", policy="fara15-4b", suite="native",
@@ -153,6 +226,8 @@ class CleanStartTests(unittest.TestCase):
             rows = []
             try:
                 with patch.object(run_suite, "_close_suite_app_windows"), \
+                     patch("native_start.reset_empty_textedit", return_value=TextEditReset("not_running", None, 0)), \
+                     patch("native_start.launch_fresh_textedit", return_value=10), \
                      patch("native_start.prepare_textedit_untitled", return_value=NativeDocumentLease(10, 20)), \
                      patch("native_start.close_textedit_untitled", side_effect=RuntimeError("window close failed")), \
                      patch.object(run_suite, "_run_driver", return_value=({"answer": "created the document"}, None)) as driver, \
@@ -180,7 +255,7 @@ class CleanStartTests(unittest.TestCase):
             self.assertFalse((scratch / "Start.txt").exists())
 
     def test_successful_textedit_cleanup_closes_leased_window_then_clears_output_reservation(self) -> None:
-        from native_start import NativeDocumentLease
+        from native_start import NativeDocumentLease, TextEditReset
 
         task = run_suite.load_tasks("native")[0]
         args = SimpleNamespace(execution="real-host", policy="fara15-4b", suite="native",
@@ -198,6 +273,8 @@ class CleanStartTests(unittest.TestCase):
                     observed["reserved"] = marker["reserved_outputs"]
 
                 with patch.object(run_suite, "_close_suite_app_windows"), \
+                     patch("native_start.reset_empty_textedit", return_value=TextEditReset("not_running", None, 0)), \
+                     patch("native_start.launch_fresh_textedit", return_value=10), \
                      patch("native_start.prepare_textedit_untitled", return_value=NativeDocumentLease(10, 20)), \
                      patch("native_start.close_textedit_untitled", side_effect=close_owned), \
                      patch.object(run_suite, "_run_driver", return_value=({"answer": "created the document"}, None)), \
