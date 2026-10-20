@@ -327,6 +327,15 @@ struct OSAtlasLlamaPrivateFile: Equatable, Sendable {
 
 struct OSAtlasLlamaLaunchConfiguration: Equatable, Sendable {
     static let host = "127.0.0.1"
+    static let defaultTrainedVisionImageTokensPerScreenshot = 1_536
+    static func trainedVisionImageTokensPerScreenshot(for model: AgentPolicyModel) -> Int {
+        model == .fara15_4b
+            ? ComputerUseFaraModel.contextImageTokensPerScreenshot
+            : defaultTrainedVisionImageTokensPerScreenshot
+    }
+    static func reservedAgentImageTokens(imageCount: Int, for model: AgentPolicyModel) -> Int {
+        imageCount * trainedVisionImageTokensPerScreenshot(for: model)
+    }
     static let maximumGeneratedTokens = 256
     static let imageTokensPerScreenshot = 256
     static let workerThreads = 4
@@ -455,6 +464,9 @@ struct OSAtlasLlamaLaunchConfiguration: Equatable, Sendable {
         if let trainedVisionAlias, let authenticationFile, let multimodalProjectorURL {
             let isAgentFara = trainedVisionAlias == ComputerUseFaraRuntimeInputs.modelAlias
                 && resourceProfile == .agentVision
+            let imageTokensPerScreenshot = trainedVisionAlias == ComputerUseFaraRuntimeInputs.modelAlias
+                ? Self.trainedVisionImageTokensPerScreenshot(for: .fara15_4b)
+                : Self.defaultTrainedVisionImageTokensPerScreenshot
             var arguments = [
                 "--model", modelFirstSplitURL.path, "--mmproj", multimodalProjectorURL.path,
                 "--alias", trainedVisionAlias,
@@ -465,11 +477,11 @@ struct OSAtlasLlamaLaunchConfiguration: Equatable, Sendable {
                 "--cache-ram", "0", "--ctx-checkpoints", "0", "--no-cache-idle-slots",
                 "--threads", String(Self.workerThreads), "--threads-batch", String(Self.workerThreads),
                 "--poll", "0", "--poll-batch", "0", "--n-gpu-layers", "99",
-                "--image-max-tokens", String(ComputerUseFaraModel.contextImageTokensPerScreenshot),
-                "--mtmd-batch-max-tokens", String(ComputerUseFaraModel.contextImageTokensPerScreenshot), "--jinja",
+                "--image-max-tokens", String(imageTokensPerScreenshot),
+                "--mtmd-batch-max-tokens", String(ComputerUseFaraModel.contextImageBatchTokens), "--jinja",
             ]
             if isAgentFara {
-                arguments += ["--flash-attn", "on", "--cache-type-k", "q8_0", "--cache-type-v", "q8_0"]
+                arguments += ["--flash-attn", "on", "--cache-type-k", "f16", "--cache-type-v", "f16"]
             }
             return arguments
         }
@@ -1433,7 +1445,8 @@ actor OSAtlasLlamaRuntime {
                     let exactTokens = try await server.transport.exactInputTokenCount(completionRequest: request)
                     try Task.checkCancellation()
                     guard active?.endpoint == endpoint else { throw OSAtlasLlamaRuntimeError.inactiveSession }
-                    let reservedTokens = preparedInput.imageCount * ComputerUseFaraModel.contextImageTokensPerScreenshot
+                    let reservedTokens = OSAtlasLlamaLaunchConfiguration.reservedAgentImageTokens(
+                        imageCount: preparedInput.imageCount, for: input.model)
                         + OSAtlasLlamaHTTPClient.agentMaximumCompletionTokens
                         + ComputerUseFaraModel.contextSafetyReserveTokens
                     guard exactTokens > 0 else { throw OSAtlasLlamaRuntimeError.invalidResponse }

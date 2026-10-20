@@ -661,8 +661,8 @@ final class OSAtlasLlamaRuntimeTests: XCTestCase {
             try credential.verify()
             let arguments = configuration.arguments
             for (flag, value) in [("--mmproj", faraInputs.projectorURL.path), ("--ctx-size", "8192"),
-                                  ("--alias", ComputerUseFaraRuntimeInputs.modelAlias), ("--image-max-tokens", "1536"),
-                                  ("--parallel", "1"), ("--poll", "0"), ("--cache-ram", "0")] {
+                                  ("--alias", ComputerUseFaraRuntimeInputs.modelAlias), ("--image-max-tokens", "768"),
+                                  ("--mtmd-batch-max-tokens", "1536"), ("--parallel", "1"), ("--poll", "0"), ("--cache-ram", "0")] {
                 let index = try XCTUnwrap(arguments.firstIndex(of: flag))
                 XCTAssertEqual(arguments[index + 1], value)
             }

@@ -19,7 +19,8 @@ struct ComputerUseFaraRuntimeInputs: Equatable, Sendable {
 
 enum ComputerUseFaraModel {
     static let maximumCompletionTokens = 1_024
-    static let contextImageTokensPerScreenshot = 1_536
+    static let contextImageTokensPerScreenshot = 768
+    static let contextImageBatchTokens = 1_536
     static let contextSafetyReserveTokens = 64
     /// Page data read from a validated native observation, not a new instruction
     /// or proof that the model's interpretation is correct.

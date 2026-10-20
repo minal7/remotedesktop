@@ -5,7 +5,7 @@ import XCTest
 
 @MainActor
 final class AgentVLMContextBudgetTests: XCTestCase {
-    func testAgentFaraLaunchPinsSixteenKFlashAttentionAndQ8KVCache() throws {
+    func testAgentFaraLaunchPinsSixteenKFlashAttentionAndF16KVCache() throws {
         let authentication = try OSAtlasLlamaPrivateFile.authentication(token: "test-agent-fara-token-123456")
         defer { try? FileManager.default.removeItem(at: authentication.directoryURL) }
         let inputs = AgentVisionRuntimeInputs(model: .fara15_4b,
@@ -20,8 +20,23 @@ final class AgentVLMContextBudgetTests: XCTestCase {
         }
         XCTAssertEqual(try value(after: "--ctx-size"), "16384")
         XCTAssertEqual(try value(after: "--flash-attn"), "on")
-        XCTAssertEqual(try value(after: "--cache-type-k"), "q8_0")
-        XCTAssertEqual(try value(after: "--cache-type-v"), "q8_0")
+        XCTAssertEqual(try value(after: "--cache-type-k"), "f16")
+        XCTAssertEqual(try value(after: "--cache-type-v"), "f16")
+        XCTAssertEqual(try value(after: "--image-max-tokens"), "768")
+        XCTAssertEqual(try value(after: "--mtmd-batch-max-tokens"), "1536")
+        XCTAssertEqual(ComputerUseFaraModel.contextImageTokensPerScreenshot, 768,
+            "Per-image preprocessing cap and host context reservation must agree")
+        XCTAssertEqual(ComputerUseFaraModel.contextImageBatchTokens, 1536,
+            "The independent multimodal batch cap remains unchanged")
+    }
+
+    func testAgentImageReservationMatchesEachModelLaunchCap() {
+        XCTAssertEqual(OSAtlasLlamaLaunchConfiguration.trainedVisionImageTokensPerScreenshot(for: .fara15_4b), 768)
+        XCTAssertEqual(OSAtlasLlamaLaunchConfiguration.trainedVisionImageTokensPerScreenshot(for: .uiTars15_7b), 1_536)
+        XCTAssertEqual(OSAtlasLlamaLaunchConfiguration.trainedVisionImageTokensPerScreenshot(for: .guiOwl15_4b), 1_536)
+        XCTAssertEqual(OSAtlasLlamaLaunchConfiguration.reservedAgentImageTokens(imageCount: 2, for: .fara15_4b), 1_536)
+        XCTAssertEqual(OSAtlasLlamaLaunchConfiguration.reservedAgentImageTokens(imageCount: 2, for: .uiTars15_7b), 3_072)
+        XCTAssertEqual(OSAtlasLlamaLaunchConfiguration.reservedAgentImageTokens(imageCount: 2, for: .guiOwl15_4b), 3_072)
     }
 
     func testTokenizerCountsInputsLargerThanModelContextForTrimming() throws {
@@ -125,8 +140,8 @@ final class AgentVLMContextBudgetTests: XCTestCase {
         XCTAssertEqual(output.action, AgentAction.wait(seconds: 1))
         let tokenizations = await transport.tokenizationRequests
         XCTAssertGreaterThan(tokenizations.count, 1, "An oversized request must be trimmed before a model completion")
-        XCTAssertLessThanOrEqual(try imageCount(in: XCTUnwrap(tokenizations.last)), 3,
-            "History is bounded to two prior screenshots plus the current screenshot")
+        XCTAssertLessThanOrEqual(try imageCount(in: XCTUnwrap(tokenizations.last)), 2,
+            "Fara context retains at most one prior screenshot plus the current screenshot")
         let completionCount = await transport.completionCount
         XCTAssertEqual(completionCount, 1, "Context fitting selects one final request; it does not retry model output")
         let completedRequestBody = await transport.completedRequestBody

@@ -142,7 +142,7 @@ final class LlamaVLMPolicy: AgentPolicy {
         self.transport = transport
         self.model = model
         self.promptVersion = switch model {
-        case .fara15_4b: "v2-fara-macos-native-coordinates-compact-history"
+        case .fara15_4b: "v2-fara-macos-native-coordinates-16k-f16kv-768img-one-prior"
         case .uiTars15_7b: "v1-ui-tars-native-coordinates-compact-history"
         case .guiOwl15_4b: "v1-gui-owl-native-coordinates-compact-history"
         }
@@ -362,7 +362,7 @@ final class LlamaVLMPolicy: AgentPolicy {
             excess -= drop
             if transcript[0].feedback.isEmpty { transcript.removeFirst() }
         }
-        let screenshotStart = max(0, transcript.count - 2)
+        let screenshotStart = max(0, transcript.count - (model == .fara15_4b ? 1 : 2))
         for index in transcript.indices {
             transcript[index].observationContext = Self.compactObservationContext(transcript[index].observationContext)
             if index < screenshotStart { transcript[index].screenshotPNG = nil }

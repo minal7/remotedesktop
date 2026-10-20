@@ -13,7 +13,7 @@ final class AgentLlamaVLMPolicyTests: XCTestCase {
 
         let output = try await policy.propose(observation)
 
-        XCTAssertEqual(policy.promptVersion, "v2-fara-macos-native-coordinates-compact-history")
+        XCTAssertEqual(policy.promptVersion, "v2-fara-macos-native-coordinates-16k-f16kv-768img-one-prior")
         XCTAssertEqual(output.rawOutput, raw)
         XCTAssertEqual(output.action, .click(target: .point(x: 1, y: 2), button: nil, count: nil))
         let input = try XCTUnwrap(transport.inputs.first)
@@ -440,38 +440,44 @@ final class AgentLlamaVLMPolicyTests: XCTestCase {
     }
 
     func testEachPriorScreenshotStaysInItsActionUserTurn() async throws {
-        let raw = try completion(arguments: #"{"action":"wait","time":1}"#)
-        let transport = RecordingAgentVLMTransport(response: raw)
-        let (policy, fixtureObservation, _) = try fixture(transport: transport)
-        let screenshots = try [
-            NSColor(calibratedRed: 1, green: 0, blue: 0, alpha: 1),
-            NSColor(calibratedRed: 0, green: 1, blue: 0, alpha: 1),
-            NSColor(calibratedRed: 0, green: 0, blue: 1, alpha: 1),
-        ].map { try makePNG(color: $0) }
-        XCTAssertEqual(Set(screenshots).count, 3)
-        let initial = AgentObservation(task: fixtureObservation.task, surface: fixtureObservation.surface,
-            screenshot: screenshots[0].base64EncodedString(), elements: fixtureObservation.elements,
-            focus: fixtureObservation.focus, history: [], budget: .init(step: 0, maxSteps: 40))
-        _ = try await policy.propose(initial)
-        let oneResult = AgentObservation(task: initial.task, surface: initial.surface,
-            screenshot: screenshots[1].base64EncodedString(), elements: initial.elements, focus: initial.focus,
-            history: [.init(action: .wait(seconds: 1), result: "result-0")], budget: .init(step: 1, maxSteps: 40))
-        _ = try await policy.propose(oneResult)
-        let twoResults = AgentObservation(task: initial.task, surface: initial.surface,
-            screenshot: screenshots[2].base64EncodedString(), elements: initial.elements, focus: initial.focus,
-            history: [
-                .init(action: .wait(seconds: 1), result: "result-0"),
-                .init(action: .wait(seconds: 1), result: "result-1"),
-            ], budget: .init(step: 2, maxSteps: 40))
+        for model in [AgentPolicyModel.fara15_4b, .uiTars15_7b, .guiOwl15_4b] {
+            let raw: String
+            switch model {
+            case .fara15_4b: raw = try completion(arguments: #"{"action":"wait","time":1}"#)
+            case .uiTars15_7b: raw = try uiTarsCompletion("Thought: wait.\nAction: wait()")
+            case .guiOwl15_4b: raw = try completion(arguments: #"{"action":"wait","time":1}"#, content: "Action: Wait.")
+            }
+            let transport = RecordingAgentVLMTransport(response: raw)
+            let (_, fixtureObservation, _) = try fixture(transport: transport)
+            let policy = try LlamaVLMPolicy(transport: transport, prompt: promptText(), model: model)
+            let screenshots = try [
+                NSColor(calibratedRed: 1, green: 0, blue: 0, alpha: 1),
+                NSColor(calibratedRed: 0, green: 1, blue: 0, alpha: 1),
+                NSColor(calibratedRed: 0, green: 0, blue: 1, alpha: 1),
+            ].map { try makePNG(color: $0) }
+            XCTAssertEqual(Set(screenshots).count, 3)
+            let initial = AgentObservation(task: fixtureObservation.task, surface: fixtureObservation.surface,
+                screenshot: screenshots[0].base64EncodedString(), elements: fixtureObservation.elements,
+                focus: fixtureObservation.focus, history: [], budget: .init(step: 0, maxSteps: 40))
+            _ = try await policy.propose(initial)
+            let oneResult = AgentObservation(task: initial.task, surface: initial.surface,
+                screenshot: screenshots[1].base64EncodedString(), elements: initial.elements, focus: initial.focus,
+                history: [.init(action: .wait(seconds: 1), result: "result-0")], budget: .init(step: 1, maxSteps: 40))
+            _ = try await policy.propose(oneResult)
+            let twoResults = AgentObservation(task: initial.task, surface: initial.surface,
+                screenshot: screenshots[2].base64EncodedString(), elements: initial.elements, focus: initial.focus,
+                history: [.init(action: .wait(seconds: 1), result: "result-0"),
+                          .init(action: .wait(seconds: 1), result: "result-1")],
+                budget: .init(step: 2, maxSteps: 40))
+            _ = try await policy.propose(twoResults)
 
-        _ = try await policy.propose(twoResults)
-
-        let messages = try XCTUnwrap(transport.inputs.last?.messages)
-        XCTAssertEqual(messages.map(\.role), [.system, .user, .assistant, .user, .assistant, .user])
-        XCTAssertEqual(messages[1].content.imageValues, [screenshots[0]])
-        XCTAssertEqual(messages[3].content.imageValues, [screenshots[1]])
-        XCTAssertEqual(messages[5].content.imageValues, [screenshots[2]])
-        XCTAssertEqual(transport.inputs.last?.imageCount, 3)
+            let messages = try XCTUnwrap(transport.inputs.last?.messages)
+            XCTAssertEqual(messages.map(\.role), [.system, .user, .assistant, .user, .assistant, .user])
+            XCTAssertEqual(messages[1].content.imageValues, model == .fara15_4b ? [] : [screenshots[0]])
+            XCTAssertEqual(messages[3].content.imageValues, [screenshots[1]])
+            XCTAssertEqual(messages[5].content.imageValues, [screenshots[2]])
+            XCTAssertEqual(transport.inputs.last?.imageCount, model == .fara15_4b ? 2 : 3)
+        }
     }
 
     func testMalformedNativeOutputIsRetainedOnceBeforeRejectionFeedback() async throws {
@@ -518,7 +524,7 @@ final class AgentLlamaVLMPolicyTests: XCTestCase {
                 history: history, budget: .init(step: index, maxSteps: 40))
             _ = try await policy.propose(input)
             let sent = try XCTUnwrap(transport.inputs.last)
-            XCTAssertEqual(sent.imageCount, min(index, 2) + 1)
+            XCTAssertEqual(sent.imageCount, min(index, 1) + 1)
             XCTAssertLessThanOrEqual(sent.messages.filter { $0.role == .assistant }.count, 8)
             XCTAssertFalse(sent.messages.flatMap(\.content).textValues.contains { $0.contains("result-0") } && index >= 9)
             if index == 6 {
