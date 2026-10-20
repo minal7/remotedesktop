@@ -20,7 +20,7 @@
 | D4 | Physical-device checklist | Prepared; not run | Checklist updated to three current demo tasks plus all control receipts; result fields remain blank. iPhone app installation is verified, but no checklist steps have been run. iPad unavailable. | Run on a physical release-build device; Deny/Approve/ask_user/Stop/Take over/Resume. |
 | M1 | Final ship gates | Pending | No waivers inferred. | Gate table on release build. |
 | M2 | Demo video | Pending | Owner films device; raw footage retained; speed changes labelled. | 2–3 minute package. |
-| M3 | Metrics one-pager | Pending | Every number links to a report. | Markdown + one-page PDF. |
+| M3 | Metrics one-pager | Draft prepared; visually reviewed | `docs/computer-use-review/investor-metrics.md` and `output/pdf/investor-metrics.pdf` are draft snapshots. S5 and D2 results are pending; this does not claim release-gate completion. | Finalize only after S5 and D2 evidence is available. |
 | M4 | Live runbook | Prepared; rehearsal/video evidence pending | docs/computer-use-review/demo-runbook.md: eight prompts, M2 order, setup, narration, 60-second takeover fallback and labelled footage. | Fill measured rehearsal table and recording paths. |
 | M5 | PR to main | Pending | Owner merges, uploads TestFlight and publishes host. | Open after gates; stop. |
 | OWNER | Outstanding owner actions | Notes account decision and release/demo gates pending | Decide whether to isolate the Notes test account or accept an infra-blocked S2 result. Physical-device session, iOS TestFlight upload, video filming and merge remain pending. Monday 18:00 release was not achieved. | No interaction window or suite is active; resume after owner decision. Scope and gates unchanged. |
