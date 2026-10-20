@@ -17,10 +17,10 @@
 | D1 | Eight demo task YAMLs | Pending | Prompts/checkers only; no task-specific production code. | Define after Saturday measurements. |
 | D2 | Five rehearsals per demo | Pending | Preserve every episode and failed attempt. | Per-task pass/time table. |
 | D3 | Release archive + notarization | Pending; version pipeline repaired | Release workflow preserves Mac 0.3.0 (1) and Windows 0.2.1 independently; 7 focused contract tests passed, including actual resolver execution and SHA/tag mismatch rejection. Developer ID setup ready. | Signed archive, notarization and iOS archive; credentials owner-only if required. |
-| D4 | Physical-device checklist | Pending | Owner operates physical iPad/iPhone; Codex verifies episodes. | Deny/Approve/ask_user/Stop/Take over/Resume. |
+| D4 | Physical-device checklist | Prepared; physical run pending | Checklist updated to three current demo tasks plus all control receipts; result fields blank. Owner operates physical iPad/iPhone; independent Notes receipt alongside episode. | Run on release build; Deny/Approve/ask_user/Stop/Take over/Resume. |
 | M1 | Final ship gates | Pending | No waivers inferred. | Gate table on release build. |
 | M2 | Demo video | Pending | Owner films device; raw footage retained; speed changes labelled. | 2–3 minute package. |
 | M3 | Metrics one-pager | Pending | Every number links to a report. | Markdown + one-page PDF. |
-| M4 | Live runbook | Pending | Preparation, narration and recorded fallbacks. | Publish with demo package. |
+| M4 | Live runbook | Prepared; rehearsal/video evidence pending | docs/computer-use-review/demo-runbook.md: eight prompts, M2 order, setup, narration, 60-second takeover fallback and labelled footage. | Fill measured rehearsal table and recording paths. |
 | M5 | PR to main | Pending | Owner merges, uploads TestFlight and publishes host. | Open after gates; stop. |
 | OWNER | Outstanding owner actions | None blocking S1 | Future: physical device session, credentials if required, TestFlight upload, video filming and merge. | Hands-off run window will be announced before live tests. |
