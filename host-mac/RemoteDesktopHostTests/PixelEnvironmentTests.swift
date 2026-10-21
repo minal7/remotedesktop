@@ -60,7 +60,7 @@ final class PixelEnvironmentTests: XCTestCase {
         XCTAssertEqual(roundTrip.y, sourceCenter.y, accuracy: 0.001)
     }
 
-    func testNativeWindowCaptureExcludesChildWindowsFromRaster() throws {
+    func testNativeWindowCaptureIncludesChildWindowsForPopupVisibility() throws {
         let resolved = PixelGeometry.nativeWindowCaptureConfiguration(width: 1312, height: 844)
         guard #available(macOS 14.2, *) else {
             XCTAssertNil(resolved)
@@ -73,7 +73,7 @@ final class PixelEnvironmentTests: XCTestCase {
         XCTAssertTrue(configuration.scalesToFit)
         XCTAssertTrue(configuration.preservesAspectRatio)
         XCTAssertTrue(configuration.ignoreShadowsSingleWindow)
-        XCTAssertFalse(configuration.includeChildWindows)
+        XCTAssertTrue(configuration.includeChildWindows)
     }
 
     func testNativeWindowImageMappingRejectsPointsOutsideCapturedWindow() {

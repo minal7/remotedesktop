@@ -167,7 +167,7 @@ enum PixelGeometry {
         configuration.scalesToFit = true
         configuration.preservesAspectRatio = true
         configuration.ignoreShadowsSingleWindow = true
-        configuration.includeChildWindows = false
+        configuration.includeChildWindows = true
         return configuration
     }
 
