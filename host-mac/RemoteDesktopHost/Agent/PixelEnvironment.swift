@@ -127,21 +127,19 @@ final class PixelEnvironment: AgentEnvironment {
         } catch { return .init(ready: false, detail: "Screen capture is unavailable: \(error.localizedDescription)") }
     }
 
-    static func captureNativeWindow(_ window: SCWindow) async throws -> NativeWindowCapture {
-        let filter = SCContentFilter(desktopIndependentWindow: window)
-        let info = SCShareableContent.info(for: filter)
+    static func captureNativeWindow(_ window: SCWindow, _ availableDisplays: [SCDisplay]? = nil) async throws -> NativeWindowCapture {
+        let displays: [SCDisplay]
+        if let availableDisplays { displays = availableDisplays }
+        else { displays = try await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: true).displays }
+        guard let display = displays.first(where: { $0.frame.contains(window.frame) }) else { throw AgentEnvironmentError.unavailable("Window is not wholly on one display.") }
+        let filter = SCContentFilter(display: display, including: [window]), info = SCShareableContent.info(for: filter)
         let scale = CGFloat(info.pointPixelScale)
-        guard let size = PixelGeometry.nativeWindowPixelSize(windowBounds: window.frame, pointPixelScale: scale) else {
-            throw AgentEnvironmentError.unavailable("Could not resolve native pixels-per-point for the selected window.")
-        }
-        guard let configuration = PixelGeometry.nativeWindowCaptureConfiguration(width: size.width, height: size.height) else {
-            throw AgentEnvironmentError.unavailable("Exact independent-window capture is unavailable on this macOS version.")
-        }
-        let image = try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: configuration)
-        guard image.width == size.width, image.height == size.height else {
-            throw AgentEnvironmentError.unavailable("Captured window pixels did not match the requested native dimensions.")
-        }
-        return NativeWindowCapture(image: image, expectedPixelSize: CGSize(width: size.width, height: size.height),
+        guard let plan = PixelGeometry.displayBoundWindowCaptureConfiguration(windowBounds: window.frame,
+                displayBounds: displays.map(\.frame), pointPixelScale: scale) else { throw AgentEnvironmentError.unavailable("Exact window capture is unavailable.") }
+        let image = try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: plan.configuration)
+        guard image.width == plan.configuration.width, image.height == plan.configuration.height else { throw AgentEnvironmentError.unavailable("Captured pixels did not match window dimensions.") }
+        return NativeWindowCapture(image: image,
+            expectedPixelSize: CGSize(width: plan.configuration.width, height: plan.configuration.height),
             pointPixelScale: scale, contentRect: info.contentRect)
     }
 
@@ -407,7 +405,7 @@ final class PixelEnvironment: AgentEnvironment {
         var windowCapture = false
         if capturePreference == .frontmostWindow, let target {
             do {
-                let captured = try await Self.captureNativeWindow(target)
+                let captured = try await Self.captureNativeWindow(target, content.displays)
                 image = captured.image
                 captureBounds = target.frame; identity = axWindow?.identity ?? "window:\(target.windowID)"; windowCapture = true
             } catch {

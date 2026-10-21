@@ -158,17 +158,19 @@ enum PixelTargetContextLabel {
 }
 
 enum PixelGeometry {
-    static func nativeWindowCaptureConfiguration(width: Int, height: Int) -> SCStreamConfiguration? {
+    static func displayBoundWindowCaptureConfiguration(windowBounds: CGRect, displayBounds: [CGRect],
+        pointPixelScale: CGFloat) -> (configuration: SCStreamConfiguration, sourceRect: CGRect)? {
         guard #available(macOS 14.2, *) else { return nil }
+        let intersecting = displayBounds.filter { $0.intersects(windowBounds) }
+        guard intersecting.count == 1, let display = intersecting.first, valid(display), display.contains(windowBounds),
+              let size = nativeWindowPixelSize(windowBounds: windowBounds, pointPixelScale: pointPixelScale) else { return nil }
+        let sourceRect = windowBounds.offsetBy(dx: -display.minX, dy: -display.minY)
         let configuration = SCStreamConfiguration()
-        configuration.width = width
-        configuration.height = height
-        configuration.showsCursor = false
-        configuration.scalesToFit = true
-        configuration.preservesAspectRatio = true
-        configuration.ignoreShadowsSingleWindow = true
-        configuration.includeChildWindows = true
-        return configuration
+        configuration.width = size.width; configuration.height = size.height
+        configuration.sourceRect = sourceRect; configuration.showsCursor = false
+        configuration.scalesToFit = true; configuration.preservesAspectRatio = true
+        configuration.ignoreShadowsDisplay = true; configuration.includeChildWindows = true
+        return (configuration, sourceRect)
     }
 
     static func screenCaptureRect(fromAppKit rect: CGRect, primaryScreenMaxY: CGFloat) -> CGRect {

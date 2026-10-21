@@ -60,20 +60,42 @@ final class PixelEnvironmentTests: XCTestCase {
         XCTAssertEqual(roundTrip.y, sourceCenter.y, accuracy: 0.001)
     }
 
-    func testNativeWindowCaptureIncludesChildWindowsForPopupVisibility() throws {
-        let resolved = PixelGeometry.nativeWindowCaptureConfiguration(width: 1312, height: 844)
+    func testDisplayBoundWindowCaptureUsesDisplayLocalRectAndIncludesChildWindows() throws {
         guard #available(macOS 14.2, *) else {
-            XCTAssertNil(resolved)
+            XCTAssertNil(PixelGeometry.displayBoundWindowCaptureConfiguration(
+                windowBounds: CGRect(x: -1200, y: 130, width: 586, height: 488),
+                displayBounds: [CGRect(x: -1440, y: 50, width: 1440, height: 900)], pointPixelScale: 2))
             return
         }
-        let configuration = try XCTUnwrap(resolved)
-        XCTAssertEqual(configuration.width, 1312)
-        XCTAssertEqual(configuration.height, 844)
-        XCTAssertFalse(configuration.showsCursor)
-        XCTAssertTrue(configuration.scalesToFit)
-        XCTAssertTrue(configuration.preservesAspectRatio)
-        XCTAssertTrue(configuration.ignoreShadowsSingleWindow)
-        XCTAssertTrue(configuration.includeChildWindows)
+        let capture = try XCTUnwrap(PixelGeometry.displayBoundWindowCaptureConfiguration(
+            windowBounds: CGRect(x: -1200, y: 130, width: 586, height: 488),
+            displayBounds: [CGRect(x: -1440, y: 50, width: 1440, height: 900)], pointPixelScale: 2))
+        XCTAssertEqual(capture.sourceRect, CGRect(x: 240, y: 80, width: 586, height: 488))
+        XCTAssertEqual(capture.configuration.sourceRect, capture.sourceRect)
+        XCTAssertEqual(capture.configuration.width, 1172)
+        XCTAssertEqual(capture.configuration.height, 976)
+        XCTAssertTrue(capture.configuration.includeChildWindows)
+        XCTAssertTrue(capture.configuration.ignoreShadowsDisplay)
+        XCTAssertFalse(capture.configuration.showsCursor)
+        XCTAssertTrue(capture.configuration.scalesToFit)
+        XCTAssertTrue(capture.configuration.preservesAspectRatio)
+    }
+
+    func testDisplayBoundWindowCaptureRejectsPartialOrAmbiguousDisplayMapping() throws {
+        guard #available(macOS 14.2, *) else { return }
+        let window = CGRect(x: 90, y: 20, width: 20, height: 40)
+        XCTAssertNil(PixelGeometry.displayBoundWindowCaptureConfiguration(windowBounds: window,
+            displayBounds: [CGRect(x: 0, y: 0, width: 100, height: 100)], pointPixelScale: 2))
+        XCTAssertNil(PixelGeometry.displayBoundWindowCaptureConfiguration(windowBounds: window,
+            displayBounds: [CGRect(x: 0, y: 0, width: 200, height: 100),
+                CGRect(x: 100, y: 0, width: 100, height: 100)], pointPixelScale: 2))
+    }
+
+    func testDisplayBoundWindowCaptureRejectsInvalidScale() throws {
+        guard #available(macOS 14.2, *) else { return }
+        XCTAssertNil(PixelGeometry.displayBoundWindowCaptureConfiguration(
+            windowBounds: CGRect(x: 20, y: 20, width: 50, height: 50),
+            displayBounds: [CGRect(x: 0, y: 0, width: 100, height: 100)], pointPixelScale: 0))
     }
 
     func testNativeWindowImageMappingRejectsPointsOutsideCapturedWindow() {
