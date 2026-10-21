@@ -111,6 +111,16 @@ enum CoordinateCalibrationIdentityMatcher {
     }
 }
 
+struct CoordinateCalibrationTracePhase {
+    let phase: String
+    let uptime: TimeInterval
+    let frontmostPID: Int32?
+    let focusedAXIdentity: Int?
+    let focusedAXTitle: String?
+    let focusedAXBounds: CGRect?
+    let samePIDWindows: [[String: Double]]
+}
+
 @MainActor
 private enum CoordinateCalibration {
     private struct AppSpec {
@@ -135,6 +145,7 @@ private enum CoordinateCalibration {
         let visibleWindowCount: Int
         let pngPath: String
         let pngSHA256: String
+        var trace: [CoordinateCalibrationTracePhase]
     }
 
     private static let apps = [
@@ -158,7 +169,6 @@ private enum CoordinateCalibration {
             for spec in apps {
                 do {
                     let sample = try await capture(spec: spec, seed: seed, directory: runDirectory)
-                    windows.append(windowJSON(sample))
                     samples.append(sample)
                 } catch {
                     appFailures.append(["app": spec.name, "bundleID": spec.bundleID,
@@ -181,13 +191,18 @@ private enum CoordinateCalibration {
                         "error": "The sampled window was no longer frontmost and focused before its AX checks."])
                     continue
                 }
-                for mark in selected { checks.append(check(mark, sample: sample)) }
+                let afterReactivation = phaseSnapshot("after_reactivation", app: sample.app,
+                    target: sample.target)
+                samples[index].trace.append(afterReactivation)
+                let tracedSample = samples[index]
+                for mark in selected { checks.append(check(mark, sample: tracedSample)) }
             }
             let exactCount = checks.filter { $0["identityMatch"] as? String == "exact" }.count
             let descendantCount = checks.filter { $0["identityMatch"] as? String == "descendant" }.count
             let passCount = checks.filter { $0["calibrationPass"] as? Bool == true }.count
             let expectedCount = 20
             let appsCovered = apps.allSatisfy { (selectedCounts[$0.bundleID] ?? 0) > 0 }
+            windows = samples.map(windowJSON)
             return [
                 "operation": "coordinate_calibration",
                 "selectionSeed": seed,
@@ -374,7 +389,9 @@ private enum CoordinateCalibration {
         let marks = ElementMarks.readCapture(window: axWindow, focusedWindowElement: focused,
             focusedBounds: bounds, appRoot: root, application: app, selectedBounds: target.frame,
             budget: .seconds(2), limit: 256)
+        let beforeScreenshot = phaseSnapshot("before_screenshot", app: app, target: target)
         let native = try await PixelEnvironment.captureNativeWindow(target)
+        let afterScreenshot = phaseSnapshot("after_screenshot", app: app, target: target)
         guard NSWorkspace.shared.frontmostApplication?.processIdentifier == app.processIdentifier else {
             throw AgentEnvironmentError.scopeChanged
         }
@@ -399,7 +416,34 @@ private enum CoordinateCalibration {
                 ElementMarks.focusedWindowMatches(bounds, selectedBounds: $0.frame)
             }.count, maskedSecureRegions: maskedCount,
             visibleWindowCount: content.windows.filter { $0.owningApplication?.processID == app.processIdentifier && $0.isOnScreen }.count,
-            pngPath: pngURL.path, pngSHA256: hash)
+            pngPath: pngURL.path, pngSHA256: hash, trace: [beforeScreenshot, afterScreenshot])
+    }
+
+    private static func phaseSnapshot(_ phase: String, app: NSRunningApplication,
+                                      target: SCWindow) -> CoordinateCalibrationTracePhase {
+        let capturedAt = ProcessInfo.processInfo.systemUptime
+        let root = AXUIElementCreateApplication(app.processIdentifier)
+        AXUIElementSetMessagingTimeout(root, 0.1)
+        let focused = ElementMarks.focusedWindow(root)
+        if let focused { AXUIElementSetMessagingTimeout(focused, 0.1) }
+        let windows = (CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements],
+            kCGNullWindowID) as? [[String: Any]] ?? []).compactMap { info -> [String: Double]? in
+                guard info[kCGWindowOwnerPID as String] as? Int32 == app.processIdentifier,
+                      let id = info[kCGWindowNumber as String] as? Int,
+                      let layer = info[kCGWindowLayer as String] as? Int,
+                      let raw = info[kCGWindowBounds as String] as? [String: Any],
+                      let bounds = CGRect(dictionaryRepresentation: raw as CFDictionary),
+                      bounds.intersects(target.frame) else { return nil }
+                return ["windowID": Double(id), "layer": Double(layer),
+                    "x": bounds.origin.x, "y": bounds.origin.y,
+                    "width": bounds.width, "height": bounds.height]
+            }.prefix(32).map { $0 }
+        return CoordinateCalibrationTracePhase(phase: phase, uptime: capturedAt,
+            frontmostPID: NSWorkspace.shared.frontmostApplication?.processIdentifier,
+            focusedAXIdentity: focused.map { Int(truncatingIfNeeded: CFHash($0)) },
+            focusedAXTitle: focused.flatMap { ElementMarks.string($0, kAXTitleAttribute) },
+            focusedAXBounds: focused.flatMap(ElementMarks.bounds),
+            samePIDWindows: windows)
     }
 
     private static func check(_ mark: PixelElementMark, sample: WindowSample) -> [String: Any] {
@@ -466,10 +510,20 @@ private enum CoordinateCalibration {
         case .descendant: identityMatch = "descendant"; calibrationPass = true
         case .rejected: identityMatch = "rejected"; calibrationPass = false
         }
+        if let expected { AXUIElementSetMessagingTimeout(expected.element, 0.1) }
+        let expectedRole = expected.flatMap { ElementMarks.string($0.element, kAXRoleAttribute) }
+        let expectedBounds = expected.flatMap { ElementMarks.bounds($0.element) }
+        var expectedPID: pid_t = 0
+        let expectedPIDStatus = expected.map { AXUIElementGetPid($0.element, &expectedPID) } ?? .failure
+        let originalIdentityValid = expectedRole != nil && expectedBounds != nil &&
+            expectedPIDStatus == .success && expectedPID == sample.app.processIdentifier
         return [
             "app": sample.spec.name, "bundleID": sample.spec.bundleID,
             "windowID": sample.target.windowID, "windowTitle": sample.target.title ?? "",
             "role": mark.role, "name": mark.name, "markID": mark.id,
+            "originalIdentityValidAfterReactivation": originalIdentityValid,
+            "originalIdentityCurrentRole": expectedRole ?? "",
+            "originalIdentityCurrentBounds": expectedBounds.map { rectJSON($0) as Any } ?? NSNull(),
             "sourceCenter": pointJSON(center), "screenshotPixel": pixel.map { pointJSON($0) as Any } ?? NSNull(),
             "roundTripPoint": roundTrip.map { pointJSON($0) as Any } ?? NSNull(),
             "expectedMarkBounds": rectJSON(mark.screenRect),
@@ -529,6 +583,14 @@ private enum CoordinateCalibration {
          "resizedPixels": ["width": sample.image.width, "height": sample.image.height],
          "maskedSecureRegions": sample.maskedSecureRegions,
          "eligibleInteractiveMarks": eligibleMarks(in: sample).count,
+         "tracePhases": sample.trace.map { phase in
+            ["phase": phase.phase, "uptime": phase.uptime,
+             "frontmostPID": phase.frontmostPID ?? 0,
+             "focusedAXIdentity": phase.focusedAXIdentity ?? 0,
+             "focusedAXTitle": phase.focusedAXTitle ?? "",
+             "focusedAXBounds": phase.focusedAXBounds.map { rectJSON($0) as Any } ?? NSNull(),
+             "samePIDWindows": phase.samePIDWindows] as [String: Any]
+         },
          "pngPath": sample.pngPath, "pngSHA256": sample.pngSHA256]
     }
 
