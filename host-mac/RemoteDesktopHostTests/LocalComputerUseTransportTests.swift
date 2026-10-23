@@ -7,6 +7,26 @@ import XCTest
 
 @MainActor
 final class LocalComputerUseTransportTests: XCTestCase {
+    func testLocalMailboxUsesFastPollingAndMultiplexKeepsSlowFallbackCadence() async {
+        let local = LocalHostComputerUseChannel(
+            hostID: "HOST-ID",
+            pairingCode: "123456")
+        let slow = BufferedHostComputerUseChannel(
+            hostID: "HOST-ID",
+            pairingCode: "123456")
+
+        let localInterval = await local.pollingInterval()
+        let fallbackInterval = await slow.pollingInterval()
+        XCTAssertEqual(localInterval, .milliseconds(100))
+        XCTAssertEqual(fallbackInterval, .seconds(2))
+
+        let multiplex = MultiplexHostComputerUseChannel(
+            channels: [slow, local])
+        let multiplexInterval = await multiplex.pollingInterval()
+        XCTAssertEqual(multiplexInterval, .milliseconds(100))
+        await multiplex.stopPolling()
+    }
+
     private let hostID = "8A2269A1-A94C-4FA2-BD63-BEAEEA79A97A"
     private let peerID = "53A8D639-5DE2-4786-BE26-2AC9F853D3B6"
     private let pairingCode = "123456"

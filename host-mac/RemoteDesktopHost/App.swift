@@ -27,6 +27,20 @@ struct RemoteDesktopHostApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
 
     init() {
+#if DEBUG
+        if DebugResidentHostConfiguration.isSelected() {
+            // The resident evaluation candidate is launched directly from its
+            // staged bundle. Do not let ordinary relaunch or command handlers
+            // touch the installed Release process first.
+            return
+        }
+#else
+        if CommandLine.arguments.contains("--debug-r0-resident-host")
+            || ProcessInfo.processInfo.environment["REMOTE_DESKTOP_R0_HOST_ID"] != nil {
+            NSLog("RemoteDesktopHost R0 resident mode is unavailable in Release")
+            Darwin.exit(2)
+        }
+#endif
         if let exitCode = HostRelaunch.runIfRequested() {
             Darwin.exit(exitCode)
         }
@@ -54,7 +68,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     // XCTest is injected after the application delegate is created. Defer the
     // session (and therefore the local model manager) until AppKit begins
     // launching so HostRuntimeContext can see that injection reliably.
-    private(set) lazy var session = HostSession()
+#if DEBUG
+    private var r0Configuration: DebugResidentHostConfiguration?
+    private var r0SingleInstanceLease: HostSingleInstanceLease?
+#endif
+    private(set) lazy var session: HostSession = {
+#if DEBUG
+        guard let configuration = r0Configuration else {
+            return HostSession()
+        }
+        return HostSession(
+            deviceIdentityProvider: { configuration.hostID },
+            advertisedHostName: configuration.hostDisplayName,
+            localCredentialStore: LocalComputerUseCredentialStore(
+                service: DebugResidentHostConfiguration.credentialService),
+            allowsAutomaticComputerUseSetup: false,
+            computerUseTaskLedger: ComputerUseTaskLedger(
+                fileURL: configuration.taskLedgerURL))
+#else
+        return HostSession()
+#endif
+    }()
     private var statusItem: NSStatusItem!
     private var popover: NSPopover!
     private var setupWindowController: NSWindowController?
@@ -76,7 +110,43 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private(set) var didInstallStatusItem = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        #if DEBUG
+#if DEBUG
+        if DebugResidentHostConfiguration.isSelected() {
+            guard let configuration = DebugResidentHostConfiguration.parse() else {
+                NSLog("RemoteDesktopHost R0 resident selector or host UUID is malformed")
+                Darwin.exit(2)
+            }
+            r0Configuration = configuration
+            do {
+                guard let lease = try HostSingleInstance.acquire(
+                    bundleIdentifier: configuration.lockIdentity) else {
+                    NSLog("RemoteDesktopHost R0 candidate is already running")
+                    Darwin.exit(2)
+                }
+                r0SingleInstanceLease = lease
+            } catch {
+                NSLog("RemoteDesktopHost R0 candidate could not acquire its isolated lock: \(error)")
+                Darwin.exit(2)
+            }
+
+            NSApp.setActivationPolicy(.prohibited)
+            let permissions = SystemPermissionsProvider()
+            guard permissions.screenRecordingGranted(),
+                  permissions.accessibilityGranted() else {
+                NSLog("RemoteDesktopHost R0 candidate requires existing Screen Recording and Accessibility grants; no prompt was requested")
+                Darwin.exit(2)
+            }
+            configureTerminationSignalHandling()
+            session.refreshPermissions()
+            guard session.permissions.coreReady else {
+                NSLog("RemoteDesktopHost R0 candidate permissions changed during preflight; no prompt was requested")
+                Darwin.exit(2)
+            }
+            session.start()
+            return
+        }
+#endif
+#if DEBUG
         if DebugAgentEvalCommand.shouldRun() {
             NSApp.setActivationPolicy(.prohibited)
             Task { @MainActor in
@@ -168,6 +238,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+#if DEBUG
+        if r0Configuration != nil {
+            terminationSignalSource?.cancel()
+            terminationSignalSource = nil
+            return
+        }
+#endif
         guard HostRuntimeContext.shouldInstallVisibleChrome,
               ownsSingleInstanceLease else { return }
         terminationSignalSource?.cancel()
@@ -187,7 +264,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         _ sender: NSApplication
     ) -> NSApplication.TerminateReply {
         if rejectedDuplicateInstance { return .terminateNow }
-        guard HostRuntimeContext.shouldInstallVisibleChrome else {
+        var shouldShutDownSession = HostRuntimeContext.shouldInstallVisibleChrome
+#if DEBUG
+        shouldShutDownSession = shouldShutDownSession || r0Configuration != nil
+#endif
+        guard shouldShutDownSession else {
             return .terminateNow
         }
         switch terminationState {

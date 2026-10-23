@@ -2081,6 +2081,76 @@ final class ComputerUseTests: XCTestCase {
             ifAllowed: { false }))
     }
 
+    func test_inputInjectorStopClosesGateAndReleasesAutomationBeforeReturning() {
+        let events = CapturedCGEventStore()
+        let gate = TestBooleanProbe(true)
+        let injector = InputInjector(eventPoster: { events.append($0) }, physicalInputState: { .released })
+        XCTAssertEqual(injector.admitAutomation { gate.read() }, .admitted)
+        XCTAssertTrue(injector.apply(.key(usage: 0x04, down: true, modifiers: 0), ifAllowed: { gate.read() }))
+
+        injector.stopAutomation { gate.set(false) }
+
+        XCTAssertFalse(gate.read())
+        XCTAssertEqual(events.values().map(\.type), [.keyDown, .keyUp])
+        XCTAssertFalse(injector.apply(.key(usage: 0x05, down: true, modifiers: 0), ifAllowed: { gate.read() }))
+        XCTAssertEqual(events.values().map(\.type), [.keyDown, .keyUp])
+    }
+
+    func test_delayedAutomationCleanupDoesNotReleaseNewDirectInputHold() {
+        let events = CapturedCGEventStore()
+        let injector = InputInjector(eventPoster: { events.append($0) }, physicalInputState: { .released })
+        let gate = TestBooleanProbe(true)
+        XCTAssertTrue(injector.apply(.key(usage: 0x04, down: true, modifiers: 0), ifAllowed: { gate.read() }))
+        injector.stopAutomation { gate.set(false) }
+
+        let session = injector.beginDirectInputSession()
+        XCTAssertTrue(injector.applyDirectInput(
+            .key(usage: 0x05, down: true, modifiers: 0), session: session) { false })
+        injector.stopAutomation {}
+
+        let keyEvents = events.values().filter { $0.type == .keyDown || $0.type == .keyUp }
+        XCTAssertEqual(keyEvents.map(\.keyCode), [0x00, 0x00, 0x0B])
+        XCTAssertEqual(keyEvents.map(\.type), [.keyDown, .keyUp, .keyDown])
+        injector.endDirectInputSession(session)
+        XCTAssertEqual(events.values().filter { $0.type == .keyUp }.count, 2)
+    }
+
+    func test_inputInjectorStopSerializesBehindEventAlreadyPosting() {
+        let events = CapturedCGEventStore()
+        let enteredPoster = DispatchSemaphore(value: 0)
+        let releasePoster = DispatchSemaphore(value: 0)
+        let actionFinished = DispatchGroup()
+        let stopFinished = DispatchGroup()
+        let gate = TestBooleanProbe(true)
+        let injector = InputInjector(eventPoster: { event in
+            if event.type == .keyDown {
+                enteredPoster.signal()
+                _ = releasePoster.wait(timeout: .now() + 3)
+            }
+            events.append(event)
+        }, physicalInputState: { .released })
+        XCTAssertEqual(injector.admitAutomation { gate.read() }, .admitted)
+
+        actionFinished.enter()
+        DispatchQueue.global().async {
+            defer { actionFinished.leave() }
+            _ = injector.apply(.key(usage: 0x04, down: true, modifiers: 0), ifAllowed: { gate.read() })
+        }
+        XCTAssertEqual(enteredPoster.wait(timeout: .now() + 2), .success)
+        stopFinished.enter()
+        DispatchQueue.global().async {
+            defer { stopFinished.leave() }
+            injector.stopAutomation { gate.set(false) }
+        }
+        defer { releasePoster.signal() }
+        XCTAssertEqual(stopFinished.wait(timeout: .now() + .milliseconds(50)), .timedOut)
+        releasePoster.signal()
+        XCTAssertEqual(actionFinished.wait(timeout: .now() + 2), .success)
+        XCTAssertEqual(stopFinished.wait(timeout: .now() + 2), .success)
+        XCTAssertEqual(events.values().map(\.type), [.keyDown, .keyUp])
+        XCTAssertFalse(gate.read())
+    }
+
     func test_inputInjectorReleasesHeldRemoteInputWhenVisualTransportEnds() {
         let events = CapturedCGEventStore()
         let injector = InputInjector(eventPoster: { events.append($0) })
@@ -4759,6 +4829,62 @@ final class ComputerUseTests: XCTestCase {
         await waitUntil { executor.callCount == 1 && manager.activity == .idle }
     }
 
+    func test_remoteCancelIsDispatchedWithinTwoSecondsAfterEmptyPoll() async throws {
+        let executor = SuspendingComputerUseExecutor()
+        let channel = PollCadenceProbeChannel()
+        let ledgerURL = temporaryLedgerURL()
+        defer {
+            try? FileManager.default.removeItem(
+                at: ledgerURL.deletingLastPathComponent())
+        }
+        let manager = HostComputerUseManager(
+            experimentalEnabled: { true },
+            injector: InputInjector(),
+            executor: executor,
+            taskLedger: ComputerUseTaskLedger(fileURL: ledgerURL),
+            channelFactory: { _ in channel })
+        defer { manager.stop() }
+
+        let prompt = makeEnvelope(
+            id: "poll-cadence-stop-prompt",
+            kind: .prompt,
+            body: "Wait for Stop")
+        manager.start(pairingCode: prompt.pairingCode)
+        manager.authorizePeer(senderID: prompt.senderID)
+        let firstEmptyPollObserved = await channel.waitForEmptyPoll(atLeast: 1)
+        XCTAssertTrue(firstEmptyPollObserved)
+
+        await channel.enqueue(prompt)
+        let promptAcknowledged = await channel.waitForAcknowledgement(
+            prompt.id,
+            timeout: .seconds(5))
+        XCTAssertTrue(promptAcknowledged)
+        XCTAssertEqual(executor.callCount, 1)
+
+        // This signal is emitted after the manager's empty poll has returned,
+        // immediately before its idle wait. Enqueueing here makes dispatch
+        // latency independent of arbitrary test sleeps.
+        let emptyPollAfterPromptObserved = await channel.waitForEmptyPoll(atLeast: 2)
+        XCTAssertTrue(emptyPollAfterPromptObserved)
+        let stop = try makeControlEnvelope(
+            kind: .cancel,
+            taskID: prompt.id,
+            revision: 1)
+        let enqueuedAt = ContinuousClock.now
+        await channel.enqueue(stop)
+        let acknowledged = await channel.waitForAcknowledgement(
+            stop.id,
+            timeout: .milliseconds(1_800))
+        let elapsed = ContinuousClock.now - enqueuedAt
+
+        XCTAssertTrue(
+            acknowledged,
+            "The manager did not dispatch Stop within the 2-second budget")
+        XCTAssertLessThan(elapsed, .seconds(2))
+        await waitUntil { executor.cancellationCount == 1 }
+        XCTAssertEqual(manager.activity, .idle)
+    }
+
     func test_cancelControlStopsActiveTaskAndPublishesTerminalReadyState() async throws {
         let executor = SuspendingComputerUseExecutor()
         let channel = FakeHostComputerUseChannel()
@@ -4827,6 +4953,37 @@ final class ComputerUseTests: XCTestCase {
             executor.prompts.count,
             1,
             "A canceled task must replay its terminal result without running again")
+    }
+
+    func test_versionedCancelReleasesHeldAutomationInputBeforeReturning() async throws {
+        let executor = SuspendingComputerUseExecutor()
+        let channel = FakeHostComputerUseChannel()
+        let inputEvents = CapturedCGEventStore()
+        let injector = InputInjector(eventPoster: { inputEvents.append($0) })
+        let ledgerURL = temporaryLedgerURL()
+        defer {
+            try? FileManager.default.removeItem(at: ledgerURL.deletingLastPathComponent())
+        }
+        let manager = HostComputerUseManager(
+            experimentalEnabled: { true },
+            injector: injector,
+            executor: executor,
+            taskLedger: ComputerUseTaskLedger(fileURL: ledgerURL),
+            channelFactory: { _ in channel })
+        defer { manager.stop() }
+        let prompt = makeEnvelope(kind: .prompt, body: "Hold a key")
+        manager.authorizePeer(senderID: prompt.senderID)
+        XCTAssertTrue(manager.handle(prompt, channel: channel))
+        await waitUntil { executor.prompts.count == 1 && manager.activity == .working("Starting…") }
+
+        XCTAssertTrue(injector.apply(.key(usage: 0x04, down: true, modifiers: 0), ifAllowed: { true }))
+        XCTAssertTrue(manager.handle(
+            try makeControlEnvelope(kind: .cancel, taskID: prompt.id, revision: 1),
+            channel: channel))
+
+        XCTAssertEqual(inputEvents.values().filter { $0.type == .keyUp }.count, 1,
+            "Stop must release already-held automation input before it returns")
+        await waitUntil { executor.cancellationCount == 1 }
     }
 
     private func injectManualInput(_ message: ControlMessage, injector: InputInjector,
@@ -10494,6 +10651,99 @@ private actor FakeHostComputerUseChannel: HostComputerUseChannel {
     func acknowledge(_ envelopes: [ComputerUseEnvelope]) async throws {}
 
     func sentMessages() -> [ComputerUseEnvelope] { sent }
+}
+
+private actor PollCadenceProbeChannel: HostComputerUseChannel {
+    private var incoming: [ComputerUseEnvelope] = []
+    private var emptyPollCount = 0
+    private var acknowledgedIDs: Set<String> = []
+    private var emptyPollWaiters: [Int: CheckedContinuation<Bool, Never>] = [:]
+    private var acknowledgementWaiters: [String: CheckedContinuation<Bool, Never>] = [:]
+
+    func send(
+        kind: ComputerUseEnvelope.Kind,
+        body: String,
+        to explicitTargetID: String?,
+        sessionID explicitSessionID: String?,
+        messageID explicitMessageID: String?
+    ) async throws -> ComputerUseEnvelope {
+        ComputerUseEnvelope(
+            id: explicitMessageID ?? UUID().uuidString,
+            senderID: "HOST-ID",
+            targetID: explicitTargetID ?? "IOS-PEER",
+            pairingCode: "123456",
+            sessionID: explicitSessionID ?? "SESSION-1",
+            kind: kind,
+            body: body)
+    }
+
+    func poll() async throws -> [ComputerUseEnvelope] {
+        guard incoming.isEmpty else {
+            let result = incoming
+            incoming.removeAll(keepingCapacity: true)
+            return result
+        }
+        emptyPollCount += 1
+        for (target, waiter) in emptyPollWaiters where emptyPollCount >= target {
+            emptyPollWaiters[target] = nil
+            waiter.resume(returning: true)
+        }
+        return []
+    }
+
+    func pollingInterval() async -> Duration { .milliseconds(100) }
+
+    func acknowledge(_ envelopes: [ComputerUseEnvelope]) async throws {
+        for envelope in envelopes {
+            acknowledgedIDs.insert(envelope.id)
+            acknowledgementWaiters.removeValue(forKey: envelope.id)?
+                .resume(returning: true)
+        }
+    }
+
+    func enqueue(_ envelope: ComputerUseEnvelope) {
+        incoming.append(envelope)
+    }
+
+    func waitForEmptyPoll(
+        atLeast target: Int,
+        timeout: Duration = .seconds(5)
+    ) async -> Bool {
+        guard emptyPollCount < target else { return true }
+        return await withCheckedContinuation { continuation in
+            emptyPollWaiters[target] = continuation
+            scheduleTimeout(timeout, emptyPollTarget: target)
+        }
+    }
+
+    func waitForAcknowledgement(
+        _ id: String,
+        timeout: Duration
+    ) async -> Bool {
+        guard !acknowledgedIDs.contains(id) else { return true }
+        return await withCheckedContinuation { continuation in
+            acknowledgementWaiters[id] = continuation
+            scheduleTimeout(timeout, acknowledgementID: id)
+        }
+    }
+
+    private func scheduleTimeout(
+        _ duration: Duration,
+        emptyPollTarget: Int? = nil,
+        acknowledgementID: String? = nil
+    ) {
+        Task {
+            try? await Task.sleep(for: duration)
+            if let emptyPollTarget {
+                self.emptyPollWaiters.removeValue(forKey: emptyPollTarget)?
+                    .resume(returning: false)
+            }
+            if let acknowledgementID {
+                self.acknowledgementWaiters.removeValue(forKey: acknowledgementID)?
+                    .resume(returning: false)
+            }
+        }
+    }
 }
 
 private actor TeardownOrderingComputerUseChannel: HostComputerUseChannel {

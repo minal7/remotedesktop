@@ -316,9 +316,15 @@ final class PixelEnvironment: AgentEnvironment {
         return .init(status: .ok, result: resultLine("\(detail) → \(summary)"))
     }
 
-    func suspend() async { suspended = true; injector.releaseHeldInput() }
+    func suspend() async {
+        suspended = true
+        injector.stopAutomation {}
+    }
     func resume() async throws { guard !stopped else { throw CancellationError() }; suspended = false }
-    func stop() async { stopped = true; injector.releaseHeldInput() }
+    func stop() async {
+        stopped = true
+        injector.stopAutomation {}
+    }
 
     func captureSnapshot() async throws -> Snapshot {
         try checkActive()

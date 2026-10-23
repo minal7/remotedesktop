@@ -2790,6 +2790,44 @@ extension OSAtlasLlamaRuntimeTests {
         await runtime.shutdown()
     }
 
+    func testQueuedAgentActionCancellationDropsTheRequestBeforeInference() async throws {
+        let events = RuntimeEventLog(), launcher = FakeLlamaLauncher(events: events)
+        let transport = FakeTransportMaker(events: events, blocksCompletion: true)
+        let runtime = textRuntime(launcher, transports: transport)
+        do {
+            let inputs = AgentVisionRuntimeInputs(model: .fara15_4b,
+                modelURL: URL(fileURLWithPath: "/models/Fara1.5-4B-Q4_K_M.gguf"),
+                projectorURL: URL(fileURLWithPath: "/models/mmproj-Fara1.5-4B-f16.gguf"),
+                llamaServerURL: URL(fileURLWithPath: "/runtime/llama-server"))
+            let endpoint = try await runtime.activateAgentVision(inputs)
+            let input = try agentRuntimeRequestInput()
+            let owner = Task { try await runtime.completeAgentAction(endpoint: endpoint, input: input) }
+            await transport.waitUntilCompletionStarted()
+
+            let queued = Task { try await runtime.completeAgentAction(endpoint: endpoint, input: input) }
+            try await waitForModelAccessQueue(1) { await runtime.queuedModelAccessRequestCount }
+            queued.cancel()
+            do {
+                _ = try await queued.value
+                XCTFail("A Stop-cancelled queued agent request must not acquire the model")
+            } catch is CancellationError {}
+
+            let queuedCount = await runtime.queuedModelAccessRequestCount
+            XCTAssertEqual(queuedCount, 0)
+            XCTAssertEqual(transport.recordedCompletionRequests().count, 1,
+                "Only the in-flight request may reach the model transport")
+            XCTAssertEqual(transport.recordedTokenCountRequests().count, 1,
+                "The cancelled queued request must not reach tokenization")
+            owner.cancel()
+            do { _ = try await owner.value; XCTFail("The in-flight request should cancel") }
+            catch is CancellationError {}
+        } catch {
+            await runtime.shutdown()
+            throw error
+        }
+        await runtime.shutdown()
+    }
+
     private func agentRuntimeRequestInput() throws -> AgentVLMRequestInput {
         let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
             .deletingLastPathComponent().deletingLastPathComponent()

@@ -392,6 +392,15 @@ final class InputInjector: @unchecked Sendable {
         return interrupted
     }
 
+    /// Closes automation and releases its held input in the same posting
+    /// transaction. Direct-input ownership remains with its live session.
+    func stopAutomation(closeGate: () -> Void) {
+        lock.lock()
+        defer { lock.unlock() }
+        closeGate()
+        releaseHeldAutomationInputLocked()
+    }
+
     /// Releases every pointer button and key owned by the current remote-input
     /// stream even when no AI action is presently inside the automation gate.
     /// A visual-sidecar transport can disappear while the person is dragging

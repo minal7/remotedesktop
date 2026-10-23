@@ -500,13 +500,43 @@ final class AgentLoopTests: XCTestCase {
         XCTAssertEqual(environment.executed.count, 1)
     }
 
+    func testCancellationIgnoringPolicyCannotExecuteItsLateInput() async throws {
+        let environment = TestEnvironment(frames: [webFrame(elements: [button(id: 1, name: "Continue")])])
+        let policy = LateOutputPolicy(.click(target: .element(id: 1), button: nil, count: nil))
+        let recorder = TestRecorder()
+        let loop = try makeLoop(environment: environment, policy: policy, recorder: recorder,
+                                journal: TestJournal(), trustedWeb: true)
+
+        let run = Task { try await loop.run() }
+        let deadline = ContinuousClock.now + .seconds(2)
+        while !policy.proposalStarted, ContinuousClock.now < deadline { await Task.yield() }
+        guard policy.proposalStarted else {
+            run.cancel()
+            _ = try? await run.value
+            XCTFail("The fake policy did not enter its in-flight proposal")
+            return
+        }
+
+        let cancellation = Task { try await loop.cancel() }
+        let result = try await cancellation.value
+        let runResult = try await run.value
+
+        guard case .cancelled = result else { return XCTFail("Stop did not cancel the loop") }
+        guard case .cancelled = runResult else { return XCTFail("The in-flight run did not cancel") }
+        XCTAssertTrue(loop.didFinish)
+        XCTAssertEqual(recorder.footer?.outcome, "cancelled")
+        XCTAssertEqual(environment.executed.count, 0,
+            "A policy that returns an input after Stop must be fenced before environment execution")
+        XCTAssertEqual(policy.stopCount, 1)
+    }
+
     func testMaximumLoopBudgetClampsLegacyFortyStepRequestsToThirty() throws {
         let loop = try makeLoop(environment: TestEnvironment(frames: [webFrame()]),
             policy: TestPolicy([]), recorder: TestRecorder(), journal: TestJournal(), maxSteps: 40)
         XCTAssertEqual(loop.maxSteps, 30)
     }
 
-    private func makeLoop(environment: TestEnvironment, policy: TestPolicy, recorder: TestRecorder,
+    private func makeLoop(environment: TestEnvironment, policy: any AgentPolicy, recorder: TestRecorder,
                           journal: TestJournal, trustedWeb: Bool = false,
                           appIdentity: String? = nil, maxSteps: Int = 40) throws -> AgentLoop {
         let store = TestTrustStore(trustedWeb: trustedWeb)
@@ -554,6 +584,30 @@ private final class TestPolicy: AgentPolicy {
         }
     }
     func stop() async { stopCount += 1 }
+}
+
+@MainActor
+private final class LateOutputPolicy: AgentPolicy {
+    let promptVersion = "late-output-test"
+    private let output: AgentPolicyOutput
+    private var continuation: CheckedContinuation<AgentPolicyOutput, Never>?
+    private(set) var proposalStarted = false
+    private(set) var stopCount = 0
+
+    init(_ action: AgentAction) {
+        output = .init(rawOutput: "late action", action: action, rejectionReason: nil)
+    }
+
+    func propose(_ observation: AgentObservation) async throws -> AgentPolicyOutput {
+        proposalStarted = true
+        return await withCheckedContinuation { continuation = $0 }
+    }
+
+    func stop() async {
+        stopCount += 1
+        continuation?.resume(returning: output)
+        continuation = nil
+    }
 }
 
 @MainActor

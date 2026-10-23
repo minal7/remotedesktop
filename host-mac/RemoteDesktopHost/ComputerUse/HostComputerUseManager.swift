@@ -3434,11 +3434,14 @@ protocol HostComputerUseChannel: Sendable {
     ) async throws -> ComputerUseEnvelope
 
     func poll() async throws -> [ComputerUseEnvelope]
+    func pollingInterval() async -> Duration
     func acknowledge(_ envelopes: [ComputerUseEnvelope]) async throws
     func stopPolling() async
 }
 
 extension HostComputerUseChannel {
+    func pollingInterval() async -> Duration { .seconds(2) }
+
     @discardableResult
     func send(
         kind: ComputerUseEnvelope.Kind,
@@ -3501,6 +3504,10 @@ actor SetupOnlyHostComputerUseChannel: HostComputerUseChannel {
             try await wrapped.acknowledge(rejected)
         }
         return envelopes.filter { $0.kind == .setupRequest }
+    }
+
+    func pollingInterval() async -> Duration {
+        await wrapped.pollingInterval()
     }
 
     func acknowledge(_ envelopes: [ComputerUseEnvelope]) async throws {
@@ -4742,7 +4749,7 @@ final class HostComputerUseManager: ObservableObject {
             }
 
             do {
-                try await Task.sleep(for: .seconds(2))
+                try await Task.sleep(for: await channel.pollingInterval())
             } catch {
                 return
             }
@@ -5318,7 +5325,9 @@ final class HostComputerUseManager: ObservableObject {
         // Cancel is terminal for this execution. Keep the automation gate
         // closed until a later, separately claimed Prompt explicitly begins;
         // never let cancellation-ignoring work inject during unwind.
-        actionGate.endAutomation(allowsActions: false)
+        injector.stopAutomation { [actionGate] in
+            actionGate.endAutomation(allowsActions: false)
+        }
         let invalidatedApproval = pendingApproval
         postedApprovedVisualTaskID = nil
         cancelActiveVisualApprovalContinuation()

@@ -64,6 +64,7 @@ final class HostSession: ObservableObject {
     private let permissionsProvider: PermissionsProvider
     private let validateAudioInputEntitlements: @Sendable () throws -> Void
     private let deviceIdentityProvider: @Sendable () -> String
+    private let advertisedHostName: String?
     private let cloudAccountBindingProvider:
         @Sendable () async throws -> CloudKitAccountBinding
     private let signalingRunOverride: (@MainActor @Sendable (String) async -> Void)?
@@ -73,7 +74,7 @@ final class HostSession: ObservableObject {
     private var disconnecting = false
     private let iceConfigFetcher = ICEConfigFetcher(
         containerIdentifier: HostConfig.cloudKitContainerIdentifier)
-    private let localCredentialStore = LocalComputerUseCredentialStore()
+    private let localCredentialStore: LocalComputerUseCredentialStore
     private var localComputerUseServer: LocalComputerUseBrokerServer?
     private var localComputerUseChannel: LocalHostComputerUseChannel?
     /// Set by every CloudKit account-change notification, including ones that
@@ -93,6 +94,10 @@ final class HostSession: ObservableObject {
         deviceIdentityProvider: @escaping @Sendable () -> String = {
             DeviceIdentity.get()
         },
+        advertisedHostName: String? = nil,
+        localCredentialStore: LocalComputerUseCredentialStore =
+            LocalComputerUseCredentialStore(),
+        allowsAutomaticComputerUseSetup: Bool = true,
         cloudAccountBindingProvider: @escaping @Sendable () async throws
             -> CloudKitAccountBinding = {
                 try await CloudKitAccountBinding.current(
@@ -111,10 +116,13 @@ final class HostSession: ObservableObject {
             injector: injector,
             executor: computerUseExecutor,
             taskLedger: computerUseTaskLedger ?? ComputerUseTaskLedger(),
-            allowsExternalServices: allowsExternalComputerUseServices)
+            allowsExternalServices: allowsExternalComputerUseServices,
+            allowsAutomaticSetup: allowsAutomaticComputerUseSetup)
         self.permissionsProvider = permissionsProvider
         self.validateAudioInputEntitlements = validateAudioInputEntitlements
         self.deviceIdentityProvider = deviceIdentityProvider
+        self.advertisedHostName = advertisedHostName
+        self.localCredentialStore = localCredentialStore
         self.cloudAccountBindingProvider = cloudAccountBindingProvider
         self.signalingRunOverride = signalingRunOverride
     }
@@ -519,7 +527,9 @@ final class HostSession: ObservableObject {
             return
         }
         guard !Task.isCancelled else { return }
-        let hostName = Host.current().localizedName ?? ProcessInfo.processInfo.hostName
+        let hostName = advertisedHostName
+            ?? Host.current().localizedName
+            ?? ProcessInfo.processInfo.hostName
         let claimedComputerUseCapability = computerUse.capability
         let localChannel = LocalHostComputerUseChannel(
             hostID: senderID,

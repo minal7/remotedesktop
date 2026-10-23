@@ -224,6 +224,66 @@ final class HostPeerInputAuthorization: @unchecked Sendable {
     }
 }
 
+private final class PeerCloseBarrier: @unchecked Sendable {
+    private let lock = NSLock()
+    private var finished = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    func wait() async {
+        await withCheckedContinuation { continuation in
+            lock.lock()
+            if finished {
+                lock.unlock()
+                continuation.resume()
+                return
+            }
+            waiters.append(continuation)
+            lock.unlock()
+        }
+    }
+
+    func finish() {
+        lock.lock()
+        finished = true
+        let pending = waiters
+        waiters.removeAll()
+        lock.unlock()
+        pending.forEach { $0.resume() }
+    }
+}
+
+/// Gives every caller the same teardown barrier while allowing the session to
+/// snapshot its state under its own lock before performing native cleanup.
+final class PeerCloseCoordinator: @unchecked Sendable {
+    private let lock = NSLock()
+    private var completion: Task<Void, Never>?
+
+    /// Revoke authority for every caller, but let only the first caller run
+    /// teardown. Neither callback runs while the coordinator lock is held, so
+    /// native close callbacks may safely reenter this method.
+    func close(revokeInput: () -> Void,
+               teardown: () -> Task<Void, Never>) -> Task<Void, Never> {
+        lock.lock()
+        if let completion {
+            lock.unlock()
+            revokeInput()
+            return completion
+        }
+        let barrier = PeerCloseBarrier()
+        let task = Task { await barrier.wait() }
+        completion = task
+        lock.unlock()
+
+        revokeInput()
+        let teardown = teardown()
+        Task {
+            await teardown.value
+            barrier.finish()
+        }
+        return task
+    }
+}
+
 final class HostPeerSession: NSObject {
     struct PeerAuthorization: Equatable, Sendable {
         let senderID: String
@@ -274,7 +334,7 @@ final class HostPeerSession: NSObject {
     private var captureRecovery: CaptureRecoveryEpisode?
     private var captureRecoveryDeadlineTask: Task<Void, Never>?
     private var lastVideoAttempt: CaptureAttemptLease?
-    private var captureTeardownTask: Task<Void, Never>?
+    private let closeCoordinator = PeerCloseCoordinator()
     private var hostSeq: UInt32 = 0
     private var answerSent = false
     private var pendingLocalICEPayloads: [[String: String]] = []
@@ -397,48 +457,55 @@ final class HostPeerSession: NSObject {
     /// task before installing new capture callbacks on the shared capturer.
     @discardableResult
     func close(reason: String) -> Task<Void, Never> {
-        closeStateLock.lock()
-        if let captureTeardownTask {
-            closeStateLock.unlock()
-            return captureTeardownTask
+        return closeCoordinator.close(revokeInput: {
+            self.inputAuthorization.close()
+        }) {
+            self.closeStateLock.lock()
+            self.ended = true
+            let restartTask = self.captureRestartTask
+            self.captureRestartTask = nil
+            self.captureRestartID = nil
+            self.captureRecovery = nil
+            let recoveryDeadlineTask = self.captureRecoveryDeadlineTask
+            self.captureRecoveryDeadlineTask = nil
+            let owner = self.captureOwner
+            let channelToClose = self.dataChannel
+            self.dataChannel = nil
+            let peerConnectionToClose = self.peerConnection
+            self.peerConnection = nil
+            self.videoSender = nil
+            self.adaptedVideoWidth = nil
+            self.adaptedVideoHeight = nil
+            self.lastVideoAttempt = nil
+            let shouldDetachAudio = self.audioEnabled
+            let shouldStopAudioRecording = self.audioRecordingStarted
+            self.audioRecordingStarted = false
+            self.localMediaConfigured = false
+            self.hostSeq &+= 1
+            let timestamp = UInt64(DispatchTime.now().uptimeNanoseconds / 1_000)
+            let byePayload = self.messageData(for: .bye(reason: reason), seq: self.hostSeq, ts: timestamp)
+            self.closeStateLock.unlock()
+
+            restartTask?.cancel()
+            recoveryDeadlineTask?.cancel()
+            // Never acquire the capture gate under the peer lock: capture callbacks
+            // may synchronously reenter native peer callbacks during teardown.
+            let captureTeardown = owner.map { self.capture.endSession($0) } ?? Task {}
+            self.resetBufferedLocalICE()
+            if let channelToClose, channelToClose.readyState == .open {
+                _ = channelToClose.sendData(RTCDataBuffer(data: byePayload, isBinary: false))
+            }
+            channelToClose?.close()
+            peerConnectionToClose?.close()
+            if shouldDetachAudio {
+                self.audioBridge.detach(from: self.factory.audioDeviceModule)
+            }
+            if shouldStopAudioRecording {
+                let stopStatus = self.factory.audioDeviceModule.stopRecording()
+                self.log.info("host audio ADM stop=\(stopStatus, privacy: .public)")
+            }
+            return captureTeardown
         }
-        ended = true
-        captureRestartTask?.cancel()
-        captureRestartTask = nil
-        captureRestartID = nil
-        captureRecovery = nil
-        captureRecoveryDeadlineTask?.cancel()
-        captureRecoveryDeadlineTask = nil
-        let owner = captureOwner
-        closeStateLock.unlock()
-        inputAuthorization.close()
-        // Never acquire the capture gate under the peer lock: capture consumers
-        // can synchronously enter native peer callbacks. Retire admission before
-        // resetting those consumers, then serialize the remaining peer cleanup.
-        let teardown = owner.map { capture.endSession($0) } ?? Task {}
-        closeStateLock.lock()
-        if let captureTeardownTask {
-            closeStateLock.unlock()
-            return captureTeardownTask
-        }
-        resetBufferedLocalICE()
-        send(.bye(reason: reason))
-        dataChannel?.close()
-        dataChannel = nil
-        peerConnection?.close()
-        peerConnection = nil
-        videoSender = nil
-        adaptedVideoWidth = nil
-        adaptedVideoHeight = nil
-        lastVideoAttempt = nil
-        if audioEnabled {
-            audioBridge.detach(from: factory.audioDeviceModule)
-        }
-        stopAudioRecording()
-        captureTeardownTask = teardown
-        localMediaConfigured = false
-        closeStateLock.unlock()
-        return teardown
     }
 
     private func makePeerConnection() throws -> RTCPeerConnection {

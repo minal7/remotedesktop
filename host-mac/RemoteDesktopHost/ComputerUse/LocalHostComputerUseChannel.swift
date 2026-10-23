@@ -234,6 +234,8 @@ actor LocalHostComputerUseChannel: HostComputerUseChannel {
         inboundByID.values.sorted(by: Self.envelopeOrder)
     }
 
+    func pollingInterval() async -> Duration { .milliseconds(100) }
+
     func acknowledge(_ envelopes: [ComputerUseEnvelope]) async throws {
         for envelope in envelopes {
             guard let current = inboundByID[envelope.id],
