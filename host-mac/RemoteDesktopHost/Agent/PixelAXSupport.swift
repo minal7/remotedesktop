@@ -231,7 +231,7 @@ struct PixelAXElementState {
 enum PixelAXDiff {
     static func describe(before: [PixelAXElementState]?, after: [PixelAXElementState]?, sameApplication: Bool,
                          windowChanged: Bool) -> [String] {
-        guard sameApplication, let before, let after else { return ["window changed: \(windowChanged ? "yes" : "no")"] }
+        guard sameApplication, let before, let after else { return [windowChanged ? "window changed: yes" : "AX comparison unavailable; content change unverified"] }
         var changes: [String] = []
         let afterIDs = Set(after.map(\.identity))
         let beforeIDs = Set(before.map(\.identity))
@@ -252,7 +252,7 @@ enum PixelAXDiff {
             if old.isEnabled != fresh.isEnabled { changes.append(prefix + "enabled changed") }
             if changes.count >= 10 { return Array(changes.prefix(10)) }
         }
-        return changes
+        return changes.isEmpty && !windowChanged ? ["AX unchanged; content change unverified"] : changes
     }
 }
 

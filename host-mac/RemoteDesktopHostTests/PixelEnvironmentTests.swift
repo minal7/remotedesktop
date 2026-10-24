@@ -762,7 +762,14 @@ final class PixelEnvironmentTests: XCTestCase {
 
     func testAccessibilityDiffFallsBackToWindowChangedWhenAXIsUnavailable() {
         XCTAssertEqual(PixelAXDiff.describe(before: nil, after: nil, sameApplication: true, windowChanged: true), ["window changed: yes"])
-        XCTAssertEqual(PixelAXDiff.describe(before: nil, after: nil, sameApplication: true, windowChanged: false), ["window changed: no"])
+        XCTAssertEqual(PixelAXDiff.describe(before: nil, after: nil, sameApplication: true, windowChanged: false),
+            ["AX comparison unavailable; content change unverified"])
+
+        let unchangedAX = PixelAXElementState(identity: "same", role: "AXButton", title: "Show second tab",
+            value: nil, isEnabled: true)
+        XCTAssertEqual(PixelAXDiff.describe(before: [unchangedAX], after: [unchangedAX],
+            sameApplication: true, windowChanged: false),
+            ["AX unchanged; content change unverified"])
     }
 
     func testEmptyAccessibilityProjectionIsUnavailableRatherThanAllElementsRemoved() {
@@ -772,7 +779,7 @@ final class PixelEnvironmentTests: XCTestCase {
 
         XCTAssertNil(empty.axState)
         XCTAssertEqual(PixelAXDiff.describe(before: previous, after: empty.axState,
-            sameApplication: true, windowChanged: false), ["window changed: no"])
+            sameApplication: true, windowChanged: false), ["AX comparison unavailable; content change unverified"])
     }
 
     func testAccessibilityDiffFallsBackToWindowChangeAcrossApplications() {
@@ -781,6 +788,8 @@ final class PixelEnvironmentTests: XCTestCase {
 
         XCTAssertEqual(PixelAXDiff.describe(before: prior, after: next, sameApplication: false, windowChanged: true),
             ["window changed: yes"])
+        XCTAssertEqual(PixelAXDiff.describe(before: nil, after: nil, sameApplication: false, windowChanged: false),
+            ["AX comparison unavailable; content change unverified"])
     }
 
     func testAXValueTextPreservesNumericControlValues() {
