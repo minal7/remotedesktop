@@ -216,6 +216,7 @@ public enum MemoryFactoryError: Error, Equatable {
     case unsafeDirectory
     case unsafeDatabase
     case incompleteNewStore
+    case storageAbsent
     case storageUnavailable
     case vaultOperationFailed
     case memoryErasureFailed
@@ -237,6 +238,7 @@ extension MemoryFactoryError: LocalizedError, CustomStringConvertible, CustomDeb
         case .unsafeDirectory: return "Private memory storage directory is unsafe."
         case .unsafeDatabase: return "Private memory database path is unsafe."
         case .incompleteNewStore: return "Private memory store is incomplete; its key will not be replaced."
+        case .storageAbsent: return "Private memory store is not present."
         case .storageUnavailable: return "Private memory storage could not be opened."
         case .vaultOperationFailed: return "Protected vault operation could not be completed."
         case .memoryErasureFailed: return "Owner memory erasure could not be completed."
@@ -486,10 +488,15 @@ public enum MemoryStoreFactory {
                 }
                 let databaseExists = try validateDatabasePath(database)
                 var sidecarExists = try sidecars.map(validateDatabasePath).contains(true)
-                try ForgetRecoveryJournal.requireNoPendingMarker(client: client,
-                    root: canonicalRoot, namespace: namespace)
                 let permitsResume = initializationPermit?.root == canonicalRoot &&
                     initializationPermit?.namespace == namespace
+                if !databaseExists && !createdLock && !permitsResume && !sidecarExists {
+                    try requireReadOnlyAbsentStore(root: canonicalRoot, namespace: namespace,
+                        binding: generationBinding, client: client)
+                    throw MemoryFactoryError.storageAbsent
+                }
+                try ForgetRecoveryJournal.requireNoPendingMarker(client: client,
+                    root: canonicalRoot, namespace: namespace)
                 if permitsResume {
                     let allowed = Set([".vault-lifecycle.lock", "memory.sqlite", "memory.sqlite-wal",
                                        "memory.sqlite-shm", "memory.sqlite-journal"])
@@ -548,6 +555,35 @@ public enum MemoryStoreFactory {
             // Do not expose file paths, SQLCipher diagnostics, Keychain details, or caller data.
             throw MemoryFactoryError.storageUnavailable
         }
+    }
+
+    private static func requireReadOnlyAbsentStore(root: URL, namespace: KeychainNamespace,
+        binding: MemoryStoreBinding?, client: any KeychainClient) throws {
+        guard let binding, binding.hasConsistentReference() else {
+            throw MemoryFactoryError.incompleteNewStore
+        }
+        var boundRootInfo = stat(), openedRootInfo = stat()
+        guard binding.generation.root.path.withCString({ stat($0, &boundRootInfo) }) == 0,
+              root.path.withCString({ stat($0, &openedRootInfo) }) == 0,
+              (boundRootInfo.st_mode & S_IFMT) == S_IFDIR,
+              (openedRootInfo.st_mode & S_IFMT) == S_IFDIR,
+              boundRootInfo.st_dev == openedRootInfo.st_dev,
+              boundRootInfo.st_ino == openedRootInfo.st_ino else {
+            throw MemoryFactoryError.incompleteNewStore
+        }
+        let entries = Set(try FileManager.default.contentsOfDirectory(atPath: root.path))
+        var allowed: Set<String> = [".vault-lifecycle.lock"]
+        var parentRootInfo = stat()
+        let parentIsCurrentRoot = binding.generation.parentRoot.path.withCString {
+            stat($0, &parentRootInfo)
+        } == 0 && parentRootInfo.st_dev == openedRootInfo.st_dev &&
+            parentRootInfo.st_ino == openedRootInfo.st_ino
+        if parentIsCurrentRoot { allowed.insert(".generation-transition.lock") }
+        guard entries == allowed else {
+            throw MemoryFactoryError.incompleteNewStore
+        }
+        try ForgetRecoveryJournal.requireCompletedForget(client: client, root: root,
+            namespace: namespace)
     }
 
     private static func removeUncommittedDatabaseSidecars(_ sidecars: [URL]) throws {

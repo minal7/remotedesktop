@@ -277,6 +277,17 @@ final class PersonalMemoryCoordinator {
             }
         } catch let error as OwnerMemoryWriterError {
             return reply(command, status: Self.status(for: error))
+        } catch MemoryFactoryError.storageAbsent {
+            guard !Task.isCancelled, !isClosed, erasureState == nil,
+                  isCurrentPolicyLease(hostLease, context: context) else {
+                return reply(command, status: .unauthorized)
+            }
+            switch command.operation {
+            case .listRecords, .searchRecords:
+                return recordsReply(command, records: [], nextRecordID: nil)
+            default:
+                return reply(command, status: .unavailable)
+            }
         } catch {
             return reply(command, status: .unavailable)
         }
