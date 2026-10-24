@@ -148,13 +148,38 @@ struct AgentEvalPreflightDependencies {
     let screenRecordingCheck: @MainActor () -> Bool
     let pixelReadinessCheck: @MainActor () async -> PixelEnvironmentReadiness
     let modelCheck: @MainActor (AgentPolicyModel) async -> String?
+    let modelReadinessDetail: @MainActor () -> String
     let trustSeeder: @MainActor ([AgentEvalTrustSeed]) throws -> AgentEvalTrustSeedResult
+
+    init(signedHostCheck: @escaping @MainActor () -> Bool,
+         accessibilityCheck: @escaping @MainActor () -> Bool,
+         screenRecordingCheck: @escaping @MainActor () -> Bool,
+         pixelReadinessCheck: @escaping @MainActor () async -> PixelEnvironmentReadiness,
+         modelCheck: @escaping @MainActor (AgentPolicyModel) async -> String?,
+         modelReadinessDetail: @escaping @MainActor () -> String = { "Selected model completed its bounded runtime readiness check." },
+         trustSeeder: @escaping @MainActor ([AgentEvalTrustSeed]) throws -> AgentEvalTrustSeedResult) {
+        self.signedHostCheck = signedHostCheck
+        self.accessibilityCheck = accessibilityCheck
+        self.screenRecordingCheck = screenRecordingCheck
+        self.pixelReadinessCheck = pixelReadinessCheck
+        self.modelCheck = modelCheck
+        self.modelReadinessDetail = modelReadinessDetail
+        self.trustSeeder = trustSeeder
+    }
 }
 
 enum AgentEvalPreflight {
     @MainActor
     static func run(_ request: AgentEvalPreflightRequest) async -> AgentEvalPreflightResponse {
         await run(request, dependencies: liveDependencies())
+    }
+
+    @MainActor
+    static func run(_ request: AgentEvalPreflightRequest,
+                    modelCheck: @escaping @MainActor (AgentPolicyModel) async -> String?,
+                    modelReadinessDetail: @escaping @MainActor () -> String = { "Selected model completed its bounded runtime readiness check." }) async -> AgentEvalPreflightResponse {
+        await run(request, dependencies: liveDependencies(modelCheck: modelCheck,
+            modelReadinessDetail: modelReadinessDetail))
     }
 
     @MainActor
@@ -199,7 +224,7 @@ enum AgentEvalPreflight {
                 "Complete setup for the selected local model in the signed host app, then rerun preflight.",
                 checks: checks, policy: request.policy, modelStatus: "failed")
         }
-        checks.append(.init(name: "model", status: "passed", detail: "Selected local model loaded and passed its runtime health check."))
+        checks.append(.init(name: "model", status: "passed", detail: dependencies.modelReadinessDetail()))
         let seedResult: AgentEvalTrustSeedResult
         do { seedResult = try dependencies.trustSeeder(request.trustSeeds) }
         catch {
@@ -229,14 +254,18 @@ enum AgentEvalPreflight {
     }
 
     @MainActor
-    private static func liveDependencies() -> AgentEvalPreflightDependencies {
+    private static func liveDependencies(
+        modelCheck: @escaping @MainActor (AgentPolicyModel) async -> String? = ensureModelReady,
+        modelReadinessDetail: @escaping @MainActor () -> String = { "Selected model completed its bounded runtime readiness check." }
+    ) -> AgentEvalPreflightDependencies {
         let permissions = SystemPermissionsProvider()
         return AgentEvalPreflightDependencies(
             signedHostCheck: isSignedHost,
             accessibilityCheck: { permissions.accessibilityGranted() },
             screenRecordingCheck: { permissions.screenRecordingGranted() },
             pixelReadinessCheck: { await PixelEnvironment.readiness() },
-            modelCheck: ensureModelReady,
+            modelCheck: modelCheck,
+            modelReadinessDetail: modelReadinessDetail,
             trustSeeder: seedTrust)
     }
 

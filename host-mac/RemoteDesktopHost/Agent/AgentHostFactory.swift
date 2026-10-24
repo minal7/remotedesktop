@@ -35,20 +35,16 @@ enum AgentHostFactory {
 
     static func make(receipt: ComputerUseInstallationReceipt, injector: InputInjector,
                      mayAct: @escaping () -> Bool, bundle: Bundle = .main,
-                     configuration: Configuration = .init()) throws -> ComputerUseCapabilityExecutor {
+                     configuration: Configuration = .init(),
+                     taskMemoryContextSlot: TaskMemoryContextSlot? = nil,
+                     taskMemoryFaraRuntimeInputs: PersonalMemoryFaraRuntimeInputsCache? = nil,
+                     runtime: OSAtlasLlamaRuntime = .shared) throws -> ComputerUseCapabilityExecutor {
         guard (1...40).contains(configuration.maxSteps) else {
             throw ConfigurationError.invalidMaxSteps
         }
-        let directory = try OSAtlasVisualExecutorLoader.bundledRuntimeDirectoryURL(in: bundle)
-        let faraInputs: ComputerUseFaraRuntimeInputs?
-        if configuration.policy == .fara15_4b {
-            faraInputs = try OSAtlasRuntimeInputResolver().resolveFara(receipt: receipt,
-                runtimeDirectoryURL: directory, enclosingBundleURL: bundle.bundleURL)
-        } else { faraInputs = nil }
-        let runtimeInputs = try AgentVisionRuntimeInputs.resolve(model: configuration.policy,
-            faraInputs: faraInputs,
-            modelRootURL: HostComputerUseManager.modelDirectoryURL.appendingPathComponent("Models", isDirectory: true),
-            runtimeDirectoryURL: directory, enclosingBundleURL: bundle.bundleURL)
+        let inputsCache = taskMemoryFaraRuntimeInputs ?? PersonalMemoryFaraRuntimeInputsCache()
+        let runtimeInputs = try inputsCache.resolve(receipt: receipt, model: configuration.policy,
+            bundle: bundle)
         let registry = AgentAppRegistry(openHandler: { url in
             try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
                 do {
@@ -94,9 +90,12 @@ enum AgentHostFactory {
             let journal = try AgentJournal(taskID: taskID, prompt: prompt,
                 directory: configuration.storageDirectory?.appendingPathComponent("AgentEffects", isDirectory: true)
                     ?? support.appendingPathComponent("AgentEffects", isDirectory: true))
+            let basePolicy = try LlamaVLMPolicy(runtimeInputs: runtimeInputs, runtime: runtime, bundle: bundle)
+            let policy = TaskMemoryContextPolicy.applying(
+                taskID: taskID, slot: taskMemoryContextSlot, base: basePolicy)
             return try AgentLoop(taskID: taskID, prompt: prompt, maxSteps: configuration.maxSteps,
                 environment: pixel,
-                policy: LlamaVLMPolicy(runtimeInputs: runtimeInputs, bundle: bundle),
+                policy: policy,
                 gate: AgentActionGate(trustStore: trust, allowPolicy: HostAgentAllowPolicy(registry: registry)),
                 recorder: recorder, journal: journal)
         }

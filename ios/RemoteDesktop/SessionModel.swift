@@ -246,6 +246,7 @@ final class SessionModel: ObservableObject, VideoRendererTarget {
     private let localComputerUseChannelConnector:
         LocalComputerUseChannelConnector
     private let localPendingStore: any ComputerUsePendingPromptStoring
+    private let enablePersonalMemory: Bool
     private let accountChangeNotificationCenter: NotificationCenter
     private let applicationNotificationCenter: NotificationCenter
     private var applicationObservers: [NSObjectProtocol] = []
@@ -336,6 +337,7 @@ final class SessionModel: ObservableObject, VideoRendererTarget {
             },
         localPendingStore: any ComputerUsePendingPromptStoring =
             ComputerUsePendingPromptStore.shared,
+        enablePersonalMemory: Bool = false,
         accountChangeNotificationCenter: NotificationCenter = .default
     ) {
         self.inputActivity = initialInputActivity
@@ -348,6 +350,7 @@ final class SessionModel: ObservableObject, VideoRendererTarget {
         self.localComputerUseChannelConnector =
             localComputerUseChannelConnector
         self.localPendingStore = localPendingStore
+        self.enablePersonalMemory = enablePersonalMemory
         self.accountChangeNotificationCenter = accountChangeNotificationCenter
         accountChangeObserver = accountChangeNotificationCenter.addObserver(
             forName: NSNotification.Name.CKAccountChanged,
@@ -897,7 +900,8 @@ final class SessionModel: ObservableObject, VideoRendererTarget {
                     sessionID: sessionID,
                     localAccountBinding: accountBinding,
                     pendingStore: pendingStore,
-                    channel: channel)
+                    channel: channel,
+                    ownerMemoryDisplayEnabled: self.enablePersonalMemory)
                 self.hostName = hostName
                 self.computerUseSession = model
                 self.state = .connected

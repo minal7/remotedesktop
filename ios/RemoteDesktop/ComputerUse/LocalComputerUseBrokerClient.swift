@@ -18,7 +18,7 @@ protocol ComputerUseSetupChannel: Sendable {
 /// contracts as CloudKit, so prompt recovery, lifecycle controls, approvals,
 /// and typed terminal outcomes retain their existing semantics.
 actor LocalComputerUseBrokerClient:
-    ComputerUseSessionChannel, ComputerUseSetupChannel {
+    ComputerUseSessionChannel, ComputerUseSetupChannel, PersonalMemoryChannel {
     private let endpoint: LocalComputerUseEndpoint
     private let credential: LocalComputerUseCredential
     private let pairingCode: String
@@ -95,6 +95,24 @@ actor LocalComputerUseBrokerClient:
             guard inboxByID[envelope.id] == envelope else { continue }
             inboxByID[envelope.id] = nil
         }
+    }
+
+    /// Owner memory uses a typed request/reply frame separate from the task
+    /// mailbox so memory values never enter prompt, retry, or lifecycle traffic.
+    func sendMemoryCommand(_ command: LocalMemoryRPCCommand) async throws -> LocalMemoryRPCReply {
+        let request = LocalComputerUseRPCRequest(
+            senderID: senderID,
+            targetID: targetID,
+            sessionID: sessionID,
+            memoryCommand: command)
+        let response = try await LocalComputerUseRPCTransport.call(
+            endpoint: endpoint,
+            credential: credential,
+            request: request)
+        guard let reply = try response.memoryResult(for: request) else {
+            throw LocalComputerUseRPCValidationError.memoryReplyMissing
+        }
+        return reply
     }
 
     @discardableResult

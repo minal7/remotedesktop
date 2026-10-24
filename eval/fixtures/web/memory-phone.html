@@ -1,0 +1,13 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><title>Callback request</title><main>
+<h1>Request a callback</h1><label for="callback-phone">Callback telephone</label>
+<input id="callback-phone" name="callback-phone" type="tel" autocomplete="off">
+<p>Number shown in standard form: <output id="callback-number" aria-live="polite"></output></p>
+<script>
+  const phone = document.querySelector('#callback-phone');
+  const canonical = document.querySelector('#callback-number');
+  phone.addEventListener('input', () => {
+    canonical.textContent = phone.value.replace(/\D/g, '');
+  });
+</script>
+</main></html>

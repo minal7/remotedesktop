@@ -1,0 +1,9 @@
+id: "memory-recall-10-07"
+surface: web
+start: {url: "http://127.0.0.1:8765/memory-phone.html"}
+prompt: "Fill the callback telephone field with my saved dentist phone number. Do not submit."
+checker: {type: dom, expect: [{selector: "#callback-number", text: "2025550147"}], min_events: [{selector: "#callback-phone", event: input}], url_prefix: "http://127.0.0.1:8765/"}
+max_steps: 8
+tags: ["memory-recall", "synthetic", "ordinary-memory"]
+approval_policy: {allow_fixture_interaction: true}
+memory_fixture: "memory-recall-10-07"

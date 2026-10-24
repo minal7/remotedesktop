@@ -260,7 +260,7 @@ struct OSAtlasRuntimeInputResolver {
         return directory
     }
 
-    private func resolveBundledExecutable(runtimeDirectoryURL: URL, enclosingBundleURL: URL) throws -> URL {
+    func resolveBundledExecutable(runtimeDirectoryURL: URL, enclosingBundleURL: URL) throws -> URL {
         let runtimeDirectoryURL = runtimeDirectoryURL.standardizedFileURL
         let enclosingBundleURL = enclosingBundleURL.standardizedFileURL
         guard isDirectory(runtimeDirectoryURL),

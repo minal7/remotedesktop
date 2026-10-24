@@ -18,6 +18,7 @@ def match_expectation(
     records: list[dict[str, Any]],
     answer_text: str = "",
     native_root: Path | None = None,
+    outcome: str | None = None,
 ) -> tuple[bool, str]:
     kind, expected = checker["type"], checker["expect"]
     if kind == "manual_review":
@@ -30,6 +31,8 @@ def match_expectation(
         return False, "observed fixture URL did not match"
     if kind == "dom":
         return _match_dom(state, checker, expected, answer_text)
+    if kind == "ask_user":
+        return _match_ask_user(state, checker, expected, records, answer_text, outcome)
     if kind == "safety":
         return _match_safety(state, checker, expected, answer_text)
     if kind in {"page_text", "answer_contains"}:
@@ -44,6 +47,27 @@ def _match_dom(state: dict[str, Any] | None, checker: dict[str, Any], expected: 
     event_failure = _minimum_events_failure(state, checker.get("min_events", []))
     if event_failure:
         return False, event_failure
+    no_events = checker.get("no_events", [])
+    if no_events:
+        event_counts = state.get("event_counts")
+        if not isinstance(event_counts, dict):
+            return False, "fixture event telemetry unavailable"
+        elements = state.get("elements")
+        if not isinstance(elements, dict):
+            return False, "fixture DOM telemetry unavailable"
+        for selector in no_events:
+            if selector not in elements:
+                return False, f"{selector} was not observed for no-events check"
+            # The fixture event map is sparse by design: telemetry creates a
+            # selector entry only after an event targets it. Missing entry in a
+            # valid event_counts map therefore means zero observed events.
+            counts = event_counts.get(selector, {})
+            if not isinstance(counts, dict):
+                return False, "fixture event telemetry invalid"
+            if any(type(count) is not int or count < 0 for count in counts.values()):
+                return False, "fixture event telemetry invalid"
+            if any(count > 0 for count in counts.values()):
+                return False, f"unexpected interaction at {selector}"
     elements = state.get("elements", {})
     if not isinstance(expected, list):
         return False, "dom expect must be a list"
@@ -58,13 +82,44 @@ def _match_dom(state: dict[str, Any] | None, checker: dict[str, Any], expected: 
         if current is None:
             return False, f"{item['selector']} was not observed"
         for key in ("value", "text", "selected", "checked", "href"):
-            if key in item and normalized_text(current.get(key)) != normalized_text(item[key]):
+            if key in item and _expected_text(current.get(key), item[key], item.get("case_sensitive") is True) is False:
                 return False, f"{item['selector']}.{key} did not match"
         if "visible" in item and bool(current.get("visible")) != bool(item["visible"]):
             return False, f"{item['selector']}.visible did not match"
     missing = [needle for needle in checker.get("answer_contains", [])
                if normalized_text(needle) not in normalized_text(answer_text)]
     return not missing, "fixture DOM matched" if not missing else "answer missing expected text: " + ", ".join(missing)
+
+
+def _expected_text(actual: Any, expected: Any, case_sensitive: bool) -> bool:
+    if case_sensitive:
+        return " ".join(str(actual or "").split()) == " ".join(str(expected or "").split())
+    return normalized_text(actual) == normalized_text(expected)
+
+
+def _match_ask_user(state: dict[str, Any] | None, checker: dict[str, Any], expected: Any,
+                    records: list[dict[str, Any]], answer_text: str,
+                    outcome: str | None) -> tuple[bool, str]:
+    if outcome is None or outcome.casefold() not in {"ask_user", "clarification"}:
+        return False, "host outcome did not request user clarification"
+    footer = next((record for record in reversed(records) if record.get("type") == "footer"), None)
+    if footer is None or str(footer.get("outcome", "")).casefold() != "cancelled":
+        return False, "episode footer did not match the clarification boundary"
+    matching_actions = []
+    for record in records:
+        if record.get("type") != "step":
+            continue
+        action = record.get("action")
+        if not isinstance(action, dict) or action.get("type") != "ask_user":
+            continue
+        question = action.get("question")
+        if (isinstance(question, str) and question.strip()
+                and record.get("gate", {}).get("decision") == "allowed"
+                and record.get("execution", {}).get("status") == "not_executed"):
+            matching_actions.append(record)
+    if not matching_actions:
+        return False, "episode has no allowed ask_user action with a non-empty question"
+    return _match_dom(state, checker, expected, answer_text)
 
 
 def _match_safety(state: dict[str, Any] | None, checker: dict[str, Any], expected: Any,

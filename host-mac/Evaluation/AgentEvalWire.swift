@@ -163,6 +163,32 @@ struct AgentEvalPixelMetadataRecord: Encodable {
 }
 
 struct AgentEvalRequest: Decodable {
+    struct FaraExchangeCapture: Decodable, Equatable {
+        let caseID: String
+        let runToken: String
+
+        init(from decoder: Decoder) throws {
+            let dynamic = try decoder.container(keyedBy: DynamicKey.self)
+            guard Set(dynamic.allKeys.map(\.stringValue)) == ["case_id", "run_token"] else {
+                throw AgentEvalWireError.invalidRequest
+            }
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            caseID = try container.decode(String.self, forKey: .caseID)
+            runToken = try container.decode(String.self, forKey: .runToken)
+        }
+
+        private struct DynamicKey: CodingKey {
+            let stringValue: String
+            let intValue: Int? = nil
+            init?(stringValue: String) { self.stringValue = stringValue }
+            init?(intValue: Int) { return nil }
+        }
+
+        private enum CodingKeys: String, CodingKey, CaseIterable {
+            case caseID = "case_id", runToken = "run_token"
+        }
+    }
+
     struct Start: Decodable {
         let url: String?
         let app: String?
@@ -208,6 +234,9 @@ struct AgentEvalRequest: Decodable {
     let policy: String
     let approvalPolicy: ApprovalPolicy?
     let setupDocument: URL?
+    let faraExchangeCapture: FaraExchangeCapture?
+    let memoryFixture: String?
+    let memoryPolicy: ComputerUseTaskMemoryPolicy
 
     private enum CodingKeys: String, CodingKey, CaseIterable {
         case taskID = "task_id"
@@ -216,16 +245,33 @@ struct AgentEvalRequest: Decodable {
         case policy
         case approvalPolicy = "approval_policy"
         case setupDocument = "setup_document"
+        case faraExchangeCapture = "fara_exchange_capture"
+        case memoryFixture = "memory_fixture"
+        case memoryPolicy = "memory_policy"
     }
 
     static func decodeStrict(_ data: Data,
-                             homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser) throws -> Self {
+                             homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser,
+                             environment: [String: String] = ProcessInfo.processInfo.environment) throws -> Self {
         guard let root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-              Set(root.keys).isSubset(of: ["task_id", "prompt", "start", "max_steps", "policy", "approval_policy", "setup_document"]),
+              Set(root.keys).isSubset(of: ["task_id", "prompt", "start", "max_steps", "policy", "approval_policy", "setup_document", "fara_exchange_capture", "memory_fixture", "memory_policy"]),
               !root.keys.contains("setup_document") || root["setup_document"] is String,
               ["task_id", "prompt", "start", "max_steps", "policy"].allSatisfy({ root[$0] != nil }),
               let start = root["start"] as? [String: Any],
               (Set(start.keys) == ["url"] || Set(start.keys) == ["app"]) else {
+            throw AgentEvalWireError.invalidRequest
+        }
+        if root.keys.contains("fara_exchange_capture") {
+            guard let capture = root["fara_exchange_capture"] as? [String: Any],
+                  Set(capture.keys) == ["case_id", "run_token"],
+                  capture["case_id"] is String, capture["run_token"] is String else {
+                throw AgentEvalWireError.invalidRequest
+            }
+        }
+        if root.keys.contains("memory_fixture"), !(root["memory_fixture"] is String) {
+            throw AgentEvalWireError.invalidRequest
+        }
+        if root.keys.contains("memory_policy"), !(root["memory_policy"] is [String: Any]) {
             throw AgentEvalWireError.invalidRequest
         }
         if let approval = root["approval_policy"] as? [String: Any],
@@ -239,6 +285,7 @@ struct AgentEvalRequest: Decodable {
         decoder.userInfo[.agentEvalHomeDirectory] = homeDirectory
         let request = try decoder.decode(Self.self, from: data)
         try request.validate()
+        try request.validateFaraExchangeCapture(environment: environment)
         return request
     }
 
@@ -256,6 +303,9 @@ struct AgentEvalRequest: Decodable {
         maxSteps = try container.decode(Int.self, forKey: .maxSteps)
         policy = try container.decode(String.self, forKey: .policy)
         approvalPolicy = try container.decodeIfPresent(ApprovalPolicy.self, forKey: .approvalPolicy)
+        faraExchangeCapture = try container.decodeIfPresent(FaraExchangeCapture.self, forKey: .faraExchangeCapture)
+        memoryFixture = try container.decodeIfPresent(String.self, forKey: .memoryFixture)
+        memoryPolicy = try container.decodeIfPresent(ComputerUseTaskMemoryPolicy.self, forKey: .memoryPolicy) ?? .init()
         if let path = try container.decodeIfPresent(String.self, forKey: .setupDocument) {
             guard start.app != nil, approvalPolicy?.allowStartInteraction == true,
                   let task = ProcessInfo.processInfo.environment["EVAL_TASK_ID"],
@@ -286,6 +336,65 @@ struct AgentEvalRequest: Decodable {
         if let app = start.app {
             guard !app.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
                   app.utf8.count <= 256 else { throw AgentEvalWireError.invalidRequest }
+        }
+        try validateMemoryFixture()
+    }
+
+    func validateMemoryFixture() throws {
+        guard let memoryFixture else { return }
+        var fixturePaths = ["memory-recall-10-01": "/memory-seat.html"]
+#if DEBUG
+        fixturePaths["memory-recall-10-02"] = "/memory-contact.html"
+        fixturePaths["memory-recall-10-03"] = "/memory-address.html"
+        fixturePaths["memory-recall-10-04"] = "/memory-airport.html"
+        fixturePaths["memory-recall-10-05"] = "/memory-greeting.html"
+        fixturePaths["memory-recall-10-06"] = "/memory-seat-active.html"
+        fixturePaths["memory-recall-10-07"] = "/memory-phone.html"
+        fixturePaths["memory-recall-10-08"] = "/memory-seat-unavailable.html"
+        fixturePaths["memory-recall-10-09"] = "/memory-seat-updated.html"
+        fixturePaths["memory-recall-10-10"] = "/memory-name-style.html"
+        fixturePaths["memory-privacy-10-01"] = "/memory-greeting.html"
+        fixturePaths["memory-privacy-10-02"] = "/memory-greeting.html"
+        fixturePaths["memory-privacy-10-03"] = "/memory-contact.html"
+        fixturePaths["memory-privacy-10-04"] = "/memory-address.html"
+        fixturePaths["memory-privacy-10-05"] = "/memory-privacy-10-05.html"
+        fixturePaths["memory-privacy-10-06"] = "/memory-greeting.html"
+        fixturePaths["memory-privacy-10-07"] = "/memory-contact.html"
+        fixturePaths["memory-privacy-10-08"] = "/memory-privacy-10-08.html"
+        fixturePaths["memory-privacy-10-09"] = "/memory-privacy-10-09.html"
+        for index in 1...10 {
+            fixturePaths[String(format: "memory-injection-10-%02d", index)] =
+                String(format: "/memory-injection-10-%02d.html", index)
+        }
+#endif
+        let admittedMemoryPolicy: Bool
+        switch memoryFixture {
+        case "memory-privacy-10-01", "memory-privacy-10-03":
+            admittedMemoryPolicy = memoryPolicy.noMemory && !memoryPolicy.incognito
+        case "memory-privacy-10-02", "memory-privacy-10-04":
+            admittedMemoryPolicy = memoryPolicy.incognito && !memoryPolicy.noMemory
+        default:
+            admittedMemoryPolicy = !memoryPolicy.noMemory && !memoryPolicy.incognito
+        }
+        guard let expectedPath = fixturePaths[memoryFixture], policy == "fara15-4b",
+              admittedMemoryPolicy,
+              approvalPolicy?.allowFixtureInteraction == true,
+              faraExchangeCapture?.caseID == memoryFixture,
+              let value = start.url, let components = URLComponents(string: value),
+              components.scheme == "http", components.host == "127.0.0.1",
+              components.port == 8765, components.path == expectedPath,
+              components.user == nil, components.password == nil, components.fragment == nil else {
+            throw AgentEvalWireError.invalidRequest
+        }
+    }
+
+    func validateFaraExchangeCapture(environment: [String: String]) throws {
+        guard let capture = faraExchangeCapture else { return }
+        guard let startURL = start.url,
+              AgentEvalFaraExchangeActivation.isValid(caseID: capture.caseID,
+                runToken: capture.runToken, driverTaskID: taskID, policy: policy,
+                startURL: startURL, environment: environment) else {
+            throw AgentEvalWireError.invalidRequest
         }
     }
 
@@ -325,6 +434,74 @@ struct AgentEvalRequest: Decodable {
     private static let supportedPolicies = ["fara15-4b", "ui-tars15-7b", "gui-owl15-4b"]
 }
 
+struct AgentEvalMemoryFixtureReceipt: Encodable {
+    let caseID: String
+    let runID: String
+    let runToken: String
+    let driverTaskID: String
+    let bindingReference: String
+    let selectedMemoryItemIDs: [String]
+    let excludedSupersededMemoryItemIDs: [String]
+    let contextSHA256: String
+    let coverageStatus = "incomplete"
+    let b7Pass = false
+
+    enum CodingKeys: String, CodingKey {
+        case caseID = "case_id", runID = "run_id", runToken = "run_token"
+        case driverTaskID = "driver_task_id", bindingReference = "binding_reference"
+        case selectedMemoryItemIDs = "selected_memory_item_ids"
+        case excludedSupersededMemoryItemIDs = "excluded_superseded_memory_item_ids"
+        case contextSHA256 = "context_sha256", coverageStatus = "coverage_status", b7Pass = "b7_pass"
+    }
+}
+
+struct AgentEvalMemoryFixtureStoreSnapshot: Encodable {
+    let recordCount: Int
+    let sha256: String
+
+    enum CodingKeys: String, CodingKey {
+        case recordCount = "record_count", sha256
+    }
+}
+
+/// Value-free before/after evidence for one explicitly admitted synthetic memory fixture.
+/// A missing snapshot is represented by its status and never interpreted as an empty store.
+struct AgentEvalMemoryFixtureStoreEvidence: Encodable {
+    let caseID: String
+    let runID: String
+    let runToken: String
+    let driverTaskID: String
+    let bindingReference: String
+    let beforeStatus: String
+    let before: AgentEvalMemoryFixtureStoreSnapshot?
+    let afterStatus: String
+    let after: AgentEvalMemoryFixtureStoreSnapshot?
+    let evidenceStatus: String
+
+    init(caseID: String, runID: String, runToken: String, driverTaskID: String,
+         bindingReference: String, before: AgentEvalMemoryFixtureStoreSnapshot?,
+         after: AgentEvalMemoryFixtureStoreSnapshot?) {
+        self.caseID = caseID
+        self.runID = runID
+        self.runToken = runToken
+        self.driverTaskID = driverTaskID
+        self.bindingReference = bindingReference
+        self.before = before
+        self.after = after
+        beforeStatus = before == nil ? "unavailable" : "captured"
+        afterStatus = after == nil ? "unavailable" : "captured"
+        evidenceStatus = before == nil || after == nil ? "incomplete" : "complete"
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case caseID = "case_id", runID = "run_id", runToken = "run_token"
+        case driverTaskID = "driver_task_id", bindingReference = "binding_reference"
+        case beforeStatus = "before_status", before
+        case afterStatus = "after_status", after
+        case evidenceStatus = "evidence_status"
+    }
+}
+
 struct AgentEvalResponse: Encodable {
     let taskID: String
     let outcome: String
@@ -336,6 +513,24 @@ struct AgentEvalResponse: Encodable {
     let cropMode: String
     let requestedCropMode: String
     let realHostApp = true
+    let memoryFixtureReceipt: AgentEvalMemoryFixtureReceipt?
+    let memoryFixtureStoreEvidence: AgentEvalMemoryFixtureStoreEvidence?
+
+    init(taskID: String, outcome: String, answer: String, episodePath: String,
+         wallSeconds: Double, policy: String, cropMode: String, requestedCropMode: String,
+         memoryFixtureReceipt: AgentEvalMemoryFixtureReceipt? = nil,
+         memoryFixtureStoreEvidence: AgentEvalMemoryFixtureStoreEvidence? = nil) {
+        self.taskID = taskID
+        self.outcome = outcome
+        self.answer = answer
+        self.episodePath = episodePath
+        self.wallSeconds = wallSeconds
+        self.policy = policy
+        self.cropMode = cropMode
+        self.requestedCropMode = requestedCropMode
+        self.memoryFixtureReceipt = memoryFixtureReceipt
+        self.memoryFixtureStoreEvidence = memoryFixtureStoreEvidence
+    }
 
     private enum CodingKeys: String, CodingKey {
         case taskID = "task_id", outcome, answer
@@ -345,6 +540,8 @@ struct AgentEvalResponse: Encodable {
         case cropMode = "crop_mode"
         case requestedCropMode = "requested_crop_mode"
         case realHostApp = "real_host_app"
+        case memoryFixtureReceipt = "memory_fixture_receipt"
+        case memoryFixtureStoreEvidence = "memory_fixture_store_evidence"
     }
 }
 

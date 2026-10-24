@@ -363,6 +363,62 @@ final class LocalComputerUseTransportTests: XCTestCase {
         XCTAssertThrowsError(try LocalComputerUseRPCCodec.encode(invalid))
     }
 
+    func testMemoryCommandRPCBindsTypedReplyToRequest() throws {
+        let command = LocalMemoryRPCCommand(
+            rememberKind: .fact,
+            text: "My home airport is SFO",
+            commandID: "memory-save-1")
+        let request = LocalComputerUseRPCRequest(
+            requestID: "memory-request-1",
+            senderID: peerID,
+            targetID: hostID,
+            sessionID: sessionID,
+            memoryCommand: command)
+
+        let decodedRequest = try LocalComputerUseRPCCodec.decodeRequest(
+            LocalComputerUseRPCCodec.encode(request))
+        XCTAssertEqual(decodedRequest.memoryCommand, command)
+        XCTAssertTrue(decodedRequest.envelopes.isEmpty)
+        XCTAssertTrue(decodedRequest.acknowledgedEnvelopeIDs.isEmpty)
+
+        let reply = LocalMemoryRPCReply(
+            operation: .remember,
+            commandID: "memory-save-1",
+            rememberKind: .fact,
+            status: .completed,
+            recordID: "fact-home-airport",
+            idempotentRetry: false)
+        let response = LocalComputerUseRPCResponse(
+            requestID: "memory-request-1",
+            senderID: hostID,
+            targetID: peerID,
+            memoryReply: reply)
+        let decodedResponse = try LocalComputerUseRPCCodec.decodeResponse(
+            LocalComputerUseRPCCodec.encode(response))
+        XCTAssertEqual(try decodedResponse.memoryResult(for: decodedRequest), reply)
+
+        let missingReply = LocalComputerUseRPCResponse(
+            requestID: "memory-request-1",
+            senderID: hostID,
+            targetID: peerID)
+        XCTAssertThrowsError(try missingReply.memoryResult(for: decodedRequest)) { error in
+            XCTAssertEqual(error as? LocalComputerUseRPCValidationError, .memoryReplyMissing)
+        }
+
+        let mismatchedReply = LocalComputerUseRPCResponse(
+            requestID: "memory-request-1",
+            senderID: hostID,
+            targetID: peerID,
+            memoryReply: LocalMemoryRPCReply(
+                operation: .remember,
+                commandID: "other-command",
+                rememberKind: .fact,
+                status: .completed,
+                recordID: "fact-home-airport",
+                idempotentRetry: false))
+        XCTAssertThrowsError(try mismatchedReply.memoryResult(for: decodedRequest))
+    }
+
     private func addTestCredential(
         _ credential: LocalComputerUseCredential,
         service: String,

@@ -163,6 +163,17 @@ final class AgentCapabilityAdapter: ComputerUseTaskAwareExecuting, ComputerUseCl
             && executor.activeLoop?.pendingStep?.approval.id == request.id
     }
 
+    func ownsTaskMemoryContinuation(rootTaskID: String, originatingHostTaskID: String,
+                                    currentHostTaskID: String) -> Bool {
+        guard self.rootTaskID == rootTaskID, executor.activeTaskID == rootTaskID else { return false }
+        if let pendingQuestion {
+            return pendingQuestion.rootTaskID == rootTaskID
+                && pendingQuestion.hostTaskID == originatingHostTaskID
+                && hostTaskID == originatingHostTaskID
+        }
+        return hostTaskID == currentHostTaskID
+    }
+
     func resumeApproval(request: AgentApprovalRequest, approved: Bool,
                          progress: @escaping (String) -> Void) async -> ComputerUseExecutionResult {
         guard request.taskID == rootTaskID, let hostTaskID,

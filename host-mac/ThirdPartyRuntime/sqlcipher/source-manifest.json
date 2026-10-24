@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "repository": "sqlcipher/sqlcipher",
+  "releaseTag": "v4.14.0",
+  "annotatedTagObject": "46bb08ec73b2caa84b6945a19c9e435fff446dcd",
+  "sourceCommit": "778ab890cfc30c3631212dcceb0295498abdcd3e",
+  "archiveURL": "https://codeload.github.com/sqlcipher/sqlcipher/tar.gz/778ab890cfc30c3631212dcceb0295498abdcd3e",
+  "archiveFile": "sqlcipher-778ab890cfc30c3631212dcceb0295498abdcd3e.tar.gz",
+  "archiveBytesObserved": 19028329,
+  "archiveSHA256Observed": "c7b3d762d0a06484133f9463ed17d1540fcbda65e417d5b4ed3d3532b4499c5a",
+  "sourceArchiveSHA256IndependentlyPublished": false,
+  "sourceLicense": "BSD-3-Clause",
+  "sqliteCoreLicense": "Public Domain",
+  "cryptoProvider": "CommonCrypto (Apple system SDK; SQLCIPHER_CRYPTO_CC)",
+  "runtimeDownload": false,
+  "runtimeNetwork": false
+}

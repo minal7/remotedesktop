@@ -1201,11 +1201,14 @@ public struct ComputerUsePromptRequest: Codable, Equatable, Sendable {
     public let supportsClarificationRetry: Bool
     /// Answer-only opt-in: older retry clients cannot decode formatMismatch.
     public let supportsClarificationFormatRetry: Bool
+    /// Captured owner memory preferences for this exact task.
+    public let memoryPolicy: ComputerUseTaskMemoryPolicy
 
     public init(
         prompt: String,
         conversation: [ComputerUseConversationTurn] = [],
-        supportsApprovedActionEvidence: Bool = false
+        supportsApprovedActionEvidence: Bool = false,
+        memoryPolicy: ComputerUseTaskMemoryPolicy = .init()
     ) {
         version = Self.currentVersion
         self.prompt = Self.boundedPrompt(prompt)
@@ -1215,21 +1218,23 @@ public struct ComputerUsePromptRequest: Codable, Equatable, Sendable {
         self.supportsApprovedActionEvidence = supportsApprovedActionEvidence
         self.supportsClarificationRetry = false
         self.supportsClarificationFormatRetry = false
+        self.memoryPolicy = memoryPolicy
     }
 
     /// A clarification answer is exact user input, not a bounded chat-history
     /// excerpt. Reject an oversized answer instead of truncating its payload.
     public static func answering(_ reference: ComputerUseClarificationReference, text: String,
         supportsApprovedActionEvidence: Bool = false, supportsClarificationRetry: Bool = false,
-        supportsClarificationFormatRetry: Bool = false, clarificationChoiceID: String? = nil) throws -> Self {
+        supportsClarificationFormatRetry: Bool = false, clarificationChoiceID: String? = nil,
+        memoryPolicy: ComputerUseTaskMemoryPolicy = .init()) throws -> Self {
         try Self(exactAnswer: text, reference: reference, supportsApprovedActionEvidence: supportsApprovedActionEvidence,
             supportsClarificationRetry: supportsClarificationRetry, supportsClarificationFormatRetry: supportsClarificationFormatRetry,
-            clarificationChoiceID: clarificationChoiceID)
+            clarificationChoiceID: clarificationChoiceID, memoryPolicy: memoryPolicy)
     }
 
     private init(exactAnswer: String, reference: ComputerUseClarificationReference, supportsApprovedActionEvidence: Bool,
                  supportsClarificationRetry: Bool, supportsClarificationFormatRetry: Bool,
-                 clarificationChoiceID: String?) throws {
+                 clarificationChoiceID: String?, memoryPolicy: ComputerUseTaskMemoryPolicy) throws {
         guard !supportsClarificationFormatRetry || supportsClarificationRetry else { throw ComputerUsePayloadError.invalidClarification }
         if let clarificationChoiceID {
             guard !clarificationChoiceID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
@@ -1246,6 +1251,7 @@ public struct ComputerUsePromptRequest: Codable, Equatable, Sendable {
         self.supportsApprovedActionEvidence = supportsApprovedActionEvidence
         self.supportsClarificationRetry = supportsClarificationRetry
         self.supportsClarificationFormatRetry = supportsClarificationFormatRetry
+        self.memoryPolicy = memoryPolicy
     }
 
     private static func validateExactAnswer(_ text: String) throws {
@@ -1290,6 +1296,7 @@ public struct ComputerUsePromptRequest: Codable, Equatable, Sendable {
         case supportsApprovedActionEvidence
         case supportsClarificationRetry
         case supportsClarificationFormatRetry
+        case memoryPolicy
     }
 
     public init(from decoder: Decoder) throws {
@@ -1308,6 +1315,9 @@ public struct ComputerUsePromptRequest: Codable, Equatable, Sendable {
         supportsApprovedActionEvidence = try values.decodeIfPresent(Bool.self, forKey: .supportsApprovedActionEvidence) ?? false
         supportsClarificationRetry = try values.decodeIfPresent(Bool.self, forKey: .supportsClarificationRetry) ?? false
         supportsClarificationFormatRetry = try values.decodeIfPresent(Bool.self, forKey: .supportsClarificationFormatRetry) ?? false
+        memoryPolicy = values.contains(.memoryPolicy)
+            ? try values.decode(ComputerUseTaskMemoryPolicy.self, forKey: .memoryPolicy)
+            : .init()
         guard !supportsClarificationFormatRetry || (supportsClarificationRetry && clarification != nil) else {
             throw ComputerUsePayloadError.invalidClarification
         }
@@ -1334,6 +1344,7 @@ public struct ComputerUsePromptRequest: Codable, Equatable, Sendable {
         if supportsApprovedActionEvidence { try values.encode(true, forKey: .supportsApprovedActionEvidence) }
         if supportsClarificationRetry { try values.encode(true, forKey: .supportsClarificationRetry) }
         if supportsClarificationFormatRetry { try values.encode(true, forKey: .supportsClarificationFormatRetry) }
+        if !memoryPolicy.isEmpty { try values.encode(memoryPolicy, forKey: .memoryPolicy) }
     }
 
     private static func boundedPrompt(_ value: String) -> String {

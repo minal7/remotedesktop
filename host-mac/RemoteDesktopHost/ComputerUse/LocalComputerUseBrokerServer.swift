@@ -3,6 +3,10 @@ import Network
 
 @MainActor
 final class LocalComputerUseBrokerServer {
+    typealias MemoryCommandHandler = @MainActor @Sendable (
+        LocalMemoryRPCCommand, LocalMemoryRPCContext
+    ) async -> LocalMemoryRPCReply
+
     enum ServerError: LocalizedError {
         case listenerFailed(String)
         case unavailablePort
@@ -39,6 +43,8 @@ final class LocalComputerUseBrokerServer {
     private let authorizePeer: (String) -> Bool
     private let revokePeer: (String) -> Void
     private let loopbackOnly: Bool
+    private let memoryFeatureEnabled: Bool
+    private let memoryHandler: MemoryCommandHandler?
     private var listener: NWListener?
     private var connectionTasks: [UUID: Task<Void, Never>] = [:]
     private var authorizedPeerID: String?
@@ -50,6 +56,8 @@ final class LocalComputerUseBrokerServer {
         hostID: String,
         channel: LocalHostComputerUseChannel,
         loopbackOnly: Bool = false,
+        memoryFeatureEnabled: Bool = false,
+        memoryHandler: MemoryCommandHandler? = nil,
         authorizePeer: @escaping (String) -> Bool,
         revokePeer: @escaping (String) -> Void
     ) {
@@ -57,6 +65,8 @@ final class LocalComputerUseBrokerServer {
         self.hostID = hostID
         self.channel = channel
         self.loopbackOnly = loopbackOnly
+        self.memoryFeatureEnabled = memoryFeatureEnabled
+        self.memoryHandler = memoryHandler
         self.authorizePeer = authorizePeer
         self.revokePeer = revokePeer
     }
@@ -182,7 +192,7 @@ final class LocalComputerUseBrokerServer {
         }
     }
 
-    private func handle(
+    func handle(
         _ request: LocalComputerUseRPCRequest
     ) async throws -> LocalComputerUseRPCResponse {
         try request.validate()
@@ -192,6 +202,9 @@ final class LocalComputerUseBrokerServer {
         guard Self.isValidPeerID(request.senderID),
               Self.isValidPeerID(request.targetID) else {
             throw LocalComputerUseRPCValidationError.invalidField("senderID")
+        }
+        guard Self.isValidSessionID(request.sessionID) else {
+            throw LocalComputerUseRPCValidationError.invalidField("sessionID")
         }
         if let authorizedPeerID,
            authorizedPeerID != request.senderID {
@@ -210,6 +223,34 @@ final class LocalComputerUseBrokerServer {
                 authorizedPeerID = nil
             }
             throw ServerError.busy
+        }
+        if let command = request.memoryCommand {
+            touchAuthorization(for: request.senderID)
+            let context = LocalMemoryRPCContext(
+                peerID: request.senderID,
+                sessionID: request.sessionID)
+            let reply: LocalMemoryRPCReply
+            if memoryFeatureEnabled, let memoryHandler {
+                reply = await memoryHandler(command, context)
+            } else {
+                reply = Self.disabledMemoryReply(for: command)
+            }
+            let response = LocalComputerUseRPCResponse(
+                requestID: request.requestID,
+                senderID: hostID,
+                targetID: request.senderID,
+                memoryReply: reply)
+            do {
+                _ = try response.memoryResult(for: request)
+                try response.validate()
+                return response
+            } catch {
+                return LocalComputerUseRPCResponse(
+                    requestID: request.requestID,
+                    senderID: hostID,
+                    targetID: request.senderID,
+                    memoryReply: Self.unavailableMemoryReply(for: command))
+            }
         }
         let accepted: [String]
         do {
@@ -230,6 +271,35 @@ final class LocalComputerUseBrokerServer {
             authenticatedSenderID: request.senderID,
             sessionID: request.sessionID)
         return try Self.boundedResponse(to: request, envelopes: envelopes, acceptedEnvelopeIDs: accepted)
+    }
+
+    static func disabledMemoryReply(
+        for command: LocalMemoryRPCCommand
+    ) -> LocalMemoryRPCReply {
+        .init(operation: command.operation,
+              commandID: command.commandID,
+              rememberKind: command.rememberKind,
+              status: .disabled,
+              generationReference: Self.requiresGenerationReference(command)
+                ? command.generationReference : nil)
+    }
+
+    static func unavailableMemoryReply(
+        for command: LocalMemoryRPCCommand
+    ) -> LocalMemoryRPCReply {
+        .init(operation: command.operation,
+              commandID: command.commandID,
+              rememberKind: command.rememberKind,
+              status: .unavailable,
+              generationReference: Self.requiresGenerationReference(command)
+                ? command.generationReference : nil)
+    }
+
+    private static func requiresGenerationReference(
+        _ command: LocalMemoryRPCCommand
+    ) -> Bool {
+        command.operation == .forgetEverything
+            || command.operation == .initializeMemoryGeneration
     }
 
     /// Count alone cannot bound JSON frames containing complete questions.
@@ -260,6 +330,13 @@ final class LocalComputerUseBrokerServer {
 
     private static func isValidPeerID(_ value: String) -> Bool {
         value.utf8.count == 36 && UUID(uuidString: value) != nil
+    }
+
+    private static func isValidSessionID(_ value: String) -> Bool {
+        !value.isEmpty && value.utf8.count <= LocalHostComputerUseChannel.maximumSessionIDBytes
+            && value.unicodeScalars.allSatisfy {
+                !CharacterSet.controlCharacters.contains($0)
+            }
     }
 
     /// `NWListener(on: .any)` is needed for both Wi-Fi and wired Macs, but the

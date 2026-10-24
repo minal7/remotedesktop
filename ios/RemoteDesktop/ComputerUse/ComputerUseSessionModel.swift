@@ -87,6 +87,9 @@ final class ComputerUseSessionModel: ObservableObject {
     @Published private(set) var isConnected = false {
         didSet { onRemoteScreenObscurationChange?() }
     }
+    @Published private(set) var ownerMemory: PersonalMemoryViewModel?
+    @Published var noMemoryForNextTask = false
+    @Published var incognitoForNextTask = false
     /// Embedded Mail MCP tasks can leave a small compose/result window above
     /// unrelated desktop content. Cover the remote pixels for the task's full
     /// lifecycle, starting before the request leaves the phone, until the
@@ -106,6 +109,11 @@ final class ComputerUseSessionModel: ObservableObject {
     }
 
     var hasActivePrompt: Bool { activePromptID != nil }
+    var showsTaskMemoryControls: Bool { ownerMemoryDisplayEnabled }
+    var canChangeTaskMemoryOptions: Bool {
+        ownerMemoryDisplayEnabled && activePromptID == nil && composerMode == .request
+            && !requiresRecoveryReconnect
+    }
     var isCancellationPending: Bool {
         activePromptID != nil && lastControlKind == .cancel
     }
@@ -139,6 +147,8 @@ final class ComputerUseSessionModel: ObservableObject {
     private let pairingCode: String
     private let sessionID: String
     private let pendingStore: any ComputerUsePendingPromptStoring
+    private let ownerMemoryDisplayEnabled: Bool
+    private var acceptedTaskMemoryPolicy = ComputerUseTaskMemoryPolicy()
     private var activePendingRecord: ComputerUsePendingPrompt?
     /// An unreadable initial record may own a different session ID. Only a
     /// newly authenticated connection may select that recovered session.
@@ -212,6 +222,7 @@ final class ComputerUseSessionModel: ObservableObject {
         localAccountBinding: CloudKitAccountBinding? = nil,
         pendingStore: any ComputerUsePendingPromptStoring = ComputerUsePendingPromptStore.shared,
         channel: any ComputerUseSessionChannel,
+        ownerMemoryDisplayEnabled: Bool = false,
         responseTimeoutDuration: Duration = .seconds(20 * 60),
         promptRefreshInterval: Duration = .seconds(30),
         questionRecoveryTimeout: Duration = .seconds(10),
@@ -236,6 +247,7 @@ final class ComputerUseSessionModel: ObservableObject {
         self.pairingCode = pairingCode
         self.sessionID = effectiveSessionID
         self.pendingStore = pendingStore
+        self.ownerMemoryDisplayEnabled = ownerMemoryDisplayEnabled
         self.localAccountBinding = localAccountBinding
         self.responseTimeoutDuration = responseTimeoutDuration
         self.promptRefreshInterval = promptRefreshInterval
@@ -270,6 +282,7 @@ final class ComputerUseSessionModel: ObservableObject {
             retryWireBody = restored.exactWireBody
             let request = ComputerUsePromptRequest.decodeCompatibleBody(
                 restored.exactWireBody)
+            acceptedTaskMemoryPolicy = request.memoryPolicy
             if Self.requiresPersistentPrivacyShield(request) {
                 isLiveScreenPrivacyShielded = true
             }
@@ -329,6 +342,11 @@ final class ComputerUseSessionModel: ObservableObject {
         isStopped = false
         isConnected = true
         guard !requiresRecoveryReconnect else { return }
+        if ownerMemoryDisplayEnabled,
+           let memoryChannel = channel as? any PersonalMemoryChannel {
+            ownerMemory = PersonalMemoryViewModel(enabled: true, channel: memoryChannel,
+                                                  allowsInitialization: true)
+        }
         pollingTask = Task { [weak self] in
             await self?.pollLoop()
         }
@@ -350,6 +368,8 @@ final class ComputerUseSessionModel: ObservableObject {
     }
 
     func stop() {
+        ownerMemory?.disconnect()
+        ownerMemory = nil
         guard !isStopped else { return }
         if waitingQuestionRecord != nil {
             persistQuestionDraft()
@@ -445,13 +465,16 @@ final class ComputerUseSessionModel: ObservableObject {
                 request = try .answering(reference, text: rawPrompt, supportsApprovedActionEvidence: true,
                     supportsClarificationRetry: clarificationAnswerPolicy?.supportsRetry == true,
                     supportsClarificationFormatRetry: clarificationAnswerPolicy?.supportsRetry == true && clarificationAnswerPolicy?.format != nil,
-                    clarificationChoiceID: clarificationChoiceID)
+                    clarificationChoiceID: clarificationChoiceID,
+                    memoryPolicy: acceptedTaskMemoryPolicy)
             case .legacyAnswer:
                 guard clarificationChoiceID == nil else { return false }
-                request = .init(prompt: rawPrompt, conversation: recentConversation(), supportsApprovedActionEvidence: true)
+                request = .init(prompt: rawPrompt, conversation: recentConversation(),
+                    supportsApprovedActionEvidence: true, memoryPolicy: acceptedTaskMemoryPolicy)
             case .request:
                 guard clarificationChoiceID == nil else { return false }
-                request = .init(prompt: rawPrompt, supportsApprovedActionEvidence: true)
+                request = .init(prompt: rawPrompt, supportsApprovedActionEvidence: true,
+                    memoryPolicy: taskMemoryPolicyForNextTask())
             case .expiredAnswer, .recoveringAnswer: return false
             }
             wireBody = try request.encodedBody()
@@ -497,6 +520,7 @@ final class ComputerUseSessionModel: ObservableObject {
             statusText = "Request not sent — secure recovery storage is unavailable"
             return false
         }
+        acceptedTaskMemoryPolicy = request.memoryPolicy
         clearQuestionRecovery(removingStoredRecord: false)
         resetComposerMode()
         state = .working
@@ -536,6 +560,13 @@ final class ComputerUseSessionModel: ObservableObject {
             }
         }
         return true
+    }
+
+    private func taskMemoryPolicyForNextTask() -> ComputerUseTaskMemoryPolicy {
+        guard ownerMemoryDisplayEnabled else { return .init() }
+        return ComputerUseTaskMemoryPolicy(
+            noMemory: noMemoryForNextTask,
+            incognito: incognitoForNextTask)
     }
 
     func promptValidationMessage(_ text: String) -> String? {

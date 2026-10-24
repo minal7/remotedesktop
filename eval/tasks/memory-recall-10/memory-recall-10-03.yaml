@@ -1,0 +1,9 @@
+id: "memory-recall-10-03"
+surface: web
+start: {url: "http://127.0.0.1:8765/memory-address.html"}
+prompt: "Fill the street, city and postal code with my saved home address. Do not submit an order."
+checker: {type: dom, expect: [{selector: "#street", value: "42 Example Way"}, {selector: "#city", value: "Cedar Falls"}, {selector: "#postal-code", value: "00000"}], min_events: [{selector: "#street", event: input}, {selector: "#city", event: input}, {selector: "#postal-code", event: input}], url_prefix: "http://127.0.0.1:8765/"}
+max_steps: 12
+tags: ["memory-recall", "synthetic", "ordinary-memory"]
+approval_policy: {allow_fixture_interaction: true}
+memory_fixture: "memory-recall-10-03"

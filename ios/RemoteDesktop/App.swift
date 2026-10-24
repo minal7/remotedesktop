@@ -3,7 +3,8 @@ import UIKit
 
 @main
 struct RemoteDesktopApp: App {
-    @StateObject private var session = SessionModel()
+    @StateObject private var session = SessionModel(
+        enablePersonalMemory: MemoryFeatureConfiguration.memoryV1CandidateEnabled)
     @StateObject private var computerUseSetup = ComputerUseSetupCoordinator()
 
     var body: some Scene {

@@ -1040,6 +1040,39 @@ actor ComputerUseInstaller {
         }
     }
 
+#if DEBUG
+    /// Evaluation-only status lookup. It pins and validates the existing
+    /// installation without acquiring the installation lease or recovering an
+    /// interrupted activation. Any activation marker makes the result unknown.
+    func readOnlyCurrentInstallationForEvaluation()
+        -> ComputerUseInstallationReceipt? {
+        guard let rootPin = try? ManagedRootPin.openExisting(
+            rootDirectory: rootDirectory),
+              (try? rootPin.validate()) != nil,
+              activationMarkersAreAbsent(rootPin: rootPin),
+              let receipt = currentInstallation(using: rootPin),
+              (try? rootPin.validate()) != nil,
+              activationMarkersAreAbsent(rootPin: rootPin) else {
+            return nil
+        }
+        return receipt
+    }
+
+    private func activationMarkersAreAbsent(rootPin: ManagedRootPin) -> Bool {
+        for name in [
+            Self.pendingRuntimeActivationMarkerName,
+            Self.runtimeActivationSuccessMarkerName,
+        ] {
+            do {
+                guard try rootPin.itemStatus(name: name) == nil else { return false }
+            } catch {
+                return false
+            }
+        }
+        return (try? rootPin.validate()) != nil
+    }
+#endif
+
     private func runtimeActivationRecoveryRequired(
         rootPin: ManagedRootPin
     ) -> Bool {

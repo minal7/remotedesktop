@@ -75,18 +75,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private(set) lazy var session: HostSession = {
 #if DEBUG
         guard let configuration = r0Configuration else {
-            return HostSession()
+            let hostSession = HostSession(
+                enablePersonalMemory: MemoryFeatureConfiguration.memoryV1CandidateEnabled)
+            hostSession.hideOwnerMemoryWindow = { [weak self] in
+                self?.settingsWindowController?.window?.orderOut(nil)
+            }
+            return hostSession
         }
-        return HostSession(
+        let hostSession = HostSession(
             deviceIdentityProvider: { configuration.hostID },
             advertisedHostName: configuration.hostDisplayName,
             localCredentialStore: LocalComputerUseCredentialStore(
                 service: DebugResidentHostConfiguration.credentialService),
             allowsAutomaticComputerUseSetup: false,
             computerUseTaskLedger: ComputerUseTaskLedger(
-                fileURL: configuration.taskLedgerURL))
+                fileURL: configuration.taskLedgerURL),
+            enablePersonalMemory: MemoryFeatureConfiguration.memoryV1CandidateEnabled)
+        hostSession.hideOwnerMemoryWindow = { [weak self] in
+            self?.settingsWindowController?.window?.orderOut(nil)
+        }
+        return hostSession
 #else
-        return HostSession()
+        let hostSession = HostSession(
+            enablePersonalMemory: MemoryFeatureConfiguration.memoryV1CandidateEnabled)
+        hostSession.hideOwnerMemoryWindow = { [weak self] in
+            self?.settingsWindowController?.window?.orderOut(nil)
+        }
+        return hostSession
 #endif
     }()
     private var statusItem: NSStatusItem!
@@ -481,6 +496,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         guard let closingWindow = notification.object as? NSWindow,
               closingWindow === setupWindowController?.window
                 || closingWindow === settingsWindowController?.window else { return }
+
+        if closingWindow === settingsWindowController?.window {
+            session.closeOwnerMemoryView()
+        }
 
         let otherWindowIsVisible: Bool
         if closingWindow === setupWindowController?.window {

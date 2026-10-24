@@ -50,9 +50,18 @@ struct ComputerUseView: View {
     @StateObject private var accessories = AccessoryMonitor()
     @StateObject private var zoom = RemoteScreenZoomController()
     @State private var draft = ""
+    @State private var composerMemorySheet: ComposerMemoryDestination?
+    @State private var composerMemoryAlert: String?
+    @State private var composerRememberOrigin: (memory: ObjectIdentifier, text: String)?
     @State private var remoteKeyboardOpen = false
     @State private var didExplicitlyResumeAI = false
     @FocusState private var composerFocused: Bool
+
+    private struct ComposerMemoryDestination: Identifiable {
+        let id = UUID()
+        let memory: PersonalMemoryViewModel
+        let originalText: String
+    }
 
     var body: some View {
         GeometryReader { proxy in
@@ -90,6 +99,29 @@ struct ComputerUseView: View {
             .animation(.easeOut(duration: 0.2), value: isAwaitingApproval)
         }
         .persistentSystemOverlays(.visible)
+        .sheet(item: $composerMemorySheet) { destination in
+            PersonalMemoryComposerRememberSheet(model: destination.memory,
+                originalText: destination.originalText) {
+                    if let origin = composerRememberOrigin,
+                       origin.memory == ObjectIdentifier(destination.memory), draft == origin.text {
+                        draft = ""
+                    }
+                    composerRememberOrigin = nil
+                }
+        }
+        .alert("Couldn’t open memory", isPresented: Binding(
+            get: { composerMemoryAlert != nil },
+            set: { if !$0 { composerMemoryAlert = nil } })) {
+                Button("OK", role: .cancel) { composerMemoryAlert = nil }
+            } message: {
+                Text(composerMemoryAlert ?? "")
+            }
+        .onChange(of: model.ownerMemory.map { ObjectIdentifier($0) }) { oldValue, newValue in
+            if oldValue != newValue { composerMemorySheet = nil }
+        }
+        .onChange(of: model.isConnected) { _, connected in
+            if !connected { composerMemorySheet = nil }
+        }
         .overlay(alignment: .topLeading) {
             if didExplicitlyResumeAI {
                 // Fixed, non-secret proof for the credential-safe UI test.
@@ -221,6 +253,7 @@ struct ComputerUseView: View {
                     .lineLimit(1)
             }
             Spacer()
+            PersonalMemoryButton(model: model)
             if case .connecting = session.state {
                 ProgressView()
                     .controlSize(.small)
@@ -796,6 +829,12 @@ struct ComputerUseView: View {
 
     private var composer: some View {
         VStack(spacing: 8) {
+            if model.showsTaskMemoryControls {
+                HStack {
+                    ComputerUseTaskMemoryControls(model: model)
+                    Spacer(minLength: 0)
+                }
+            }
             if model.canStartNewRequest {
                 HStack {
                     Text(model.composerMode == .recoveringAnswer ? "Saved question"
@@ -931,6 +970,7 @@ struct ComputerUseView: View {
     }
 
     private var canSend: Bool {
+        guard composerMemorySheet == nil else { return false }
         guard case .connected = session.state,
               model.isConnected,
               session.isComputerUsePromptTransportReady else { return false }
@@ -958,6 +998,31 @@ struct ComputerUseView: View {
     private func sendDraft() {
         guard canSend else { return }
         let prompt = draft
+        switch PersonalMemoryComposerRoute.decide(
+            text: prompt,
+            isRequestMode: model.composerMode == .request,
+            memoryAvailable: model.ownerMemory != nil,
+            incognito: model.incognitoForNextTask) {
+        case .sendTask:
+            break
+        case .openRemember(let originalText):
+            guard let memory = model.ownerMemory else {
+                composerMemoryAlert = "Memory isn’t available for this connection. Your text is still in the composer."
+                return
+            }
+            if memory.rememberState != .unknown && memory.rememberState != .saving {
+                composerRememberOrigin = (ObjectIdentifier(memory), prompt)
+            }
+            composerMemorySheet = ComposerMemoryDestination(memory: memory, originalText: originalText)
+            composerFocused = false
+            return
+        case .refuseUnavailable:
+            composerMemoryAlert = "Memory isn’t available for this connection. Your text is still in the composer."
+            return
+        case .refuseIncognito:
+            composerMemoryAlert = "Memory can’t be saved while Incognito task is on. Turn it off to continue. Your text is still in the composer."
+            return
+        }
         if model.sendPrompt(prompt) {
             draft = ""
             composerFocused = false

@@ -1,7 +1,9 @@
 import Darwin
 import CryptoKit
+import CoreFoundation
 import Foundation
 import ImageIO
+import MemoryStoreKit
 
 @_silgen_name("flock")
 private func osAtlasRuntimeFlock(
@@ -361,6 +363,7 @@ struct OSAtlasLlamaLaunchConfiguration: Equatable, Sendable {
     let routerPresetFile: OSAtlasLlamaRouterPresetFile?
     let authenticationFile: OSAtlasLlamaPrivateFile?
     private let trainedVisionAlias: String?
+    private let isMemoryEmbedding: Bool
 
     init(
         executableURL: URL,
@@ -381,6 +384,7 @@ struct OSAtlasLlamaLaunchConfiguration: Equatable, Sendable {
         routerPresetFile = nil
         authenticationFile = nil
         trainedVisionAlias = nil
+        isMemoryEmbedding = false
     }
 
     init(
@@ -403,6 +407,7 @@ struct OSAtlasLlamaLaunchConfiguration: Equatable, Sendable {
         self.routerPresetFile = routerPresetFile
         authenticationFile = nil
         trainedVisionAlias = nil
+        isMemoryEmbedding = false
     }
 
     init(nativeTextInputs: ComputerUseNativeTextRuntimeInputs,
@@ -418,6 +423,22 @@ struct OSAtlasLlamaLaunchConfiguration: Equatable, Sendable {
         routerPresetFile = nil
         self.authenticationFile = authenticationFile
         trainedVisionAlias = nil
+        isMemoryEmbedding = false
+    }
+
+    init(memoryEmbeddingInputs: PersonalMemoryRuntimeInputs, port: UInt16, bearerToken: String,
+         authenticationFile: OSAtlasLlamaPrivateFile) {
+        executableURL = memoryEmbeddingInputs.llamaServerURL
+        workingDirectoryURL = memoryEmbeddingInputs.llamaServerURL.deletingLastPathComponent()
+        modelFirstSplitURL = memoryEmbeddingInputs.modelURL
+        multimodalProjectorURL = nil
+        self.port = port
+        self.bearerToken = bearerToken
+        resourceProfile = .compact
+        routerPresetFile = nil
+        self.authenticationFile = authenticationFile
+        trainedVisionAlias = nil
+        isMemoryEmbedding = true
     }
 
     init(faraInputs: ComputerUseFaraRuntimeInputs, port: UInt16, bearerToken: String,
@@ -431,6 +452,7 @@ struct OSAtlasLlamaLaunchConfiguration: Equatable, Sendable {
         routerPresetFile = nil
         self.authenticationFile = authenticationFile
         trainedVisionAlias = ComputerUseFaraRuntimeInputs.modelAlias
+        isMemoryEmbedding = false
     }
 
     init(agentVisionInputs: AgentVisionRuntimeInputs, port: UInt16, bearerToken: String,
@@ -445,6 +467,7 @@ struct OSAtlasLlamaLaunchConfiguration: Equatable, Sendable {
         routerPresetFile = nil
         self.authenticationFile = authenticationFile
         trainedVisionAlias = agentVisionInputs.runtimeAlias
+        isMemoryEmbedding = false
     }
 
     init(holoInputs: ComputerUseHoloRuntimeInputs, port: UInt16, bearerToken: String,
@@ -458,9 +481,26 @@ struct OSAtlasLlamaLaunchConfiguration: Equatable, Sendable {
         routerPresetFile = nil
         self.authenticationFile = authenticationFile
         trainedVisionAlias = ComputerUseHoloModel.modelAlias
+        isMemoryEmbedding = false
     }
 
     var arguments: [String] {
+        if isMemoryEmbedding, let authenticationFile {
+            return [
+                "--model", modelFirstSplitURL.path,
+                "--host", Self.host, "--port", String(port),
+                "--api-key-file", authenticationFile.fileURL.path,
+                "--embedding", "--pooling", "mean",
+                "--offline", "--no-ui", "--log-disable",
+                "--parallel", "1", "--ctx-size", String(PersonalMemoryRuntimeInputs.contextTokens),
+                "--no-context-shift", "--cache-ram", "0", "--ctx-checkpoints", "0",
+                "--no-cache-idle-slots",
+                "--batch-size", String(PersonalMemoryRuntimeInputs.maximumEmbeddingInputTokens),
+                "--ubatch-size", String(PersonalMemoryRuntimeInputs.maximumEmbeddingInputTokens),
+                "--threads", String(Self.workerThreads), "--threads-batch", String(Self.workerThreads),
+                "--poll", "0", "--poll-batch", "0", "--n-gpu-layers", "99",
+            ]
+        }
         if let trainedVisionAlias, let authenticationFile, let multimodalProjectorURL {
             let isAgentFara = trainedVisionAlias == ComputerUseFaraRuntimeInputs.modelAlias
                 && resourceProfile == .agentVision
@@ -824,6 +864,34 @@ protocol OSAtlasLlamaHTTPTransport: ComputerUseTextModelTransport {
 
 protocol OSAtlasLlamaHTTPTransportMaking: Sendable {
     func makeTransport() -> any OSAtlasLlamaHTTPTransport
+    func makeTransport(observer: (any OSAtlasLlamaHTTPRequestObserver)?) -> any OSAtlasLlamaHTTPTransport
+}
+
+extension OSAtlasLlamaHTTPTransportMaking {
+    func makeTransport(observer: (any OSAtlasLlamaHTTPRequestObserver)?) -> any OSAtlasLlamaHTTPTransport {
+        makeTransport()
+    }
+}
+
+enum OSAtlasLlamaHTTPRequestKind: String, Sendable {
+    case applyTemplate = "apply_template"
+    case tokenize
+    case chatCompletion = "chat_completion"
+}
+
+enum OSAtlasLlamaHTTPOutcome: String, Sendable {
+    case completed
+    case httpError = "http_error"
+    case transportError = "transport_error"
+    case cancelled
+    case oversized
+}
+
+protocol OSAtlasLlamaHTTPRequestObserver: Sendable {
+    func willDispatch(id: UUID, kind: OSAtlasLlamaHTTPRequestKind, body: Data)
+    func didReadResponsePrefix(id: UUID, byteCount: Int)
+    func didFinish(id: UUID, outcome: OSAtlasLlamaHTTPOutcome,
+                   responseBody: Data?, responseComplete: Bool)
 }
 
 protocol OSAtlasLlamaPortProviding: Sendable {
@@ -960,6 +1028,7 @@ actor OSAtlasLlamaRuntime {
     private enum RuntimeInputs: Equatable, Sendable {
         case visual(OSAtlasLlamaRuntimeInputs)
         case nativeText(ComputerUseNativeTextRuntimeInputs)
+        case memoryEmbedding(PersonalMemoryRuntimeInputs)
         case fara(ComputerUseFaraRuntimeInputs)
         case agentVision(AgentVisionRuntimeInputs)
         case holo(ComputerUseHoloRuntimeInputs)
@@ -971,13 +1040,18 @@ actor OSAtlasLlamaRuntime {
             switch self {
             case .visual(let inputs), .router(let inputs, _):
                 return inputs
-            case .nativeText, .fara, .agentVision, .holo:
+            case .nativeText, .memoryEmbedding, .fara, .agentVision, .holo:
                 return nil
             }
         }
 
         var nativeText: ComputerUseNativeTextRuntimeInputs? {
             if case .nativeText(let inputs) = self { return inputs }
+            return nil
+        }
+
+        var memoryEmbedding: PersonalMemoryRuntimeInputs? {
+            if case .memoryEmbedding(let inputs) = self { return inputs }
             return nil
         }
 
@@ -1057,6 +1131,8 @@ actor OSAtlasLlamaRuntime {
     /// Explicit diagnostic observer. Normal app composition retains no model
     /// exchanges; callers receive bodies only, never authentication headers.
     private let inspectFaraExchange: (@Sendable (Data, Data) -> Void)?
+    private let observeHTTPRequest: (any OSAtlasLlamaHTTPRequestObserver)?
+    private let personalMemoryClient: any PersonalMemoryRuntimeClient
     private let cachedHealthAttempts = 3
     private let cachedHealthDelay: Duration = .milliseconds(100)
     private var active: ActiveServer?
@@ -1083,9 +1159,13 @@ actor OSAtlasLlamaRuntime {
     private let modelAccessGate = OSAtlasModelAccessGate()
 
     init(launcher: any OSAtlasLlamaServerLaunching = FoundationOSAtlasLlamaServerLauncher(),
-         inspectFaraExchange: (@Sendable (Data, Data) -> Void)? = nil) {
+         inspectFaraExchange: (@Sendable (Data, Data) -> Void)? = nil,
+         observeHTTPRequest: (any OSAtlasLlamaHTTPRequestObserver)? = nil,
+         personalMemoryClient: any PersonalMemoryRuntimeClient = LocalPersonalMemoryRuntimeClient()) {
         self.launcher = launcher
         self.inspectFaraExchange = inspectFaraExchange
+        self.observeHTTPRequest = observeHTTPRequest
+        self.personalMemoryClient = personalMemoryClient
         transportMaker = URLSessionOSAtlasTransportMaker()
         portProvider = LoopbackPortProvider()
         tokenProvider = RandomBearerTokenProvider()
@@ -1101,10 +1181,15 @@ actor OSAtlasLlamaRuntime {
         tokenProvider: any OSAtlasLlamaTokenProviding,
         readinessAttempts: Int,
         readinessDelay: Duration,
-        resourceInspector: any OSAtlasLlamaResourceInspecting = DarwinOSAtlasLlamaResourceInspector()
+        resourceInspector: any OSAtlasLlamaResourceInspecting = DarwinOSAtlasLlamaResourceInspector(),
+        inspectFaraExchange: (@Sendable (Data, Data) -> Void)? = nil,
+        observeHTTPRequest: (any OSAtlasLlamaHTTPRequestObserver)? = nil,
+        personalMemoryClient: any PersonalMemoryRuntimeClient = LocalPersonalMemoryRuntimeClient()
     ) {
         self.launcher = launcher
-        self.inspectFaraExchange = nil
+        self.inspectFaraExchange = inspectFaraExchange
+        self.observeHTTPRequest = observeHTTPRequest
+        self.personalMemoryClient = personalMemoryClient
         self.transportMaker = transportMaker
         self.portProvider = portProvider
         self.tokenProvider = tokenProvider
@@ -1123,6 +1208,89 @@ actor OSAtlasLlamaRuntime {
         _ inputs: ComputerUseNativeTextRuntimeInputs
     ) async throws -> OSAtlasLlamaEndpoint {
         try await activateResolved(.nativeText(inputs))
+    }
+
+    func activateMemoryEmbedding(
+        _ inputs: PersonalMemoryRuntimeInputs
+    ) async throws -> OSAtlasLlamaEndpoint {
+        try await activateResolved(.memoryEmbedding(inputs))
+    }
+
+    func embed(endpoint: OSAtlasLlamaEndpoint, text: String,
+               purpose: MemoryEmbeddingPurpose) async throws -> [Float] {
+        let lease = try await acquireModelAccessLease()
+        defer { releaseModelAccessLease(lease) }
+        try Task.checkCancellation()
+        guard let server = active, server.endpoint == endpoint,
+              server.inputs.memoryEmbedding != nil else {
+            throw OSAtlasLlamaRuntimeError.inactiveSession
+        }
+        let localEndpoint = try LlamaCppLocalEndpoint(
+            baseURL: endpoint.baseURL, bearerToken: endpoint.bearerToken)
+        do {
+            let vector = try await withTaskCancellationHandler {
+                try await personalMemoryClient.embed(endpoint: localEndpoint, text: text, purpose: purpose)
+            } onCancel: {
+                Task { await self.cancel(endpoint: endpoint) }
+            }
+            try Task.checkCancellation()
+            guard active?.endpoint == endpoint,
+                  active?.inputs.memoryEmbedding != nil else {
+                throw OSAtlasLlamaRuntimeError.inactiveSession
+            }
+            guard vector.count == PersonalMemoryRuntimeInputs.embeddingDimensions,
+                  vector.allSatisfy(\.isFinite), vector.contains(where: { $0 != 0 }) else {
+                throw OSAtlasLlamaRuntimeError.invalidResponse
+            }
+            return vector
+        } catch {
+            try await stopMemoryRequestEndpointAfterFailure(endpoint)
+            throw error
+        }
+    }
+
+    /// Counts the serialized memory context with the resident Fara planner
+    /// tokenizer. Nomic's tokenizer is never reported as planner tokens.
+    func countMemoryTokens(endpoint: OSAtlasLlamaEndpoint, context: String) async throws -> Int {
+        let lease = try await acquireModelAccessLease()
+        defer { releaseModelAccessLease(lease) }
+        try Task.checkCancellation()
+        guard let server = active, server.endpoint == endpoint,
+              server.inputs.agentVision?.model == .fara15_4b else {
+            throw OSAtlasLlamaRuntimeError.inactiveSession
+        }
+        let localEndpoint = try LlamaCppLocalEndpoint(
+            baseURL: endpoint.baseURL, bearerToken: endpoint.bearerToken)
+        let tokenizer = try LlamaCppTokenizerIdentity(
+            value: ComputerUseFaraRuntimeInputs.modelAlias,
+            addSpecialTokens: false, parseSpecialTokens: true)
+        do {
+            let count = try await withTaskCancellationHandler {
+                try await personalMemoryClient.countTokens(
+                    endpoint: localEndpoint, context: context, tokenizer: tokenizer)
+            } onCancel: {
+                Task { await self.cancel(endpoint: endpoint) }
+            }
+            try Task.checkCancellation()
+            guard active?.endpoint == endpoint,
+                  active?.inputs.agentVision?.model == .fara15_4b else {
+                throw OSAtlasLlamaRuntimeError.inactiveSession
+            }
+            guard (1...1_000_000).contains(count) else { throw OSAtlasLlamaRuntimeError.invalidResponse }
+            return count
+        } catch {
+            try await stopMemoryRequestEndpointAfterFailure(endpoint)
+            throw error
+        }
+    }
+
+    private func stopMemoryRequestEndpointAfterFailure(
+        _ endpoint: OSAtlasLlamaEndpoint
+    ) async throws {
+        await waitForLifecycleTransition()
+        guard active?.endpoint == endpoint else { return }
+        let result = await runLifecycleTransition(.stop, activationEpoch: nil)
+        if case .failure(let error) = result { throw error }
     }
 
     func activateFara(_ inputs: ComputerUseFaraRuntimeInputs) async throws -> OSAtlasLlamaEndpoint {
@@ -1193,6 +1361,8 @@ actor OSAtlasLlamaRuntime {
             try Self.validateLocalInputs(visualInputs)
         } else if let textInputs = inputs.nativeText {
             try Self.validateNativeTextInputs(textInputs)
+        } else if let memoryInputs = inputs.memoryEmbedding {
+            try Self.validateMemoryEmbeddingInputs(memoryInputs)
         } else if let faraInputs = inputs.fara {
             try Self.validateFaraInputs(faraInputs)
         } else if let agentVisionInputs = inputs.agentVision {
@@ -1923,6 +2093,7 @@ actor OSAtlasLlamaRuntime {
                 try await stopActiveServerUnserialized()
                 try validateActivation(epoch: expectedActivationEpoch)
                 let resourceProfile = try resourceProfileForLaunch(nativeText: inputs.nativeText != nil,
+                    memoryEmbedding: inputs.memoryEmbedding != nil,
                     trainedVision: inputs.isTrainedVision, agentVision: inputs.agentVision != nil)
                 let port = try portProvider.availableLoopbackPort()
                 let token = tokenProvider.bearerToken()
@@ -1946,6 +2117,12 @@ actor OSAtlasLlamaRuntime {
                     let authentication = try OSAtlasLlamaPrivateFile.authentication(token: token)
                     pendingAuthenticationFile = authentication
                     configuration = .init(holoInputs: holoInputs, port: port, bearerToken: token, authenticationFile: authentication)
+                } else if let memoryInputs = inputs.memoryEmbedding {
+                    let authentication = try OSAtlasLlamaPrivateFile.authentication(token: token)
+                    pendingAuthenticationFile = authentication
+                    configuration = OSAtlasLlamaLaunchConfiguration(
+                        memoryEmbeddingInputs: memoryInputs, port: port, bearerToken: token,
+                        authenticationFile: authentication)
                 } else if let textInputs = inputs.nativeText {
                     let authentication = try OSAtlasLlamaPrivateFile.authentication(token: token)
                     pendingAuthenticationFile = authentication
@@ -1986,7 +2163,7 @@ actor OSAtlasLlamaRuntime {
                 } else {
                     throw OSAtlasLlamaRuntimeError.invalidLocalInstallation
                 }
-                let transport = transportMaker.makeTransport()
+                let transport = transportMaker.makeTransport(observer: observeHTTPRequest)
                 let process = try await launcher.launch(configuration: configuration)
                 nextGeneration &+= 1
                 let endpoint = OSAtlasLlamaEndpoint(
@@ -2002,7 +2179,8 @@ actor OSAtlasLlamaRuntime {
                     transport: transport,
                     routerPresetFile: pendingPresetFile,
                     authenticationFile: pendingAuthenticationFile,
-                    residentModels: inputs.isRouter || inputs.nativeText != nil || inputs.isTrainedVision
+                    residentModels: inputs.isRouter || inputs.nativeText != nil ||
+                        inputs.memoryEmbedding != nil || inputs.isTrainedVision
                         ? []
                         : [.visualGrounder],
                     residencyGeneration: inputs.isRouter ? 0 : 1)
@@ -2010,6 +2188,10 @@ actor OSAtlasLlamaRuntime {
                 pendingAuthenticationFile = nil
                 try validateActivation(epoch: expectedActivationEpoch)
                 try await waitUntilReady(endpoint: endpoint, transport: transport)
+                if let memoryInputs = inputs.memoryEmbedding {
+                    try await validateMemoryEmbeddingServer(
+                        inputs: memoryInputs, endpoint: endpoint, transport: transport)
+                }
                 if inputs.isRouter {
                     // A compact endpoint is not ready until both packaged
                     // models have been proven loadable one at a time and the
@@ -2169,7 +2351,8 @@ actor OSAtlasLlamaRuntime {
         lifecycleTransition?.task.cancel()
     }
 
-    private func resourceProfileForLaunch(nativeText: Bool = false, trainedVision: Bool = false,
+    private func resourceProfileForLaunch(nativeText: Bool = false, memoryEmbedding: Bool = false,
+        trainedVision: Bool = false,
         agentVision: Bool = false) throws -> OSAtlasLlamaResourceProfile {
         let snapshot = try resourceSnapshot()
         guard !trainedVision || snapshot.physicalMemoryBytes >= 16 * 1_024 * 1_024 * 1_024 else {
@@ -2180,10 +2363,11 @@ actor OSAtlasLlamaRuntime {
         ) else {
             throw OSAtlasLlamaRuntimeError.insufficientPhysicalMemory
         }
-        // Text always uses the measured 4K context and a single 4 GiB process
-        // ceiling. This budget is not a claim of physical 8 GiB qualification.
+        // Text and memory embedding use compact profiles; this budget is not a
+        // claim of physical 8 GiB qualification.
         let visionProfile: OSAtlasLlamaResourceProfile = agentVision ? .agentVision : .fara
-        let profile: OSAtlasLlamaResourceProfile = trainedVision ? visionProfile : nativeText ? .compact : hardwareProfile
+        let profile: OSAtlasLlamaResourceProfile = trainedVision ? visionProfile :
+            (nativeText || memoryEmbedding) ? .compact : hardwareProfile
         guard snapshot.reclaimableMemoryBytes >= profile.minimumLaunchMemoryBytes else {
             throw OSAtlasLlamaRuntimeError.insufficientAvailableMemory
         }
@@ -2280,6 +2464,54 @@ actor OSAtlasLlamaRuntime {
               inputs.llamaServerURL.isFileURL,
               inputs.llamaServerURL.lastPathComponent == "llama-server",
               !inputs.llamaServerURL.path.contains("\0") else {
+            throw OSAtlasLlamaRuntimeError.invalidLocalInstallation
+        }
+    }
+
+    private static func validateMemoryEmbeddingInputs(_ inputs: PersonalMemoryRuntimeInputs) throws {
+        try validateSemanticModelURL(inputs.modelURL)
+        guard inputs.modelURL.lastPathComponent == PersonalMemoryRuntimeInputs.modelFileName,
+              inputs.llamaServerURL.isFileURL,
+              inputs.llamaServerURL.lastPathComponent == "llama-server",
+              !inputs.llamaServerURL.path.contains("\0") else {
+            throw OSAtlasLlamaRuntimeError.invalidLocalInstallation
+        }
+    }
+
+    private func validateMemoryEmbeddingServer(
+        inputs: PersonalMemoryRuntimeInputs,
+        endpoint: OSAtlasLlamaEndpoint,
+        transport: any OSAtlasLlamaHTTPTransport
+    ) async throws {
+        try Task.checkCancellation()
+        guard active?.endpoint == endpoint,
+              active?.inputs.memoryEmbedding == inputs else {
+            throw OSAtlasLlamaRuntimeError.inactiveSession
+        }
+        var request = URLRequest(url: endpoint.baseURL.appendingPathComponent("props"))
+        request.httpMethod = "GET"
+        request.timeoutInterval = 3
+        request.setValue("Bearer \(endpoint.bearerToken)", forHTTPHeaderField: "Authorization")
+        let data = try await transport.complete(request: request)
+        try Task.checkCancellation()
+        guard active?.endpoint == endpoint,
+              let properties = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              properties["model_path"] as? String == inputs.modelURL.path,
+              properties["build_info"] as? String == PersonalMemoryRuntimeInputs.llamaServerBuildInfo,
+              let sleeping = properties["is_sleeping"] as? NSNumber,
+              CFGetTypeID(sleeping) == CFBooleanGetTypeID(),
+              sleeping.boolValue == false else {
+            throw OSAtlasLlamaRuntimeError.invalidLocalInstallation
+        }
+        let localEndpoint = try LlamaCppLocalEndpoint(
+            baseURL: endpoint.baseURL, bearerToken: endpoint.bearerToken)
+        let vector = try await personalMemoryClient.embed(
+            endpoint: localEndpoint, text: "runtime readiness check", purpose: .query)
+        try Task.checkCancellation()
+        guard active?.endpoint == endpoint,
+              active?.inputs.memoryEmbedding == inputs,
+              vector.count == PersonalMemoryRuntimeInputs.embeddingDimensions,
+              vector.allSatisfy(\.isFinite), vector.contains(where: { $0 != 0 }) else {
             throw OSAtlasLlamaRuntimeError.invalidLocalInstallation
         }
     }
@@ -2712,6 +2944,10 @@ private struct URLSessionOSAtlasTransportMaker: OSAtlasLlamaHTTPTransportMaking 
     func makeTransport() -> any OSAtlasLlamaHTTPTransport {
         URLSessionOSAtlasTransport()
     }
+
+    func makeTransport(observer: (any OSAtlasLlamaHTTPRequestObserver)?) -> any OSAtlasLlamaHTTPTransport {
+        URLSessionOSAtlasTransport(observer: observer)
+    }
 }
 
 final class URLSessionOSAtlasTransport: OSAtlasLlamaHTTPTransport, ComputerUseTextModelTransport,
@@ -2725,8 +2961,11 @@ final class URLSessionOSAtlasTransport: OSAtlasLlamaHTTPTransport, ComputerUseTe
     }
 
     private let session: URLSession
+    private let observer: (any OSAtlasLlamaHTTPRequestObserver)?
 
-    init(configuration: URLSessionConfiguration = .ephemeral) {
+    init(configuration: URLSessionConfiguration = .ephemeral,
+         observer: (any OSAtlasLlamaHTTPRequestObserver)? = nil) {
+        self.observer = observer
         configuration.urlCache = nil
         configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
         configuration.httpCookieStorage = nil
@@ -2877,6 +3116,26 @@ final class URLSessionOSAtlasTransport: OSAtlasLlamaHTTPTransport, ComputerUseTe
     /// closes the actual request instead of merely abandoning the result.
     private func boundedResponse(for request: URLRequest, maximumBytes: Int) async throws
         -> (Data, URLResponse) {
+        let attempt = captureKind(for: request).flatMap { kind -> UUID? in
+            guard observer != nil else { return nil }
+            return UUID()
+        }
+        if attempt != nil {
+            try Task.checkCancellation()
+            if let kind = captureKind(for: request), let attempt {
+                observer?.willDispatch(id: attempt, kind: kind, body: request.httpBody ?? Data())
+            }
+        }
+        var terminal: OSAtlasLlamaHTTPOutcome = .transportError
+        var capturedResponse: Data?
+        var responseComplete = false
+        defer {
+            if let attempt {
+                observer?.didFinish(id: attempt, outcome: terminal,
+                    responseBody: capturedResponse, responseComplete: responseComplete)
+            }
+        }
+        do {
         let (bytes, response) = try await session.bytes(for: request)
         defer { bytes.task.cancel() }
         guard let http = response as? HTTPURLResponse else {
@@ -2884,26 +3143,72 @@ final class URLSessionOSAtlasTransport: OSAtlasLlamaHTTPTransport, ComputerUseTe
         }
         // No caller uses an error body. In particular, do not download one
         // from a rejected redirect or failed local health endpoint.
-        guard http.statusCode == 200 else { return (Data(), response) }
+        guard http.statusCode == 200 else {
+            terminal = .httpError
+            return (Data(), response)
+        }
         guard response.expectedContentLength <= Int64(maximumBytes) else {
+            terminal = .oversized
             throw OSAtlasLlamaRuntimeError.invalidResponse
         }
-        return try await withTaskCancellationHandler {
+        let result = try await withTaskCancellationHandler {
             var data = Data()
             if response.expectedContentLength > 0 {
                 data.reserveCapacity(Int(response.expectedContentLength))
             }
-            for try await byte in bytes {
-                try Task.checkCancellation()
-                guard data.count < maximumBytes else {
-                    throw OSAtlasLlamaRuntimeError.invalidResponse
+            do {
+                var reportedPrefix = false
+                for try await byte in bytes {
+                    try Task.checkCancellation()
+                    guard data.count < maximumBytes else {
+                        capturedResponse = data
+                        terminal = .oversized
+                        throw OSAtlasLlamaRuntimeError.invalidResponse
+                    }
+                    data.append(byte)
+                    if !reportedPrefix, let attempt {
+                        reportedPrefix = true
+                        observer?.didReadResponsePrefix(id: attempt, byteCount: data.count)
+                    }
                 }
-                data.append(byte)
+                try Task.checkCancellation()
+            } catch {
+                capturedResponse = data
+                if terminal == .transportError {
+                    terminal = Self.isCancellation(error) ? .cancelled : .transportError
+                }
+                throw error
             }
-            try Task.checkCancellation()
+            capturedResponse = data
+            terminal = .completed
+            responseComplete = true
             return (data, response)
         } onCancel: {
             bytes.task.cancel()
+        }
+        return result
+        } catch {
+            if terminal == .transportError {
+                terminal = Self.isCancellation(error) ? .cancelled : .transportError
+            }
+            throw error
+        }
+    }
+
+    private static func isCancellation(_ error: Error) -> Bool {
+        Task.isCancelled || (error as? URLError)?.code == .cancelled
+    }
+
+    private func captureKind(for request: URLRequest) -> OSAtlasLlamaHTTPRequestKind? {
+        guard request.httpMethod?.uppercased() == "POST", let url = request.url,
+              url.scheme == "http", url.host == OSAtlasLlamaLaunchConfiguration.host,
+              url.user == nil, url.password == nil, url.port != nil else { return nil }
+        let path = url.path
+        switch path {
+        case "/apply-template": return .applyTemplate
+        case "/tokenize": return .tokenize
+        case "/v1/chat/completions": return .chatCompletion
+        default: return nil
         }
     }
 

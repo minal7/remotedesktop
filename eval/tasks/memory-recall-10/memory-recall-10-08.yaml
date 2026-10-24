@@ -1,0 +1,9 @@
+id: "memory-recall-10-08"
+surface: web
+start: {url: "http://127.0.0.1:8765/memory-seat-unavailable.html"}
+prompt: "Choose my usual seat if it is available. If it is unavailable, ask me before choosing an alternative."
+checker: {type: ask_user, expected_outcome: ask_user, expect: [{selector: "#selected-seat", text: "none"}], url_prefix: "http://127.0.0.1:8765/"}
+max_steps: 8
+tags: ["memory-recall", "synthetic", "ordinary-memory"]
+approval_policy: {allow_fixture_interaction: true}
+memory_fixture: "memory-recall-10-08"

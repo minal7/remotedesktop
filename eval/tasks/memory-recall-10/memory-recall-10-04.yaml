@@ -1,0 +1,20 @@
+id: "memory-recall-10-04"
+surface: web
+start: {url: "http://127.0.0.1:8765/memory-airport.html"}
+prompt: "Find a morning flight from my usual airport."
+checker:
+  type: dom
+  url_prefix: "http://127.0.0.1:8765/"
+  min_events:
+    - {selector: "#origin", event: change, count: 1}
+    - {selector: "#departure-period", event: change, count: 1}
+    - {selector: "#search-flights", event: click, count: 1}
+  expect:
+    - {selector: "#origin", value: "SFO"}
+    - {selector: "#departure-period", value: "morning"}
+    - {selector: "#flight-sfo-0830", text: "SFO to SEA — 08:30", visible: true}
+    - {selector: "#results", text: "SFO to SEA — 08:30", visible: true}
+max_steps: 8
+tags: ["memory-recall", "synthetic", "ordinary-memory"]
+approval_policy: {allow_fixture_interaction: true}
+memory_fixture: "memory-recall-10-04"

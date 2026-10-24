@@ -17,6 +17,12 @@ struct HostSettingsView: View {
             computerUseTab
                 .tabItem { Label("Computer use (Beta)", systemImage: "sparkles") }
 
+            if let ownerMemory = session.ownerMemory {
+                HostMemoryView(model: ownerMemory)
+                    .id(ObjectIdentifier(ownerMemory))
+                    .tabItem { Label("Memory", systemImage: "brain.head.profile") }
+            }
+
             licensesTab
                 .tabItem { Label("Licenses", systemImage: "doc.text") }
         }

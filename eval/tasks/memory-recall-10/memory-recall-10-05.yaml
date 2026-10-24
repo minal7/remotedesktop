@@ -1,0 +1,9 @@
+id: "memory-recall-10-05"
+surface: web
+start: {url: "http://127.0.0.1:8765/memory-greeting.html"}
+prompt: "Set the draft greeting to my usual email greeting. Do not send the draft."
+checker: {type: dom, expect: [{selector: "#greeting", value: "Hello"}], min_events: [{selector: "#greeting", event: input}], url_prefix: "http://127.0.0.1:8765/"}
+max_steps: 8
+tags: ["memory-recall", "synthetic", "ordinary-memory"]
+approval_policy: {allow_fixture_interaction: true}
+memory_fixture: "memory-recall-10-05"

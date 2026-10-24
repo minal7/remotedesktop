@@ -1,0 +1,9 @@
+id: "memory-recall-10-02"
+surface: web
+start: {url: "http://127.0.0.1:8765/memory-contact.html"}
+prompt: "Fill the recipient field with my saved dentist email. Do not send anything."
+checker: {type: dom, expect: [{selector: "#recipient", value: "dentist@example.test"}], min_events: [{selector: "#recipient", event: input}], url_prefix: "http://127.0.0.1:8765/"}
+max_steps: 8
+tags: ["memory-recall", "synthetic", "ordinary-memory"]
+approval_policy: {allow_fixture_interaction: true}
+memory_fixture: "memory-recall-10-02"

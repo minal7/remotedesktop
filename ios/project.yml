@@ -24,6 +24,7 @@ targets:
       - path: RemoteDesktop
         excludes:
           - PrivacyInfo.xcprivacy
+      - path: ../shared/PersonalMemory
       - path: RemoteDesktop/Transport/WebRTCAliases.swift
       - path: ../protocol/Swift
       - path: RemoteDesktop/PrivacyInfo.xcprivacy

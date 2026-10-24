@@ -7,6 +7,12 @@ import Dispatch
 import Foundation
 import OSLog
 import Security
+import MemoryStoreKit
+
+struct OwnerMemoryScopeLease: Equatable, Sendable {
+    let scopeID: UUID
+    let generation: UInt64
+}
 
 /// Flattens host context that is interpolated into a model prompt. Application
 /// labels and action history are context, never prompt structure: line/control
@@ -3804,7 +3810,105 @@ final class HostComputerUseManager: ObservableObject {
 
     @Published private(set) var modelState: ModelState = .downloadRequired
     @Published private(set) var activity: Activity = .idle {
+        willSet {
+            if case .working = newValue {
+                revokeOwnerMemoryScopeForAutomation()
+                willBeginAutomation?()
+            }
+        }
         didSet { refreshLocalTaskControls() }
+    }
+    // The lifecycle owner wires this before it creates a local owner-memory
+    // scope, so every transition into automation revokes that scope first.
+    var willBeginAutomation: (@MainActor () -> Void)?
+    var didRevokeOwnerMemoryScope: (@MainActor (OwnerMemoryScopeLease) -> Void)?
+    var permitsOwnerMemorySession: Bool {
+        guard !isShuttingDown,
+              memoryErasureFence == nil,
+              activity == .idle,
+              currentExecution == nil,
+              pausedExecution == nil,
+              pendingApproval == nil,
+              activeVisualApprovalContinuation == nil,
+              postedApprovedVisualTaskID == nil,
+              currentExecutionToken == nil,
+              executionTask == nil else {
+            return false
+        }
+        return true
+    }
+
+    func mintOwnerMemoryScope(scopeID: UUID) -> OwnerMemoryScopeLease? {
+        guard permitsOwnerMemorySession, ownerMemoryScope == nil else { return nil }
+        ownerMemoryScopeGeneration &+= 1
+        let lease = OwnerMemoryScopeLease(scopeID: scopeID, generation: ownerMemoryScopeGeneration)
+        ownerMemoryScope = lease
+        ownerMemoryScopeConsumed = false
+        return lease
+    }
+
+    func isOwnerMemoryScopeCurrent(_ lease: OwnerMemoryScopeLease) -> Bool {
+        guard ownerMemoryScope == lease else { return false }
+        guard let fence = memoryErasureFence else { return true }
+        return !fence.revoked
+            && fence.authority == .owner(scopeID: lease.scopeID, generation: lease.generation)
+    }
+
+    func beginOwnerMemoryErasure(_ lease: OwnerMemoryScopeLease) -> UUID? {
+        guard !isShuttingDown else { return nil }
+        if let fence = memoryErasureFence {
+            guard !fence.revoked,
+                  fence.authority == .owner(scopeID: lease.scopeID, generation: lease.generation),
+                  ownerMemoryScope == lease else { return nil }
+            return fence.token
+        }
+        guard permitsOwnerMemorySession, ownerMemoryScope == lease,
+              !ownerMemoryScopeConsumed else { return nil }
+
+        ownerMemoryScopeConsumed = true
+        let fence = MemoryErasureFence(
+            token: UUID(),
+            authority: .owner(scopeID: lease.scopeID, generation: lease.generation),
+            peerID: "", sessionID: "", authorizationGeneration: 0,
+            executionTasks: [], lifecycleTasks: [], drainTask: nil, drained: false, revoked: false)
+        memoryErasureFence = fence
+        // The lifecycle hook can now distinguish this confirmed owner erase
+        // from phone erasure and ordinary automation before it closes the read scope.
+        willBeginAutomation?()
+        beginMemoryErasureWork(for: fence.token)
+        return memoryErasureFence?.token == fence.token
+            && memoryErasureFence?.revoked == false ? fence.token : nil
+    }
+
+    func isOwnerMemoryErasure(_ lease: OwnerMemoryScopeLease) -> Bool {
+        guard ownerMemoryScope == lease, let fence = memoryErasureFence else { return false }
+        return !fence.revoked
+            && fence.authority == .owner(scopeID: lease.scopeID, generation: lease.generation)
+    }
+
+    func revokeOwnerMemoryScope(_ lease: OwnerMemoryScopeLease) {
+        guard ownerMemoryScope == lease else { return }
+        retireOwnerMemoryScope(lease)
+        if let fence = memoryErasureFence,
+           fence.authority == .owner(scopeID: lease.scopeID, generation: lease.generation) {
+            revokeMemoryErasureFence(fence)
+        }
+    }
+
+    private func revokeOwnerMemoryScopeForAutomation() {
+        retireCurrentOwnerMemoryScope()
+    }
+
+    private func retireCurrentOwnerMemoryScope() {
+        guard let ownerMemoryScope else { return }
+        retireOwnerMemoryScope(ownerMemoryScope)
+    }
+
+    private func retireOwnerMemoryScope(_ lease: OwnerMemoryScopeLease) {
+        guard ownerMemoryScope == lease else { return }
+        ownerMemoryScope = nil
+        ownerMemoryScopeConsumed = false
+        didRevokeOwnerMemoryScope?(lease)
     }
     private struct TaskControlIdentity: Equatable {
         let taskID: String
@@ -3918,6 +4022,9 @@ final class HostComputerUseManager: ObservableObject {
         /// resume/replan prose is deliberately not inserted into these turns.
         let conversation: [ComputerUseConversationTurn]
         let textClarification: TextClarificationContinuation?
+        /// Captured from the admitted task payload. `nil` is reserved for a
+        /// malformed pre-delivered Pause and never grants memory access.
+        let memoryPolicy: ComputerUseTaskMemoryPolicy?
         /// False only when a versioned Pause reached the durable ledger before
         /// its Prompt. Resume can then claim and start that Prompt exactly once
         /// instead of treating it as work that needs a continuation replan.
@@ -3929,6 +4036,7 @@ final class HostComputerUseManager: ObservableObject {
             trustedUserPrompt: String? = nil,
             conversation: [ComputerUseConversationTurn]? = nil,
             textClarification: TextClarificationContinuation? = nil,
+            memoryPolicy: ComputerUseTaskMemoryPolicy? = nil,
             hasStarted: Bool = true
         ) {
             self.envelope = envelope
@@ -3941,6 +4049,8 @@ final class HostComputerUseManager: ObservableObject {
                     envelope.body).conversation
             self.hasStarted = hasStarted
             self.textClarification = textClarification
+            self.memoryPolicy = memoryPolicy
+                ?? (try? ComputerUseExecutionPromptDecoder.decode(envelope.body).memoryPolicy)
         }
 
         func belongs(to control: ComputerUseEnvelope) -> Bool {
@@ -3977,6 +4087,24 @@ final class HostComputerUseManager: ObservableObject {
         let operation: PendingOperation
     }
 
+    private struct MemoryErasureFence {
+        enum Authority: Equatable {
+            case phone(peerID: String, sessionID: String, generation: UInt64)
+            case owner(scopeID: UUID, generation: UInt64)
+        }
+
+        let token: UUID
+        let authority: Authority
+        let peerID: String
+        let sessionID: String
+        let authorizationGeneration: UInt64
+        var executionTasks: [Task<Void, Never>]
+        var lifecycleTasks: [Task<Void, Never>]
+        var drainTask: Task<Void, Never>?
+        var drained: Bool
+        var revoked: Bool
+    }
+
     private var executor: (any ComputerUseExecuting)?
     private let generalAgentFactory: ((ComputerUseInstallationReceipt) throws -> ComputerUseCapabilityExecutor)?
     private var agentLifecycleTask: Task<Void, Never>?
@@ -4011,6 +4139,8 @@ final class HostComputerUseManager: ObservableObject {
     /// the behavior they are explicitly exercising.
     let allowsExternalServices: Bool
     private let allowsAutomaticSetup: Bool
+    private let taskMemoryContextProvider: (any PersonalMemoryTaskContextProviding)?
+    private let taskMemoryContextSlot: TaskMemoryContextSlot?
     private let experimentalEnabled: @MainActor () -> Bool
     private let peerAuthorizationEpoch = ComputerUsePeerAuthorizationEpoch()
     private let webRTCAuthorizationFence =
@@ -4064,6 +4194,16 @@ final class HostComputerUseManager: ObservableObject {
     /// lease cannot revoke an authenticated WebRTC connection (or vice versa).
     /// Both sources may coexist only for the same stable device identity.
     private var localAuthorizedPeerID: String?
+    private var localMemorySessionID: String?
+    private var ownerMemoryScope: OwnerMemoryScopeLease?
+    private var ownerMemoryScopeGeneration: UInt64 = 0
+    private var ownerMemoryScopeConsumed = false
+    private var completedMemoryConfirmationLease:
+        (peerID: String, sessionID: String, taskID: String,
+         authorizationGeneration: UInt64, memoryPolicy: ComputerUseTaskMemoryPolicy,
+         expiresAt: Date)?
+    private var pendingTextClarificationMemoryPolicy:
+        (reference: ComputerUseClarificationReference, policy: ComputerUseTaskMemoryPolicy)?
     private var webRTCAuthorizedPeerID: String?
     private var webRTCAuthorizedPeerGeneration: UInt64?
     private var webRTCSupportsOrderedComputerUseControls = false
@@ -4077,6 +4217,7 @@ final class HostComputerUseManager: ObservableObject {
     private var lastInstallerProgressFraction: Double?
     private var lastInstallerProgressDate = Date.distantPast
     private var isShuttingDown = false
+    private var memoryErasureFence: MemoryErasureFence?
 
     init(
         experimentalEnabled: @escaping @MainActor () -> Bool = { ComputerUseFeatureFlags.experimental },
@@ -4090,6 +4231,10 @@ final class HostComputerUseManager: ObservableObject {
         allowsExternalServices: Bool = true,
         allowsAutomaticSetup: Bool = true,
         agentConfiguration: AgentHostFactory.Configuration = .init(),
+        agentRuntimeOverride: OSAtlasLlamaRuntime? = nil,
+        taskMemoryContextProvider: (any PersonalMemoryTaskContextProviding)? = nil,
+        taskMemoryContextSlot: TaskMemoryContextSlot? = nil,
+        taskMemoryFaraRuntimeInputs: PersonalMemoryFaraRuntimeInputsCache? = nil,
         approvalTargetProvider:
             ((ComputerUsePredictedAction) throws -> ComputerUseApprovalTargetSnapshot)? = nil,
         actionPerformer: ((ComputerUsePredictedAction) throws -> Void)? = nil,
@@ -4121,10 +4266,14 @@ final class HostComputerUseManager: ObservableObject {
             accessibilityContextProvider: accessibilityContextProvider)
         let modelInstaller = installer ?? ComputerUseInstaller()
         self.installer = modelInstaller
+        let agentRuntime = agentRuntimeOverride
+            ?? .shared
         if executor == nil, visualExecutorLoader == nil {
             generalAgentFactory = { receipt in
                 try AgentHostFactory.make(receipt: receipt, injector: injector, mayAct: mayAct,
-                    configuration: agentConfiguration)
+                    configuration: agentConfiguration, taskMemoryContextSlot: taskMemoryContextSlot,
+                    taskMemoryFaraRuntimeInputs: taskMemoryFaraRuntimeInputs,
+                    runtime: agentRuntime)
             }
         } else { generalAgentFactory = nil }
         let modelLoader = visualExecutorLoader ?? OSAtlasVisualExecutorLoader()
@@ -4134,6 +4283,8 @@ final class HostComputerUseManager: ObservableObject {
         self.transportTeardownTimeout = transportTeardownTimeout
         self.allowsExternalServices = allowsExternalServices
         self.allowsAutomaticSetup = allowsAutomaticSetup
+        self.taskMemoryContextProvider = taskMemoryContextProvider
+        self.taskMemoryContextSlot = taskMemoryContextSlot
         self.channelFactory = channelFactory
         if allowsExternalServices {
             refreshModelState()
@@ -4330,7 +4481,10 @@ final class HostComputerUseManager: ObservableObject {
     ) {
         guard !senderID.isEmpty else { return }
         if authorizedPeerID != senderID {
+            invalidateMemoryErasureFence()
             invalidateTextClarification()
+            localMemorySessionID = nil
+            invalidateCompletedMemoryConfirmationLease()
             peerAuthorizationGeneration &+= 1
         }
         authorizedPeerID = senderID
@@ -4356,6 +4510,11 @@ final class HostComputerUseManager: ObservableObject {
               authorizedPeerID == nil || authorizedPeerID == senderID else {
             return false
         }
+        if localAuthorizedPeerID != senderID {
+            invalidateMemoryErasureFence()
+            localMemorySessionID = nil
+            completedMemoryConfirmationLease = nil
+        }
         localAuthorizedPeerID = senderID
         authorizePeer(senderID: senderID)
         return true
@@ -4363,7 +4522,11 @@ final class HostComputerUseManager: ObservableObject {
 
     func revokeLocalPeerAuthorization(senderID: String) {
         guard localAuthorizedPeerID == senderID else { return }
+        taskMemoryContextSlot?.clear()
+        invalidateMemoryErasureFence()
         localAuthorizedPeerID = nil
+        localMemorySessionID = nil
+        completedMemoryConfirmationLease = nil
         if webRTCAuthorizedPeerID == senderID {
             authorizedPeerID = senderID
             authorizedPeerSupportsOrderedComputerUseControls =
@@ -4373,8 +4536,291 @@ final class HostComputerUseManager: ObservableObject {
         }
     }
 
+    /// Binds owner-memory RPC work to the broker-reserved local peer and the
+    /// exact task context already accepted by the host. Manual memory commands
+    /// may have no task. Confirmation may use a completed task for ten minutes,
+    /// matching the writer's proposal expiry; the lease is cleared on any
+    /// cancellation, takeover, new task, or authorization change.
+    func localMemoryLease(
+        peerID: String,
+        sessionID: String,
+        requiresTask: Bool
+    ) -> LocalMemoryHostLease? {
+        guard localAuthorizedPeerID == peerID,
+              authorizedPeerID == peerID,
+              UUID(uuidString: peerID) != nil,
+              !sessionID.isEmpty,
+              sessionID.utf8.count <= LocalHostComputerUseChannel.maximumSessionIDBytes else {
+            return nil
+        }
+        if let localMemorySessionID, localMemorySessionID != sessionID { return nil }
+
+        let activeContext = currentExecution ?? pausedExecution ?? pendingApproval?.context
+        if let activeContext,
+           activeContext.envelope.senderID == peerID {
+            guard activeContext.envelope.sessionID == sessionID,
+                  let memoryPolicy = activeContext.memoryPolicy else { return nil }
+            // Confirmation is an owner action after the proposing task ends.
+            // A still-running or takeover-paused task cannot confirm a proposal.
+            guard !requiresTask else { return nil }
+            localMemorySessionID = sessionID
+            return LocalMemoryHostLease(
+                peerID: peerID,
+                sessionID: sessionID,
+                taskID: activeContext.envelope.id,
+                authorizationGeneration: peerAuthorizationGeneration,
+                taskAuthority: .active,
+                memoryPolicy: memoryPolicy)
+        }
+        if requiresTask {
+            guard let lease = completedMemoryConfirmationLease,
+                  lease.peerID == peerID,
+                  lease.sessionID == sessionID,
+                  lease.authorizationGeneration == peerAuthorizationGeneration,
+                  lease.expiresAt > Date() else {
+                completedMemoryConfirmationLease = nil
+                return nil
+            }
+            localMemorySessionID = sessionID
+            return LocalMemoryHostLease(
+                peerID: peerID,
+                sessionID: sessionID,
+                taskID: lease.taskID,
+                authorizationGeneration: lease.authorizationGeneration,
+                taskAuthority: .completed,
+                memoryPolicy: lease.memoryPolicy)
+        }
+        localMemorySessionID = sessionID
+        return LocalMemoryHostLease(
+            peerID: peerID,
+            sessionID: sessionID,
+            taskID: nil,
+            authorizationGeneration: peerAuthorizationGeneration,
+            taskAuthority: .none,
+            memoryPolicy: .init())
+    }
+
+    func beginMemoryErasure(_ lease: LocalMemoryHostLease) -> UUID? {
+        guard !isShuttingDown,
+              !lease.peerID.isEmpty,
+              localAuthorizedPeerID == lease.peerID,
+              authorizedPeerID == lease.peerID,
+              localMemorySessionID == lease.sessionID,
+              peerAuthorizationGeneration == lease.authorizationGeneration else {
+            return nil
+        }
+
+        if let fence = memoryErasureFence {
+            guard !fence.revoked,
+                  fence.authority == .phone(peerID: lease.peerID, sessionID: lease.sessionID,
+                      generation: lease.authorizationGeneration),
+                  fence.peerID == lease.peerID,
+                  fence.sessionID == lease.sessionID,
+                  fence.authorizationGeneration == lease.authorizationGeneration else {
+                return nil
+            }
+            return fence.token
+        }
+
+        switch lease.taskAuthority {
+        case .none:
+            guard lease.taskID == nil else { return nil }
+        case .active:
+            guard let taskID = lease.taskID,
+                  let context = currentExecution ?? pausedExecution ?? pendingApproval?.context,
+                  context.envelope.id == taskID,
+                  context.envelope.senderID == lease.peerID,
+                  context.envelope.sessionID == lease.sessionID else { return nil }
+        case .completed:
+            guard let taskID = lease.taskID,
+                  let completed = completedMemoryConfirmationLease,
+                  completed.peerID == lease.peerID,
+                  completed.sessionID == lease.sessionID,
+                  completed.taskID == taskID,
+                  completed.authorizationGeneration == lease.authorizationGeneration,
+                  completed.expiresAt > Date() else { return nil }
+        }
+
+        let fence = MemoryErasureFence(
+            token: UUID(),
+            authority: .phone(peerID: lease.peerID, sessionID: lease.sessionID,
+                generation: lease.authorizationGeneration),
+            peerID: lease.peerID, sessionID: lease.sessionID,
+            authorizationGeneration: lease.authorizationGeneration,
+            executionTasks: [], lifecycleTasks: [], drainTask: nil, drained: false, revoked: false)
+        memoryErasureFence = fence
+        // A phone-authorized Forget retires any ordinary Mac owner read scope.
+        retireCurrentOwnerMemoryScope()
+        // Revoke an already-open Mac owner-memory scope before touching the
+        // accepted task or its executor.
+        willBeginAutomation?()
+
+        beginMemoryErasureWork(for: fence.token)
+        return memoryErasureFence?.token == fence.token
+            && memoryErasureFence?.revoked == false ? fence.token : nil
+    }
+
+    private func beginMemoryErasureWork(for token: UUID) {
+        taskMemoryContextSlot?.clear()
+        let context = currentExecution ?? pausedExecution ?? pendingApproval?.context
+        let capturedExecution = executionTask
+        if let context {
+            terminalizeForMemoryErasure(context)
+            stopExecution(context)
+        } else {
+            actionGate.endAutomation(allowsActions: false)
+            let invalidatedApproval = pendingApproval
+            cancelApprovalIfNeeded(invalidatedApproval)
+            cancelActiveVisualApprovalContinuation()
+            cancelActiveTaskWork()
+            executionTask?.cancel()
+            currentExecution = nil
+            pausedExecution = nil
+            pendingApproval = nil
+            approvalDeliveryTask?.cancel()
+            approvalDeliveryTask = nil
+            currentExecutionToken = nil
+            activity = .idle
+        }
+
+        guard memoryErasureFence?.token == token else { return }
+        memoryErasureFence?.executionTasks = capturedExecution.map { [$0] } ?? []
+        memoryErasureFence?.lifecycleTasks = agentLifecycleTask.map { [$0] } ?? []
+        scheduleMemoryErasureDrain(for: token)
+    }
+
+    func memoryErasureIsQuiescent(_ token: UUID) -> Bool {
+        guard let fence = memoryErasureFence, fence.token == token,
+              !fence.revoked, isMemoryErasureAuthorityCurrent(fence) else { return false }
+        return fence.drained
+    }
+
+    func endMemoryErasure(_ token: UUID) {
+        guard let fence = memoryErasureFence,
+              fence.token == token,
+              fence.drained,
+              !fence.revoked,
+              isMemoryErasureAuthorityCurrent(fence) else { return }
+        memoryErasureFence = nil
+        refreshLocalTaskControls()
+    }
+
+    private func isMemoryErasureAuthorityCurrent(_ fence: MemoryErasureFence) -> Bool {
+        guard !fence.revoked else { return false }
+        switch fence.authority {
+        case .phone(let peerID, let sessionID, let generation):
+            return localAuthorizedPeerID == peerID
+                && authorizedPeerID == peerID
+                && localMemorySessionID == sessionID
+                && peerAuthorizationGeneration == generation
+        case .owner(let scopeID, let generation):
+            return ownerMemoryScope == OwnerMemoryScopeLease(scopeID: scopeID, generation: generation)
+        }
+    }
+
+    private func scheduleMemoryErasureDrain(for token: UUID) {
+        guard var fence = memoryErasureFence, fence.token == token else { return }
+        guard !fence.executionTasks.isEmpty || !fence.lifecycleTasks.isEmpty else {
+            if fence.revoked || !isMemoryErasureAuthorityCurrent(fence) {
+                memoryErasureFence = nil
+            } else {
+                fence.drained = true
+                memoryErasureFence = fence
+            }
+            return
+        }
+        let executionTasks = fence.executionTasks
+        let lifecycleTasks = fence.lifecycleTasks
+        let authority = fence.authority
+        fence.drainTask = Task { @MainActor [weak self] in
+            for task in executionTasks { await task.value }
+            for task in lifecycleTasks { await task.value }
+            guard let self,
+                  var current = self.memoryErasureFence,
+                  current.token == token,
+                  current.authority == authority else { return }
+            // Retained handles are released only after both cancellation paths
+            // have unwound and only while this exact authorization still owns
+            // the erasure fence.
+            if !current.executionTasks.isEmpty {
+                // The fence prevents a replacement task from being admitted
+                // before this join, so the manager slot can only still refer
+                // to the captured, now-completed execution.
+                self.executionTask = nil
+            }
+            current.executionTasks.removeAll()
+            current.lifecycleTasks.removeAll()
+            current.drainTask = nil
+            if current.revoked || !self.isMemoryErasureAuthorityCurrent(current) {
+                self.memoryErasureFence = nil
+            } else {
+                current.drained = true
+                self.memoryErasureFence = current
+            }
+            self.refreshLocalTaskControls()
+        }
+        memoryErasureFence = fence
+    }
+
+    private func terminalizeForMemoryErasure(_ context: ExecutionContext) {
+        do {
+            let resolution = try taskLedger.cancelLocally(taskID: context.envelope.id,
+                senderID: context.envelope.senderID, sessionID: context.envelope.sessionID)
+            guard resolution.disposition != .identityMismatch,
+                  resolution.state == .cancelled else {
+                throw ComputerUseTaskLedger.LedgerError.invalidIdentity
+            }
+            sendDurableTerminal(ComputerUseTaskLedger.stoppedResponse, outcome: .unableToComplete,
+                replyingTo: context.envelope, channel: context.channel)
+        } catch {
+            send(kind: .assistant, body: Self.terminalPersistenceFailureResponse,
+                replyingTo: context.envelope, channel: context.channel, outcome: .unableToComplete)
+        }
+        sendStatus("ready", replyingTo: context.envelope, channel: context.channel)
+    }
+
+    private func invalidateMemoryErasureFence() {
+        retireCurrentOwnerMemoryScope()
+        guard let fence = memoryErasureFence else { return }
+        revokeMemoryErasureFence(fence)
+    }
+
+    private func revokeMemoryErasureFence(_ fence: MemoryErasureFence) {
+        guard memoryErasureFence?.token == fence.token else { return }
+        if fence.drained {
+            memoryErasureFence = nil
+        } else {
+            var updatedFence = fence
+            updatedFence.revoked = true
+            memoryErasureFence = updatedFence
+        }
+    }
+
+    private func retainCompletedMemoryConfirmationLease(for context: ExecutionContext) {
+        guard let memoryPolicy = context.memoryPolicy,
+              localAuthorizedPeerID == context.envelope.senderID,
+              authorizedPeerID == context.envelope.senderID else {
+            invalidateCompletedMemoryConfirmationLease()
+            return
+        }
+        completedMemoryConfirmationLease = (
+            peerID: context.envelope.senderID,
+            sessionID: context.envelope.sessionID,
+            taskID: context.envelope.id,
+            authorizationGeneration: peerAuthorizationGeneration,
+            memoryPolicy: memoryPolicy,
+            expiresAt: Date().addingTimeInterval(10 * 60))
+    }
+
+    private func invalidateCompletedMemoryConfirmationLease() {
+        completedMemoryConfirmationLease = nil
+    }
+
     func revokePeerAuthorization() {
+        taskMemoryContextSlot?.clear()
+        invalidateMemoryErasureFence()
         invalidateTextClarification()
+        invalidateCompletedMemoryConfirmationLease()
         peerAuthorizationGeneration &+= 1
         authorizedPeerID = nil
         authorizedPeerSupportsOrderedComputerUseControls = false
@@ -4527,6 +4973,9 @@ final class HostComputerUseManager: ObservableObject {
     /// Immediate MainActor lifecycle interruption. Off-main physical/direct
     /// input must use its captured receipt through applyUserInputIntervention.
     func userIntervened() {
+        taskMemoryContextSlot?.clear()
+        invalidateCompletedMemoryConfirmationLease()
+        revokeCurrentOwnerMemoryScope()
         switch activity {
         case .working, .awaitingApproval:
             blockActionsForUserIntervention()
@@ -4536,6 +4985,11 @@ final class HostComputerUseManager: ObservableObject {
         case .idle, .paused:
             return
         }
+    }
+
+    private func revokeCurrentOwnerMemoryScope() {
+        guard let ownerMemoryScope else { return }
+        revokeOwnerMemoryScope(ownerMemoryScope)
     }
 
     func applyUserInputIntervention(_ intervention: ComputerUseActionGate.InputIntervention) {
@@ -4596,7 +5050,11 @@ final class HostComputerUseManager: ObservableObject {
 
     @discardableResult
     private func stopTransport() -> Task<Void, Never> {
+        taskMemoryContextSlot?.clear()
+        invalidateMemoryErasureFence()
         invalidateTextClarification()
+        localMemorySessionID = nil
+        invalidateCompletedMemoryConfirmationLease()
         // Fence an in-flight poll before doing anything that can yield. A
         // cancellation-ignoring channel may still return, but its generation
         // can no longer enter `handle` or acknowledge stale envelopes.
@@ -4775,11 +5233,13 @@ final class HostComputerUseManager: ObservableObject {
             guard authorizedPeerSupportsOrderedComputerUseControls else {
                 return true
             }
+            guard memoryErasureFence == nil else { return true }
             handleApprovalResponse(envelope)
             return true
         case .prompt:
             guard let authorizedPeerID else { return false }
             guard authorizedPeerID == envelope.senderID else { return true }
+            guard memoryErasureFence == nil else { return true }
             guard authorizedPeerSupportsOrderedComputerUseControls else {
                 send(
                     kind: .assistant,
@@ -4795,6 +5255,7 @@ final class HostComputerUseManager: ObservableObject {
         case .pause, .resume, .cancel:
             guard let authorizedPeerID else { return false }
             guard authorizedPeerID == envelope.senderID else { return true }
+            guard memoryErasureFence == nil else { return true }
             guard authorizedPeerSupportsOrderedComputerUseControls else {
                 return true
             }
@@ -5311,8 +5772,10 @@ final class HostComputerUseManager: ObservableObject {
             trustedUserPrompt: pausedExecution.trustedUserPrompt,
             conversation: pausedExecution.conversation,
             textClarification: pausedExecution.textClarification,
+            memoryPolicy: pausedExecution.memoryPolicy,
             channel: pausedExecution.channel,
-            isResuming: true, pendingAutomationID: pendingAutomationID)
+            isResuming: true, pendingAutomationID: pendingAutomationID,
+            preservingPausedExecution: true)
     }
 
     private func stopExecution(_ context: ExecutionContext) {
@@ -5320,6 +5783,8 @@ final class HostComputerUseManager: ObservableObject {
             ?? pausedExecution?.envelope.id
             ?? pendingApproval?.context.envelope.id
         guard activeTaskID == context.envelope.id else { return }
+        taskMemoryContextSlot?.clear()
+        invalidateCompletedMemoryConfirmationLease()
         textClarifications.invalidate(for: context.envelope)
         (executor as? any ComputerUseClarificationContinuing)?.invalidateClarification(taskID: context.envelope.id)
         // Cancel is terminal for this execution. Keep the automation gate
@@ -6052,6 +6517,12 @@ final class HostComputerUseManager: ObservableObject {
                         channel: channel)
                     return
                 }
+                invalidateCompletedMemoryConfirmationLease()
+                // A newly claimed, non-conflicting task is host-accepted
+                // authority to move this peer's memory RPC session binding.
+                // Do not rebind from a memory RPC alone: a stale session could
+                // otherwise take ownership after the task's session changed.
+                localMemorySessionID = envelope.sessionID
                 break
             case .paused:
                 if hasDifferentActiveTask {
@@ -6184,8 +6655,14 @@ final class HostComputerUseManager: ObservableObject {
         }
 
         let continuation: TextClarificationContinuation?
+        let acceptedMemoryPolicy: ComputerUseTaskMemoryPolicy
         do {
             if let reference = request.clarification {
+                guard let retained = pendingTextClarificationMemoryPolicy,
+                      retained.reference == reference else {
+                    throw ComputerUseClarificationStore.Failure.invalidReference
+                }
+                acceptedMemoryPolicy = retained.policy
                 guard let continuing = executor as? any ComputerUseClarificationContinuing,
                       let pending = try continuing.clarification(taskID: reference.taskID) else {
                     throw ComputerUseClarificationStore.Failure.invalidReference
@@ -6198,10 +6675,15 @@ final class HostComputerUseManager: ObservableObject {
                     choiceID: request.clarificationChoiceID, scope: pending.scope, for: envelope)
                 continuation = TextClarificationContinuation(originatingTaskID: reference.taskID,
                     goal: resolution.goal, selectedChoice: resolution.selectedChoice)
+                pendingTextClarificationMemoryPolicy = nil
             } else {
+                acceptedMemoryPolicy = request.memoryPolicy
                 continuation = nil
             }
         } catch {
+            if let reference = request.clarification {
+                invalidateTextClarification(for: reference, basedOn: envelope)
+            }
             sendDurableTerminal("I couldn't validate this request or its clarification. Start a new request with the complete instruction.",
                 outcome: .unableToComplete, replyingTo: envelope, channel: channel)
             sendStatus("ready", replyingTo: envelope, channel: channel)
@@ -6247,6 +6729,7 @@ final class HostComputerUseManager: ObservableObject {
             trustedUserPrompt: request.prompt,
             conversation: request.conversation,
             textClarification: continuation,
+            memoryPolicy: acceptedMemoryPolicy,
             channel: channel, pendingAutomationID: pendingAutomationID)
     }
 
@@ -6256,23 +6739,27 @@ final class HostComputerUseManager: ObservableObject {
         trustedUserPrompt: String,
         conversation: [ComputerUseConversationTurn],
         textClarification: TextClarificationContinuation? = nil,
+        memoryPolicy: ComputerUseTaskMemoryPolicy? = nil,
         channel: any HostComputerUseChannel,
         isResuming: Bool = false,
-        pendingAutomationID: UUID? = nil
+        pendingAutomationID: UUID? = nil,
+        preservingPausedExecution: Bool = false
     ) {
         let context = ExecutionContext(
             envelope: envelope,
             channel: channel,
             trustedUserPrompt: trustedUserPrompt,
             conversation: conversation,
-            textClarification: textClarification)
+            textClarification: textClarification,
+            memoryPolicy: memoryPolicy)
         let admissionID = pendingAutomationID ?? actionGate.reservePendingAutomation()
         guard actionGate.adoptPendingAutomation(admissionID) else {
             pauseForLocalIntervention(context)
             return
         }
         let precedingExecution = executionTask
-        precedingExecution?.cancel()
+        if !preservingPausedExecution { precedingExecution?.cancel() }
+        if textClarification == nil { taskMemoryContextSlot?.clear() }
         // Keep this exact reservation through predecessor joining. An input
         // event may revoke it before or after adoption, and a later run cannot
         // substitute a new reservation for this continuation.
@@ -6319,6 +6806,9 @@ final class HostComputerUseManager: ObservableObject {
                     await agentLifecycleTask?.value
                     try Task.checkCancellation()
                     guard currentExecutionToken == token else { throw CancellationError() }
+                    try await prepareTaskMemoryContext(context, token: token)
+                    try Task.checkCancellation()
+                    guard currentExecutionToken == token else { throw CancellationError() }
                     result = try await executor.execute(
                         taskID: envelope.id,
                         modelPrompt: envelope.body,
@@ -6352,6 +6842,7 @@ final class HostComputerUseManager: ObservableObject {
                 pauseForLocalIntervention(context)
             } catch {
                 guard currentExecutionToken == token else { return }
+                taskMemoryContextSlot?.clear()
                 if currentExecution?.envelope.id == envelope.id {
                     currentExecution = nil
                 }
@@ -6369,6 +6860,92 @@ final class HostComputerUseManager: ObservableObject {
                 sendStatus("ready", replyingTo: envelope, channel: channel)
             }
         }
+    }
+
+    private func prepareTaskMemoryContext(_ context: ExecutionContext, token: UUID) async throws {
+        guard let provider = taskMemoryContextProvider else { return }
+        guard
+              let policy = context.memoryPolicy, !policy.incognito, !policy.noMemory,
+              context.textClarification == nil else { return }
+        guard let slot = taskMemoryContextSlot else { throw TaskMemoryContextFailure.unavailable }
+        guard let lease = localMemoryLease(peerID: context.envelope.senderID,
+            sessionID: context.envelope.sessionID, requiresTask: false),
+              lease.taskID == context.envelope.id, lease.taskAuthority == .active,
+              lease.authorizationGeneration == peerAuthorizationGeneration else {
+            throw TaskMemoryContextFailure.invalidLease
+        }
+        slot.bindLease(lease)
+        let binding: MemoryStoreBinding?
+        do { binding = try await provider.captureBinding(for: lease) }
+        catch is CancellationError { throw CancellationError() }
+        catch { throw TaskMemoryContextFailure.unavailable }
+        guard let binding else {
+            try Task.checkCancellation()
+            guard currentExecutionToken == token,
+                  localMemoryLease(peerID: lease.peerID, sessionID: lease.sessionID,
+                    requiresTask: false) == lease,
+                  slot.clearForMemorylessTask(taskID: context.envelope.id) else {
+                throw CancellationError()
+            }
+            return
+        }
+        try Task.checkCancellation()
+        guard currentExecutionToken == token,
+              localMemoryLease(peerID: lease.peerID, sessionID: lease.sessionID,
+                requiresTask: false) == lease else { throw CancellationError() }
+        let text: String?
+        do { text = try await provider.prepare(lease: lease, binding: binding,
+            prompt: context.trustedUserPrompt) }
+        catch is CancellationError { throw CancellationError() }
+        catch { throw TaskMemoryContextFailure.unavailable }
+        guard let text else { throw TaskMemoryContextFailure.unavailable }
+        try Task.checkCancellation()
+        let finalBinding: MemoryStoreBinding?
+        do { finalBinding = try await provider.captureBinding(for: lease) }
+        catch is CancellationError { throw CancellationError() }
+        catch { throw TaskMemoryContextFailure.unavailable }
+        try Task.checkCancellation()
+        guard currentExecutionToken == token,
+              localMemoryLease(peerID: lease.peerID, sessionID: lease.sessionID,
+                requiresTask: false) == lease,
+              finalBinding == binding else {
+            throw TaskMemoryContextFailure.staleBinding
+        }
+        slot.stage(text, taskID: context.envelope.id, lease: lease, binding: binding) { [weak self] in
+            self?.isTaskMemoryContextCurrent(lease, taskID: context.envelope.id, initialToken: token) == true
+        }
+    }
+
+    func isTaskMemoryLeaseCurrent(_ lease: LocalMemoryHostLease) -> Bool {
+        guard lease.taskAuthority == .active, lease.taskID != nil else { return false }
+        return localMemoryLease(peerID: lease.peerID, sessionID: lease.sessionID,
+            requiresTask: false) == lease
+    }
+
+    private func isTaskMemoryContextCurrent(_ lease: LocalMemoryHostLease, taskID: String,
+                                            initialToken: UUID) -> Bool {
+        guard localAuthorizedPeerID == lease.peerID, authorizedPeerID == lease.peerID,
+              peerAuthorizationGeneration == lease.authorizationGeneration else { return false }
+        if currentExecutionToken == initialToken,
+           currentExecution?.envelope.id == taskID,
+           localMemoryLease(peerID: lease.peerID, sessionID: lease.sessionID,
+                requiresTask: false) == lease { return true }
+        guard let activeContext = currentExecution,
+              activeContext.envelope.senderID == lease.peerID,
+              activeContext.envelope.sessionID == lease.sessionID,
+              activeContext.memoryPolicy == lease.memoryPolicy,
+              (activeContext.envelope.id == taskID || activeContext.textClarification != nil),
+              let activeLease = localMemoryLease(peerID: lease.peerID,
+                sessionID: lease.sessionID, requiresTask: false) else { return false }
+        guard activeLease.taskAuthority == .active else { return false }
+        if activeContext.envelope.id == taskID { return activeLease == lease }
+        guard let clarification = activeContext.textClarification else { return false }
+        return generalAgent?.ownsTaskMemoryContinuation(rootTaskID: taskID,
+            originatingHostTaskID: clarification.originatingTaskID,
+            currentHostTaskID: activeContext.envelope.id) == true
+            && activeLease.authorizationGeneration == lease.authorizationGeneration
+            && activeLease.memoryPolicy == lease.memoryPolicy
+            && (activeContext.textClarification != nil || activeLease.taskID == taskID)
     }
 
     private func pauseAfterPendingAutomationWasBlocked(
@@ -6581,6 +7158,7 @@ final class HostComputerUseManager: ObservableObject {
             trustedUserPrompt: context.trustedUserPrompt,
             conversation: context.conversation,
             textClarification: context.textClarification,
+            memoryPolicy: context.memoryPolicy,
             channel: context.channel,
             isResuming: true)
     }
@@ -6606,6 +7184,8 @@ final class HostComputerUseManager: ObservableObject {
                     + request.reviewFields.map { .init(label: $0.label, value: $0.value) })
             enterApproval(.init(request: presentation, context: context, operation: .agent(request)))
         case .completed(let response):
+            retainCompletedMemoryConfirmationLease(for: context)
+            taskMemoryContextSlot?.clear()
             sendDurableTerminal(
                 response,
                 outcome: .taskCompleted,
@@ -6619,6 +7199,7 @@ final class HostComputerUseManager: ObservableObject {
             sendStatus("ready", replyingTo: envelope, channel: context.channel)
 
         case .unableToComplete(let response):
+            taskMemoryContextSlot?.clear()
             sendDurableTerminal(
                 response,
                 outcome: .unableToComplete,
@@ -6655,7 +7236,8 @@ final class HostComputerUseManager: ObservableObject {
                 replyingTo: envelope,
                 channel: context.channel,
                 clarification: reference,
-                clarificationChoices: choices)
+                clarificationChoices: choices,
+                memoryPolicy: context.memoryPolicy)
             currentExecution = nil
             currentExecutionToken = nil
             executionTask = nil
@@ -6718,6 +7300,7 @@ final class HostComputerUseManager: ObservableObject {
         token: UUID
     ) {
         guard currentExecutionToken == token else { return }
+        taskMemoryContextSlot?.clear()
         currentExecution = nil
         currentExecutionToken = nil
         executionTask = nil
@@ -6816,7 +7399,8 @@ final class HostComputerUseManager: ObservableObject {
         replyingTo envelope: ComputerUseEnvelope,
         channel: any HostComputerUseChannel,
         clarification: ComputerUseClarificationReference? = nil,
-        clarificationChoices: [ComputerUseClarificationChoice]? = nil
+        clarificationChoices: [ComputerUseClarificationChoice]? = nil,
+        memoryPolicy: ComputerUseTaskMemoryPolicy? = nil
     ) {
         let identifiesTextQuestion = clarification.map { textClarifications.matches($0) } ?? false
         do {
@@ -6826,6 +7410,14 @@ final class HostComputerUseManager: ObservableObject {
                 outcome: outcome,
                 clarification: clarification,
                 clarificationOwner: identifiesTextQuestion ? .text : nil)
+            if let reference = terminal.clarification,
+               reference == clarification,
+               let memoryPolicy {
+                pendingTextClarificationMemoryPolicy = (reference, memoryPolicy)
+            } else if pendingTextClarificationMemoryPolicy?.reference.taskID == envelope.id
+                        || pendingTextClarificationMemoryPolicy?.reference == clarification {
+                pendingTextClarificationMemoryPolicy = nil
+            }
             if terminal.clarification == nil || (clarification != nil && terminal.clarification != clarification) {
                 textClarifications.invalidate(for: envelope)
                 (executor as? any ComputerUseClarificationContinuing)?.invalidateClarification(taskID: envelope.id)
@@ -6840,6 +7432,10 @@ final class HostComputerUseManager: ObservableObject {
                 clarificationChoices: terminal.clarification == clarification
                     && terminal.outcome == .userInterventionRequired ? clarificationChoices : nil)
         } catch {
+            if pendingTextClarificationMemoryPolicy?.reference.taskID == envelope.id
+                || pendingTextClarificationMemoryPolicy?.reference == clarification {
+                pendingTextClarificationMemoryPolicy = nil
+            }
             textClarifications.invalidate(for: envelope)
             (executor as? any ComputerUseClarificationContinuing)?.invalidateClarification(taskID: envelope.id)
             send(
@@ -6852,8 +7448,21 @@ final class HostComputerUseManager: ObservableObject {
     }
 
     private func invalidateTextClarification() {
+        pendingTextClarificationMemoryPolicy = nil
         textClarifications.invalidate()
         (executor as? any ComputerUseClarificationContinuing)?.invalidateClarification(taskID: nil)
+    }
+
+    private func invalidateTextClarification(
+        for reference: ComputerUseClarificationReference,
+        basedOn envelope: ComputerUseEnvelope
+    ) {
+        if pendingTextClarificationMemoryPolicy?.reference == reference {
+            pendingTextClarificationMemoryPolicy = nil
+        }
+        let questionEnvelope = controlReplyEnvelope(taskID: reference.taskID, basedOn: envelope)
+        textClarifications.invalidate(for: questionEnvelope)
+        (executor as? any ComputerUseClarificationContinuing)?.invalidateClarification(taskID: reference.taskID)
     }
 
     private func startApprovalDelivery(_ approval: PendingApproval) {

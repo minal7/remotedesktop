@@ -1,0 +1,8 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><title>Choose a seat</title><main>
+<h1>Choose a seat</h1><p>The aisle seat is unavailable on this itinerary.</p>
+<button id="seat-aisle" type="button" disabled aria-disabled="true">Aisle seat — unavailable</button>
+<button id="seat-window" type="button" onclick="document.querySelector('#selected-seat').textContent='window'">Window seat</button>
+<button id="seat-middle" type="button" onclick="document.querySelector('#selected-seat').textContent='middle'">Middle seat</button>
+<p>Selected seat: <strong id="selected-seat">none</strong></p>
+</main></html>

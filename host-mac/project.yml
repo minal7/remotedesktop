@@ -13,6 +13,8 @@ settings:
   CURRENT_PROJECT_VERSION: 1
 
 packages:
+  MemoryStoreKit:
+    path: MemoryStoreKit
   LiveKitWebRTC:
     url: https://github.com/livekit/webrtc-xcframework.git
     exactVersion: 144.7559.3
@@ -54,6 +56,7 @@ targets:
         excludes:
           - Resources/ComputerUseSkills
           - Agent/Schemas
+      - path: ../shared/PersonalMemory
       - path: RemoteDesktopHost/Agent/Schemas
         type: folder
         buildPhase: resources
@@ -70,6 +73,8 @@ targets:
         type: folder
         buildPhase: resources
     dependencies:
+      - package: MemoryStoreKit
+        product: MemoryStoreKit
       - package: LiveKitWebRTC
         product: LiveKitWebRTC
       - package: SwiftSystem
@@ -165,6 +170,7 @@ targets:
       - path: ../protocol/Swift
         excludes:
           - DesktopVideoQuality.swift
+      - path: ../shared/PersonalMemory
     settings:
       CODE_SIGN_IDENTITY: Apple Development
       CODE_SIGN_STYLE: Automatic
@@ -182,6 +188,8 @@ targets:
     dependencies:
       - target: RemoteDesktopHost
       - target: RemoteDesktopClientCore
+      - package: MemoryStoreKit
+        product: MemoryStoreKit
     settings:
       CODE_SIGN_IDENTITY: Apple Development
       CODE_SIGN_STYLE: Automatic
