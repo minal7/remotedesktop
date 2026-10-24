@@ -111,6 +111,10 @@ class FixtureSchemaTests(unittest.TestCase):
                 self.assertEqual(memory[active_id]["status"], "active")
                 if secondary_id is not None:
                     self.assertEqual(memory[secondary_id]["status"], secondary_status)
+        self.assertEqual(
+            memory["profile-email-greeting"]["text"],
+            "My usual email greeting is exactly “Hello” (without the quotation marks or punctuation).",
+        )
         address_case = cases["memory-recall-10-03"]
         self.assertNotIn("no_unrelated_memory", address_case["assertions"])
         self.assertEqual(cases["memory-recall-10-08"]["expected_outcome"], "ask_user")

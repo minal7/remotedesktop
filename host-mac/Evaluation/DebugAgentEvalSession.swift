@@ -539,7 +539,7 @@ struct DebugAgentEvalMemoryFixtureDefinition {
         let favoriteColor = MemoryEvaluationFixtureRecord(id: "fact-favorite-color", kind: .fact,
             body: "My favorite color is blue.", observedAt: 50, active: true)
         let emailGreeting = MemoryEvaluationFixtureRecord(id: "profile-email-greeting", kind: .profile,
-            body: "My usual email greeting is Hello.", observedAt: 110, active: true)
+            body: "My usual email greeting is exactly “Hello” (without the quotation marks or punctuation).", observedAt: 110, active: true)
         let dentistPhone = MemoryEvaluationFixtureRecord(id: "fact-dentist-phone", kind: .fact,
             body: "My fictional dentist phone number is 202-555-0147.", observedAt: 110, active: true)
         let currentWindow = MemoryEvaluationFixtureRecord(id: "profile-seat-window-current", kind: .profile,
