@@ -132,7 +132,8 @@ final class PersonalMemoryCoordinator {
         }
         if command.operation == .captureMemoryGeneration {
             if erasureState != nil,
-               !(await renewReaderScopeIfAllowed(hostLease, context: context)) {
+               !(await renewReaderScopeIfAllowed(hostLease, context: context,
+                    allowVerifiedAbsentRead: true)) {
                 return reply(command, status: .unavailable)
             }
             return await captureGeneration(command, context: context, hostLease: hostLease)
@@ -143,7 +144,10 @@ final class PersonalMemoryCoordinator {
                 isClosed: { [weak self] in self?.isClosed ?? true })
         }
         if erasureState != nil {
-            guard await renewReaderScopeIfAllowed(hostLease, context: context) else {
+            let allowsEmptyStoreRead = [.listMetadata, .listRecords, .searchRecords]
+                .contains(command.operation)
+            guard await renewReaderScopeIfAllowed(hostLease, context: context,
+                allowVerifiedAbsentRead: allowsEmptyStoreRead) else {
                 return reply(command, status: .unavailable)
             }
         }
@@ -315,7 +319,8 @@ final class PersonalMemoryCoordinator {
     }
 
     private func renewReaderScopeIfAllowed(_ lease: LocalMemoryHostLease,
-                                           context: LocalMemoryRPCContext) async -> Bool {
+                                           context: LocalMemoryRPCContext,
+                                           allowVerifiedAbsentRead: Bool = false) async -> Bool {
         guard let oldState = erasureState, oldState.completed, erasureWork == nil,
               let oldAuthority = completedForgetAuthority,
               oldAuthority.peerID == oldState.peerID,
@@ -332,9 +337,28 @@ final class PersonalMemoryCoordinator {
               erasureWork == nil, ownsErasureState(oldState),
               completedForgetAuthority == oldAuthority,
               isCurrentLease(lease, context: context),
-              let currentBinding,
-              initializationCoordinator.canRenewReaderScope(old: oldAuthority,
-                  newLease: lease, currentBinding: currentBinding, hasPendingWork: false) else {
+              let currentBinding else {
+            return false
+        }
+        let initializedScope = initializationCoordinator.canRenewReaderScope(old: oldAuthority,
+            newLease: lease, currentBinding: currentBinding, hasPendingWork: false)
+        let absentStoreScope: Bool
+        if initializedScope {
+            absentStoreScope = false
+        } else if allowVerifiedAbsentRead,
+                  initializationCoordinator.canRenewReaderScopeForVerifiedAbsentStore(
+                    old: oldAuthority, newLease: lease, currentBinding: currentBinding,
+                    hasPendingWork: false) {
+            absentStoreScope = verifyBoundStoreIsAbsent(binding: oldAuthority.binding)
+        } else {
+            absentStoreScope = false
+        }
+        guard initializedScope || absentStoreScope,
+              !Task.isCancelled, !isClosed,
+              erasureWork == nil, ownsErasureState(oldState),
+              completedForgetAuthority == oldAuthority,
+              isCurrentLease(lease, context: context),
+              await isCurrentBinding(currentBinding) else {
             return false
         }
         closeStorage()
@@ -342,6 +366,27 @@ final class PersonalMemoryCoordinator {
         completedForgetAuthority = nil
         initializationCoordinator.retireCompletedScope()
         return true
+    }
+
+    private func verifyBoundStoreIsAbsent(binding: MemoryStoreBinding) -> Bool {
+        // Opening the existing bound generation is read-only when its database is absent:
+        // MemoryStoreFactory verifies the completed-Forget marker and exact lock-only root
+        // before throwing storageAbsent. Any opened service or other error fails closed.
+        closeStorage()
+        do {
+            guard try resolveErasureService(binding: binding) != nil else {
+                closeStorage()
+                return false
+            }
+            closeStorage()
+            return false
+        } catch MemoryFactoryError.storageAbsent {
+            closeStorage()
+            return true
+        } catch {
+            closeStorage()
+            return false
+        }
     }
 
     private func readCurrentBinding() async throws -> MemoryStoreBinding? {

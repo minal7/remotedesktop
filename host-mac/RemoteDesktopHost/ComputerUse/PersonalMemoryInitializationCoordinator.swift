@@ -231,6 +231,21 @@ final class PersonalMemoryInitializationCoordinator {
             || oldCurrent.peerID != old.peerID || oldCurrent.sessionID != old.sessionID
     }
 
+    func canRenewReaderScopeForVerifiedAbsentStore(
+        old: CompletedMemoryForgetAuthority?, newLease: LocalMemoryHostLease,
+        currentBinding: MemoryStoreBinding, hasPendingWork: Bool
+    ) -> Bool {
+        guard !hasPendingWork, activeWork == nil, let old,
+              currentBinding == old.binding,
+              newLease.peerID == old.peerID,
+              newLease.sessionID != old.sessionID,
+              newLease.authorizationGeneration != old.authorizationGeneration else { return false }
+        let oldContext = LocalMemoryRPCContext(peerID: old.peerID, sessionID: old.sessionID)
+        guard let oldCurrent = leaseProvider(oldContext, false) else { return true }
+        return oldCurrent.authorizationGeneration != old.authorizationGeneration
+            || oldCurrent.peerID != old.peerID || oldCurrent.sessionID != old.sessionID
+    }
+
     func retireCompletedScope() {
         guard activeWork == nil else { return }
         completedResult = nil

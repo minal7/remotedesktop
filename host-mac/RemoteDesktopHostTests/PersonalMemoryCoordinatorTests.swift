@@ -240,6 +240,91 @@ final class PersonalMemoryCoordinatorTests: XCTestCase {
             account: "database-key", protection: .deviceOnlyWhenUnlocked)))
     }
 
+    func testSameCoordinatorListsEmptyAfterForgetForFreshAuthorizedSession() async throws {
+        let root = try makeMemoryRoot("PersonalMemorySameCoordinatorPostForget")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let namespace = KeychainNamespace.testing("same-coordinator-post-forget-\(UUID().uuidString)")
+        let keys = CoordinatorLifecycleTestKeys()
+        let oldSessionID = sessionID
+        let newSessionID = "memory-session-after-forget"
+        var currentSessionID = oldSessionID
+        var authorizationGeneration: UInt64 = 41
+        let oldContext = OwnerMemoryContext(ownerID: ownerID, sessionID: oldSessionID)
+        let original = try XCTUnwrap(MemoryStoreFactory.openForTesting(enabled: true, root: root,
+            client: keys, random: keys, namespace: namespace,
+            authorize: { $0 == oldContext }, isTaskActive: { _, _ in true },
+            policy: { OwnerMemoryPolicy(featureEnabled: true) }))
+        let binding = try XCTUnwrap(MemoryStoreFactory.captureBindingForTesting(enabled: true,
+            root: root, client: keys, namespace: namespace))
+        _ = try original.writer.remember(kind: .fact, text: "synthetic same-process Forget row",
+            commandID: UUID().uuidString.lowercased(), context: oldContext)
+        try original.close()
+
+        let coordinator = PersonalMemoryCoordinator(enabled: true, ownerID: ownerID,
+            leaseProvider: { request, requiresTask in
+                guard request.peerID == self.peerID,
+                      request.sessionID == currentSessionID, !requiresTask else { return nil }
+                return LocalMemoryHostLease(peerID: self.peerID, sessionID: currentSessionID,
+                    taskID: nil, authorizationGeneration: authorizationGeneration,
+                    taskAuthority: .none)
+            }, beginErasure: { _ in UUID() },
+            isErasureQuiescent: { _ in true },
+            endErasure: { _ in },
+            captureBinding: {
+                try MemoryStoreFactory.captureBindingForTesting(enabled: true,
+                    root: root, client: keys, namespace: namespace)
+            },
+            boundServiceFactory: { captured in
+                try MemoryStoreFactory.openBoundGenerationForTesting(enabled: true,
+                    binding: captured, client: keys, random: keys,
+                    authorize: { $0.ownerID == self.ownerID }, isTaskActive: { _, _ in true },
+                    policy: { OwnerMemoryPolicy(featureEnabled: true) })
+            })
+        defer { coordinator.close() }
+
+        let oldRequest = LocalMemoryRPCContext(peerID: peerID, sessionID: oldSessionID)
+        let forgotten = await coordinator.handle(LocalMemoryRPCCommand(
+            forgetEverything: UUID().uuidString.lowercased(), generationReference: binding.reference),
+            context: oldRequest)
+        XCTAssertEqual(forgotten.status, .completed)
+        XCTAssertEqual(forgotten.generationReference, binding.reference)
+
+        currentSessionID = newSessionID
+        authorizationGeneration += 1
+        let newRequest = LocalMemoryRPCContext(peerID: peerID, sessionID: newSessionID)
+        let listed = await coordinator.handle(LocalMemoryRPCCommand(listRecords: 8), context: newRequest)
+        XCTAssertEqual(listed.status, .completed)
+        XCTAssertTrue(listed.records.isEmpty)
+        XCTAssertNil(listed.nextRecordID)
+
+        let database = root.appendingPathComponent("memory.sqlite")
+        for path in [database.path, database.path + "-wal", database.path + "-shm",
+                     database.path + "-journal"] {
+            XCTAssertFalse(FileManager.default.fileExists(atPath: path))
+        }
+        XCTAssertEqual(try MemoryStoreFactory.captureBindingForTesting(enabled: true,
+            root: root, client: keys, namespace: namespace), binding)
+        let databaseKey = ExactKeychainItem(service: namespace.databaseKeyService,
+            account: "database-key", protection: .deviceOnlyWhenUnlocked)
+        XCTAssertFalse(keys.contains(databaseKey))
+
+        let attemptedWrite = await coordinator.handle(LocalMemoryRPCCommand(
+            rememberKind: .fact, text: "must require fresh initialization",
+            commandID: UUID().uuidString.lowercased()), context: newRequest)
+        XCTAssertEqual(attemptedWrite.status, .unavailable)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: database.path))
+        XCTAssertFalse(keys.contains(databaseKey))
+
+        let unknown = root.appendingPathComponent("unexpected-state")
+        try Data([0xA5]).write(to: unknown)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: unknown.path)
+        let corruptStateReply = await coordinator.handle(LocalMemoryRPCCommand(listRecords: 8),
+            context: newRequest)
+        XCTAssertEqual(corruptStateReply.status, .unavailable)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: database.path))
+        XCTAssertFalse(keys.contains(databaseKey))
+    }
+
     func testExistingDatabaseKeyFailureDoesNotReturnEmptyList() async throws {
         let root = try makeMemoryRoot("PersonalMemoryExistingDatabaseFailure")
         defer { try? FileManager.default.removeItem(at: root) }
