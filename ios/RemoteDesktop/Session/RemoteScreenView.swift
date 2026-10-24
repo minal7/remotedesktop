@@ -146,6 +146,7 @@ final class RemoteScreenUIView: UIView, UIPointerInteractionDelegate, UIGestureR
     private var visibilityObserver: UUID?
     private var sessionBindingRequest = UUID()
     private var visibilityOwner: UUID?
+    private weak var inputOwnershipSession: SessionModel?
     private var isReconcilingVisibility = false
     private var visibilityReconciliationPending = false
     private weak var zoomController: RemoteScreenZoomController?
@@ -277,6 +278,9 @@ final class RemoteScreenUIView: UIView, UIPointerInteractionDelegate, UIGestureR
             retireInputSource()
             guard !stopped, sessionBindingRequest == request else { return }
             self.session = session
+            inputOwnershipSession?.releaseRemoteScreenInput(owner: self)
+            inputOwnershipSession = session
+            session?.claimRemoteScreenInput(owner: self)
         }
         if visibilityOwner == nil, let session = self.session {
             let owner = UUID()
@@ -302,11 +306,12 @@ final class RemoteScreenUIView: UIView, UIPointerInteractionDelegate, UIGestureR
         }
         // Event callbacks may discard old state, but only an explicit UI
         // binding/window attachment can acquire the next registration.
-        if allowSourceBinding, !stopped, !detached, inputSource == nil,
+        let ownsScreenInput = session?.ownsRemoteScreenInput(owner: self) == true
+        if allowSourceBinding, ownsScreenInput, !stopped, !detached, inputSource == nil,
            let session, session.hasInteractiveRemoteScreen, let generation {
             inputSource = session.beginRemoteInputSource(.pointer, expectedInputGeneration: generation)
         }
-        let available = !stopped && !detached && inputSource.map {
+        let available = ownsScreenInput && !stopped && !detached && inputSource.map {
             session?.isRemoteInputSourceCurrent($0) == true
         } == true
         if generation != inputGeneration || available != inputAvailable {
@@ -342,6 +347,8 @@ final class RemoteScreenUIView: UIView, UIPointerInteractionDelegate, UIGestureR
         if let visibilityObserver { session?.removeRemoteScreenVisibilityObserver(visibilityObserver) }
         visibilityObserver = nil
         retireInputSource()
+        inputOwnershipSession?.releaseRemoteScreenInput(owner: self)
+        inputOwnershipSession = nil
         session = nil
         synchronizeInputAvailability()
         rebindRendererIfNeeded()

@@ -197,6 +197,23 @@ final class SessionModel: ObservableObject, VideoRendererTarget {
     private var screenVisibilityObservers: [UUID: ScreenVisibilityObserver] = [:]
     private var isNotifyingScreenVisibility = false
     private var screenVisibilityNotificationPending = false
+    private weak var remoteScreenInputOwner: AnyObject?
+
+    /// Only the most recently bound remote-screen view may acquire the shared
+    /// pointer input source. A displaced view can still receive SwiftUI updates,
+    /// but those updates must not reclaim control from its successor.
+    func claimRemoteScreenInput(owner: AnyObject) {
+        remoteScreenInputOwner = owner
+    }
+
+    func ownsRemoteScreenInput(owner: AnyObject) -> Bool {
+        remoteScreenInputOwner === owner
+    }
+
+    func releaseRemoteScreenInput(owner: AnyObject) {
+        guard remoteScreenInputOwner === owner else { return }
+        remoteScreenInputOwner = nil
+    }
 
     /// Native surfaces hide and detach synchronously at policy changes rather
     /// than waiting for SwiftUI to rebuild an opaque overlay. Callbacks read the

@@ -911,7 +911,10 @@ final class ComputerUseSetupTests: XCTestCase {
         let pause = try XCTUnwrap(sentPause)
         XCTAssertEqual(
             try ComputerUseControlRequest.decodeBody(pause.body),
-            ComputerUseControlRequest(taskID: taskID, revision: 1))
+            ComputerUseControlRequest(
+                taskID: taskID,
+                revision: 1,
+                observedHostControlEpoch: 0))
     }
 
     func test_sessionResumeAIMarksWorkingAndSendsResumeControl() async throws {
@@ -945,7 +948,10 @@ final class ComputerUseSetupTests: XCTestCase {
         let resume = try XCTUnwrap(sentResume)
         XCTAssertEqual(
             try ComputerUseControlRequest.decodeBody(resume.body),
-            ComputerUseControlRequest(taskID: taskID, revision: 2))
+            ComputerUseControlRequest(
+                taskID: taskID,
+                revision: 2,
+                observedHostControlEpoch: 0))
     }
 
     func test_sessionStopCurrentTaskSendsCancelForActivePrompt() async throws {
@@ -978,7 +984,10 @@ final class ComputerUseSetupTests: XCTestCase {
         let prompt = try XCTUnwrap(sentPrompt)
         XCTAssertEqual(
             try ComputerUseControlRequest.decodeBody(cancel.body),
-            ComputerUseControlRequest(taskID: prompt.id, revision: 1))
+            ComputerUseControlRequest(
+                taskID: prompt.id,
+                revision: 1,
+                observedHostControlEpoch: 0))
     }
 
     func test_controlRevisionPersistsAcrossSessionModelRecreation() async throws {
@@ -1034,7 +1043,10 @@ final class ComputerUseSetupTests: XCTestCase {
         let secondPause = try XCTUnwrap(sentSecondPause)
         XCTAssertEqual(
             try ComputerUseControlRequest.decodeBody(secondPause.body),
-            ComputerUseControlRequest(taskID: prompt.id, revision: 2))
+            ComputerUseControlRequest(
+                taskID: prompt.id,
+                revision: 2,
+                observedHostControlEpoch: 0))
     }
 
     func test_restoredTypedPauseReplaysExactRevisionAndPreservesGuidance() async throws {
@@ -1094,7 +1106,10 @@ final class ComputerUseSetupTests: XCTestCase {
         let replayed = try XCTUnwrap(replayedPause)
         XCTAssertEqual(
             try ComputerUseControlRequest.decodeBody(replayed.body),
-            ComputerUseControlRequest(taskID: prompt.id, revision: 1))
+            ComputerUseControlRequest(
+                taskID: prompt.id,
+                revision: 1,
+                observedHostControlEpoch: 0))
         let acknowledgedBefore = await recoveryChannel.acknowledgedEnvelopeCount()
         try await recoveryChannel.enqueueHostEnvelope(
             kind: .status,
@@ -1155,7 +1170,10 @@ final class ComputerUseSetupTests: XCTestCase {
         let replayed = try XCTUnwrap(replayedCancel)
         XCTAssertEqual(
             try ComputerUseControlRequest.decodeBody(replayed.body),
-            ComputerUseControlRequest(taskID: prompt.id, revision: 1))
+            ComputerUseControlRequest(
+                taskID: prompt.id,
+                revision: 1,
+                observedHostControlEpoch: 0))
         recovered.resumeAI()
         recovered.takeControl()
         recovered.stopCurrentTask()
@@ -1208,7 +1226,10 @@ final class ComputerUseSetupTests: XCTestCase {
         let replayed = try XCTUnwrap(replayedResume)
         XCTAssertEqual(
             try ComputerUseControlRequest.decodeBody(replayed.body),
-            ComputerUseControlRequest(taskID: prompt.id, revision: 2))
+            ComputerUseControlRequest(
+                taskID: prompt.id,
+                revision: 2,
+                observedHostControlEpoch: 0))
         let refreshedPrompt = await waitForSentMessage(
             kind: .prompt,
             channel: recoveryChannel)
@@ -1969,7 +1990,10 @@ final class ComputerUseSetupTests: XCTestCase {
         XCTAssertEqual(first.statusText, guidance)
         XCTAssertEqual(
             try ComputerUseControlRequest.decodeBody(freshPause.body),
-            ComputerUseControlRequest(taskID: prompt.id, revision: 1))
+            ComputerUseControlRequest(
+                taskID: prompt.id,
+                revision: 1,
+                observedHostControlEpoch: 0))
         let persistedPause = try XCTUnwrap(store.load(
             hostID: hostID,
             pairingCode: "123456"))
@@ -1994,7 +2018,10 @@ final class ComputerUseSetupTests: XCTestCase {
         let replayedPause = try XCTUnwrap(sentReplayedPause)
         XCTAssertEqual(
             try ComputerUseControlRequest.decodeBody(replayedPause.body),
-            ComputerUseControlRequest(taskID: prompt.id, revision: 1))
+            ComputerUseControlRequest(
+                taskID: prompt.id,
+                revision: 1,
+                observedHostControlEpoch: 0))
         let approvalAttempts = await recoveryChannel.sendAttemptCount(
             kind: .approvalResponse)
         let promptAttempts = await recoveryChannel.sendAttemptCount(kind: .prompt)

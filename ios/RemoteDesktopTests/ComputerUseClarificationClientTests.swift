@@ -206,9 +206,12 @@ final class ComputerUseClarificationClientTests: XCTestCase {
             XCTAssertTrue(store.save(pending))
             let original = keychain.snapshot, mutations = keychain.mutationCount
             keychain.readStatus = errSecInteractionNotAllowed
-            let channel = ClarificationClientChannel()
+            // A channel captures the session selected by the authenticated
+            // connection. The unreadable attempt and the later recovered
+            // connection must not share an identity.
+            let blockedChannel = ClarificationClientChannel(sessionID: "unrelated-session")
             let blocked = ComputerUseSessionModel(hostName: "Mac", pairingCode: "123456", hostID: "HOST-ID",
-                sessionID: "unrelated-session", pendingStore: store, channel: channel)
+                sessionID: "unrelated-session", pendingStore: store, channel: blockedChannel)
             blocked.start()
             XCTAssertTrue(blocked.isLiveScreenPrivacyShielded)
             XCTAssertNotNil(blocked.promptValidationMessage("Another task"))
@@ -218,8 +221,11 @@ final class ComputerUseClarificationClientTests: XCTestCase {
             keychain.readStatus = nil
             XCTAssertFalse(blocked.sendPrompt("Another task"), "Restoring storage cannot authenticate a different session in place")
             blocked.stop()
-            let count = await channel.sentCount(); XCTAssertEqual(count, 0)
+            let count = await blockedChannel.sentCount(); XCTAssertEqual(count, 0)
             XCTAssertEqual(keychain.snapshot, original); XCTAssertEqual(keychain.mutationCount, mutations)
+            // SessionModel's real reconnect path reads the saved record before
+            // creating its channel; mirror that authenticated channel identity.
+            let channel = ClarificationClientChannel(sessionID: pending.sessionID)
             let restored = ComputerUseSessionModel(hostName: "Mac", pairingCode: "123456", hostID: "HOST-ID",
                 pendingStore: store, channel: channel)
             defer { restored.stop() }
@@ -1376,10 +1382,16 @@ private actor ClarificationClientChannel: ComputerUseSessionChannel {
     private var acknowledgedCount = 0
     private var failPrompt = false
     private var allSentCount = 0
+    private let sessionID: String
+
+    init(sessionID: String = "session-1") {
+        self.sessionID = sessionID
+    }
+
     func send(kind: ComputerUseEnvelope.Kind, body: String, to targetID: String?, sessionID: String?, messageID: String?) async throws -> ComputerUseEnvelope {
         allSentCount += 1
         let envelope = ComputerUseEnvelope(id: messageID ?? UUID().uuidString, senderID: "IOS-ID", targetID: targetID ?? "HOST-ID",
-            pairingCode: "123456", sessionID: sessionID ?? "session-1", kind: kind, body: body)
+            pairingCode: "123456", sessionID: sessionID ?? self.sessionID, kind: kind, body: body)
         if kind == .prompt {
             prompts.append(envelope)
             if failPrompt { failPrompt = false; throw Failure.requested }
