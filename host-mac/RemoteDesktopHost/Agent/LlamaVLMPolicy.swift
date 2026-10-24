@@ -142,7 +142,7 @@ final class LlamaVLMPolicy: AgentPolicy {
         self.transport = transport
         self.model = model
         self.promptVersion = switch model {
-        case .fara15_4b: "v2-fara-macos-native-coordinates-16k-f16kv-768img-one-prior-credential-handoff-privacy-reference-v1"
+        case .fara15_4b: "v3-fara-macos-native-element-id-clicks-16k-f16kv-768img-one-prior-credential-handoff-privacy-reference-v1"
         case .uiTars15_7b: "v1-ui-tars-native-coordinates-compact-history"
         case .guiOwl15_4b: "v1-gui-owl-native-coordinates-compact-history"
         }
@@ -452,11 +452,12 @@ final class LlamaVLMPolicy: AgentPolicy {
             This edition of the model was trained using SFT on top of Qwen3.5-4B, using a synthetic data mixture generated and developed by Microsoft AI Frontiers.
             """
             let official = ComputerUseFaraModel.officialSystemPrompt
-            guard let criticalPoints = official.range(of: "A critical point is a situation") else {
+            let declared = (try? ComputerUseFaraModel.addingNativeClickElementID(to: official)) ?? official
+            guard let criticalPoints = declared.range(of: "A critical point is a situation") else {
                 return official4BIdentity
             }
-            let native = official4BIdentity + "\n\n" + String(official[criticalPoints.lowerBound...])
-                + "\n\nElement bounding boxes in observation JSON are [x, y, width, height] in Fara's normalized 0–1000 display coordinates. Use the center of a box for a click."
+            let native = official4BIdentity + "\n\n" + String(declared[criticalPoints.lowerBound...])
+                + "\n\nElement bounding boxes in observation JSON are [x, y, width, height] in Fara's normalized 0–1000 display coordinates. Use the center of a box for a click. For a marked click target, use its element_id alone; for an unmarked target, use the normalized 0–1000 coordinate alone. Read the ID from each latest observation; previous-observation IDs are stale."
             let appendix = base.trimmingCharacters(in: .whitespacesAndNewlines)
             return appendix.hasPrefix("You are operating macOS.") ? native + "\n\n" + appendix : native
         }

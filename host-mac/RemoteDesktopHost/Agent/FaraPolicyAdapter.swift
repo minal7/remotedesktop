@@ -9,7 +9,7 @@ enum FaraPolicyAdapter {
         guard raw.utf8.count <= maximumCompletionBytes,
               imageSize.width > 0, imageSize.height > 0 else { throw Failure.invalidCompletion }
         let action: AgentAction
-        if let openApp = try decodeOpenApp(raw) { action = openApp }
+        if let special = try decodeSpecialNativeAction(raw) { action = special }
         else {
             let proposal: ComputerUseFaraAction
             do { proposal = try ComputerUseFaraAction.decodeNativeMessage(raw) }
@@ -142,22 +142,35 @@ enum FaraPolicyAdapter {
         }
     }
 
-    private static func decodeOpenApp(_ raw: String) throws -> AgentAction? {
+    private static func decodeSpecialNativeAction(_ raw: String) throws -> AgentAction? {
         guard let start = raw.range(of: "<tool_call>") else { return nil }
         let callText = String(raw[start.lowerBound...]).trimmingCharacters(in: .whitespacesAndNewlines)
-        let prefix = "<tool_call>", suffix = "</tool_call>"
-        guard callText.hasPrefix(prefix), callText.hasSuffix(suffix) else { return nil }
-        let body = String(callText.dropFirst(prefix.count).dropLast(suffix.count))
+        guard callText.hasPrefix("<tool_call>"), callText.hasSuffix("</tool_call>") else { return nil }
+        let body = String(callText.dropFirst("<tool_call>".count).dropLast("</tool_call>".count))
         var parser = StrictSemanticJSONParser(body)
         guard case .object(let call) = try parser.parse(), Set(call.keys) == ["name", "arguments"],
               call["name"] == .string("computer_use"), case .object(let args)? = call["arguments"],
-              case .string("open_app")? = args["action"] else { return nil }
-        guard Set(args.keys) == ["action", "name"], case .string(let name)? = args["name"],
-              !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-              name.utf8.count <= 1_024,
-              !name.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains) else {
+              case .string(let action)? = args["action"] else { return nil }
+        if action == "open_app" {
+            guard Set(args.keys) == ["action", "name"], case .string(let name)? = args["name"],
+                  !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                  name.utf8.count <= 1_024, !name.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains) else {
+                throw Failure.invalidCompletion
+            }
+            return .openApp(name: name)
+        }
+        let click: (AgentMouseButton?, Int?)
+        switch action {
+        case "left_click": click = (nil, nil)
+        case "right_click": click = (.right, nil)
+        case "double_click": click = (nil, 2)
+        case "triple_click": click = (nil, 3)
+        default: return nil
+        }
+        guard args["element_id"] != nil else { return nil }
+        guard Set(args.keys) == ["action", "element_id"], case .integer(let id)? = args["element_id"], id >= 1 else {
             throw Failure.invalidCompletion
         }
-        return .openApp(name: name)
+        return .click(target: .element(id: id), button: click.0, count: click.1)
     }
 }

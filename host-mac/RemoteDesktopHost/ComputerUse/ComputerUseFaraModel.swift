@@ -605,6 +605,26 @@ enum ComputerUseFaraModel {
         return original.replacingCharacters(in: start.upperBound..<end.lowerBound,
             with: String(decoding: schema, as: UTF8.self) + "\n")
     }
+    static func addingNativeClickElementID(to original: String) throws -> String {
+        guard let start = original.range(of: "<tools>\n"),
+              let end = original.range(of: "</tools>", range: start.upperBound..<original.endIndex),
+              var tool = try JSONSerialization.jsonObject(with: Data(original[start.upperBound..<end.lowerBound].utf8)) as? [String: Any],
+              var function = tool["function"] as? [String: Any],
+              var parameters = function["parameters"] as? [String: Any],
+              var properties = parameters["properties"] as? [String: Any],
+              var action = properties["action"] as? [String: Any],
+              var coordinate = properties["coordinate"] as? [String: Any] else {
+            throw OSAtlasLlamaRuntimeError.invalidResponse
+        }
+        action["description"] = (action["description"] as? String ?? "")
+            + " For click actions, use exactly one target: the latest observation's element_id or coordinate when no marked target exists."
+        coordinate["description"] = "Required for mouse movement and drag; for clicks use only when the latest observation has no marked target."
+        properties["action"] = action; properties["coordinate"] = coordinate
+        properties["element_id"] = ["type": "integer", "minimum": 1,
+            "description": "Click target ID from the latest observation's elements only; mutually exclusive with coordinate."]
+        parameters["properties"] = properties; function["parameters"] = parameters; tool["function"] = function
+        return try replacingDesktopToolSchema(in: original, with: tool)
+    }
     static func validatePageReading(_ reading: PageReading) throws {
         guard ComputerUseValidatedWebURL.validatedURL(reading.sourceURL) == reading.sourceURL,
               !reading.question.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
