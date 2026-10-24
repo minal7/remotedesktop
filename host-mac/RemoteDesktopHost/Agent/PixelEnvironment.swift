@@ -43,35 +43,8 @@ struct PixelClipboardLease {
 @MainActor
 final class PixelEnvironment: AgentEnvironment {
     typealias Picker = @MainActor ([String]) async throws -> String
-    struct NativeWindowCapture {
-        let image: CGImage
-        let expectedPixelSize: CGSize
-        let pointPixelScale: CGFloat
-        let contentRect: CGRect
-    }
-
     private enum PasteResult: Equatable { case matches, rejected, unavailable }
     var followsFrontmostSurface: Bool { true }
-    struct Snapshot {
-        let window: AgentMacAccessibility.Window?
-        let application: NSRunningApplication?
-        let identity: String
-        let bundleID: String
-        let appName: String
-        let title: String
-        let url: String?
-        let image: CGImage
-        let screenshot: Data
-        let elements: [AgentElement]
-        let focus: AgentFocus?
-        let screenBounds: CGRect
-        let activeWindowBounds: CGRect?
-        let activeWindowNumber: UInt32?
-        let activeWindowOwnerProcessID: Int32?
-        let visibleWindowCount: Int
-        let marks: PixelElementMarks?
-    }
-
     private let taskID: String
     private let injector: InputInjector
     private let registry: AgentAppRegistry
@@ -220,9 +193,11 @@ final class PixelEnvironment: AgentEnvironment {
                 return nil
             }
         }
-        let label = PixelTargetContextLabel.resolve(resolvedAction, targets: targets) { x, y in
-            SystemBarriers.targetLabel(screenshot: frame.observation.screenshot, x: x, y: y)
-        }
+        let label = PixelTargetContextLabel.resolveWithBoundaryContext(resolvedAction, targets: targets,
+            imageSize: CGSize(width: snapshot?.image.width ?? 0, height: snapshot?.image.height ?? 0),
+            screenBounds: snapshot?.screenBounds ?? .zero, marks: snapshot?.marks?.marks ?? []) { x, y in
+                SystemBarriers.targetLabel(screenshot: frame.observation.screenshot, x: x, y: y)
+            }
         let references = try Self.references(for: targets, marks: snapshot?.marks?.marks ?? [])
         return .init(action: resolvedAction, frame: frame, targets: targets, targetContextLabel: label,
             surfaceReadOnly: snapshot.map { AgentSafetyBoundary.readOnly(bundleID: $0.bundleID, appName: $0.appName) } ?? false,
@@ -237,10 +212,12 @@ final class PixelEnvironment: AgentEnvironment {
         for (expected, _) in zip(resolved.targets, current) {
             references[expected.id] = try PixelElementReferenceResolver.rebound(expected, in: snapshot?.marks?.marks ?? [])
         }
-        let targetContextLabel = PixelTargetContextLabel.rebound(resolved.action, targets: current,
-            previous: resolved.targetContextLabel) { x, y in
-            SystemBarriers.targetLabel(screenshot: frame.observation.screenshot, x: x, y: y)
-        }
+        let targetContextLabel = PixelTargetContextLabel.resolveWithBoundaryContext(resolved.action, targets: current,
+            previous: resolved.targetContextLabel,
+            imageSize: CGSize(width: snapshot?.image.width ?? 0, height: snapshot?.image.height ?? 0),
+            screenBounds: snapshot?.screenBounds ?? .zero, marks: snapshot?.marks?.marks ?? []) { x, y in
+                SystemBarriers.targetLabel(screenshot: frame.observation.screenshot, x: x, y: y)
+            }
         let oldBindings = resolved.hostBinding as? PixelResolvedTargets
         return .init(action: resolved.action, frame: frame, targets: current,
             targetContextLabel: targetContextLabel,

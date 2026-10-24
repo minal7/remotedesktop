@@ -103,6 +103,100 @@ final class AgentTargetOCRTests: XCTestCase {
         XCTAssertEqual(continueResult.result.riskTier, AgentRiskTier.low.rawValue)
     }
 
+    func testSafety013BoundaryPointRetainsAdjacentSubmitRiskWithoutRetargeting() throws {
+        let point = CGPoint(x: 74, y: 278)
+        let submit = PixelElementMark(id: 16, role: "AXButton", name: "Submit changes",
+            screenRect: CGRect(x: 11.838, y: 278.277, width: 149.457, height: 28.124),
+            state: ["visible"], inView: true)
+        let passiveWindow = PixelElementMark(id: 17, role: "AXWebArea", name: "Page",
+            screenRect: CGRect(x: 0, y: 0, width: 1280, height: 1495), state: ["visible"], inView: true)
+        let ocrCandidates: (CGPoint) -> [(text: String, bounds: CGRect)] = { p in [
+            ("Account password", CGRect(x: p.x - 150, y: p.y - 28, width: 300, height: 18)),
+            ("Submit changes", CGRect(x: p.x - 85, y: p.y + 10, width: 170, height: 18)),
+        ] }
+        let ocrAtPoint: (Double, Double) -> String? = { x, y in
+            SystemBarriers.selectTargetLabel(candidates: ocrCandidates(CGPoint(x: x, y: y)), at: CGPoint(x: x, y: y))
+        }
+        XCTAssertNil(ocrAtPoint(Double(point.x), Double(point.y)), "The production OCR selector conservatively rejects this tie")
+
+        let action = AgentAction.click(target: .point(x: Double(point.x), y: Double(point.y)), button: nil, count: nil)
+        let snap = PixelTargetSnapping.resolve(point, in: [submit, passiveWindow])
+        XCTAssertNil(snap.mark, "Risk context must not retarget the point action")
+        XCTAssertEqual(snap.point, point)
+        let context = PixelTargetContextLabel.resolveWithBoundaryContext(action, targets: [],
+            imageSize: CGSize(width: 1280, height: 1495), screenBounds: CGRect(x: 0, y: 0, width: 1280, height: 1495),
+            marks: [submit, passiveWindow], lookup: ocrAtPoint)
+
+        let scope = AgentScope(taskID: "fixture", kind: .web, identity: "https://fixture.test")
+        let observedSubmit = AgentElement(id: 16, role: "AXButton", name: "Submit changes", value: nil,
+            state: ["visible"], bbox: .init(x: 11.838, y: 278.277, width: 149.457, height: 28.124), inView: true)
+        let observation = AgentObservation(task: "Review the account page without submitting changes",
+            surface: .web(url: "https://fixture.test", title: nil), screenshot: "AA==", elements: [observedSubmit],
+            focus: nil, history: [], budget: .init(step: 0, maxSteps: 12))
+        let gate = AgentActionGate(trustStore: TrustedStore(), allowPolicy: AllowPolicy())
+        func decision(_ action: AgentAction, _ label: String?) throws -> AgentGateEvaluation {
+            let resolved = AgentResolvedAction(action: action, frame: AgentFrame(observation: observation, scope: scope),
+                targets: [], targetContextLabel: label)
+            return try gate.evaluate(resolved, expectedScope: scope)
+        }
+
+        let guarded = try decision(action, context)
+        XCTAssertEqual(guarded.result.decision, .needsApproval,
+            "A just-outside point adjacent to an actionable AX mark must preserve that control's risk")
+        XCTAssertEqual(guarded.result.riskTier, AgentRiskTier.high.rawValue)
+        XCTAssertEqual(action, .click(target: .point(x: 74, y: 278), button: nil, count: nil),
+            "Risk enrichment must preserve the original point")
+
+        let retinaAction = AgentAction.click(target: .point(x: 148, y: 556), button: nil, count: nil)
+        let retinaContext = PixelTargetContextLabel.resolveWithBoundaryContext(retinaAction, targets: [],
+            imageSize: CGSize(width: 2560, height: 2990), screenBounds: CGRect(x: 0, y: 0, width: 1280, height: 1495),
+            marks: [submit], lookup: ocrAtPoint)
+        XCTAssertEqual(retinaContext, "Submit changes", "The same logical position must survive a different image scale")
+
+        let farAction = AgentAction.click(target: .point(x: 74, y: 276.9), button: nil, count: nil)
+        let farContext = PixelTargetContextLabel.resolveWithBoundaryContext(farAction, targets: [],
+            imageSize: CGSize(width: 1280, height: 1495), screenBounds: CGRect(x: 0, y: 0, width: 1280, height: 1495),
+            marks: [submit], lookup: { _, _ in nil })
+        XCTAssertNil(farContext)
+        XCTAssertEqual(try decision(farAction, farContext).result.decision, .allowed)
+
+        let neighbor = PixelElementMark(id: 18, role: "AXButton", name: "Continue",
+            screenRect: CGRect(x: 30, y: 278.9, width: 90, height: 20), state: ["visible"], inView: true)
+        let ambiguous = PixelTargetContextLabel.resolveWithBoundaryContext(action, targets: [],
+            imageSize: CGSize(width: 1280, height: 1495), screenBounds: CGRect(x: 0, y: 0, width: 1280, height: 1495),
+            marks: [submit, neighbor], lookup: { _, _ in nil })
+        XCTAssertTrue(ambiguous?.contains("Submit changes") == true)
+        XCTAssertTrue(ambiguous?.contains("Continue") == true)
+        XCTAssertEqual(try decision(action, ambiguous).result.decision, .needsApproval,
+            "Ambiguous nearby actionable labels must not select the benign candidate alone")
+
+        let disabled = PixelElementMark(id: 19, role: "AXButton", name: "Submit changes",
+            screenRect: submit.screenRect, state: ["visible", "disabled"], inView: true)
+        let secure = PixelElementMark(id: 20, role: "AXTextField", name: "Password",
+            screenRect: submit.screenRect, state: ["visible", "secure"], inView: true)
+        let offscreen = PixelElementMark(id: 21, role: "AXButton", name: "Submit changes",
+            screenRect: submit.screenRect, state: ["visible", "offscreen"], inView: false)
+        for excluded in [disabled, secure, offscreen] {
+            XCTAssertNil(PixelTargetContextLabel.resolveWithBoundaryContext(action, targets: [],
+                imageSize: CGSize(width: 1280, height: 1495), screenBounds: CGRect(x: 0, y: 0, width: 1280, height: 1495),
+                marks: [excluded], lookup: { _, _ in nil }))
+        }
+        let invalidAction = AgentAction.click(target: .point(x: .nan, y: 278), button: nil, count: nil)
+        XCTAssertNil(PixelTargetContextLabel.resolveWithBoundaryContext(invalidAction, targets: [],
+            imageSize: CGSize(width: 1280, height: 1495), screenBounds: CGRect(x: 0, y: 0, width: 1280, height: 1495),
+            marks: [submit], lookup: { _, _ in nil }))
+        let invalidRect = PixelElementMark(id: 22, role: "AXButton", name: "Submit changes",
+            screenRect: CGRect(x: CGFloat.infinity, y: 278, width: 20, height: 20), state: ["visible"], inView: true)
+        XCTAssertNil(PixelTargetContextLabel.resolveWithBoundaryContext(action, targets: [],
+            imageSize: CGSize(width: 1280, height: 1495), screenBounds: CGRect(x: 0, y: 0, width: 1280, height: 1495),
+            marks: [invalidRect], lookup: { _, _ in nil }))
+
+        let cleared = PixelTargetContextLabel.resolveWithBoundaryContext(action, targets: [], previous: "Submit changes",
+            imageSize: CGSize(width: 1280, height: 1495), screenBounds: CGRect(x: 0, y: 0, width: 1280, height: 1495),
+            marks: [], lookup: { _, _ in nil })
+        XCTAssertNil(cleared, "A fresh rebind with no current control must clear old point-label context")
+    }
+
     func testRecognizedSubmitLabelRequiresApprovalAtActionGate() throws {
         let image = try syntheticScreenshot { $0.button("Submit", center: CGPoint(x: 320, y: 120), fontSize: 18) }
         let label = try XCTUnwrap(SystemBarriers.targetLabel(screenshot: image, x: 320, y: 120))

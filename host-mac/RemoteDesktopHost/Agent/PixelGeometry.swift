@@ -1,3 +1,4 @@
+import AppKit
 import CoreGraphics
 import ScreenCaptureKit
 
@@ -150,6 +151,46 @@ enum PixelTargetContextLabel {
         }
     }
 
+    @MainActor
+    static func resolveWithBoundaryContext(_ action: AgentAction, targets: [AgentElement], previous: String? = nil,
+                                           imageSize: CGSize, screenBounds: CGRect, marks: [PixelElementMark],
+                                           lookup: (Double, Double) -> String?) -> String? {
+        let observed = rebound(action, targets: targets, previous: previous, lookup: lookup)
+        guard case let .click(.point(x, y), _, _) = action,
+              let point = PixelGeometry.point(CGPoint(x: x, y: y), imageSize: imageSize, screenBounds: screenBounds) else {
+            return observed
+        }
+        return retainingAdjacentActionableLabels(observed, at: point, marks: marks)
+    }
+
+    /// Retains nearby AX action labels as host-only risk context when image-to-window rounding
+    /// leaves a point just outside a visible control. This never changes the input target.
+    @MainActor
+    static func retainingAdjacentActionableLabels(_ observed: String?, at point: CGPoint,
+                                                   marks: [PixelElementMark], tolerance: CGFloat = 1) -> String? {
+        guard point.x.isFinite, point.y.isFinite, tolerance.isFinite, tolerance >= 0 else { return observed }
+        let nearby = marks.compactMap { mark -> (String, CGFloat)? in
+            guard PixelTargetSnapping.interactiveRoles.contains(mark.role), mark.inView,
+                  !mark.state.contains("disabled"), !mark.state.contains("secure"),
+                  !mark.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                  !mark.screenRect.isNull, !mark.screenRect.isEmpty,
+                  mark.screenRect.minX.isFinite, mark.screenRect.minY.isFinite,
+                  mark.screenRect.width.isFinite, mark.screenRect.height.isFinite else { return nil }
+            let dx = max(0, max(mark.screenRect.minX - point.x, point.x - mark.screenRect.maxX))
+            let dy = max(0, max(mark.screenRect.minY - point.y, point.y - mark.screenRect.maxY))
+            let distance = hypot(dx, dy)
+            return distance <= tolerance ? (mark.name.trimmingCharacters(in: .whitespacesAndNewlines), distance) : nil
+        }.sorted { lhs, rhs in
+            lhs.1 == rhs.1 ? lhs.0.localizedCaseInsensitiveCompare(rhs.0) == .orderedAscending : lhs.1 < rhs.1
+        }
+        guard !nearby.isEmpty else { return observed }
+        var labels: [String] = []
+        for value in [observed].compactMap({ $0 }) + nearby.map(\.0) {
+            if !labels.contains(where: { $0.caseInsensitiveCompare(value) == .orderedSame }) { labels.append(value) }
+        }
+        return labels.joined(separator: " / ")
+    }
+
     static func rebound(_ action: AgentAction, targets: [AgentElement], previous: String?,
                         lookup: (Double, Double) -> String?) -> String? {
         guard case .click = action else { return previous }
@@ -272,5 +313,35 @@ enum PixelWindowActionBoundary {
     private static func valid(_ rect: CGRect) -> Bool {
         !rect.isNull && !rect.isEmpty && rect.minX.isFinite && rect.minY.isFinite
             && rect.width.isFinite && rect.height.isFinite
+    }
+}
+
+// Capture metadata shared by observation and point resolution.
+extension PixelEnvironment {
+    struct NativeWindowCapture {
+        let image: CGImage
+        let expectedPixelSize: CGSize
+        let pointPixelScale: CGFloat
+        let contentRect: CGRect
+    }
+
+    struct Snapshot {
+        let window: AgentMacAccessibility.Window?
+        let application: NSRunningApplication?
+        let identity: String
+        let bundleID: String
+        let appName: String
+        let title: String
+        let url: String?
+        let image: CGImage
+        let screenshot: Data
+        let elements: [AgentElement]
+        let focus: AgentFocus?
+        let screenBounds: CGRect
+        let activeWindowBounds: CGRect?
+        let activeWindowNumber: UInt32?
+        let activeWindowOwnerProcessID: Int32?
+        let visibleWindowCount: Int
+        let marks: PixelElementMarks?
     }
 }

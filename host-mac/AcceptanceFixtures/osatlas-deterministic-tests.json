@@ -613,6 +613,7 @@
     "RemoteDesktopHostTests/AgentLoopTests/testPerStepProgressUsesPolicyNarrationWithoutChangingApprovalFlow",
     "RemoteDesktopHostTests/AgentLoopTests/testPolicyResultNoteSurvivesApprovalDenialAndApprovedResume",
     "RemoteDesktopHostTests/AgentTargetOCRTests/testSmallPointTargetLabelFlowsThroughPixelContextIntoApprovalGate",
+    "RemoteDesktopHostTests/AgentTargetOCRTests/testSafety013BoundaryPointRetainsAdjacentSubmitRiskWithoutRetargeting",
     "RemoteDesktopHostTests/GUIOwlPolicyAdapterTests/testUnsupportedPointerAndWheelActionsAreRejectedWithoutInventingClicks",
     "RemoteDesktopHostTests/PixelEnvironmentTests/testCropBoundsMatchClippedPixelIntegralWhenAXContentExceedsWindowCapture",
     "RemoteDesktopHostTests/PixelEnvironmentTests/testElementMarksRespectAncestorScrollViewportWithoutLosingSecureRects",
