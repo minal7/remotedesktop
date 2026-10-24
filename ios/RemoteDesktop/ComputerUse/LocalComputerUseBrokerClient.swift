@@ -19,8 +19,13 @@ protocol ComputerUseSetupChannel: Sendable {
 /// and typed terminal outcomes retain their existing semantics.
 actor LocalComputerUseBrokerClient:
     ComputerUseSessionChannel, ComputerUseSetupChannel, PersonalMemoryChannel {
+    typealias RPCExchange = @Sendable (
+        LocalComputerUseRPCRequest
+    ) async throws -> LocalComputerUseRPCResponse
+
     private let endpoint: LocalComputerUseEndpoint
     private let credential: LocalComputerUseCredential
+    private let rpcExchange: RPCExchange
     private let pairingCode: String
     private let sessionID: String
     private let senderID: String
@@ -33,10 +38,17 @@ actor LocalComputerUseBrokerClient:
         pairingCode: String,
         sessionID: String,
         senderID: String,
-        targetID: String
+        targetID: String,
+        rpcExchange: RPCExchange? = nil
     ) {
         self.endpoint = endpoint
         self.credential = credential
+        self.rpcExchange = rpcExchange ?? { request in
+            try await LocalComputerUseRPCTransport.call(
+                endpoint: endpoint,
+                credential: credential,
+                request: request)
+        }
         self.pairingCode = pairingCode
         self.sessionID = sessionID
         self.senderID = senderID
@@ -47,7 +59,12 @@ actor LocalComputerUseBrokerClient:
     /// before presenting the composer, making TLS readiness—not Bonjour TXT—
     /// the authority for local AI availability.
     func handshake() async throws {
-        _ = try await exchange()
+        let response = try await exchange(bindSession: true)
+        // A pre-binding host's missing additive field remains a valid legacy
+        // connectivity handshake. Explicit rejection from a new host is not.
+        guard response.sessionBindingAccepted != false else {
+            throw LocalComputerUseRPCTransportError.responseMismatch
+        }
     }
 
     @discardableResult
@@ -118,18 +135,17 @@ actor LocalComputerUseBrokerClient:
     @discardableResult
     private func exchange(
         envelopes: [ComputerUseEnvelope] = [],
-        acknowledgedEnvelopeIDs: [String] = []
+        acknowledgedEnvelopeIDs: [String] = [],
+        bindSession: Bool? = nil
     ) async throws -> LocalComputerUseRPCResponse {
         let request = LocalComputerUseRPCRequest(
             senderID: senderID,
             targetID: targetID,
             sessionID: sessionID,
             envelopes: envelopes,
-            acknowledgedEnvelopeIDs: acknowledgedEnvelopeIDs)
-        let response = try await LocalComputerUseRPCTransport.call(
-            endpoint: endpoint,
-            credential: credential,
-            request: request)
+            acknowledgedEnvelopeIDs: acknowledgedEnvelopeIDs,
+            bindSession: bindSession)
+        let response = try await rpcExchange(request)
         try merge(response.envelopes)
         return response
     }

@@ -3001,19 +3001,32 @@ final class ComputerUseTests: XCTestCase {
             actionPerformer: { _ in },
             channelFactory: { _ in channel })
         defer { manager.stop() }
-        let activePrompt = makeEnvelope(
+        let localPeerID = "53A8D639-5DE2-4786-BE26-2AC9F853D3B6"
+        let activePrompt = ComputerUseEnvelope(
             id: "active-approval-task",
+            senderID: localPeerID,
+            targetID: "HOST-ID",
+            pairingCode: "123456",
+            sessionID: "SESSION-1",
             kind: .prompt,
-            body: "Delete the selected item")
-        let competingPrompt = makeEnvelope(
+            body: try ComputerUsePromptRequest(prompt: "Delete the selected item").encodedBody())
+        let competingPrompt = ComputerUseEnvelope(
             id: "competing-approval-task",
+            senderID: localPeerID,
+            targetID: "HOST-ID",
+            pairingCode: "123456",
+            sessionID: "SESSION-1",
             kind: .prompt,
-            body: "Open Notes")
-        manager.authorizePeer(senderID: activePrompt.senderID)
+            body: try ComputerUsePromptRequest(prompt: "Open Notes").encodedBody())
+        XCTAssertTrue(manager.authorizeLocalPeer(senderID: activePrompt.senderID))
+        XCTAssertTrue(manager.bindLocalMemorySession(
+            peerID: activePrompt.senderID, sessionID: activePrompt.sessionID))
 
         XCTAssertTrue(manager.handle(activePrompt, channel: channel))
         await waitUntil {
-            if case .awaitingApproval = manager.activity { return true }
+            if case .awaitingApproval = manager.activity {
+                return true
+            }
             return false
         }
         await waitUntil {
@@ -3028,6 +3041,10 @@ final class ComputerUseTests: XCTestCase {
             approvalEnvelope.id,
             approval.requestID,
             "Approval refreshes must reuse one durable CloudKit record ID")
+
+        XCTAssertFalse(manager.bindLocalMemorySession(
+            peerID: activePrompt.senderID, sessionID: "SESSION-2"),
+            "A pending approval cannot be moved into a new Memory session")
 
         XCTAssertTrue(manager.handle(competingPrompt, channel: channel))
         await waitUntil {
@@ -3052,7 +3069,11 @@ final class ComputerUseTests: XCTestCase {
             requestID: approval.requestID,
             approved: false)
         XCTAssertTrue(manager.handle(
-            makeEnvelope(
+            ComputerUseEnvelope(
+                senderID: localPeerID,
+                targetID: "HOST-ID",
+                pairingCode: "123456",
+                sessionID: "SESSION-1",
                 kind: .approvalResponse,
                 body: try denial.encodedBody()),
             channel: channel))

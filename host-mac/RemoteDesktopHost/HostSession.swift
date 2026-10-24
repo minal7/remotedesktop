@@ -719,6 +719,11 @@ final class HostSession: ObservableObject {
                 revokePeer: { [weak computerUse] senderID in
                     computerUse?.revokeLocalPeerAuthorization(
                         senderID: senderID)
+                },
+                bindSession: { [weak computerUse] senderID, sessionID in
+                    computerUse?.bindLocalMemorySession(
+                        peerID: senderID,
+                        sessionID: sessionID) ?? false
                 })
             do {
                 localPort = Int32(try await server.start())

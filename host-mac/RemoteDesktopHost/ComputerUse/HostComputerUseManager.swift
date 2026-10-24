@@ -3171,6 +3171,10 @@ final class ComputerUseActionGate: @unchecked Sendable {
         lock.withLock { value }
     }
 
+    var hasPendingInputIntervention: Bool {
+        lock.withLock { pendingInputIntervention != nil }
+    }
+
     func setAllowsActions(_ allowed: Bool) {
         lock.withLock { value = allowed }
     }
@@ -4536,6 +4540,42 @@ final class HostComputerUseManager: ObservableObject {
         }
     }
 
+    /// Binds the authenticated local peer to the phone's explicit connection
+    /// session. A same-session reconnect is idempotent so task recovery keeps
+    /// its existing authority. Changing sessions is allowed only while the
+    /// host is quiescent and invalidates every old memory/context lease.
+    @discardableResult
+    func bindLocalMemorySession(peerID: String, sessionID: String) -> Bool {
+        guard localAuthorizedPeerID == peerID,
+              authorizedPeerID == peerID,
+              UUID(uuidString: peerID) != nil,
+              !sessionID.isEmpty,
+              sessionID.utf8.count <= LocalHostComputerUseChannel.maximumSessionIDBytes,
+              sessionID.unicodeScalars.allSatisfy({
+                  !CharacterSet.controlCharacters.contains($0)
+              }) else {
+            return false
+        }
+        if localMemorySessionID == sessionID { return true }
+        guard !isShuttingDown,
+              memoryErasureFence == nil,
+              !actionGate.hasPendingInputIntervention else {
+            return false
+        }
+        let retainedContext = currentExecution ?? pausedExecution ?? pendingApproval?.context
+        let isSameTaskRecovery = retainedContext?.envelope.senderID == peerID
+            && retainedContext?.envelope.sessionID == sessionID
+        guard isSameTaskRecovery || permitsOwnerMemorySession else {
+            return false
+        }
+        taskMemoryContextSlot?.clear()
+        invalidateTextClarification()
+        invalidateCompletedMemoryConfirmationLease()
+        peerAuthorizationGeneration &+= 1
+        localMemorySessionID = sessionID
+        return true
+    }
+
     /// Binds owner-memory RPC work to the broker-reserved local peer and the
     /// exact task context already accepted by the host. Manual memory commands
     /// may have no task. Confirmation may use a completed task for ten minutes,
@@ -4550,10 +4590,10 @@ final class HostComputerUseManager: ObservableObject {
               authorizedPeerID == peerID,
               UUID(uuidString: peerID) != nil,
               !sessionID.isEmpty,
-              sessionID.utf8.count <= LocalHostComputerUseChannel.maximumSessionIDBytes else {
+              sessionID.utf8.count <= LocalHostComputerUseChannel.maximumSessionIDBytes,
+              localMemorySessionID == sessionID else {
             return nil
         }
-        if let localMemorySessionID, localMemorySessionID != sessionID { return nil }
 
         let activeContext = currentExecution ?? pausedExecution ?? pendingApproval?.context
         if let activeContext,

@@ -59,6 +59,8 @@ public struct LocalComputerUseRPCRequest: Codable, Equatable, Sendable {
     public let envelopes: [ComputerUseEnvelope]
     public let acknowledgedEnvelopeIDs: [String]
     public let memoryCommand: LocalMemoryRPCCommand?
+    /// Explicit authenticated connection-session bind; omitted by legacy polls.
+    public let bindSession: Bool?
 
     public init(
         requestID: String = UUID().uuidString,
@@ -67,7 +69,8 @@ public struct LocalComputerUseRPCRequest: Codable, Equatable, Sendable {
         sessionID: String,
         envelopes: [ComputerUseEnvelope] = [],
         acknowledgedEnvelopeIDs: [String] = [],
-        memoryCommand: LocalMemoryRPCCommand? = nil
+        memoryCommand: LocalMemoryRPCCommand? = nil,
+        bindSession: Bool? = nil
     ) {
         version = LocalComputerUseRPCLimits.currentVersion
         self.requestID = requestID
@@ -77,6 +80,7 @@ public struct LocalComputerUseRPCRequest: Codable, Equatable, Sendable {
         self.envelopes = envelopes
         self.acknowledgedEnvelopeIDs = acknowledgedEnvelopeIDs
         self.memoryCommand = memoryCommand
+        self.bindSession = bindSession
     }
 
     public func validate() throws {
@@ -120,6 +124,10 @@ public struct LocalComputerUseRPCRequest: Codable, Equatable, Sendable {
         if memoryCommand != nil && (!envelopes.isEmpty || !acknowledgedEnvelopeIDs.isEmpty) {
             throw LocalComputerUseRPCValidationError.invalidField("memoryOnlyRequest")
         }
+        if bindSession == true,
+           memoryCommand != nil || !envelopes.isEmpty || !acknowledgedEnvelopeIDs.isEmpty {
+            throw LocalComputerUseRPCValidationError.invalidField("sessionBindOnlyRequest")
+        }
     }
 }
 
@@ -135,6 +143,8 @@ public struct LocalComputerUseRPCResponse: Codable, Equatable, Sendable {
     public let acceptedEnvelopeIDs: [String]
     public let failure: LocalComputerUseRPCFailure?
     public let memoryReply: LocalMemoryRPCReply?
+    /// Present only when the host processed an explicit session-bind request.
+    public let sessionBindingAccepted: Bool?
 
     public init(
         requestID: String,
@@ -143,7 +153,8 @@ public struct LocalComputerUseRPCResponse: Codable, Equatable, Sendable {
         envelopes: [ComputerUseEnvelope] = [],
         acceptedEnvelopeIDs: [String] = [],
         failure: LocalComputerUseRPCFailure? = nil,
-        memoryReply: LocalMemoryRPCReply? = nil
+        memoryReply: LocalMemoryRPCReply? = nil,
+        sessionBindingAccepted: Bool? = nil
     ) {
         version = LocalComputerUseRPCLimits.currentVersion
         self.requestID = requestID
@@ -153,6 +164,7 @@ public struct LocalComputerUseRPCResponse: Codable, Equatable, Sendable {
         self.acceptedEnvelopeIDs = acceptedEnvelopeIDs
         self.failure = failure
         self.memoryReply = memoryReply
+        self.sessionBindingAccepted = sessionBindingAccepted
     }
 
     public func validate() throws {
@@ -187,6 +199,11 @@ public struct LocalComputerUseRPCResponse: Codable, Equatable, Sendable {
         }
         try failure?.validate()
         try memoryReply?.validate()
+        if sessionBindingAccepted != nil,
+           !envelopes.isEmpty || !acceptedEnvelopeIDs.isEmpty
+                || failure != nil || memoryReply != nil {
+            throw LocalComputerUseRPCValidationError.invalidField("sessionBindingReply")
+        }
         if failure != nil && memoryReply != nil {
             throw LocalComputerUseRPCValidationError.invalidField("contradictoryMemoryResponse")
         }

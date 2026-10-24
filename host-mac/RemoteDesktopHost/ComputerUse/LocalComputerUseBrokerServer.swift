@@ -42,6 +42,7 @@ final class LocalComputerUseBrokerServer {
     private let channel: LocalHostComputerUseChannel
     private let authorizePeer: (String) -> Bool
     private let revokePeer: (String) -> Void
+    private let bindSession: ((String, String) -> Bool)?
     private let loopbackOnly: Bool
     private let memoryFeatureEnabled: Bool
     private let memoryHandler: MemoryCommandHandler?
@@ -59,7 +60,8 @@ final class LocalComputerUseBrokerServer {
         memoryFeatureEnabled: Bool = false,
         memoryHandler: MemoryCommandHandler? = nil,
         authorizePeer: @escaping (String) -> Bool,
-        revokePeer: @escaping (String) -> Void
+        revokePeer: @escaping (String) -> Void,
+        bindSession: ((String, String) -> Bool)? = nil
     ) {
         self.credential = credential
         self.hostID = hostID
@@ -69,6 +71,7 @@ final class LocalComputerUseBrokerServer {
         self.memoryHandler = memoryHandler
         self.authorizePeer = authorizePeer
         self.revokePeer = revokePeer
+        self.bindSession = bindSession
     }
 
     func start() async throws -> UInt16 {
@@ -223,6 +226,21 @@ final class LocalComputerUseBrokerServer {
                 authorizedPeerID = nil
             }
             throw ServerError.busy
+        }
+        if request.bindSession == true {
+            let accepted = bindSession?(request.senderID, request.sessionID) ?? false
+            if accepted {
+                touchAuthorization(for: request.senderID)
+            } else if reservedPeer, authorizedPeerID == request.senderID {
+                // Do not pin a peer that failed its first explicit session bind.
+                authorizedPeerID = nil
+                revokePeer(request.senderID)
+            }
+            return LocalComputerUseRPCResponse(
+                requestID: request.requestID,
+                senderID: hostID,
+                targetID: request.senderID,
+                sessionBindingAccepted: accepted)
         }
         if let command = request.memoryCommand {
             touchAuthorization(for: request.senderID)

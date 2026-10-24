@@ -619,6 +619,58 @@ final class LocalComputerUseTransportTests: XCTestCase {
         XCTAssertEqual(response.envelopes, [valid])
     }
 
+    func testBrokerRoutesOnlyExplicitSessionBindWithoutChangingLegacyPolls() async throws {
+        let credential = try LocalComputerUseCredential(rawKey: Data(repeating: 0x5A, count: 32))
+        let channel = LocalHostComputerUseChannel(hostID: hostID, pairingCode: pairingCode)
+        let nextPeerID = "89CD465C-DEB5-4B48-B758-4C94206891D8"
+        var bindings: [(String, String)] = []
+        var revokedPeers: [String] = []
+        let server = LocalComputerUseBrokerServer(
+            credential: credential,
+            hostID: hostID,
+            channel: channel,
+            authorizePeer: { _ in true },
+            revokePeer: { revokedPeers.append($0) },
+            bindSession: { peer, session in
+                bindings.append((peer, session))
+                return session != "denied-session"
+            })
+        defer { server.stop() }
+
+        // A rejected first bind must release its provisional broker reservation.
+        let denied = try await server.handle(LocalComputerUseRPCRequest(
+            senderID: peerID, targetID: hostID,
+            sessionID: "denied-session", bindSession: true))
+        XCTAssertEqual(denied.sessionBindingAccepted, false)
+        XCTAssertEqual(revokedPeers, [peerID])
+
+        let bindRequest = LocalComputerUseRPCRequest(
+            senderID: nextPeerID, targetID: hostID,
+            sessionID: "replacement-session", bindSession: true)
+        XCTAssertEqual(try LocalComputerUseRPCCodec.decodeRequest(
+            LocalComputerUseRPCCodec.encode(bindRequest)), bindRequest)
+        let bindResponse = try await server.handle(bindRequest)
+        XCTAssertEqual(bindResponse.sessionBindingAccepted, true)
+        XCTAssertTrue(bindResponse.envelopes.isEmpty)
+        XCTAssertEqual(bindings.map { $0.0 }, [peerID, nextPeerID])
+        XCTAssertEqual(bindings.map { $0.1 }, ["denied-session", "replacement-session"])
+
+        let legacyPoll = try await server.handle(LocalComputerUseRPCRequest(
+            senderID: nextPeerID, targetID: hostID, sessionID: "replacement-session"))
+        XCTAssertNil(legacyPoll.sessionBindingAccepted)
+        XCTAssertEqual(bindings.count, 2)
+
+        XCTAssertThrowsError(try LocalComputerUseRPCRequest(
+            senderID: nextPeerID, targetID: hostID, sessionID: sessionID,
+            envelopes: [makeEnvelope(id: "mixed-bind-envelope")], bindSession: true).validate())
+        XCTAssertThrowsError(try LocalComputerUseRPCRequest(
+            senderID: nextPeerID, targetID: hostID, sessionID: sessionID,
+            acknowledgedEnvelopeIDs: ["old-ack"], bindSession: true).validate())
+        XCTAssertThrowsError(try LocalComputerUseRPCRequest(
+            senderID: nextPeerID, targetID: hostID, sessionID: sessionID,
+            memoryCommand: LocalMemoryRPCCommand(listMetadata: 1), bindSession: true).validate())
+    }
+
     func testTLSPSKBrokerCarriesPromptResultAndAcknowledgementEndToEnd() async throws {
         let credential = try LocalComputerUseCredential(
             rawKey: Data(repeating: 0x5A, count: 32))

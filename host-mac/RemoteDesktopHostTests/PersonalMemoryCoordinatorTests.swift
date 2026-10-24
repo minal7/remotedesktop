@@ -240,6 +240,107 @@ final class PersonalMemoryCoordinatorTests: XCTestCase {
             account: "database-key", protection: .deviceOnlyWhenUnlocked)))
     }
 
+    func testBrokerRequiresExplicitNewSessionBindForPostForgetEmptyList() async throws {
+        let root = try makeMemoryRoot("PersonalMemoryBrokerSessionBindAfterForget")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let namespace = KeychainNamespace.testing("broker-session-bind-\(UUID().uuidString)")
+        let keys = CoordinatorLifecycleTestKeys()
+        let oldContext = OwnerMemoryContext(ownerID: ownerID, sessionID: sessionID)
+        let original = try XCTUnwrap(MemoryStoreFactory.openForTesting(
+            enabled: true, root: root, client: keys, random: keys, namespace: namespace,
+            authorize: { $0 == oldContext }, isTaskActive: { _, _ in true },
+            policy: { OwnerMemoryPolicy(featureEnabled: true) }))
+        let binding = try XCTUnwrap(MemoryStoreFactory.captureBindingForTesting(
+            enabled: true, root: root, client: keys, namespace: namespace))
+        _ = try original.writer.remember(
+            kind: .fact, text: "synthetic session-bind test row",
+            commandID: UUID().uuidString.lowercased(), context: oldContext)
+        try original.close()
+
+        let manager = HostComputerUseManager(
+            experimentalEnabled: { false }, injector: InputInjector(),
+            allowsExternalServices: false, allowsAutomaticSetup: false)
+        let newSessionID = "memory-session-after-forget"
+        let coordinator = PersonalMemoryCoordinator(
+            enabled: true, ownerID: ownerID,
+            leaseProvider: { context, requiresTask in
+                manager.localMemoryLease(
+                    peerID: context.peerID, sessionID: context.sessionID,
+                    requiresTask: requiresTask)
+            },
+            beginErasure: { manager.beginMemoryErasure($0) },
+            isErasureQuiescent: { manager.memoryErasureIsQuiescent($0) },
+            endErasure: { manager.endMemoryErasure($0) },
+            captureBinding: {
+                try MemoryStoreFactory.captureBindingForTesting(
+                    enabled: true, root: root, client: keys, namespace: namespace)
+            },
+            boundServiceFactory: { captured in
+                try MemoryStoreFactory.openBoundGenerationForTesting(
+                    enabled: true, binding: captured, client: keys, random: keys,
+                    authorize: { $0.ownerID == self.ownerID },
+                    isTaskActive: { _, _ in true },
+                    policy: { OwnerMemoryPolicy(featureEnabled: true) })
+            })
+        let channel = LocalHostComputerUseChannel(hostID: hostID, pairingCode: pairingCode)
+        let server = LocalComputerUseBrokerServer(
+            credential: try LocalComputerUseCredential(rawKey: Data(repeating: 0x5A, count: 32)),
+            hostID: hostID, channel: channel, memoryFeatureEnabled: true,
+            memoryHandler: { command, context in
+                await coordinator.handle(command, context: context)
+            },
+            authorizePeer: { manager.authorizeLocalPeer(senderID: $0) },
+            revokePeer: { manager.revokeLocalPeerAuthorization(senderID: $0) },
+            bindSession: { manager.bindLocalMemorySession(peerID: $0, sessionID: $1) })
+        defer {
+            server.stop()
+            coordinator.close()
+            _ = manager.stop()
+        }
+
+        let oldBind = try await server.handle(LocalComputerUseRPCRequest(
+            senderID: peerID, targetID: hostID, sessionID: sessionID, bindSession: true))
+        XCTAssertEqual(oldBind.sessionBindingAccepted, true)
+        let forget = LocalMemoryRPCCommand(
+            forgetEverything: UUID().uuidString.lowercased(),
+            generationReference: binding.reference)
+        let forgetRequest = LocalComputerUseRPCRequest(
+            senderID: peerID, targetID: hostID, sessionID: sessionID,
+            memoryCommand: forget)
+        let forgetResponse = try await server.handle(forgetRequest)
+        XCTAssertEqual(try forgetResponse.memoryResult(for: forgetRequest)?.status, .completed)
+
+        let newList = LocalMemoryRPCCommand(listRecords: 8)
+        let unboundRequest = LocalComputerUseRPCRequest(
+            senderID: peerID, targetID: hostID, sessionID: newSessionID,
+            memoryCommand: newList)
+        let unboundResponse = try await server.handle(unboundRequest)
+        XCTAssertEqual(try unboundResponse.memoryResult(for: unboundRequest)?.status, .unauthorized)
+
+        let newBind = try await server.handle(LocalComputerUseRPCRequest(
+            senderID: peerID, targetID: hostID, sessionID: newSessionID, bindSession: true))
+        XCTAssertEqual(newBind.sessionBindingAccepted, true)
+        XCTAssertNil(manager.localMemoryLease(
+            peerID: peerID, sessionID: sessionID, requiresTask: false))
+        let boundRequest = LocalComputerUseRPCRequest(
+            senderID: peerID, targetID: hostID, sessionID: newSessionID,
+            memoryCommand: newList)
+        let boundResponse = try await server.handle(boundRequest)
+        let listed = try XCTUnwrap(boundResponse.memoryResult(for: boundRequest))
+        XCTAssertEqual(listed.status, .completed)
+        XCTAssertTrue(listed.records.isEmpty)
+        XCTAssertNil(listed.nextRecordID)
+
+        let database = root.appendingPathComponent("memory.sqlite")
+        for path in [database.path, database.path + "-wal", database.path + "-shm",
+                     database.path + "-journal"] {
+            XCTAssertFalse(FileManager.default.fileExists(atPath: path))
+        }
+        XCTAssertFalse(keys.contains(ExactKeychainItem(
+            service: namespace.databaseKeyService,
+            account: "database-key", protection: .deviceOnlyWhenUnlocked)))
+    }
+
     func testSameCoordinatorListsEmptyAfterForgetForFreshAuthorizedSession() async throws {
         let root = try makeMemoryRoot("PersonalMemorySameCoordinatorPostForget")
         defer { try? FileManager.default.removeItem(at: root) }
@@ -613,6 +714,9 @@ final class PersonalMemoryCoordinatorTests: XCTestCase {
             allowsExternalServices: false,
             allowsAutomaticSetup: false)
         XCTAssertTrue(manager.authorizeLocalPeer(senderID: peerID))
+        XCTAssertNil(manager.localMemoryLease(
+            peerID: peerID, sessionID: "unbound-session", requiresTask: false))
+        XCTAssertTrue(manager.bindLocalMemorySession(peerID: peerID, sessionID: sessionID))
         let lease = try XCTUnwrap(manager.localMemoryLease(
             peerID: peerID, sessionID: sessionID, requiresTask: false))
         XCTAssertEqual(lease.peerID, peerID)
@@ -630,6 +734,131 @@ final class PersonalMemoryCoordinatorTests: XCTestCase {
         manager.revokeLocalPeerAuthorization(senderID: peerID)
         XCTAssertNil(manager.localMemoryLease(
             peerID: peerID, sessionID: sessionID, requiresTask: false))
+    }
+
+    func testExplicitSessionBindReauthorizesOnlyAnIdleLocalMemoryLease() async throws {
+        let manager = HostComputerUseManager(
+            experimentalEnabled: { false },
+            injector: InputInjector(),
+            allowsExternalServices: false,
+            allowsAutomaticSetup: false)
+        defer { _ = manager.stop() }
+        XCTAssertTrue(manager.authorizeLocalPeer(senderID: peerID))
+
+        // A Memory request cannot establish the initial session binding.
+        XCTAssertNil(manager.localMemoryLease(
+            peerID: peerID, sessionID: sessionID, requiresTask: false))
+        XCTAssertTrue(manager.bindLocalMemorySession(peerID: peerID, sessionID: sessionID))
+        let firstLease = try XCTUnwrap(manager.localMemoryLease(
+            peerID: peerID, sessionID: sessionID, requiresTask: false))
+        XCTAssertTrue(manager.bindLocalMemorySession(peerID: peerID, sessionID: sessionID),
+            "A same-session reconnect must preserve task recovery authority")
+        XCTAssertEqual(manager.localMemoryLease(
+            peerID: peerID, sessionID: sessionID, requiresTask: false)?.authorizationGeneration,
+            firstLease.authorizationGeneration)
+
+        let replacementSession = "memory-session-reconnected"
+        XCTAssertNil(manager.localMemoryLease(
+            peerID: peerID, sessionID: replacementSession, requiresTask: false),
+            "A Memory request cannot rebind an authenticated peer")
+        XCTAssertTrue(manager.bindLocalMemorySession(
+            peerID: peerID, sessionID: replacementSession))
+        XCTAssertNil(manager.localMemoryLease(
+            peerID: peerID, sessionID: sessionID, requiresTask: false))
+        let replacementLease = try XCTUnwrap(manager.localMemoryLease(
+            peerID: peerID, sessionID: replacementSession, requiresTask: false))
+        XCTAssertNotEqual(replacementLease.authorizationGeneration,
+            firstLease.authorizationGeneration)
+
+        let erasureToken = try XCTUnwrap(manager.beginMemoryErasure(replacementLease))
+        XCTAssertFalse(manager.bindLocalMemorySession(
+            peerID: peerID, sessionID: "memory-session-during-erasure"))
+        _ = erasureToken
+    }
+
+    func testNewSessionBindInvalidatesCompletedConfirmationLease() async throws {
+        let (manager, channel, root) = try await makeCompletedManager(
+            taskID: "session-bind-confirmation-task")
+        defer { _ = manager.stop(); try? FileManager.default.removeItem(at: root) }
+        let oldLease = try XCTUnwrap(manager.localMemoryLease(
+            peerID: peerID, sessionID: sessionID, requiresTask: true))
+        let oldSessionLease = try XCTUnwrap(manager.localMemoryLease(
+            peerID: peerID, sessionID: sessionID, requiresTask: false))
+        let replacementSession = "memory-session-after-confirmation"
+        XCTAssertTrue(manager.bindLocalMemorySession(
+            peerID: peerID, sessionID: replacementSession))
+        XCTAssertNil(manager.localMemoryLease(
+            peerID: peerID, sessionID: sessionID, requiresTask: true))
+        XCTAssertNil(manager.localMemoryLease(
+            peerID: peerID, sessionID: replacementSession, requiresTask: true),
+            "A new session cannot inherit the previous task's confirmation lease")
+        let replacementLease = try XCTUnwrap(manager.localMemoryLease(
+            peerID: peerID, sessionID: replacementSession, requiresTask: false))
+        XCTAssertNotEqual(replacementLease.authorizationGeneration,
+            oldSessionLease.authorizationGeneration)
+        XCTAssertEqual(oldLease.taskAuthority, .completed)
+        _ = channel
+    }
+
+    func testNewSessionBindIsRejectedWhileAutomationIsRunning() async throws {
+        let root = try makeMemoryRoot("PersonalMemorySessionBindActive")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let manager = HostComputerUseManager(
+            experimentalEnabled: { true },
+            injector: InputInjector(),
+            executor: SuspendedMemoryLeaseExecutor(),
+            taskLedger: ComputerUseTaskLedger(fileURL: root.appendingPathComponent("ledger.json")),
+            allowsExternalServices: false,
+            allowsAutomaticSetup: false)
+        defer { _ = manager.stop() }
+        XCTAssertTrue(manager.authorizeLocalPeer(senderID: peerID))
+        XCTAssertTrue(manager.bindLocalMemorySession(peerID: peerID, sessionID: sessionID))
+        let preTaskLease = try XCTUnwrap(manager.localMemoryLease(
+            peerID: peerID, sessionID: sessionID, requiresTask: false))
+        let channel = MemoryLeaseTestChannel(hostID: hostID, peerID: peerID, pairingCode: pairingCode)
+        let prompt = ComputerUseEnvelope(
+            id: "session-bind-active-task",
+            senderID: peerID,
+            targetID: hostID,
+            pairingCode: pairingCode,
+            sessionID: sessionID,
+            kind: .prompt,
+            body: try ComputerUsePromptRequest(prompt: "Wait safely for the test to stop").encodedBody())
+        XCTAssertTrue(manager.handle(prompt, channel: channel))
+        for _ in 0..<100 {
+            if case .working = manager.activity { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        guard case .working = manager.activity else {
+            return XCTFail("The test executor did not enter its active state")
+        }
+        XCTAssertTrue(manager.bindLocalMemorySession(
+            peerID: peerID, sessionID: sessionID),
+            "A same-session reconnect must not interrupt task recovery")
+        XCTAssertFalse(manager.bindLocalMemorySession(
+            peerID: peerID, sessionID: "memory-session-during-task"))
+        let intervention = try XCTUnwrap(manager.recordUserInputForIntervention())
+        XCTAssertFalse(manager.bindLocalMemorySession(
+            peerID: peerID, sessionID: "memory-session-during-input-cancel"))
+        manager.applyUserInputIntervention(intervention)
+        XCTAssertEqual(manager.activity, .paused)
+        XCTAssertFalse(manager.bindLocalMemorySession(
+            peerID: peerID, sessionID: "memory-session-while-paused"))
+
+        // Expiry revokes the local lease and pauses the task. Reauthorizing the
+        // same peer may restore only the exact retained task session.
+        manager.revokeLocalPeerAuthorization(senderID: peerID)
+        XCTAssertTrue(manager.authorizeLocalPeer(senderID: peerID))
+        XCTAssertTrue(manager.bindLocalMemorySession(peerID: peerID, sessionID: sessionID))
+        XCTAssertEqual(manager.activity, .paused, "Binding must not resume automation")
+        XCTAssertFalse(manager.bindLocalMemorySession(
+            peerID: peerID, sessionID: "memory-session-after-reconnect"))
+        let recoveredLease = try XCTUnwrap(manager.localMemoryLease(
+            peerID: peerID, sessionID: sessionID, requiresTask: false))
+        XCTAssertNotEqual(recoveredLease.authorizationGeneration,
+            preTaskLease.authorizationGeneration)
+        let stopped = manager.stop()
+        await stopped.value
     }
 
     func testCompletedTaskConfirmationLeaseIsInvalidatedByStopTakeoverRevokeAndNewTask() async throws {
@@ -685,8 +914,9 @@ final class PersonalMemoryCoordinatorTests: XCTestCase {
         let (manager, channel, root) = try await makeCompletedManager(taskID: "memory-session-old-task")
         defer { _ = manager.stop(); try? FileManager.default.removeItem(at: root) }
 
-        // Establish the old session binding through an authenticated memory
-        // operation, then accept a host task from the same peer in a new session.
+        // Establish the old session binding explicitly, then accept a host
+        // task from the same peer in a new session.
+        XCTAssertTrue(manager.bindLocalMemorySession(peerID: peerID, sessionID: sessionID))
         XCTAssertNotNil(manager.localMemoryLease(
             peerID: peerID, sessionID: sessionID, requiresTask: false))
         let nextTaskID = "memory-session-new-task"
@@ -811,6 +1041,20 @@ private final class FinishedMemoryLeaseExecutor: ComputerUseExecuting {
         progress: @escaping (String) -> Void
     ) async throws -> ComputerUseExecutionResult {
         .completed("Done")
+    }
+}
+
+private final class SuspendedMemoryLeaseExecutor: ComputerUseExecuting {
+    let isReady = true
+    let runtimeName = "Suspended memory session-bind test executor"
+
+    func execute(
+        prompt: String,
+        tools: ComputerUseHostTools,
+        progress: @escaping (String) -> Void
+    ) async throws -> ComputerUseExecutionResult {
+        try await Task.sleep(for: .seconds(60))
+        return .completed("Stopped")
     }
 }
 
