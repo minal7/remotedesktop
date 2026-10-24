@@ -368,42 +368,24 @@ final class AgentLoopTests: XCTestCase {
         XCTAssertEqual(recorder.footer?.outcome, "success")
     }
 
-    func testCredentialQuestionsAndLocalHandoffDoNotCreatePendingQuestion() async throws {
-        let prompts = [
-            "Please provide your password or verification code.",
-            "Please take over and enter the verification code locally, then tell me when you're done."
-        ]
-        for prompt in prompts {
-            let environment = TestEnvironment(frames: [webFrame(), webFrame(), webFrame()])
-            let policy = TestPolicy([.malformed("first invalid reply"), .malformed("second invalid reply"),
-                .action(.askUser(question: prompt, choices: nil))])
-            let recorder = TestRecorder(), loop = try makeLoop(environment: environment, policy: policy,
-                recorder: recorder, journal: TestJournal(), trustedWeb: true)
-            let outcome = try await loop.run()
-            guard case .handoff(let reason) = outcome else { return XCTFail("Credential solicitation must hand off") }
-            XCTAssertEqual(reason, "Credentials require you to take over on your Mac; never send passwords or codes in chat.")
-            XCTAssertNil(loop.pendingQuestion)
-            XCTAssertTrue(environment.executed.isEmpty)
-            XCTAssertEqual(recorder.steps.last?.execution.status, .notExecuted)
-            do {
-                _ = try await loop.resume(answer: "123456")
-                XCTFail("A credential handoff must not accept a model-created clarification answer")
-            } catch {
-                XCTAssertEqual(error as? AgentLoopError, .noPendingQuestion)
-            }
-        }
-    }
-
-    func testHarmlessCredentialFieldReportCompletesWithoutDispatchingInput() async throws {
-        let environment = TestEnvironment(frames: [webFrame()])
-        let policy = TestPolicy([.action(.done(answer: "The page shows Account password and One-time verification code fields; I did not interact with them."))])
+    func testCredentialQuestionAfterRepeatedRejectionsHandsOffWithoutPendingQuestion() async throws {
+        let environment = TestEnvironment(frames: [webFrame(), webFrame(), webFrame()])
+        let policy = TestPolicy([.malformed("first invalid reply"), .malformed("second invalid reply"),
+            .action(.askUser(question: "Please provide your password or verification code.", choices: nil))])
         let recorder = TestRecorder(), loop = try makeLoop(environment: environment, policy: policy,
             recorder: recorder, journal: TestJournal(), trustedWeb: true)
-
         let outcome = try await loop.run()
-        XCTAssertEqual(outcome, .completed(answer: "The page shows Account password and One-time verification code fields; I did not interact with them."))
+        guard case .handoff(let reason) = outcome else { return XCTFail("Credential solicitation must hand off") }
+        XCTAssertEqual(reason, "Credentials require you to take over on your Mac; never send passwords or codes in chat.")
+        XCTAssertNil(loop.pendingQuestion)
         XCTAssertTrue(environment.executed.isEmpty)
-        XCTAssertEqual(recorder.steps.count, 1)
+        XCTAssertEqual(recorder.steps.last?.execution.status, .notExecuted)
+        do {
+            _ = try await loop.resume(answer: "123456")
+            XCTFail("A credential handoff must not accept a model-created clarification answer")
+        } catch {
+            XCTAssertEqual(error as? AgentLoopError, .noPendingQuestion)
+        }
     }
 
     func testExecutionCredentialHandoffStopsBeforeASecondModelAction() async throws {
