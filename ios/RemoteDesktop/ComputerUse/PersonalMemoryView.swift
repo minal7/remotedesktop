@@ -93,7 +93,7 @@ struct PersonalMemoryView: View {
     var body: some View {
         NavigationStack {
             VStack(spacing: 0) {
-                if model.forgetCommandID != nil {
+                if model.forgetCommandID != nil || model.verifiedAbsentNeedsInitialization {
                     forgetStatusContent
                 } else {
                     searchBar
@@ -125,7 +125,8 @@ struct PersonalMemoryView: View {
                         beginForgetConfirmation()
                     }
                     .disabled(model.forgetCommandID != nil || model.forgetInProgress
-                              || model.generationReference == nil)
+                              || model.generationReference == nil
+                              || model.verifiedAbsentNeedsInitialization)
                     .accessibilityIdentifier("personal-memory-forget")
                     Button("Close") { closeView() }
                         .accessibilityIdentifier("personal-memory-close")
@@ -159,9 +160,9 @@ struct PersonalMemoryView: View {
                     .accessibilityIdentifier("personal-memory-forget-warning")
             }
             .accessibilityIdentifier("personal-memory-forget-confirmation")
-            .confirmationDialog("Start fresh Memory?", isPresented: $showingFreshMemoryConfirmation,
+            .confirmationDialog("Start using Memory again?", isPresented: $showingFreshMemoryConfirmation,
                                 titleVisibility: .visible) {
-                Button("Start Fresh Memory", role: .destructive) {
+                Button("Start Fresh", role: .destructive) {
                     confirmFreshMemory()
                 }
                 .accessibilityIdentifier("personal-memory-fresh-confirm")
@@ -170,7 +171,7 @@ struct PersonalMemoryView: View {
                 }
                 .accessibilityIdentifier("personal-memory-fresh-cancel")
             } message: {
-                Text("This creates an empty memory store for this owner. Reconnect before viewing the new memory.")
+                Text("This starts a new empty Memory. Reconnect when it is ready.")
             }
             .accessibilityIdentifier("personal-memory-fresh-confirmation")
         }
@@ -192,8 +193,8 @@ struct PersonalMemoryView: View {
     private var forgetStatusContent: some View {
         Group {
             if model.initializationCompleted {
-                ContentUnavailableView("Fresh memory is ready", systemImage: "sparkles",
-                    description: Text("Reconnect to view the new, empty memory store."))
+                ContentUnavailableView("Memory is ready", systemImage: "sparkles",
+                    description: Text("Reconnect to use Memory."))
                     .accessibilityIdentifier("personal-memory-fresh-ready")
             } else if model.initializationCommandID != nil {
                 if model.initializationInProgress {
@@ -209,7 +210,7 @@ struct PersonalMemoryView: View {
                     } description: {
                         Text("The Mac did not confirm whether fresh memory was created.")
                     } actions: {
-                        Button("Retry Start Fresh Memory", role: .destructive) {
+                        Button("Retry Start Fresh", role: .destructive) {
                             _ = model.retryFreshMemoryInitialization()
                         }
                         .disabled(!model.canRetryFreshMemoryInitialization)
@@ -217,6 +218,21 @@ struct PersonalMemoryView: View {
                     }
                     .accessibilityIdentifier("personal-memory-fresh-unknown")
                 }
+            } else if model.verifiedAbsentNeedsInitialization {
+                VStack(spacing: 16) {
+                    ContentUnavailableView("Start using Memory again", systemImage: "checkmark.shield",
+                        description: Text("Your saved memories were forgotten. Start fresh to save new memories."))
+                    if model.canBeginFreshMemory {
+                        Button("Start Fresh", role: .destructive) {
+                            beginFreshMemoryConfirmation()
+                        }
+                        .accessibilityIdentifier("personal-memory-start-fresh")
+                    } else {
+                        Button("Reload status") { model.reload() }
+                            .accessibilityIdentifier("personal-memory-verified-absent-retry")
+                    }
+                }
+                .accessibilityIdentifier("personal-memory-verified-absent")
             } else if model.forgetInProgress {
                 VStack(spacing: 12) {
                     ProgressView()
@@ -229,7 +245,7 @@ struct PersonalMemoryView: View {
                     ContentUnavailableView("Memory forgotten", systemImage: "checkmark.shield",
                         description: Text("This app’s saved memories have been erased."))
                     if model.canBeginFreshMemory {
-                        Button("Start Fresh Memory", role: .destructive) {
+                        Button("Start Fresh", role: .destructive) {
                             beginFreshMemoryConfirmation()
                         }
                         .accessibilityIdentifier("personal-memory-start-fresh")
@@ -270,7 +286,8 @@ struct PersonalMemoryView: View {
     }
 
     private func beginFreshMemoryConfirmation() {
-        guard model.forgetCompleted, let token = model.beginFreshMemoryConfirmation() else { return }
+        guard (model.forgetCompleted || model.verifiedAbsentNeedsInitialization),
+              let token = model.beginFreshMemoryConfirmation() else { return }
         freshMemoryDialogToken = token
         showingFreshMemoryConfirmation = true
     }

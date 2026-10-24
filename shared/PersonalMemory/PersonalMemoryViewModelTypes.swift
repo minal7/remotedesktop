@@ -118,6 +118,21 @@ enum PersonalMemoryReplyValidator {
         }
     }
 
+    static func verifiedAbsent(_ reply: LocalMemoryRPCReply,
+                               command: LocalMemoryRPCCommand) throws {
+        try reply.validate()
+        guard (command.operation == .listRecords || command.operation == .searchRecords)
+                && reply.operation == command.operation
+                && reply.status == .initializationRequired
+                && reply.commandID == nil && reply.rememberKind == nil
+                && reply.recordID == nil && reply.idempotentRetry == nil
+                && reply.metadata.isEmpty && reply.records.isEmpty
+                && reply.nextRecordID == nil && reply.generationReference == nil
+                && reply.replacementGenerationReference == nil else {
+            throw PersonalMemoryValidationFailure.invalid
+        }
+    }
+
     static func mutation(_ reply: LocalMemoryRPCReply, command: LocalMemoryRPCCommand) throws {
         try reply.validate()
         guard reply.operation == command.operation else { throw PersonalMemoryValidationFailure.invalid }

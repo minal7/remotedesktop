@@ -32,7 +32,8 @@ extension PersonalMemoryViewModel {
     private typealias PendingRemember = PersonalMemoryPendingRemember
 
     var canBeginRemember: Bool {
-        guard canUseChannel, !disconnected, forgetCommandID == nil,
+        guard canUseChannel, !disconnected, !verifiedAbsentNeedsInitialization,
+              forgetCommandID == nil,
               initializationCommandID == nil, requestTask == nil,
               !mutationInFlight else { return false }
         switch state {

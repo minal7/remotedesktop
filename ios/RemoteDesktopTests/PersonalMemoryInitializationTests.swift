@@ -40,6 +40,51 @@ final class PersonalMemoryInitializationTests: XCTestCase {
         XCTAssertFalse(commands.contains { $0.operation == .initializeMemoryGeneration })
     }
 
+    func testVerifiedAbsentShowsExplicitStartFreshAndNeverInitializesAutomatically() async throws {
+        let channel = FreshMemoryTestChannel(oldReference: oldReference, newReference: newReference)
+        await channel.enqueue(.listRecords, .verifiedAbsent)
+        let model = makeModel(channel)
+        model.open()
+        try await wait {
+            model.verifiedAbsentNeedsInitialization && model.generationReference != nil
+                && model.state == .ready
+        }
+
+        XCTAssertFalse(model.forgetCompleted, "Host absence is not a local Forget receipt")
+        XCTAssertTrue(model.canBeginFreshMemory)
+        XCTAssertFalse(model.canBeginRemember, "Do not advertise Save before a store exists")
+        XCTAssertTrue(model.records.isEmpty)
+        let token = try XCTUnwrap(model.beginFreshMemoryConfirmation())
+        model.cancelFreshMemoryConfirmation(token)
+        XCTAssertNil(model.initializationCommandID)
+        let cancelledCommands = await channel.commands()
+        XCTAssertFalse(cancelledCommands.contains {
+            $0.operation == .initializeMemoryGeneration
+        }, "Verified absence never initializes without explicit confirmation")
+        XCTAssertFalse(cancelledCommands.contains { $0.operation == .forgetEverything },
+                       "Cancelling Start Fresh must not issue the empty-store Forget")
+
+        let secondToken = try XCTUnwrap(model.beginFreshMemoryConfirmation())
+        let explicitForgetID = try XCTUnwrap(model.confirmFreshMemory(secondToken))
+        try await wait { model.initializationCompleted }
+        let confirmedCommands = await channel.commands()
+        let emptyForget = try XCTUnwrap(confirmedCommands.first {
+            $0.operation == .forgetEverything
+        })
+        XCTAssertEqual(emptyForget.commandID, explicitForgetID)
+        XCTAssertEqual(emptyForget.generationReference, oldReference)
+        let initialize = try XCTUnwrap(confirmedCommands.last {
+            $0.operation == .initializeMemoryGeneration
+        })
+        XCTAssertNotEqual(initialize.commandID, explicitForgetID)
+        XCTAssertEqual(initialize.generationReference, oldReference)
+
+        let malformed = LocalMemoryRPCReply(operation: .listRecords, status: .initializationRequired,
+            records: [record("unexpected-record")])
+        XCTAssertThrowsError(try PersonalMemoryReplyValidator.verifiedAbsent(malformed,
+            command: LocalMemoryRPCCommand(listRecords: 20)))
+    }
+
     func testConfirmedFreshInitializationPinsOldReferenceAndClearsContentImmediately() async throws {
         let channel = FreshMemoryTestChannel(oldReference: oldReference, newReference: newReference)
         await channel.enqueue(.initializeMemoryGeneration, .suspend)
@@ -227,7 +272,7 @@ final class PersonalMemoryInitializationTests: XCTestCase {
 private actor FreshMemoryTestChannel: PersonalMemoryChannel {
     enum Failure: Error { case request, timeout }
     enum Action: Sendable {
-        case success, page([LocalMemoryRPCRecord]), capture, failure, suspend
+        case success, page([LocalMemoryRPCRecord]), verifiedAbsent, capture, failure, suspend
         case missingReplacement, sameReplacement, wrongSource, wrongCommand, withData
     }
     private let oldReference: String
@@ -259,6 +304,9 @@ private actor FreshMemoryTestChannel: PersonalMemoryChannel {
             action = await withCheckedContinuation { continuation = $0 }
         }
         switch (command.operation, action) {
+        case (.listRecords, .verifiedAbsent), (.searchRecords, .verifiedAbsent):
+            return LocalMemoryRPCReply(operation: command.operation,
+                status: .initializationRequired)
         case (.listRecords, .page(let records)), (.searchRecords, .page(let records)):
             return LocalMemoryRPCReply(operation: command.operation, status: .completed, records: records)
         case (.captureMemoryGeneration, .capture):

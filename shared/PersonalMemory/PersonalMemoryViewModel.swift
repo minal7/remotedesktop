@@ -34,6 +34,7 @@ final class PersonalMemoryViewModel: ObservableObject {
     @Published private(set) var generationReference: String?
     @Published private(set) var forgetInProgress = false
     @Published private(set) var forgetCompleted = false
+    @Published private(set) var verifiedAbsentNeedsInitialization = false
     @Published private(set) var initializationConfirmationToken: UUID?
     @Published private(set) var initializationCommandID: String?
     @Published private(set) var initializationSourceReference: String?
@@ -48,14 +49,16 @@ final class PersonalMemoryViewModel: ObservableObject {
     var confirmedForgetGenerationReference: String? { forgetGenerationReference }
 
     var canBeginFreshMemory: Bool {
-        allowsInitialization && canUseChannel && !disconnected && forgetCompleted
+        allowsInitialization && canUseChannel && !disconnected
+            && (forgetCompleted || verifiedAbsentNeedsInitialization)
             && !initializationCompleted && initializationCommandID == nil
             && initializationConfirmationToken == nil && !forgetInProgress
             && !initializationInProgress && requestTask == nil && forgetGenerationReference != nil
     }
 
     var canRetryFreshMemoryInitialization: Bool {
-        allowsInitialization && canUseChannel && !disconnected && forgetCompleted
+        allowsInitialization && canUseChannel && !disconnected
+            && (forgetCompleted || verifiedAbsentNeedsInitialization)
             && !initializationCompleted && initializationCommandID != nil
             && initializationSourceReference != nil && !initializationInProgress && requestTask == nil
     }
@@ -309,7 +312,8 @@ final class PersonalMemoryViewModel: ObservableObject {
         forgetConfirmationToken = nil
     }
     func beginFreshMemoryConfirmation() -> UUID? {
-        guard allowsInitialization, canUseChannel, !disconnected, forgetCompleted,
+        guard allowsInitialization, canUseChannel, !disconnected,
+              (forgetCompleted || verifiedAbsentNeedsInitialization),
               !initializationCompleted, initializationCommandID == nil,
               !forgetInProgress, !initializationInProgress, requestTask == nil,
               let generationReference = forgetGenerationReference else { return nil }
@@ -324,10 +328,30 @@ final class PersonalMemoryViewModel: ObservableObject {
     @discardableResult
     func confirmFreshMemory(_ token: UUID) -> String? {
         guard allowsInitialization, initializationConfirmationToken == token,
-              canUseChannel, !disconnected, forgetCompleted, !forgetInProgress,
+              canUseChannel, !disconnected,
+              (forgetCompleted || verifiedAbsentNeedsInitialization), !forgetInProgress,
               !initializationInProgress, !initializationCompleted, requestTask == nil,
               let sourceReference = initializationSourceReference,
               sourceReference == forgetGenerationReference else { return nil }
+        if verifiedAbsentNeedsInitialization && !forgetCompleted {
+            var forgetID = UUID().uuidString.lowercased()
+            while forgetID == forgetCommandID { forgetID = UUID().uuidString.lowercased() }
+            let command = LocalMemoryRPCCommand(forgetEverything: forgetID,
+                                                generationReference: sourceReference)
+            guard validate(command) else { return nil }
+            initializationConfirmationToken = nil
+            forgetCommandID = forgetID
+            forgetGenerationReference = sourceReference
+            forgetCompleted = false
+            clearOwnerContent()
+            generation &+= 1
+            cancelCurrentRequest()
+            errorMessage = nil
+            forgetInProgress = true
+            state = .loading
+            sendForget(commandID: forgetID)
+            return forgetID
+        }
         var commandID = UUID().uuidString.lowercased()
         while commandID == forgetCommandID { commandID = UUID().uuidString.lowercased() }
         let command = LocalMemoryRPCCommand(initializeMemoryGeneration: commandID,
@@ -345,7 +369,8 @@ final class PersonalMemoryViewModel: ObservableObject {
     }
     @discardableResult
     func retryFreshMemoryInitialization() -> String? {
-        guard allowsInitialization, canUseChannel, !disconnected, forgetCompleted,
+        guard allowsInitialization, canUseChannel, !disconnected,
+              (forgetCompleted || verifiedAbsentNeedsInitialization),
               !initializationCompleted, !initializationInProgress, requestTask == nil,
               let commandID = initializationCommandID,
               let sourceReference = initializationSourceReference,
@@ -433,6 +458,11 @@ final class PersonalMemoryViewModel: ObservableObject {
 
     func beginQuery(_ newQuery: String) {
         guard !mutationInFlight, forgetCommandID == nil else { return }
+        if !forgetCompleted && verifiedAbsentNeedsInitialization {
+            verifiedAbsentNeedsInitialization = false
+            forgetGenerationReference = nil
+            generationReference = nil
+        }
         generation &+= 1
         cancelCurrentRequest()
         loadingMore = false
@@ -477,8 +507,12 @@ final class PersonalMemoryViewModel: ObservableObject {
                 self.clearOwnerContent()
                 self.forgetInProgress = false
                 self.forgetCompleted = true
-                self.state = .unavailable
-                self.errorMessage = nil
+                if self.verifiedAbsentNeedsInitialization {
+                    self.startFreshInitializationAfterVerifiedForget()
+                } else {
+                    self.state = .unavailable
+                    self.errorMessage = nil
+                }
             } catch {
                 guard let self, self.generation == requestGeneration,
                       self.requestToken == token, !Task.isCancelled,
@@ -488,6 +522,36 @@ final class PersonalMemoryViewModel: ObservableObject {
                 self.setError(Self.forgetUnknown)
             }
         }
+    }
+
+    private func startFreshInitializationAfterVerifiedForget() {
+        guard let sourceReference = initializationSourceReference,
+              sourceReference == forgetGenerationReference,
+              !initializationCompleted, !initializationInProgress else {
+            state = .unavailable
+            errorMessage = Self.initializationUnknown
+            return
+        }
+        var commandID = UUID().uuidString.lowercased()
+        while commandID == forgetCommandID { commandID = UUID().uuidString.lowercased() }
+        let command = LocalMemoryRPCCommand(initializeMemoryGeneration: commandID,
+                                            generationReference: sourceReference)
+        guard validate(command) else {
+            state = .unavailable
+            errorMessage = Self.initializationUnknown
+            return
+        }
+        initializationCommandID = commandID
+        initializationSourceReference = sourceReference
+        replacementGenerationReference = nil
+        initializationCompleted = false
+        clearOwnerContent()
+        generation &+= 1
+        cancelCurrentRequest()
+        errorMessage = nil
+        initializationInProgress = true
+        state = .loading
+        sendFreshInitialization(commandID: commandID)
     }
 
     private func clearOwnerContent() {
@@ -554,6 +618,20 @@ final class PersonalMemoryViewModel: ObservableObject {
                 guard let self, self.generation == requestGeneration,
                       self.requestToken == token, !Task.isCancelled else { return }
                 self.finishRequest(token)
+                if reply.status == .initializationRequired {
+                    guard !append else { throw ValidationFailure.invalid }
+                    try PersonalMemoryReplyValidator.verifiedAbsent(reply, command: command)
+                    guard !Task.isCancelled else { throw CancellationError() }
+                    self.records = []
+                    self.nextRecordID = nil
+                    self.generationReference = nil
+                    self.forgetGenerationReference = nil
+                    self.verifiedAbsentNeedsInitialization = true
+                    self.loadingMore = false
+                    self.startGenerationCapture(afterReadState: .ready,
+                                                requestGeneration: requestGeneration)
+                    return
+                }
                 try PersonalMemoryReplyValidator.page(reply, command: command, previousCursor: cursor,
                                                       appendingTo: append ? self.records : [])
                 if append {
@@ -563,6 +641,10 @@ final class PersonalMemoryViewModel: ObservableObject {
                 }
                 self.nextRecordID = reply.nextRecordID
                 self.loadingMore = false
+                if !self.forgetCompleted && self.verifiedAbsentNeedsInitialization {
+                    self.verifiedAbsentNeedsInitialization = false
+                    self.forgetGenerationReference = nil
+                }
                 if !append && self.generationReference == nil {
                     self.startGenerationCapture(afterReadState: .ready,
                                                 requestGeneration: requestGeneration)
@@ -622,6 +704,9 @@ final class PersonalMemoryViewModel: ObservableObject {
                     throw ValidationFailure.invalid
                 }
                 self.generationReference = reference
+                if self.verifiedAbsentNeedsInitialization {
+                    self.forgetGenerationReference = reference
+                }
                 self.state = readState
                 self.errorMessage = {
                     if case .error(let message) = readState { return message }
@@ -659,6 +744,7 @@ final class PersonalMemoryViewModel: ObservableObject {
             forgetCommandID = nil; forgetCompleted = false; forgetGenerationReference = nil
             initializationCommandID = nil; initializationSourceReference = nil
             replacementGenerationReference = nil; initializationCompleted = false
+            verifiedAbsentNeedsInitialization = false
         }
         generationReference = nil
         clearRememberState()

@@ -419,6 +419,19 @@ final class LocalComputerUseTransportTests: XCTestCase {
         XCTAssertThrowsError(try mismatchedReply.memoryResult(for: decodedRequest))
     }
 
+    func testInitializationRequiredReplyIsAZeroRecordListOnly() throws {
+        let absent = LocalMemoryRPCReply(operation: .listRecords,
+            status: .initializationRequired)
+        XCTAssertNoThrow(try absent.validate())
+        XCTAssertThrowsError(try LocalMemoryRPCReply(operation: .remember,
+            status: .initializationRequired).validate())
+        XCTAssertThrowsError(try LocalMemoryRPCReply(operation: .listRecords,
+            status: .initializationRequired, records: [LocalMemoryRPCRecord(
+                recordID: "unexpected", kind: .fact, text: "Synthetic",
+                observedAtMilliseconds: 1, active: true,
+                revision: String(repeating: "0", count: 64), source: .ownerMessage)]).validate())
+    }
+
     private func addTestCredential(
         _ credential: LocalComputerUseCredential,
         service: String,

@@ -295,6 +295,7 @@ public struct LocalMemoryRPCReply: Codable, Equatable, Sendable {
     public enum Status: String, Codable, Equatable, Sendable {
         case completed, disabled, unauthorized, inactiveTask, noMemory
         case incognito, learningPaused, notFound, conflict, invalidRequest
+        case initializationRequired
         case unavailable
     }
 
@@ -379,6 +380,15 @@ public struct LocalMemoryRPCReply: Codable, Equatable, Sendable {
         if operation != .initializeMemoryGeneration {
             guard replacementGenerationReference == nil else {
                 throw LocalComputerUseRPCValidationError.invalidField("memoryReply.replacementGenerationReference")
+            }
+        }
+        if status == .initializationRequired {
+            guard operation == .listRecords || operation == .searchRecords,
+                  commandID == nil, rememberKind == nil, recordID == nil,
+                  idempotentRetry == nil, metadata.isEmpty, records.isEmpty,
+                  nextRecordID == nil, generationReference == nil,
+                  replacementGenerationReference == nil else {
+                throw LocalComputerUseRPCValidationError.invalidField("memoryReply.initializationRequired")
             }
         }
         switch operation {

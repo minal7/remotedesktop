@@ -46,6 +46,21 @@ final class PersonalMemoryCoordinatorTests: XCTestCase {
     private let sessionID = "memory-session-1"
     private let ownerID = String(repeating: "a", count: 64)
 
+    func testUnverifiedStorageAbsentCannotClaimInitializationRequired() async {
+        let context = LocalMemoryRPCContext(peerID: peerID, sessionID: sessionID)
+        let lease = LocalMemoryHostLease(peerID: peerID, sessionID: sessionID, taskID: nil,
+            authorizationGeneration: 7, taskAuthority: .none)
+        let coordinator = PersonalMemoryCoordinator(enabled: true, ownerID: ownerID,
+            leaseProvider: { request, requiresTask in
+                request == context && !requiresTask ? lease : nil
+            }, writerFactory: { throw MemoryFactoryError.storageAbsent })
+        defer { coordinator.close() }
+
+        let reply = await coordinator.handle(LocalMemoryRPCCommand(listRecords: 8), context: context)
+        XCTAssertEqual(reply.status, .unavailable,
+            "An adapter-thrown absence without verified Forget authority must not be presented as recoverable")
+    }
+
     func testBrokerCoordinatorWritesRetriesListsAndDeletesInEncryptedStore() async throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("PersonalMemoryCoordinator-\(UUID().uuidString)", isDirectory: true)
@@ -185,13 +200,13 @@ final class PersonalMemoryCoordinatorTests: XCTestCase {
 
         let listed = await coordinator.handle(LocalMemoryRPCCommand(listRecords: 8),
             context: LocalMemoryRPCContext(peerID: peerID, sessionID: sessionID))
-        XCTAssertEqual(listed.status, .completed)
+        XCTAssertEqual(listed.status, .initializationRequired)
         XCTAssertTrue(listed.records.isEmpty)
         XCTAssertNil(listed.nextRecordID)
         let searched = await coordinator.handle(
             LocalMemoryRPCCommand(searchRecords: "synthetic", afterRecordID: UUID().uuidString.lowercased()),
             context: LocalMemoryRPCContext(peerID: peerID, sessionID: sessionID))
-        XCTAssertEqual(searched.status, .completed)
+        XCTAssertEqual(searched.status, .initializationRequired)
         XCTAssertTrue(searched.records.isEmpty)
         XCTAssertNil(searched.nextRecordID)
         let attemptedWrite = await coordinator.handle(LocalMemoryRPCCommand(
@@ -327,7 +342,7 @@ final class PersonalMemoryCoordinatorTests: XCTestCase {
             memoryCommand: newList)
         let boundResponse = try await server.handle(boundRequest)
         let listed = try XCTUnwrap(boundResponse.memoryResult(for: boundRequest))
-        XCTAssertEqual(listed.status, .completed)
+        XCTAssertEqual(listed.status, .initializationRequired)
         XCTAssertTrue(listed.records.isEmpty)
         XCTAssertNil(listed.nextRecordID)
 
@@ -341,7 +356,205 @@ final class PersonalMemoryCoordinatorTests: XCTestCase {
             account: "database-key", protection: .deviceOnlyWhenUnlocked)))
     }
 
-    func testSameCoordinatorListsEmptyAfterForgetForFreshAuthorizedSession() async throws {
+    func testFreshCoordinatorListsVerifiedAbsentAndRequiresExplicitFreshStartAfterForget() async throws {
+        let root = try makeMemoryRoot("PersonalMemorySameCoordinatorPostForget")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let namespace = KeychainNamespace.testing("same-coordinator-post-forget-\(UUID().uuidString)")
+        let keys = CoordinatorLifecycleTestKeys()
+        let oldSessionID = sessionID
+        let newSessionID = "memory-session-after-forget"
+        var currentSessionID = oldSessionID
+        var authorizationGeneration: UInt64 = 41
+        let oldContext = OwnerMemoryContext(ownerID: ownerID, sessionID: oldSessionID)
+        let original = try XCTUnwrap(MemoryStoreFactory.openForTesting(enabled: true, root: root,
+            client: keys, random: keys, namespace: namespace,
+            authorize: { $0 == oldContext }, isTaskActive: { _, _ in true },
+            policy: { OwnerMemoryPolicy(featureEnabled: true) }))
+        let binding = try XCTUnwrap(MemoryStoreFactory.captureBindingForTesting(enabled: true,
+            root: root, client: keys, namespace: namespace))
+        _ = try original.writer.remember(kind: .fact, text: "synthetic same-process Forget row",
+            commandID: UUID().uuidString.lowercased(), context: oldContext)
+        try original.close()
+
+        let coordinator = PersonalMemoryCoordinator(enabled: true, ownerID: ownerID,
+            leaseProvider: { request, requiresTask in
+                guard request.peerID == self.peerID,
+                      request.sessionID == currentSessionID, !requiresTask else { return nil }
+                return LocalMemoryHostLease(peerID: self.peerID, sessionID: currentSessionID,
+                    taskID: nil, authorizationGeneration: authorizationGeneration,
+                    taskAuthority: .none)
+            }, beginErasure: { _ in UUID() },
+            isErasureQuiescent: { _ in true },
+            endErasure: { _ in },
+            captureBinding: {
+                try MemoryStoreFactory.captureBindingForTesting(enabled: true,
+                    root: root, client: keys, namespace: namespace)
+            },
+            boundServiceFactory: { captured in
+                try MemoryStoreFactory.openBoundGenerationForTesting(enabled: true,
+                    binding: captured, client: keys, random: keys,
+                    authorize: { $0.ownerID == self.ownerID }, isTaskActive: { _, _ in true },
+                    policy: { OwnerMemoryPolicy(featureEnabled: true) })
+            },
+            initializeGeneration: { binding, commandID in
+                try MemoryStoreFactory.initializeAfterForgetBindingForTesting(enabled: true,
+                    expectedBinding: binding, commandID: commandID, client: keys, random: keys)
+            })
+        defer { coordinator.close() }
+
+        let oldRequest = LocalMemoryRPCContext(peerID: peerID, sessionID: oldSessionID)
+        let forgotten = await coordinator.handle(LocalMemoryRPCCommand(
+            forgetEverything: UUID().uuidString.lowercased(), generationReference: binding.reference),
+            context: oldRequest)
+        XCTAssertEqual(forgotten.status, .completed)
+        XCTAssertEqual(forgotten.generationReference, binding.reference)
+        coordinator.close() // Model a host-process restart after the durable Forget marker.
+
+        currentSessionID = newSessionID
+        authorizationGeneration += 1
+        let newRequest = LocalMemoryRPCContext(peerID: peerID, sessionID: newSessionID)
+        let sidecar = root.appendingPathComponent("memory.sqlite-wal")
+        var injectSidecarAtQuiescence = false
+        var didInjectSidecarAtQuiescence = false
+        let freshCoordinator = PersonalMemoryCoordinator(enabled: true, ownerID: ownerID,
+            leaseProvider: { request, requiresTask in
+                guard request.peerID == self.peerID,
+                      request.sessionID == currentSessionID, !requiresTask else { return nil }
+                return LocalMemoryHostLease(peerID: self.peerID, sessionID: currentSessionID,
+                    taskID: nil, authorizationGeneration: authorizationGeneration,
+                    taskAuthority: .none)
+            }, beginErasure: { _ in UUID() },
+            isErasureQuiescent: { _ in
+                if injectSidecarAtQuiescence {
+                    injectSidecarAtQuiescence = false
+                    do {
+                        try Data([0x5A]).write(to: sidecar)
+                        try FileManager.default.setAttributes([.posixPermissions: 0o600],
+                                                              ofItemAtPath: sidecar.path)
+                        didInjectSidecarAtQuiescence = true
+                    } catch { return false }
+                }
+                return true
+            }, endErasure: { _ in },
+            captureBinding: {
+                try MemoryStoreFactory.captureBindingForTesting(enabled: true,
+                    root: root, client: keys, namespace: namespace)
+            },
+            boundServiceFactory: { captured in
+                try MemoryStoreFactory.openBoundGenerationForTesting(enabled: true,
+                    binding: captured, client: keys, random: keys,
+                    authorize: { $0.ownerID == self.ownerID }, isTaskActive: { _, _ in true },
+                    policy: { OwnerMemoryPolicy(featureEnabled: true) })
+            },
+            boundForgetRecovery: { captured in
+                try MemoryStoreFactory.recoverBoundGenerationForTesting(enabled: true,
+                    binding: captured, client: keys)
+            },
+            initializeGeneration: { captured, commandID in
+                try MemoryStoreFactory.initializeAfterForgetBindingForTesting(enabled: true,
+                    expectedBinding: captured, commandID: commandID, client: keys, random: keys)
+            })
+        defer { freshCoordinator.close() }
+
+        let listed = await freshCoordinator.handle(LocalMemoryRPCCommand(listRecords: 8), context: newRequest)
+        XCTAssertEqual(listed.status, .initializationRequired)
+        XCTAssertTrue(listed.records.isEmpty)
+        XCTAssertNil(listed.nextRecordID)
+
+        let database = root.appendingPathComponent("memory.sqlite")
+        let databaseKey = ExactKeychainItem(service: namespace.databaseKeyService,
+            account: "database-key", protection: .deviceOnlyWhenUnlocked)
+        for path in [database.path, database.path + "-wal", database.path + "-shm",
+                     database.path + "-journal"] {
+            XCTAssertFalse(FileManager.default.fileExists(atPath: path))
+        }
+        XCTAssertFalse(keys.contains(databaseKey), "Listing a verified absent store must not create a key")
+
+        let unexpected = root.appendingPathComponent("unexpected-state")
+        try Data([0xA5]).write(to: unexpected)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: unexpected.path)
+        let staleStartFresh = await freshCoordinator.handle(LocalMemoryRPCCommand(
+            forgetEverything: UUID().uuidString.lowercased(), generationReference: binding.reference),
+            context: newRequest)
+        XCTAssertEqual(staleStartFresh.status, .unavailable,
+                       "Start Fresh must recheck the exact store is still absent")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: unexpected.path),
+                      "A changed store must not be erased by stale Start Fresh")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: database.path))
+        XCTAssertFalse(keys.contains(databaseKey))
+        try FileManager.default.removeItem(at: unexpected)
+        let relisted = await freshCoordinator.handle(LocalMemoryRPCCommand(listRecords: 8),
+            context: newRequest)
+        XCTAssertEqual(relisted.status, .initializationRequired)
+
+        let staleSession = LocalMemoryRPCContext(peerID: peerID, sessionID: "stale-session")
+        let wrongSession = await freshCoordinator.handle(LocalMemoryRPCCommand(listRecords: 8),
+                                                          context: staleSession)
+        XCTAssertEqual(wrongSession.status, .unauthorized)
+
+        authorizationGeneration += 1
+        let staleAuthorization = await freshCoordinator.handle(LocalMemoryRPCCommand(
+            forgetEverything: UUID().uuidString.lowercased(), generationReference: binding.reference),
+            context: newRequest)
+        XCTAssertEqual(staleAuthorization.status, .unavailable,
+                       "Start Fresh requires the exact authorization generation that saw absence")
+        let refreshedList = await freshCoordinator.handle(LocalMemoryRPCCommand(listRecords: 8),
+            context: newRequest)
+        XCTAssertEqual(refreshedList.status, .initializationRequired)
+
+        let capture = await freshCoordinator.handle(LocalMemoryRPCCommand(captureMemoryGeneration: ()),
+            context: newRequest)
+        XCTAssertEqual(capture.status, .completed)
+        XCTAssertEqual(capture.generationReference, binding.reference)
+
+        let unauthorizedInitialization = await freshCoordinator.handle(LocalMemoryRPCCommand(
+            initializeMemoryGeneration: UUID().uuidString.lowercased(),
+            generationReference: binding.reference), context: newRequest)
+        XCTAssertEqual(unauthorizedInitialization.status, .unavailable,
+                       "A verified empty listing alone does not initialize storage")
+
+        let prematureWrite = await freshCoordinator.handle(LocalMemoryRPCCommand(
+            rememberKind: .fact, text: "must wait for explicit Start Fresh",
+            commandID: UUID().uuidString.lowercased()), context: newRequest)
+        XCTAssertEqual(prematureWrite.status, .unavailable)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: database.path))
+
+        let emptyForgetID = UUID().uuidString.lowercased()
+        let emptyForgetCommand = LocalMemoryRPCCommand(forgetEverything: emptyForgetID,
+            generationReference: binding.reference)
+        injectSidecarAtQuiescence = true
+        let racedForget = await freshCoordinator.handle(emptyForgetCommand, context: newRequest)
+        XCTAssertTrue(didInjectSidecarAtQuiescence)
+        XCTAssertEqual(racedForget.status, .unavailable,
+                       "A recognized sidecar appearing after the first absence proof blocks Start Fresh")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: sidecar.path),
+                      "Start Fresh must preserve data that appears before the final proof")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: database.path))
+        XCTAssertFalse(keys.contains(databaseKey))
+        try FileManager.default.removeItem(at: sidecar)
+
+        let emptyForget = await freshCoordinator.handle(emptyForgetCommand, context: newRequest)
+        XCTAssertEqual(emptyForget.status, .completed)
+
+        let initializeID = UUID().uuidString.lowercased()
+        let initialized = await freshCoordinator.handle(LocalMemoryRPCCommand(
+            initializeMemoryGeneration: initializeID, generationReference: binding.reference),
+            context: newRequest)
+        XCTAssertEqual(initialized.status, .completed)
+        XCTAssertNotEqual(initialized.replacementGenerationReference, binding.reference)
+        let replacementBinding = try XCTUnwrap(MemoryStoreFactory.captureBindingForTesting(enabled: true,
+            root: root, client: keys, namespace: namespace))
+        XCTAssertEqual(replacementBinding.reference, initialized.replacementGenerationReference)
+
+        let replacementDatabase = replacementBinding.generation.root.appendingPathComponent("memory.sqlite")
+        let replacementDatabaseKey = ExactKeychainItem(
+            service: replacementBinding.generation.namespace.databaseKeyService,
+            account: "database-key", protection: .deviceOnlyWhenUnlocked)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: replacementDatabase.path))
+        XCTAssertTrue(keys.contains(replacementDatabaseKey))
+    }
+
+    func testSameCoordinatorListsVerifiedAbsentAfterForget() async throws {
         let root = try makeMemoryRoot("PersonalMemorySameCoordinatorPostForget")
         defer { try? FileManager.default.removeItem(at: root) }
         let namespace = KeychainNamespace.testing("same-coordinator-post-forget-\(UUID().uuidString)")
@@ -394,7 +607,7 @@ final class PersonalMemoryCoordinatorTests: XCTestCase {
         authorizationGeneration += 1
         let newRequest = LocalMemoryRPCContext(peerID: peerID, sessionID: newSessionID)
         let listed = await coordinator.handle(LocalMemoryRPCCommand(listRecords: 8), context: newRequest)
-        XCTAssertEqual(listed.status, .completed)
+        XCTAssertEqual(listed.status, .initializationRequired)
         XCTAssertTrue(listed.records.isEmpty)
         XCTAssertNil(listed.nextRecordID)
 

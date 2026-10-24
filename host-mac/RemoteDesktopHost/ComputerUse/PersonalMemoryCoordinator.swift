@@ -41,10 +41,18 @@ final class PersonalMemoryCoordinator {
         let commandID: String
         let binding: MemoryStoreBinding
         let token: UUID
+        let verifiedAbsentStartFresh: Bool
         var completed = false
     }
     private var erasureState: ErasureState?
     private var completedForgetAuthority: CompletedMemoryForgetAuthority?
+    private struct VerifiedAbsentScope: Equatable {
+        let peerID: String
+        let sessionID: String
+        let authorizationGeneration: UInt64
+        let binding: MemoryStoreBinding
+    }
+    private var verifiedAbsentScope: VerifiedAbsentScope?
     private var erasureWork: Task<Bool, Never>?
     private var erasureWorkID: UUID?
     private var isClosed = false
@@ -288,7 +296,20 @@ final class PersonalMemoryCoordinator {
             }
             switch command.operation {
             case .listRecords, .searchRecords:
-                return recordsReply(command, records: [], nextRecordID: nil)
+                let binding: MemoryStoreBinding?
+                do { binding = try readCurrentBindingSynchronously() }
+                catch { binding = nil }
+                guard let binding, Self.isValidGenerationReference(binding.reference),
+                      verifyBoundStoreIsAbsent(binding: binding),
+                      !Task.isCancelled, !isClosed,
+                      isCurrentPolicyLease(hostLease, context: context) else {
+                    return reply(command, status: .unavailable)
+                }
+                verifiedAbsentScope = VerifiedAbsentScope(peerID: hostLease.peerID,
+                    sessionID: hostLease.sessionID,
+                    authorizationGeneration: hostLease.authorizationGeneration,
+                    binding: binding)
+                return reply(command, status: .initializationRequired)
             default:
                 return reply(command, status: .unavailable)
             }
@@ -460,6 +481,23 @@ final class PersonalMemoryCoordinator {
             return reply(command, status: .unavailable)
         }
 
+        let verifiedAbsentStartFresh: Bool
+        if let absentScope = verifiedAbsentScope,
+           absentScope.peerID == hostLease.peerID,
+           absentScope.sessionID == hostLease.sessionID {
+            guard absentScope.authorizationGeneration == hostLease.authorizationGeneration,
+                  absentScope.binding == binding,
+                  verifyBoundStoreIsAbsent(binding: binding),
+                  !Task.isCancelled, !isClosed,
+                  isCurrentLease(hostLease, context: context) else {
+                return reply(command, status: .unavailable)
+            }
+            verifiedAbsentStartFresh = true
+        } else {
+            verifiedAbsentScope = nil
+            verifiedAbsentStartFresh = false
+        }
+
         if let state = erasureState {
             let sameAuthority = state.peerID == context.peerID
                 && state.sessionID == context.sessionID
@@ -503,7 +541,9 @@ final class PersonalMemoryCoordinator {
         }
         let state = ErasureState(peerID: hostLease.peerID, sessionID: hostLease.sessionID,
             authorizationGeneration: hostLease.authorizationGeneration,
-            commandID: commandID, binding: binding, token: token)
+            commandID: commandID, binding: binding, token: token,
+            verifiedAbsentStartFresh: verifiedAbsentStartFresh)
+        verifiedAbsentScope = nil
         erasureState = state
         return await startOrJoinErasure(state, command: command, context: context)
     }
@@ -553,6 +593,21 @@ final class PersonalMemoryCoordinator {
               !Task.isCancelled, !isClosed,
               isCurrentErasureLease(state, context: context),
               ownsErasureState(state) else { return false }
+
+        if state.verifiedAbsentStartFresh {
+            // This explicit Start Fresh Forget is authorized only while the exact
+            // captured generation is still absent. Do not run journal recovery here:
+            // it can unlink files if anything appeared after the first check.
+            guard verifyBoundStoreIsAbsent(binding: state.binding),
+                  await isCurrentBinding(state.binding),
+                  !Task.isCancelled, !isClosed,
+                  isCurrentErasureLease(state, context: context),
+                  ownsErasureState(state) else { return false }
+            endErasure(state.token)
+            erasureState?.completed = true
+            rememberCompletedForget(state)
+            return true
+        }
 
         let recovery: BoundForgetRecovery?
         if service != nil {
