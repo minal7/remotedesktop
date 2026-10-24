@@ -445,7 +445,10 @@ final class PixelEnvironment: AgentEnvironment {
         } }
         let secureRects = (marks?.secureScreenRects ?? []).compactMap { PixelGeometry.imageRect($0, captureBounds: screenshotBounds, imageSize: pixelSize) }
         let png = try encode(image, masking: secureRects)
-        if let reason = SystemBarriers.handoffReason(screenshot: png, elements: elements, focus: focus) {
+        let handoffReason = try await SystemBarriers.handoffReason(
+            screenshot: png, elements: elements, focus: focus)
+        try checkActive()
+        if let reason = handoffReason {
             throw AgentEnvironmentError.systemHandoff(reason)
         }
         return .init(window: axWindow, application: app, identity: identity, bundleID: app?.bundleIdentifier ?? "unknown",

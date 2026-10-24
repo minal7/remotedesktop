@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import Dispatch
 import XCTest
 @testable import RemoteDesktopHost
 
@@ -117,6 +118,123 @@ final class AgentTargetOCRTests: XCTestCase {
 
         XCTAssertEqual(result.result.decision, .needsApproval)
         XCTAssertEqual(result.result.riskTier, AgentRiskTier.high.rawValue)
+    }
+
+    func testSystemBarrierConsentOCRLeavesMainActorResponsiveAndCancellationDiscardsResult() async throws {
+        let imageData = try XCTUnwrap(Data(base64Encoded: syntheticScreenshot { _ in }))
+        let started = expectation(description: "consent OCR started")
+        let heartbeat = expectation(description: "main actor heartbeat")
+        let exited = expectation(description: "blocked consent OCR exited")
+        let startedSignal = DispatchSemaphore(value: 0)
+        let release = DispatchSemaphore(value: 0)
+        defer { release.signal() }
+
+        let observation: Task<String?, Error> = Task { @MainActor in
+            try await SystemBarriers.handoffReason(
+                screenshot: imageData, elements: [], focus: nil,
+                consentRecognition: { _ in
+                    XCTAssertFalse(Thread.isMainThread)
+                    started.fulfill()
+                    startedSignal.signal()
+                    defer { exited.fulfill() }
+                    _ = release.wait(timeout: .now() + .seconds(2))
+                    return true
+                })
+        }
+        let cancelAndMeasure = Task.detached {
+            await withCheckedContinuation { (continuation: CheckedContinuation<(cancelledAt: ContinuousClock.Instant, heartbeatAt: ContinuousClock.Instant), Never>) in
+                DispatchQueue.global().async {
+                    _ = startedSignal.wait(timeout: .now() + .seconds(1))
+                    observation.cancel()
+                    let cancelledAt = ContinuousClock.now
+                    Task { @MainActor in
+                        heartbeat.fulfill()
+                        continuation.resume(returning: (cancelledAt: cancelledAt, heartbeatAt: ContinuousClock.now))
+                    }
+                }
+            }
+        }
+
+        await fulfillment(of: [started, heartbeat], timeout: 1)
+        let timing = await cancelAndMeasure.value
+        let heartbeatDelay = timing.cancelledAt.duration(to: timing.heartbeatAt)
+        XCTAssertLessThan(heartbeatDelay, .seconds(1), "The main actor must remain responsive during OCR")
+        do {
+            let result = try await observation.value
+            XCTFail("A cancelled OCR wait must not return a handoff result: \(result ?? "nil")")
+        } catch is CancellationError { }
+        XCTAssertLessThan(timing.cancelledAt.duration(to: .now), .seconds(1),
+            "Cancellation should return while the worker operation is still blocked")
+
+        release.signal()
+        await fulfillment(of: [exited], timeout: 1)
+        try await waitForConsentWorkerCapacity()
+    }
+
+    func testSystemBarrierReportsBusyConsentWorkerInsteadOfPublishingUncheckedFrame() async throws {
+        let imageData = try XCTUnwrap(Data(base64Encoded: syntheticScreenshot { _ in }))
+        let started = expectation(description: "first consent OCR started")
+        let exited = expectation(description: "first consent OCR exited")
+        let release = DispatchSemaphore(value: 0)
+        defer { release.signal() }
+
+        let first: Task<String?, Error> = Task { @MainActor in
+            try await SystemBarriers.handoffReason(
+                screenshot: imageData, elements: [], focus: nil,
+                consentRecognition: { _ in
+                    started.fulfill()
+                    defer { exited.fulfill() }
+                    _ = release.wait(timeout: .now() + .seconds(2))
+                    return false
+                })
+        }
+        await fulfillment(of: [started], timeout: 1)
+
+        do {
+            _ = try await SystemBarriers.handoffReason(
+                screenshot: imageData, elements: [], focus: nil,
+                consentRecognition: { _ in XCTFail("A busy worker must not start overlapping OCR"); return false })
+            XCTFail("A busy consent worker must not publish an unchecked frame")
+        } catch let failure as ComputerUseObservationWorker.Failure {
+            XCTAssertEqual(failure, .busy)
+        }
+
+        first.cancel()
+        do { _ = try await first.value } catch is CancellationError { }
+        release.signal()
+        await fulfillment(of: [exited], timeout: 1)
+        try await waitForConsentWorkerCapacity()
+    }
+
+    func testSystemBarrierPreservesFastAuthenticationAndConsentOutcomes() async throws {
+        let secureFocus = AgentFocus(id: 1, role: "AXSecureTextField", name: "Password",
+            valuePrefix: "", selection: .init(start: 0, end: 0))
+        let fastHandoff = try await SystemBarriers.handoffReason(
+            screenshot: Data("synthetic frame".utf8), elements: [], focus: secureFocus,
+            consentRecognition: { _ in XCTFail("Fast AX authentication must skip OCR"); return false })
+        XCTAssertEqual(fastHandoff, "A sign-in or verification screen needs your attention.")
+
+        let permissionHandoff = try await SystemBarriers.handoffReason(
+            screenshot: Data("synthetic frame".utf8), elements: [], focus: nil,
+            consentRecognition: { _ in true })
+        XCTAssertEqual(permissionHandoff, "Approve the screen-capture request in macOS to continue.")
+
+        let ordinaryFrame = try await SystemBarriers.handoffReason(
+            screenshot: Data("synthetic frame".utf8), elements: [], focus: nil,
+            consentRecognition: { _ in false })
+        XCTAssertNil(ordinaryFrame)
+    }
+
+    private func waitForConsentWorkerCapacity() async throws {
+        for _ in 0..<100 {
+            do {
+                _ = try await ComputerUseObservationWorker.perform(timeout: 0.5) { true }
+                return
+            } catch ComputerUseObservationWorker.Failure.busy {
+                try await Task.sleep(for: .milliseconds(5))
+            }
+        }
+        XCTFail("Consent recognition worker did not release its serial permit")
     }
 
     private func normalized(_ value: String?) -> String? {

@@ -18,18 +18,45 @@ enum SystemBarriers {
         let bounds: CGRect
     }
 
-    static func handoffReason(screenshot: Data, elements: [AgentElement], focus: AgentFocus?) -> String? {
+    static func handoffReason(
+        screenshot: Data,
+        elements: [AgentElement],
+        focus: AgentFocus?,
+        consentRecognition: (@Sendable (Data) throws -> Bool)? = nil
+    ) async throws -> String? {
+        try Task.checkCancellation()
         let labels = elements.prefix(60).map { "\($0.role) \($0.name)" }.joined(separator: "\n")
         let focused = focus.map { "\($0.role) \($0.name)" }
         let context = ComputerUseAuthenticationContextSnapshot(focusedElement: focused, boundedWindowContext: labels)
         if ComputerUseAuthenticationBarrierDetector.requiresUserIntervention(context) {
+            try Task.checkCancellation()
             return "A sign-in or verification screen needs your attention."
         }
-        guard let image = CIImage(data: screenshot) else { return nil }
-        if (try? ComputerUseScreenCaptureConsentDetector.requiresUserIntervention(from: image)) == true {
-            return "Approve the screen-capture request in macOS to continue."
+        do {
+            let requiresIntervention = try await ComputerUseObservationWorker.performConsentRecognition {
+                if let consentRecognition { return try consentRecognition(screenshot) }
+                guard let image = CIImage(data: screenshot) else { return false }
+                return try ComputerUseScreenCaptureConsentDetector.requiresUserIntervention(from: image)
+            }
+            try Task.checkCancellation()
+            return requiresIntervention
+                ? "Approve the screen-capture request in macOS to continue."
+                : nil
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch let failure as ComputerUseObservationWorker.Failure {
+            switch failure {
+            case .busy, .timedOut:
+                // A missing consent result must not publish an unchecked frame.
+                throw failure
+            case .recognitionFailed:
+                // Preserve the prior best-effort behavior for OCR failures.
+                return nil
+            }
+        } catch {
+            // Preserve the prior best-effort behavior for other OCR failures.
+            return nil
         }
-        return nil
     }
 
     static func targetLabel(screenshot: String, x: Double, y: Double) -> String? {
