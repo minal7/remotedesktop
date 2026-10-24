@@ -57,6 +57,47 @@ final class AgentHostServicesTests: XCTestCase {
         XCTAssertTrue(AgentAppRegistry.defaultSearchRoots.contains {
             $0.standardizedFileURL.path == "/System/Library/CoreServices"
         })
+        XCTAssertTrue(AgentAppRegistry.defaultSearchRoots.contains {
+            $0.standardizedFileURL.path == "/System/Cryptexes/App/System/Applications"
+        })
+    }
+
+    func testCryptexSystemApplicationRootDiscoversGenericDisplayNames() throws {
+        let root = try makePrivateDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let applications = root.appendingPathComponent("System/Cryptexes/App/System/Applications",
+                                                        isDirectory: true)
+        try FileManager.default.createDirectory(at: applications, withIntermediateDirectories: true)
+        let appURL = try makeApp(name: "Fixture Browser", bundleID: "org.example.fixture.browser",
+                                 under: applications)
+
+        let registry = AgentAppRegistry(searchRoots: [applications])
+
+        XCTAssertEqual(try registry.resolve("fixture browser"),
+                       AgentRegisteredApp(bundleID: "org.example.fixture.browser",
+                                          url: appURL.standardizedFileURL))
+        XCTAssertEqual(try registry.resolve("ORG.EXAMPLE.FIXTURE.BROWSER").url,
+                       appURL.standardizedFileURL)
+    }
+
+    func testAppRegistryDoesNotFollowArbitrarySymlinkBundles() throws {
+        let root = try makePrivateDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let searchRoot = root.appendingPathComponent("Applications", isDirectory: true)
+        let outside = root.appendingPathComponent("outside", isDirectory: true)
+        try FileManager.default.createDirectory(at: searchRoot, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: outside, withIntermediateDirectories: true)
+        let appURL = try makeApp(name: "Linked Utility", bundleID: "org.example.linked",
+                                 under: outside)
+        try FileManager.default.createSymbolicLink(
+            at: searchRoot.appendingPathComponent("Linked Utility.app"), withDestinationURL: appURL)
+
+        let registry = AgentAppRegistry(searchRoots: [searchRoot])
+
+        XCTAssertThrowsError(try registry.resolve("Linked Utility")) { error in
+            guard let failure = error as? AgentAppRegistry.Failure,
+                  case .notFound = failure else { return XCTFail("Unexpected error: \(error)") }
+        }
     }
 
     func testAppOpenUsesResolvedHostRecordAndPolicyDeniesUnknownApps() async throws {

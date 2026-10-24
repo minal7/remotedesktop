@@ -69,6 +69,7 @@ final class AgentAppRegistry {
     static var defaultSearchRoots: [URL] { [
         URL(fileURLWithPath: "/Applications", isDirectory: true),
         URL(fileURLWithPath: "/System/Applications", isDirectory: true),
+        URL(fileURLWithPath: "/System/Cryptexes/App/System/Applications", isDirectory: true),
         URL(fileURLWithPath: "/System/Library/CoreServices", isDirectory: true),
         FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Applications", isDirectory: true),
     ] }
