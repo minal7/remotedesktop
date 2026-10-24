@@ -92,6 +92,7 @@ targets:
       configs:
         Release:
           ICLOUD_CONTAINER_ENVIRONMENT: Production
+          SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) MEMORY_V1_SHIPPING_BETA"
 
   RemoteDesktopTests:
     type: bundle.unit-test
@@ -101,9 +102,13 @@ targets:
     dependencies:
       - target: RemoteDesktop
     settings:
-      DEVELOPMENT_TEAM: V9AX39SPJD
-      PRODUCT_BUNDLE_IDENTIFIER: com.threadmark.remotedesktop.client.tests
-      GENERATE_INFOPLIST_FILE: YES
+      base:
+        DEVELOPMENT_TEAM: V9AX39SPJD
+        PRODUCT_BUNDLE_IDENTIFIER: com.threadmark.remotedesktop.client.tests
+        GENERATE_INFOPLIST_FILE: YES
+      configs:
+        Release:
+          SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) MEMORY_V1_SHIPPING_BETA"
 
   RemoteDesktopLiveE2ETests:
     type: bundle.ui-testing

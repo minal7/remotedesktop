@@ -1437,6 +1437,7 @@
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
 				PRODUCT_BUNDLE_IDENTIFIER = "$(HOST_BUNDLE_IDENTIFIER)";
 				SDKROOT = macosx;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited) MEMORY_V1_SHIPPING_BETA";
 			};
 			name = Release;
 		};
@@ -1564,6 +1565,7 @@
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.threadmark.remotedesktop.host.tests;
 				SDKROOT = macosx;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited) MEMORY_V1_SHIPPING_BETA";
 				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/RemoteDesktopHost.app/Contents/MacOS/RemoteDesktopHost";
 			};
 			name = Release;

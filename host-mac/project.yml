@@ -157,6 +157,7 @@ targets:
         Release:
           CODE_SIGN_ENTITLEMENTS: $(HOST_CODE_SIGN_ENTITLEMENTS)
           ICLOUD_CONTAINER_ENVIRONMENT: Production
+          SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) MEMORY_V1_SHIPPING_BETA"
 
   # Compile the shipped phone session state for composed app-hosted tests.
   # This framework is a test dependency only; it is not embedded in the host app.
@@ -191,9 +192,13 @@ targets:
       - package: MemoryStoreKit
         product: MemoryStoreKit
     settings:
-      CODE_SIGN_IDENTITY: Apple Development
-      CODE_SIGN_STYLE: Automatic
-      DEVELOPMENT_TEAM: V9AX39SPJD
-      PRODUCT_BUNDLE_IDENTIFIER: com.threadmark.remotedesktop.host.tests
-      MACOSX_DEPLOYMENT_TARGET: "14.0"
-      GENERATE_INFOPLIST_FILE: YES
+      base:
+        CODE_SIGN_IDENTITY: Apple Development
+        CODE_SIGN_STYLE: Automatic
+        DEVELOPMENT_TEAM: V9AX39SPJD
+        PRODUCT_BUNDLE_IDENTIFIER: com.threadmark.remotedesktop.host.tests
+        MACOSX_DEPLOYMENT_TARGET: "14.0"
+        GENERATE_INFOPLIST_FILE: YES
+      configs:
+        Release:
+          SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) MEMORY_V1_SHIPPING_BETA"
