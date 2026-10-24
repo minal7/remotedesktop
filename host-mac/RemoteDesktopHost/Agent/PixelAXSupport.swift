@@ -191,3 +191,61 @@ enum PixelFocusedRecipient {
         return element
     }
 }
+
+@MainActor
+enum PixelPersonalDataTargetGuard {
+    struct Descriptor: Equatable {
+        let role: String
+        let name: String
+        let pid: pid_t?
+
+        init(role: String, name: String, pid: pid_t? = nil) {
+            self.role = role
+            self.name = name
+            self.pid = pid
+        }
+    }
+
+    static func descriptors(at point: CGPoint) -> [Descriptor] {
+        let system = AXUIElementCreateSystemWide()
+        AXUIElementSetMessagingTimeout(system, 0.04)
+        var hit: AXUIElement?
+        guard AXUIElementCopyElementAtPosition(system, Float(point.x), Float(point.y), &hit) == .success,
+              let hit else { return [] }
+        return descriptors(from: hit)
+    }
+
+    static func descriptors(from start: AXUIElement) -> [Descriptor] {
+        let deadline = ContinuousClock.now + .milliseconds(300)
+        var node = start
+        var result: [Descriptor] = []
+        for _ in 0...5 {
+            guard ContinuousClock.now < deadline else { break }
+            AXUIElementSetMessagingTimeout(node, 0.04)
+            var pid: pid_t = 0
+            let pidKnown = AXUIElementGetPid(node, &pid) == .success
+            result.append(.init(role: ElementMarks.string(node, kAXRoleAttribute) ?? "",
+                                name: ElementMarks.label(node, deadline: deadline),
+                                pid: pidKnown ? pid : nil))
+            if let role = result.last?.role, PixelTargetSnapping.interactiveRoles.contains(role) { break }
+            guard ContinuousClock.now < deadline,
+                  let parentValue = ElementMarks.read(node, kAXParentAttribute, deadline: deadline),
+                  let parent = ElementMarks.ax(parentValue) else { break }
+            node = parent
+        }
+        return result
+    }
+
+    static func isBlocked(path: [Descriptor]) -> Bool {
+        path.contains {
+            AgentCredentialRule.isPersonalDataRetrievalControl(role: $0.role, name: $0.name, state: [])
+        }
+    }
+
+    static func performIfAllowed<T>(path: [Descriptor], action: () throws -> T) throws -> T {
+        guard !isBlocked(path: path) else {
+            throw AgentEnvironmentError.unavailable(AgentCredentialRule.personalDataRetrievalDeniedReason)
+        }
+        return try action()
+    }
+}

@@ -245,6 +245,100 @@ final class AgentActionGateTests: XCTestCase {
             frame: frame(scope, elements: [code]), targets: [code]), expectedScope: scope).result.decision, .rejected)
     }
 
+    func testPersonalDataRetrievalControlsAreOwnerOnlyEvenWhenTrusted() throws {
+        let scope = webScope()
+        let retrievalLabels = ["contact info AutoFill", "Auto Fill Credit Card", "Use Saved Passwords", "Use saved contact"]
+        for trusted in [false, true] {
+            let trust = trusted ? Set(["web:https://example.test"]) : []
+            let gate = AgentActionGate(trustStore: MemoryTrustStore(trusted: trust), allowPolicy: TestAllowPolicy())
+            for (index, label) in retrievalLabels.enumerated() {
+                let control = element(60 + index, "AXButton", label)
+                // The environment has resolved this point to the current visible candidate.
+                let action = AgentAction.click(target: .point(x: 208, y: 168), button: nil, count: nil)
+                let resolved = AgentResolvedAction(action: action,
+                    frame: frame(scope, elements: [control]), targets: [control],
+                    targetContextLabel: "point over \(label)")
+                let result = try gate.evaluate(resolved, expectedScope: scope).result
+                XCTAssertEqual(result.decision, .rejected, "\(label), trusted=\(trusted)")
+                XCTAssertEqual(result.reason, AgentCredentialRule.personalDataRetrievalDeniedReason)
+            }
+        }
+    }
+
+    func testOrdinaryAddressEmailAndNameFieldsRemainEditable() throws {
+        let scope = webScope()
+        let gate = AgentActionGate(trustStore: MemoryTrustStore(trusted: ["web:https://example.test"]),
+                                   allowPolicy: TestAllowPolicy())
+        for (index, label) in ["Street address", "Contact email", "Full name"].enumerated() {
+            let field = element(70 + index, "AXTextField", label, value: "")
+            let action = AgentAction.type(target: .element(id: field.id), text: "synthetic", mode: .replace)
+            let result = try gate.evaluate(.init(action: action,
+                frame: frame(scope, elements: [field]), targets: [field]), expectedScope: scope).result
+            XCTAssertEqual(result.decision, .allowed, label)
+        }
+        for (index, label) in ["Contact information", "Credit card"].enumerated() {
+            let role = index == 0 ? "AXLink" : "AXPopUpButton"
+            let option = element(74 + index, role, label)
+            let click = AgentResolvedAction(action: .click(target: .element(id: option.id), button: nil, count: nil),
+                frame: frame(scope, elements: [option]), targets: [option])
+            XCTAssertEqual(try gate.evaluate(click, expectedScope: scope).result.decision, .allowed, label)
+        }
+        for (index, label) in ["Use saved address", "Use stored phone number"].enumerated() {
+            let source = element(77 + index, "AXButton", label)
+            let click = AgentResolvedAction(action: .click(target: .element(id: source.id), button: nil, count: nil),
+                frame: frame(scope, elements: [source]), targets: [source])
+            XCTAssertEqual(try gate.evaluate(click, expectedScope: scope).result.reason,
+                           AgentCredentialRule.personalDataRetrievalDeniedReason, label)
+        }
+        let retrievalSource = element(79, "AXButton", "Use saved address")
+        let drag = AgentResolvedAction(action: .drag(from: .point(x: 10, y: 10), to: .point(x: 20, y: 20)),
+            frame: frame(scope, elements: [retrievalSource]), targets: [retrievalSource])
+        XCTAssertEqual(try gate.evaluate(drag, expectedScope: scope).result.reason,
+                       AgentCredentialRule.personalDataRetrievalDeniedReason)
+    }
+
+    func testPersonalDataRetrievalKeyboardActivationIsDeniedButEscapeAndNavigationRemainAvailable() throws {
+        let scope = webScope(), gate = AgentActionGate(
+            trustStore: MemoryTrustStore(trusted: ["web:https://example.test"]), allowPolicy: TestAllowPolicy())
+        let control = element(76, "AXMenuItem", "Use Saved Passwords")
+        let focus = AgentFocus(id: control.id, role: control.role, name: control.name,
+            valuePrefix: "", selection: .init(start: 0, end: 0))
+        for chord in ["Enter", "Return", "Space", "cmd+enter"] {
+            let action = AgentResolvedAction(action: .key(chord: chord),
+                frame: frame(scope, elements: [control], focus: focus), targets: [])
+            let result = try gate.evaluate(action, expectedScope: scope).result
+            XCTAssertEqual(result.decision, .rejected, chord)
+            XCTAssertEqual(result.reason, AgentCredentialRule.personalDataRetrievalDeniedReason)
+        }
+        for chord in ["Escape", "Tab", "ArrowDown"] {
+            let action = AgentResolvedAction(action: .key(chord: chord),
+                frame: frame(scope, elements: [control], focus: focus), targets: [])
+            XCTAssertEqual(try gate.evaluate(action, expectedScope: scope).result.decision, .allowed, chord)
+        }
+        let type = AgentResolvedAction(action: .type(target: .element(id: control.id), text: "synthetic", mode: .replace),
+            frame: frame(scope, elements: [control], focus: focus), targets: [control])
+        XCTAssertEqual(try gate.evaluate(type, expectedScope: scope).result.decision, .rejected)
+    }
+
+    func testApprovalRevalidationHardDeniesNewlyResolvedAutoFillTarget() throws {
+        let scope = webScope()
+        let gate = AgentActionGate(trustStore: MemoryTrustStore(trusted: ["web:https://example.test"]),
+                                   allowPolicy: ApprovalRequiredTestPolicy())
+        let ordinaryField = element(80, "AXTextField", "Street address", value: "")
+        let action = AgentAction.type(target: .element(id: ordinaryField.id), text: "synthetic", mode: .replace)
+        let first = AgentResolvedAction(action: action, frame: frame(scope, elements: [ordinaryField]), targets: [ordinaryField])
+        let approval = try XCTUnwrap(gate.evaluate(first, expectedScope: scope).approval)
+
+        let retrievalControl = element(80, "AXButton", "contact info AutoFill")
+        let rebound = AgentResolvedAction(action: action,
+            frame: frame(scope, elements: [retrievalControl]), targets: [retrievalControl],
+            targetContextLabel: "contact info AutoFill")
+        let result = try gate.resolveApproval(approval.id, approved: true,
+            resolved: rebound, expectedScope: scope).result
+        XCTAssertEqual(result.decision, .rejected)
+        XCTAssertEqual(result.reason, AgentCredentialRule.personalDataRetrievalDeniedReason)
+    }
+
     func testCredentialLanguageInQuestionsAndCompletionAlwaysRequiresOwnerHandoff() throws {
         let scope = webScope(), gate = AgentActionGate(trustStore: MemoryTrustStore(trusted: ["web:https://example.test"]), allowPolicy: TestAllowPolicy())
         for action in [AgentAction.askUser(question: "Please provide your credentials to continue.", choices: ["Password", "Verification code"]),
@@ -368,4 +462,10 @@ final class AgentActionGateTests: XCTestCase {
         guard case .openApp = action, let appIdentity else { return nil }
         return .init(kind: .app, identity: appIdentity)
     }
+}
+@MainActor private final class ApprovalRequiredTestPolicy: AgentAllowPolicy {
+    func decision(for action: AgentAction, in scope: AgentScope) -> AgentAccessDecision {
+        .approvalRequired("Test approval required.", trustIdentity: nil)
+    }
+    func resolvedTrustIdentity(for action: AgentAction, in scope: AgentScope) -> AgentTrustIdentity? { nil }
 }

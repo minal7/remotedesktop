@@ -276,7 +276,7 @@ final class PixelEnvironment: AgentEnvironment {
         case let .key(chord):
             let stroke = try AgentKeyStroke.parse(chord)
             try injector.applyHostKeyStroke(usage: stroke.usage, modifiers: stroke.modifiers,
-                ifAllowed: inputAllowed, beforePosting: { _ = try ensureNonSecureFocus() })
+                ifAllowed: inputAllowed, beforePosting: { _ = try ensureNonSecureFocus(activationStroke: stroke) })
             detail = "pressed \(chord)"
         case let .select(target, option):
             detail = try await select(option, target: target, frame: resolved.frame, targets: resolved.targets, bindings: bindings)
@@ -660,20 +660,27 @@ final class PixelEnvironment: AgentEnvironment {
         guard (1...3).contains(count) else { throw AgentEnvironmentError.unsupportedAction }
         guard inputAllowed() else { throw CancellationError() }
         let bit: UInt8 = button == .right ? 2 : button == .middle ? 4 : 1
-        for _ in 0..<count {
-            try post(.pointer(x: Int(point.x), y: Int(point.y), buttons: bit))
-            try post(.pointer(x: Int(point.x), y: Int(point.y), buttons: 0))
+        let path = PixelPersonalDataTargetGuard.descriptors(at: point)
+        try PixelPersonalDataTargetGuard.performIfAllowed(path: path) {
+            for _ in 0..<count {
+                try post(.pointer(x: Int(point.x), y: Int(point.y), buttons: bit))
+                try post(.pointer(x: Int(point.x), y: Int(point.y), buttons: 0))
+            }
         }
     }
 
     private func drag(_ from: CGPoint, to: CGPoint) throws {
-        try post(.pointer(x: Int(from.x), y: Int(from.y), buttons: 1))
-        do {
-            for step in 1...10 { let f = Double(step) / 10
-                try post(.pointer(x: Int(from.x + (to.x - from.x) * f), y: Int(from.y + (to.y - from.y) * f), buttons: 1))
-            }
-            try post(.pointer(x: Int(to.x), y: Int(to.y), buttons: 0))
-        } catch { injector.releaseHeldInput(); throw error }
+        let path = PixelPersonalDataTargetGuard.descriptors(at: from)
+            + PixelPersonalDataTargetGuard.descriptors(at: to)
+        try PixelPersonalDataTargetGuard.performIfAllowed(path: path) {
+            try post(.pointer(x: Int(from.x), y: Int(from.y), buttons: 1))
+            do {
+                for step in 1...10 { let f = Double(step) / 10
+                    try post(.pointer(x: Int(from.x + (to.x - from.x) * f), y: Int(from.y + (to.y - from.y) * f), buttons: 1))
+                }
+                try post(.pointer(x: Int(to.x), y: Int(to.y), buttons: 0))
+            } catch { injector.releaseHeldInput(); throw error }
+        }
     }
 
     private func targetLabel(_ target: AgentTarget, resolved: AgentResolvedAction) -> String {
@@ -690,8 +697,15 @@ final class PixelEnvironment: AgentEnvironment {
             number: window.number, title: window.title)).axState
     }
 
-    private func ensureNonSecureFocus() throws -> AXUIElement {
-        try PixelFocusedRecipient.current(expectedPID: lastSnapshot?.application?.processIdentifier)
+    private func ensureNonSecureFocus(activationStroke: AgentKeyStroke? = nil) throws -> AXUIElement {
+        let focused = try PixelFocusedRecipient.current(expectedPID: lastSnapshot?.application?.processIdentifier)
+        let activationUsages: Set<Int> = [0x28, 0x2c]
+        let shouldCheckRetrieval = activationStroke == nil || activationUsages.contains(activationStroke!.usage)
+        if shouldCheckRetrieval {
+            let path = PixelPersonalDataTargetGuard.descriptors(from: focused)
+            try PixelPersonalDataTargetGuard.performIfAllowed(path: path) {}
+        }
+        return focused
     }
 
     private func startIfNeeded() async throws {

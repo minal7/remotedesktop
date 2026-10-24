@@ -5,6 +5,24 @@ import XCTest
 
 @MainActor
 final class PixelEnvironmentTests: XCTestCase {
+    func testPixelPersonalDataGuardBlocksActualHitOrParentBeforeDispatch() throws {
+        let autofill = PixelPersonalDataTargetGuard.Descriptor(role: "AXButton", name: "contact info AutoFill")
+        let field = PixelPersonalDataTargetGuard.Descriptor(role: "AXTextField", name: "Street address", pid: 42)
+        let child = PixelPersonalDataTargetGuard.Descriptor(role: "AXStaticText", name: "Suggestion", pid: 42)
+        XCTAssertTrue(PixelPersonalDataTargetGuard.isBlocked(path: [autofill]))
+        XCTAssertTrue(PixelPersonalDataTargetGuard.isBlocked(path: [child, autofill]))
+        XCTAssertFalse(PixelPersonalDataTargetGuard.isBlocked(path: []))
+        XCTAssertFalse(PixelPersonalDataTargetGuard.isBlocked(path: [field]))
+
+        var dispatched = false
+        XCTAssertThrowsError(try PixelPersonalDataTargetGuard.performIfAllowed(path: [child, autofill]) {
+            dispatched = true
+        })
+        XCTAssertFalse(dispatched)
+        try PixelPersonalDataTargetGuard.performIfAllowed(path: [field]) { dispatched = true }
+        XCTAssertTrue(dispatched)
+    }
+
     func testSystemVoiceOverlayClassificationRequiresOwnedLayerZeroWindowAndCompleteSingleButtonShape() {
         func evidence(role: String = "AXWindow", subrole: String? = "AXDialog", title: String? = nil,
                       document: String? = nil, tree: PixelWindowTreeShape = .singleButtonOnly,

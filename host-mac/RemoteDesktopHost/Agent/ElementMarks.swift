@@ -621,7 +621,7 @@ enum ElementMarks {
         return value
     }
 
-    fileprivate static func label(_ element: AXUIElement, deadline: ContinuousClock.Instant) -> String {
+    static func label(_ element: AXUIElement, deadline: ContinuousClock.Instant) -> String {
         for attribute in [kAXTitleAttribute, kAXDescriptionAttribute, "AXPlaceholderValue", kAXHelpAttribute] {
             guard let value = read(element, attribute, deadline: deadline) as? String else { continue }
             let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -648,7 +648,7 @@ enum ElementMarks {
         }
     }
 
-    fileprivate static func ax(_ value: CFTypeRef?) -> AXUIElement? {
+    static func ax(_ value: CFTypeRef?) -> AXUIElement? {
         guard let value, CFGetTypeID(value) == AXUIElementGetTypeID() else { return nil }
         return unsafeBitCast(value, to: AXUIElement.self)
     }

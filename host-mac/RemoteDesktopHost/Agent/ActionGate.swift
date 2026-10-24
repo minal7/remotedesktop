@@ -96,6 +96,10 @@ final class AgentActionGate {
         if isCredentialEntry(resolved) {
             return .init(risk: .high, fingerprint: signature, reason: nil, trustKey: nil, deniedReason: "Credentials require you to take over on your Mac; never send passwords or codes in chat.")
         }
+        if isPersonalDataRetrievalAction(resolved) {
+            return .init(risk: .high, fingerprint: signature, reason: nil, trustKey: nil,
+                deniedReason: AgentCredentialRule.personalDataRetrievalDeniedReason)
+        }
         let risk = riskTier(for: resolved)
         let decision = allowPolicy.decision(for: resolved.action, in: scope)
         let destination = destinationKey(for: resolved.action, scope: scope)
@@ -141,6 +145,30 @@ final class AgentActionGate {
     }
     private func isSensitive(_ element: AgentElement) -> Bool {
         AgentCredentialRule.isSensitive(role: element.role, name: element.name, state: element.state)
+    }
+    private func isPersonalDataRetrievalAction(_ resolved: AgentResolvedAction) -> Bool {
+        switch resolved.action {
+        case .click, .type, .select, .drag:
+            break
+        case .key(let chord):
+            guard let usage = (try? AgentKeyStroke.parse(chord))?.usage,
+                  [0x28, 0x2c].contains(usage) else { return false }
+        default:
+            return false
+        }
+        if resolved.targets.contains(where: {
+            AgentCredentialRule.isPersonalDataRetrievalControl(role: $0.role, name: $0.name, state: $0.state)
+        }) { return true }
+        if let label = resolved.targetContextLabel,
+           AgentCredentialRule.isPersonalDataRetrievalControl(role: "AXButton", name: label, state: []) {
+            return true
+        }
+        if let focus = resolved.frame.observation.focus,
+           AgentCredentialRule.isPersonalDataRetrievalControl(role: focus.role, name: focus.name, state: []),
+           case .key = resolved.action {
+            return true
+        }
+        return false
     }
     private func riskTier(for resolved: AgentResolvedAction) -> AgentRiskTier {
         if case .setFiles = resolved.action { return .high }
