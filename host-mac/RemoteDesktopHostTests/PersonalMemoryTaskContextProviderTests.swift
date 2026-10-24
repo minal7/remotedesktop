@@ -185,6 +185,95 @@ final class PersonalMemoryTaskContextProviderTests: XCTestCase {
         XCTAssertEqual(captureCount.value, 1, "Invalid owner must be rejected before storage access")
     }
 
+    func testStorageAbsentAfterForgetReturnsEmptyContextWithoutRuntimeActivation() async throws {
+        let fixture = try ProviderStoreFixture()
+        defer { fixture.cleanup() }
+        let counter = ProviderCounter()
+        let leaseChecks = ProviderValidityCounter()
+        let provider = makeProvider(
+            leaseIsCurrent: { _ in leaseChecks.increment(); return true },
+            syncLeaseIsCurrent: { _ in true },
+            captureBinding: { fixture.binding },
+            openService: { _, binding, _ in
+                XCTAssertEqual(binding, fixture.binding)
+                counter.open()
+                throw MemoryFactoryError.storageAbsent
+            }, runtime: counter.runtime())
+
+        let context = try await provider.prepare(lease: activeLease(),
+            binding: fixture.binding, prompt: "Using only saved memory, what is my home airport?")
+
+        XCTAssertEqual(context, "[]")
+        XCTAssertEqual(counter.snapshot().open, 1)
+        XCTAssertEqual(counter.snapshot().activateEmbedding, 0)
+        XCTAssertEqual(counter.snapshot().embed, 0)
+        XCTAssertEqual(counter.snapshot().activateVision, 0)
+        XCTAssertEqual(counter.snapshot().countTokens, 0)
+        XCTAssertGreaterThan(leaseChecks.value, 1, "The lease must be revalidated after storage reports absent")
+    }
+
+    func testStorageUnavailableAndForgetRecoveryErrorsRemainFailClosed() async throws {
+        let fixture = try ProviderStoreFixture()
+        defer { fixture.cleanup() }
+        for error in [MemoryFactoryError.storageUnavailable, .forgetRecoveryRequired] {
+            let counter = ProviderCounter()
+            let provider = makeProvider(leaseIsCurrent: { _ in true },
+                captureBinding: { fixture.binding },
+                openService: { _, _, _ in
+                    counter.open()
+                    throw error
+                }, runtime: counter.runtime())
+
+            do {
+                _ = try await provider.prepare(lease: activeLease(), binding: fixture.binding,
+                    prompt: "Using only saved memory, what is my home airport?")
+                XCTFail("Only a verified absent store is empty context")
+            } catch is TaskMemoryContextFailure {}
+            XCTAssertEqual(counter.snapshot().open, 1)
+            XCTAssertEqual(counter.snapshot().activateEmbedding, 0)
+        }
+    }
+
+    func testStorageAbsentDoesNotBypassCancellationOrLeaseRevocation() async throws {
+        let fixture = try ProviderStoreFixture()
+        defer { fixture.cleanup() }
+        let counter = ProviderCounter()
+        let validity = ProviderValidity()
+        let revokedProvider = makeProvider(leaseIsCurrent: { _ in validity.isValid() },
+            syncLeaseIsCurrent: { _ in validity.isValid() },
+            captureBinding: { fixture.binding },
+            openService: { _, _, _ in
+                counter.open()
+                validity.revoke()
+                throw MemoryFactoryError.storageAbsent
+            }, runtime: counter.runtime())
+
+        do {
+            _ = try await revokedProvider.prepare(lease: activeLease(), binding: fixture.binding,
+                prompt: "Using only saved memory, what is my home airport?")
+            XCTFail("A revoked lease must not turn absent storage into delivered context")
+        } catch is TaskMemoryContextFailure {}
+
+        let cancelledProvider = makeProvider(leaseIsCurrent: { _ in true },
+            captureBinding: { fixture.binding },
+            openService: { _, _, _ in
+                counter.open()
+                withUnsafeCurrentTask { $0?.cancel() }
+                throw MemoryFactoryError.storageAbsent
+            }, runtime: counter.runtime())
+        let preparation = Task {
+            try await cancelledProvider.prepare(lease: activeLease(), binding: fixture.binding,
+                prompt: "Using only saved memory, what is my home airport?")
+        }
+        do {
+            _ = try await preparation.value
+            XCTFail("A cancelled lease must not turn absent storage into delivered context")
+        } catch is CancellationError {}
+
+        XCTAssertEqual(counter.snapshot().activateEmbedding, 0)
+        XCTAssertEqual(counter.snapshot().activateVision, 0)
+    }
+
     func testPauseLearningStillAllowsOrdinaryReadRetrieval() async throws {
         let fixture = try ProviderStoreFixture()
         defer { fixture.cleanup() }

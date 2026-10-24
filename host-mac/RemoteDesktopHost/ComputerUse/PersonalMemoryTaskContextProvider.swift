@@ -85,6 +85,9 @@ struct PersonalMemoryTaskContextProvider: PersonalMemoryTaskContextProviding, Se
                 service = try openProductionService(context: context, lease: lease,
                     binding: binding, isCurrent: currentSynchronously)
             }
+        } catch MemoryFactoryError.storageAbsent {
+            try await requireCurrent(lease, owner: owner)
+            return "[]"
         } catch {
             throw TaskMemoryContextFailure.unavailable
         }
