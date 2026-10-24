@@ -235,7 +235,9 @@ final class AgentActionGateTests: XCTestCase {
         let secure = element(4, "AXSecureTextField", "Account entry", value: nil)
         let focus = AgentFocus(id: 4, role: "textbox", name: "Account entry", valuePrefix: "", selection: .init(start: 0, end: 0))
         let secureFrame = frame(scope, elements: [secure], focus: focus)
-        for action in [AgentAction.type(target: nil, text: "private", mode: .replace), .select(target: .element(id: 4), option: "private")] {
+        for action in [AgentAction.type(target: nil, text: "private", mode: .replace),
+                       .key(chord: "A"),
+                       .select(target: .element(id: 4), option: "private")] {
             let result = try gate.evaluate(.init(action: action, frame: secureFrame, targets: [secure]), expectedScope: scope).result
             XCTAssertEqual(result.decision, .rejected)
             XCTAssertEqual(result.reason, "Credentials require you to take over on your Mac; never send passwords or codes in chat.")
@@ -339,14 +341,19 @@ final class AgentActionGateTests: XCTestCase {
         XCTAssertEqual(result.reason, AgentCredentialRule.personalDataRetrievalDeniedReason)
     }
 
-    func testCredentialLanguageInQuestionsAndCompletionAlwaysRequiresOwnerHandoff() throws {
+    func testCredentialQuestionsRequireHandoffButTerminalReportsDoNotBlock() throws {
         let scope = webScope(), gate = AgentActionGate(trustStore: MemoryTrustStore(trusted: ["web:https://example.test"]), allowPolicy: TestAllowPolicy())
-        for action in [AgentAction.askUser(question: "Please provide your credentials to continue.", choices: ["Password", "Verification code"]),
-                       .done(answer: "Credentials verified; no further value is needed."),
-                       .fail(reason: "Your passcode was checked; I will stop here.")] {
+        for action in [AgentAction.askUser(question: "Please provide your password or verification code.", choices: nil),
+                       .askUser(question: "Please take over and enter the verification code locally, then tell me when you're done.", choices: nil)] {
             let result = try gate.evaluate(resolved(action, scope), expectedScope: scope).result
             XCTAssertEqual(result.decision, .rejected)
             XCTAssertEqual(result.reason, "Credentials require you to take over on your Mac; never send passwords or codes in chat.")
+        }
+        for action in [AgentAction.done(answer: "The page shows Account password and One-time verification code fields; I did not interact with them."),
+                       .fail(reason: "The page is asking for a one-time verification code; I did not enter anything.")] {
+            let evaluation = try gate.evaluate(resolved(action, scope), expectedScope: scope)
+            XCTAssertEqual(evaluation.result.decision, .allowed)
+            XCTAssertNil(evaluation.approval)
         }
         let ordinary = AgentAction.askUser(question: "Which option should I choose?", choices: ["A", "B"])
         XCTAssertEqual(try gate.evaluate(resolved(ordinary, scope), expectedScope: scope).result.decision, .allowed)
