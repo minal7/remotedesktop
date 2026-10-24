@@ -4,6 +4,10 @@
   "releaseTag": "v4.14.0",
   "annotatedTagObject": "46bb08ec73b2caa84b6945a19c9e435fff446dcd",
   "sourceCommit": "778ab890cfc30c3631212dcceb0295498abdcd3e",
+  "libraryArchitectures": [
+    "arm64",
+    "x86_64"
+  ],
   "archiveURL": "https://codeload.github.com/sqlcipher/sqlcipher/tar.gz/778ab890cfc30c3631212dcceb0295498abdcd3e",
   "archiveFile": "sqlcipher-778ab890cfc30c3631212dcceb0295498abdcd3e.tar.gz",
   "archiveBytesObserved": 19028329,

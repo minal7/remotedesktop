@@ -4,6 +4,8 @@ from __future__ import annotations
 import os
 import pathlib
 import plistlib
+import importlib.util
+import json
 import subprocess
 import unittest
 
@@ -19,6 +21,54 @@ HEADLESS_SETTINGS = (
 
 
 class BuildAndRunContractTests(unittest.TestCase):
+    def test_pinned_sqlcipher_builder_and_verifier_require_universal_slices(self) -> None:
+        manifest = pathlib.Path(
+            REPO_ROOT / "host-mac/ThirdPartyRuntime/sqlcipher/source-manifest.json")
+        build_script = pathlib.Path(REPO_ROOT / "host-mac/scripts/build_memory_sqlcipher.sh")
+        verifier_path = pathlib.Path(REPO_ROOT / "host-mac/scripts/verify_memory_sqlcipher.py")
+        self.assertEqual(json.loads(manifest.read_text(encoding="utf-8"))["libraryArchitectures"],
+                         ["arm64", "x86_64"])
+        builder = build_script.read_text(encoding="utf-8")
+        self.assertIn("ARCHITECTURES=(arm64 x86_64)", builder)
+        self.assertIn('export CFLAGS="-arch $ARCH $BASE_CFLAGS"', builder)
+        self.assertIn("/usr/bin/lipo -create", builder)
+        self.assertIn("library_architectures=arm64 x86_64", builder)
+        verifier_source = verifier_path.read_text(encoding="utf-8")
+        self.assertIn('["/usr/bin/lipo", "-archs",', verifier_source)
+
+        spec = importlib.util.spec_from_file_location("verify_memory_sqlcipher", verifier_path)
+        self.assertIsNotNone(spec)
+        self.assertIsNotNone(spec.loader)
+        verifier = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(verifier)
+        verifier.validate_architectures(["arm64", "x86_64"], ["arm64", "x86_64"])
+        for actual in (["arm64"], ["x86_64"], ["arm64", "arm64"], ["arm64", "x86_64", "i386"]):
+            with self.subTest(actual=actual), self.assertRaises(ValueError):
+                verifier.validate_architectures(actual, ["arm64", "x86_64"])
+
+    def test_clean_apple_ci_jobs_prepare_pinned_sqlcipher_before_host_builds(self) -> None:
+        workflows = {
+            REPO_ROOT / ".github/workflows/validation.yml": 1,
+            REPO_ROOT / ".github/workflows/release.yml": 2,
+        }
+        for path, expected_preparations in workflows.items():
+            source = path.read_text(encoding="utf-8")
+            self.assertEqual(source.count("python3 host-mac/scripts/bootstrap_memory_sqlcipher.py --download"),
+                             expected_preparations, path.name)
+            self.assertEqual(source.count("host-mac/scripts/build_memory_sqlcipher.sh"),
+                             expected_preparations, path.name)
+            cursor = 0
+            for _ in range(expected_preparations):
+                bootstrap = source.index(
+                    "python3 host-mac/scripts/bootstrap_memory_sqlcipher.py --download", cursor)
+                builder = source.index("host-mac/scripts/build_memory_sqlcipher.sh", bootstrap)
+                next_build = source.find("xcodebuild ", builder)
+                next_bootstrap = source.find(
+                    "python3 host-mac/scripts/bootstrap_memory_sqlcipher.py --download", builder)
+                self.assertNotEqual(next_build, -1, path.name)
+                self.assertTrue(next_bootstrap == -1 or next_build < next_bootstrap, path.name)
+                cursor = builder + 1
+
     def test_release_is_default_and_launch_stops_canonical_installed_host(self) -> None:
         source = SCRIPT.read_text(encoding="utf-8")
         self.assertIn(

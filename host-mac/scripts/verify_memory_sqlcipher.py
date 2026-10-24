@@ -8,6 +8,7 @@ import hashlib
 import json
 from pathlib import Path
 import shutil
+import subprocess
 
 
 def sha256(path: Path) -> tuple[str, int]:
@@ -20,6 +21,11 @@ def sha256(path: Path) -> tuple[str, int]:
     return digest.hexdigest(), size
 
 
+def validate_architectures(actual: list[str], expected: list[str]) -> None:
+    if len(actual) != len(set(actual)) or set(actual) != set(expected):
+        raise ValueError("SQLCipher library architectures do not match the pinned universal build.")
+
+
 def verify(output: Path, manifest_path: Path) -> None:
     if output.is_symlink() or not output.is_dir():
         raise ValueError("SQLCipher output directory is missing or unsafe.")
@@ -27,6 +33,9 @@ def verify(output: Path, manifest_path: Path) -> None:
         if directory.is_symlink() or not directory.is_dir():
             raise ValueError("SQLCipher output contains an unsafe artifact directory.")
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    expected_architectures = manifest.get("libraryArchitectures")
+    if expected_architectures != ["arm64", "x86_64"]:
+        raise ValueError("SQLCipher manifest must pin arm64 and x86_64 library slices.")
     record_path = output / "build-record.json"
     if record_path.is_symlink() or not record_path.is_file():
         raise ValueError("SQLCipher output has no verifiable build record.")
@@ -35,8 +44,10 @@ def verify(output: Path, manifest_path: Path) -> None:
         "sourceCommit": manifest["sourceCommit"],
         "archiveSHA256": manifest["archiveSHA256Observed"],
         "archiveBytes": manifest["archiveBytesObserved"],
+        "libraryArchitectures": expected_architectures,
     }
-    if record.get("schemaVersion") != 1 or record.get("source") != expected_source:
+    if (record.get("schemaVersion") != 2 or record.get("source") != expected_source
+            or record.get("libraryArchitectures") != expected_architectures):
         raise ValueError("SQLCipher build record does not match the pinned source manifest.")
     expected_options = {
         "sqlite_has_codec": "1",
@@ -47,6 +58,7 @@ def verify(output: Path, manifest_path: Path) -> None:
         "fts5": "enabled (configure --enable-fts5)",
         "loadable_extensions": "disabled (configure --disable-load-extension and SQLITE_OMIT_LOAD_EXTENSION)",
         "crypto_provider": "CommonCrypto (SQLCIPHER_CRYPTO_CC)",
+        "library_architectures": "arm64 x86_64 (lipo-combined static archive)",
     }
     options = {}
     for line in (output / "build-options.txt").read_text(encoding="utf-8").splitlines():
@@ -66,6 +78,10 @@ def verify(output: Path, manifest_path: Path) -> None:
         digest, size = sha256(path)
         if artifacts[relative] != {"sha256": digest, "bytes": size}:
             raise ValueError("SQLCipher build artifact differs from its local build record.")
+    architecture_result = subprocess.run(
+        ["/usr/bin/lipo", "-archs", str(output / "lib/libsqlcipher.a")],
+        check=True, capture_output=True, text=True)
+    validate_architectures(architecture_result.stdout.split(), expected_architectures)
 
 
 def remove_owned_legacy_output(output: Path, manifest_path: Path) -> None:

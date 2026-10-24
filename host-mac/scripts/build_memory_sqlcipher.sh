@@ -46,22 +46,43 @@ fi
 
 cd "$TEMP_ROOT/work"
 export CC="/usr/bin/clang"
-export CFLAGS="-O2 -fPIC -mmacosx-version-min=14.0 -DSQLITE_HAS_CODEC -DSQLITE_EXTRA_INIT=sqlcipher_extra_init -DSQLITE_EXTRA_SHUTDOWN=sqlcipher_extra_shutdown -DSQLITE_THREADSAFE=1 -DSQLCIPHER_CRYPTO_CC -DSQLITE_OMIT_LOAD_EXTENSION=1"
-export LDFLAGS="-framework Security -framework CoreFoundation"
+BASE_CFLAGS="-O2 -fPIC -mmacosx-version-min=14.0 -DSQLITE_HAS_CODEC -DSQLITE_EXTRA_INIT=sqlcipher_extra_init -DSQLITE_EXTRA_SHUTDOWN=sqlcipher_extra_shutdown -DSQLITE_THREADSAFE=1 -DSQLCIPHER_CRYPTO_CC -DSQLITE_OMIT_LOAD_EXTENSION=1"
+ARCHITECTURES=(arm64 x86_64)
+for ARCH in "${ARCHITECTURES[@]}"; do
+  ARCH_WORK="$TEMP_ROOT/work/$ARCH"
+  mkdir -p "$ARCH_WORK"
+  (
+    cd "$ARCH_WORK"
+    export CFLAGS="-arch $ARCH $BASE_CFLAGS"
+    export LDFLAGS="-arch $ARCH -framework Security -framework CoreFoundation"
 
-"$SOURCE_ROOT/configure" \
-  --enable-static \
-  --disable-shared \
-  --enable-fts5 \
-  --disable-load-extension \
-  --with-tempstore=always
+    "$SOURCE_ROOT/configure" \
+      --enable-static \
+      --disable-shared \
+      --enable-fts5 \
+      --disable-load-extension \
+      --with-tempstore=always
 
-/usr/bin/make -j2 sqlite3.c sqlite3.h lib
-test -s libsqlite3.a
-test -s sqlite3.h
+    /usr/bin/make -j2 sqlite3.c sqlite3.h lib
+    test -s libsqlite3.a
+    test -s sqlite3.h
+    mkdir -p "$TEMP_ROOT/architectures/$ARCH"
+    /bin/cp libsqlite3.a "$TEMP_ROOT/architectures/$ARCH/libsqlcipher.a"
+    /bin/cp sqlite3.h "$TEMP_ROOT/architectures/$ARCH/sqlite3.h"
+  )
+done
+
+if ! /usr/bin/cmp -s "$TEMP_ROOT/architectures/arm64/sqlite3.h" \
+    "$TEMP_ROOT/architectures/x86_64/sqlite3.h"; then
+  echo "Pinned SQLCipher headers differ across architecture builds." >&2
+  exit 65
+fi
 mkdir -p "$OUTPUT_ROOT/lib" "$OUTPUT_ROOT/include"
-/bin/cp libsqlite3.a "$OUTPUT_ROOT/lib/libsqlcipher.a"
-/bin/cp sqlite3.h "$OUTPUT_ROOT/include/sqlite3.h"
+/usr/bin/lipo -create \
+  "$TEMP_ROOT/architectures/arm64/libsqlcipher.a" \
+  "$TEMP_ROOT/architectures/x86_64/libsqlcipher.a" \
+  -output "$OUTPUT_ROOT/lib/libsqlcipher.a"
+/bin/cp "$TEMP_ROOT/architectures/arm64/sqlite3.h" "$OUTPUT_ROOT/include/sqlite3.h"
 
 cat > "$OUTPUT_ROOT/build-options.txt" <<'EOF'
 source_commit=778ab890cfc30c3631212dcceb0295498abdcd3e
@@ -74,6 +95,7 @@ sqlite_temp_store=3 (configure --with-tempstore=always)
 fts5=enabled (configure --enable-fts5)
 loadable_extensions=disabled (configure --disable-load-extension and SQLITE_OMIT_LOAD_EXTENSION)
 crypto_provider=CommonCrypto (SQLCIPHER_CRYPTO_CC)
+library_architectures=arm64 x86_64 (lipo-combined static archive)
 key_api=sqlite3_key typed byte API; no PRAGMA/command-line/environment key
 build_network_fetches=none (staged archive required and checked before extraction)
 EOF
@@ -92,12 +114,14 @@ for relative in ("lib/libsqlcipher.a", "include/sqlite3.h", "build-options.txt")
     digest = hashlib.sha256(path.read_bytes()).hexdigest()
     artifacts[relative] = {"sha256": digest, "bytes": path.stat().st_size}
 record = {
-    "schemaVersion": 1,
+    "schemaVersion": 2,
     "source": {
         "sourceCommit": manifest["sourceCommit"],
         "archiveSHA256": manifest["archiveSHA256Observed"],
         "archiveBytes": manifest["archiveBytesObserved"],
+        "libraryArchitectures": manifest["libraryArchitectures"],
     },
+    "libraryArchitectures": manifest["libraryArchitectures"],
     "artifacts": artifacts,
 }
 (root / "build-record.json").write_text(

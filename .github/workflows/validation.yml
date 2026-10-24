@@ -109,6 +109,12 @@ jobs:
             exit 1
           fi
 
+      - name: Prepare pinned universal SQLCipher for clean checkout
+        run: |
+          set -euo pipefail
+          python3 host-mac/scripts/bootstrap_memory_sqlcipher.py --download
+          host-mac/scripts/build_memory_sqlcipher.sh
+
       - name: Regenerate iOS project
         working-directory: ios
         run: xcodegen generate

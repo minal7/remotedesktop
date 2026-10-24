@@ -231,6 +231,12 @@ jobs:
           echo "$install_root/xcodegen/bin" >> "$GITHUB_PATH"
           "$install_root/xcodegen/bin/xcodegen" --version
 
+      - name: Prepare pinned universal SQLCipher for clean checkout
+        run: |
+          set -euo pipefail
+          python3 host-mac/scripts/bootstrap_memory_sqlcipher.py --download
+          host-mac/scripts/build_memory_sqlcipher.sh
+
       - name: Regenerate iOS project
         working-directory: ios
         run: xcodegen generate
@@ -661,6 +667,12 @@ jobs:
           unzip -q "$archive" -d "$install_root"
           echo "$install_root/xcodegen/bin" >> "$GITHUB_PATH"
           "$install_root/xcodegen/bin/xcodegen" --version
+
+      - name: Prepare pinned universal SQLCipher for clean checkout
+        run: |
+          set -euo pipefail
+          python3 host-mac/scripts/bootstrap_memory_sqlcipher.py --download
+          host-mac/scripts/build_memory_sqlcipher.sh
 
       - name: Validate generated macOS project is current
         run: |
