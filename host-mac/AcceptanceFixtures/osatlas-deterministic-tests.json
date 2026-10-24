@@ -626,7 +626,8 @@
     "RemoteDesktopHostTests/HostAgentLifecycleTests/testDefaultManagerSelectsGeneralAgentFactoryWithoutExternalServices",
     "RemoteDesktopHostTests/HostAgentLifecycleTests/testInjectedExecutorDoesNotSelectGeneralAgentFactory",
     "RemoteDesktopHostTests/AgentActionGateTests/testApprovalRevalidationHardDeniesNewlyResolvedAutoFillTarget",
-    "RemoteDesktopHostTests/AgentActionGateTests/testCredentialLanguageInQuestionsAndCompletionAlwaysRequiresOwnerHandoff",
+    "RemoteDesktopHostTests/AgentActionGateTests/testCredentialRequestInAskUserStillRequiresOwnerHandoff",
+    "RemoteDesktopHostTests/AgentActionGateTests/testTerminalSummariesCanDescribeMaskedOrEmptyCredentialFields",
     "RemoteDesktopHostTests/AgentActionGateTests/testHistoricalB1Web015CountryEnterProposalsRequireApprovalWithoutDispatch",
     "RemoteDesktopHostTests/AgentActionGateTests/testNativeEnterUsesFocusedAndExactDefaultButtonEvidence",
     "RemoteDesktopHostTests/AgentActionGateTests/testOrdinaryAddressEmailAndNameFieldsRemainEditable",
@@ -643,6 +644,9 @@
     "RemoteDesktopHostTests/PixelEnvironmentTests/testDisplayBoundWindowCaptureRejectsPartialOrAmbiguousDisplayMapping",
     "RemoteDesktopHostTests/PixelEnvironmentTests/testDisplayBoundWindowCaptureUsesDisplayLocalRectAndIncludesChildWindows",
     "RemoteDesktopHostTests/PixelEnvironmentTests/testFocusedWindowSelectionUsesTitleOrUniqueGeometry",
-    "RemoteDesktopHostTests/PixelEnvironmentTests/testPixelPersonalDataGuardBlocksActualHitOrParentBeforeDispatch"
+    "RemoteDesktopHostTests/PixelEnvironmentTests/testPixelPersonalDataGuardBlocksActualHitOrParentBeforeDispatch",
+    "RemoteDesktopHostTests/AgentHostServicesTests/testAppRegistryDoesNotFollowArbitrarySymlinkBundles",
+    "RemoteDesktopHostTests/AgentHostServicesTests/testCryptexSystemApplicationRootDiscoversGenericDisplayNames",
+    "RemoteDesktopHostTests/AgentSharedSupportTests/testMatchedWindowProjectsDetachedFocusedEditorWithoutLeakingSecureFocus"
   ]
 }
