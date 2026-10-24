@@ -5,6 +5,38 @@ import XCTest
 
 @MainActor
 final class PixelEnvironmentTests: XCTestCase {
+    func testSelectedIdenticalTextPasteIsAlreadyComplete() {
+        let oldValue = "San Diego"
+        let selected = AgentSelection(start: 0, end: 3)
+        let expected = PixelTextInsertion.expectedValue(oldValue: oldValue, inserted: "San",
+            mode: .append, selection: selected)
+
+        XCTAssertEqual(expected, oldValue)
+        XCTAssertEqual(PixelTextInsertion.readback(current: oldValue, oldValue: oldValue,
+            expectedValue: expected), .matches)
+        XCTAssertEqual(PixelTextInsertion.readback(current: oldValue, oldValue: oldValue,
+            expectedValue: "San Oakland"), .unchanged)
+        XCTAssertEqual(PixelTextInsertion.readback(current: nil, oldValue: oldValue,
+            expectedValue: expected), .unverified)
+    }
+
+    func testTextInsertionExpectedValueUsesValidatedUTF16Selection() {
+        XCTAssertEqual(PixelTextInsertion.expectedValue(oldValue: "San Diego", inserted: "Oakland",
+            mode: .append, selection: .init(start: 0, end: 3)), "Oakland Diego")
+        XCTAssertEqual(PixelTextInsertion.expectedValue(oldValue: "abcd", inserted: "X",
+            mode: .append, selection: .init(start: 2, end: 2)), "abXcd")
+        XCTAssertEqual(PixelTextInsertion.expectedValue(oldValue: "A😀B", inserted: "X",
+            mode: .append, selection: .init(start: 1, end: 3)), "AXB")
+        XCTAssertNil(PixelTextInsertion.expectedValue(oldValue: "abc", inserted: "X",
+            mode: .append, selection: nil))
+        XCTAssertNil(PixelTextInsertion.expectedValue(oldValue: "A😀B", inserted: "X",
+            mode: .append, selection: .init(start: 1, end: 2)), "Must not split a UTF-16 surrogate pair")
+        XCTAssertNil(PixelTextInsertion.expectedValue(oldValue: "abc", inserted: "X",
+            mode: .append, selection: .init(start: 0, end: 4)))
+        XCTAssertEqual(PixelTextInsertion.expectedValue(oldValue: nil, inserted: "new",
+            mode: .replace, selection: nil), "new")
+    }
+
     func testPixelPersonalDataGuardBlocksActualHitOrParentBeforeDispatch() throws {
         let autofill = PixelPersonalDataTargetGuard.Descriptor(role: "AXButton", name: "contact info AutoFill")
         let field = PixelPersonalDataTargetGuard.Descriptor(role: "AXTextField", name: "Street address", pid: 42)

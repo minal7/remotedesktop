@@ -19,6 +19,54 @@ protocol PixelAXNode {
     func makeReference(observedName: String, visibleRect: CGRect?) -> (any PixelElementReference)?
 }
 
+enum PixelTextInsertion {
+    enum Readback: Equatable { case matches, unchanged, unverified }
+
+    static func expectedValue(oldValue: String?, inserted: String, mode: AgentTextMode,
+                              selection: AgentSelection?) -> String? {
+        if mode == .replace { return inserted }
+        guard let oldValue, let selection,
+              selection.start >= 0, selection.end >= selection.start else { return nil }
+        let source = oldValue as NSString
+        guard selection.end <= source.length,
+              isUTF16Boundary(selection.start, in: oldValue),
+              isUTF16Boundary(selection.end, in: oldValue) else { return nil }
+        return source.replacingCharacters(in: NSRange(location: selection.start,
+            length: selection.end - selection.start), with: inserted)
+    }
+
+    @MainActor
+    static func selectedRange(_ element: AXUIElement, valueLength: Int?) -> AgentSelection? {
+        guard let valueLength,
+              let raw = ElementMarks.read(element, kAXSelectedTextRangeAttribute,
+                deadline: ContinuousClock.now + .milliseconds(10)),
+              CFGetTypeID(raw) == AXValueGetTypeID() else { return nil }
+        let value = unsafeBitCast(raw, to: AXValue.self)
+        var range = CFRange(location: 0, length: 0)
+        guard AXValueGetValue(value, .cfRange, &range), range.location >= 0, range.length >= 0 else { return nil }
+        let (end, overflow) = range.location.addingReportingOverflow(range.length)
+        guard !overflow, end <= valueLength else { return nil }
+        return AgentSelection(start: range.location, end: end)
+    }
+
+    static func readback(current: String?, oldValue: String?, expectedValue: String?) -> Readback {
+        guard let current else { return .unverified }
+        if let expectedValue, current == expectedValue { return .matches }
+        if let oldValue, current == oldValue { return .unchanged }
+        return .unverified
+    }
+
+    private static func isUTF16Boundary(_ offset: Int, in value: String) -> Bool {
+        var position = 0
+        for scalar in value.unicodeScalars {
+            if position == offset { return true }
+            position += scalar.utf16.count
+            if position > offset { return false }
+        }
+        return position == offset
+    }
+}
+
 struct PixelAXIdentity: Hashable {
     let element: AXUIElement
 

@@ -43,7 +43,7 @@ struct PixelClipboardLease {
 @MainActor
 final class PixelEnvironment: AgentEnvironment {
     typealias Picker = @MainActor ([String]) async throws -> String
-    private enum PasteResult: Equatable { case matches, rejected, unavailable }
+    private enum PasteResult: Equatable { case matches, unchanged, unavailable }
     var followsFrontmostSurface: Bool { true }
     private let taskID: String
     private let injector: InputInjector
@@ -511,27 +511,17 @@ final class PixelEnvironment: AgentEnvironment {
             throw AgentEnvironmentError.credentialHandoff
         }
         let oldValue = ElementMarks.string(focused, kAXValueAttribute)
-        let pasted = try await paste(text, replace: mode == .replace, oldValue: oldValue)
-        var result = pasted
-        if pasted == .rejected {
-            var focusFailure: AgentEnvironmentError?
-            let completed = await injector.applyTextPaced(text, ifAllowed: {
-                guard inputAllowed() else { return false }
-                do { _ = try ensureNonSecureFocus(); return true }
-                catch let error as AgentEnvironmentError { focusFailure = error; return false }
-                catch { focusFailure = .systemHandoff("The focused control could not be verified safely."); return false }
-            })
-            guard completed else {
-                if let focusFailure { throw focusFailure }
-                throw CancellationError()
-            }
-            result = .unavailable
-        }
-        let status = result == .matches ? "matches" : result == .rejected ? "paste rejected" : "unavailable or differs"
+        let selection = PixelTextInsertion.selectedRange(focused, valueLength: oldValue?.utf16.count)
+        let expectedValue = PixelTextInsertion.expectedValue(oldValue: oldValue, inserted: text,
+            mode: mode, selection: selection)
+        let pasted = try await paste(text, replace: mode == .replace, oldValue: oldValue,
+            expectedValue: expectedValue, expectedFocus: focused)
+        let status = pasted == .matches ? "matches" : pasted == .unchanged ? "unchanged" : "unverified"
         return "typed \(text.count) chars\(name.isEmpty ? "" : " into \"\(name)\"") → read-back \(status)"
     }
 
-    private func paste(_ text: String, replace: Bool, oldValue: String?) async throws -> PasteResult {
+    private func paste(_ text: String, replace: Bool, oldValue: String?,
+                       expectedValue: String?, expectedFocus: AXUIElement) async throws -> PasteResult {
         guard text.utf8.count <= 65_536 else { throw AgentEnvironmentError.unsupportedAction }
         let lease = PixelClipboardLease(board: .general, text: text)
         defer { lease.restore() }
@@ -543,9 +533,14 @@ final class PixelEnvironment: AgentEnvironment {
             let currentRole = ElementMarks.string(currentFocus, kAXRoleAttribute) ?? "unknown"
             let currentName = ElementMarks.label(currentFocus)
             if ElementMarks.isSensitive(currentFocus, role: currentRole, name: currentName) { throw AgentEnvironmentError.credentialHandoff }
-            guard let oldValue, let current = ElementMarks.string(currentFocus, kAXValueAttribute) else { return .unavailable }
-            if current == (replace ? text : oldValue + text) { return .matches }
-            return current == oldValue ? .rejected : .unavailable
+            guard CFEqual(currentFocus, expectedFocus) else { return .unavailable }
+            let readback = PixelTextInsertion.readback(current: ElementMarks.string(currentFocus, kAXValueAttribute),
+                oldValue: oldValue, expectedValue: expectedValue)
+            switch readback {
+            case .matches: return .matches
+            case .unchanged: return .unchanged
+            case .unverified: return .unavailable
+            }
         }
         return .unavailable
     }
