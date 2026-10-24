@@ -186,7 +186,7 @@ final class PixelEnvironment: AgentEnvironment {
         voiceOverlayHistoryNotePending = false
         let kind: AgentScope.Kind
         if case .web = surface { kind = .web } else { kind = .app }
-        return .init(observation: observation, scope: .init(taskID: taskID, kind: kind, identity: snapshot.identity))
+        return .init(observation: observation, scope: .init(taskID: taskID, kind: kind, identity: snapshot.identity), defaultButtonEvidence: snapshot.marks?.defaultButtonEvidence ?? .unknown)
     }
 
     func resolve(_ action: AgentAction, in frame: AgentFrame) async throws -> AgentResolvedAction {

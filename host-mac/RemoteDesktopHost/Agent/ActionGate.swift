@@ -29,7 +29,12 @@ struct AgentGateEvaluation: Equatable { let result: AgentGateResult; let approva
 final class AgentActionGate {
     private struct TrustKey: Hashable { let kind: AgentScope.Kind; let identity: String }
     private struct PendingApproval { let request: AgentApprovalRequest; let trustKey: TrustKey? }
-    private struct Fingerprint: Encodable { let task, surface, action: String; let target: [String]; let contextLabel: String }
+    private struct Fingerprint: Encodable {
+        let task, surface, action: String
+        let target: [String]
+        let contextLabel: String
+        let defaultButton: String
+    }
     private struct Assessment { let risk: AgentRiskTier; let fingerprint: String; let reason: String?; let trustKey: TrustKey?; let deniedReason: String? }
     private let trustStore: AgentTrustStore
     private let allowPolicy: AgentAllowPolicy
@@ -149,11 +154,42 @@ final class AgentActionGate {
         }
         if isEnter(resolved.action), case .web = resolved.frame.observation.surface { return true }
         if isEnter(resolved.action) {
-            return resolved.frame.observation.elements.contains {
-                $0.role.lowercased().contains("button") && containsHighRiskLabel($0.name)
+            if isModifiedEnter(resolved.action) { return true }
+            let focusedRisk = focusedActionIsHighRisk(resolved.frame.observation)
+            switch resolved.frame.defaultButtonEvidence {
+            case .unknown:
+                return true
+            case .knownNone:
+                return focusedRisk || !hasKnownActionableFocus(resolved.frame.observation)
+            case .button(_, _, let name):
+                guard !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return true }
+                return focusedRisk || containsHighRiskLabel(name) || !hasKnownActionableFocus(resolved.frame.observation)
             }
         }
         return (resolved.targets.map(\.name) + [resolved.targetContextLabel ?? ""]).contains(where: containsHighRiskLabel)
+    }
+
+    private func focusedActionIsHighRisk(_ observation: AgentObservation) -> Bool {
+        guard let focus = observation.focus,
+              let element = observation.elements.first(where: { $0.id == focus.id }),
+              isActionableFocusRole(element.role), element.inView,
+              !element.state.contains("disabled") else { return false }
+        return containsHighRiskLabel(element.name)
+    }
+
+    private func hasKnownActionableFocus(_ observation: AgentObservation) -> Bool {
+        guard let focus = observation.focus,
+              let element = observation.elements.first(where: { $0.id == focus.id }) else { return false }
+        return isActionableFocusRole(element.role) && element.inView && !element.state.contains("disabled")
+    }
+
+    private func isActionableFocusRole(_ role: String) -> Bool {
+        switch role.lowercased() {
+        case "axbutton", "axlink", "axmenuitem", "axmenubaritem", "axtextfield", "axtextarea",
+             "axtextview", "axsearchfield", "axpopupbutton", "axcombobox", "axcheckbox", "axradiobutton":
+            return true
+        default: return false
+        }
     }
     private func containsHighRiskLabel(_ text: String) -> Bool {
         let normalized = text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -165,6 +201,12 @@ final class AgentActionGate {
     private func isEnter(_ action: AgentAction) -> Bool {
         guard case .key(let chord) = action else { return false }
         return chord.lowercased().split(whereSeparator: { !$0.isLetter }).contains { $0 == "enter" || $0 == "return" }
+    }
+    private func isModifiedEnter(_ action: AgentAction) -> Bool {
+        guard case .key(let chord) = action else { return false }
+        let keys = chord.lowercased().split(whereSeparator: { !$0.isLetter })
+        guard keys.contains(where: { $0 == "enter" || $0 == "return" }) else { return false }
+        return keys.contains { $0 != "enter" && $0 != "return" }
     }
     private func requiresSurfaceTrust(_ action: AgentAction) -> Bool {
         switch action {
@@ -197,10 +239,18 @@ final class AgentActionGate {
         case .app(let bundleID, _): surface = "app:\(bundleID)"
         }
         let targets = resolved.targets.map { "\($0.role)|\($0.name)" }.sorted()
-        let payload = Fingerprint(task: resolved.frame.scope.taskID, surface: surface, action: actionSemantics(resolved), target: targets, contextLabel: resolved.targetContextLabel ?? "")
+        let defaultButton = isEnter(resolved.action) && isApp(observation.surface)
+            ? resolved.frame.defaultButtonEvidence.approvalFingerprint : ""
+        let payload = Fingerprint(task: resolved.frame.scope.taskID, surface: surface,
+            action: actionSemantics(resolved), target: targets,
+            contextLabel: resolved.targetContextLabel ?? "", defaultButton: defaultButton)
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
         return SHA256.hash(data: try encoder.encode(payload)).map { String(format: "%02x", $0) }.joined()
+    }
+    private func isApp(_ surface: AgentSurface) -> Bool {
+        if case .app = surface { return true }
+        return false
     }
     private func actionSemantics(_ resolved: AgentResolvedAction) -> String {
         let action = resolved.action

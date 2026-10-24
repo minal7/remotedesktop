@@ -30,6 +30,8 @@ final class AgentLoop {
     var completionWaiters: [CheckedContinuation<Void, Never>] = []
     var stepProgress: (@MainActor (String) -> Void)?
     private var progressNeedsSafeFallback = false
+    private var deniedApprovalFingerprints: Set<String> = []
+    private var denialDeflectionCount = 0
 
     init(taskID: String, prompt: String, maxSteps: Int = 30, environment: AgentEnvironment,
          policy: AgentPolicy, gate: AgentActionGate, recorder: AgentRecording,
@@ -89,6 +91,7 @@ final class AgentLoop {
     private func continueApproval(_ pending: PendingStep, approved: Bool) async throws -> AgentLoopResult {
         let continuationStart = Date()
         if !approved {
+            deniedApprovalFingerprints.insert(pending.approval.fingerprint)
             gate.cancelPendingApproval(pending.approval.id); pendingStep = nil
             let denied = AgentGateResult(decision: .rejected, reason: "rejected: user declined",
                 fingerprint: pending.approval.fingerprint, scopeIdentity: pending.approval.scopeIdentity,
@@ -229,6 +232,26 @@ final class AgentLoop {
                 continue
             }
             let gateMS = ms(gateStart)
+            if let fingerprint = evaluation.result.fingerprint,
+               deniedApprovalFingerprints.contains(fingerprint) {
+                if let approval = evaluation.approval {
+                    gate.cancelPendingApproval(approval.id)
+                }
+                if let result = try await handleDeniedFingerprintRepeat(
+                    frame: frame,
+                    raw: output.rawOutput,
+                    action: action,
+                    evaluation: evaluation,
+                    priorDeflections: denialDeflectionCount,
+                    start: start,
+                    observeMS: observeMS,
+                    policyMS: policyMS,
+                    gateMS: gateMS,
+                    note: output.resultLineNote) {
+                    return result
+                }
+                continue
+            }
             if let approval = evaluation.approval {
                 pendingStep = PendingStep(resolved: resolved, approval: approval, note: output.resultLineNote)
                 try record(frame.observation, raw: output.rawOutput, action: action, gate: evaluation.result,
@@ -254,6 +277,52 @@ final class AgentLoop {
                 evaluation.result, start, observeMS, policyMS, gateMS, note: output.resultLineNote) { return terminal }
         }
         return try await finish(.failed(reason: "The task reached its \(maxSteps)-step limit."), outcome: "failed")
+    }
+
+    private func handleDeniedFingerprintRepeat(
+        frame: AgentFrame,
+        raw: String,
+        action: AgentAction,
+        evaluation: AgentGateEvaluation,
+        priorDeflections: Int,
+        start: Date,
+        observeMS: Int,
+        policyMS: Int,
+        gateMS: Int,
+        note: String?
+    ) async throws -> AgentLoopResult? {
+        guard let fingerprint = evaluation.result.fingerprint else {
+            throw AgentLoopError.invalidConfiguration
+        }
+        let isTerminalRepeat = priorDeflections >= 2
+        let reason = isTerminalRepeat
+            ? "BLOCKED: declined"
+            : "The owner declined this exact action. Choose a different action."
+        let rejected = AgentGateResult(
+            decision: .rejected,
+            reason: reason,
+            fingerprint: fingerprint,
+            scopeIdentity: evaluation.result.scopeIdentity ?? frame.scope.identity,
+            riskTier: evaluation.result.riskTier ?? AgentRiskTier.high.rawValue)
+        try record(
+            frame.observation,
+            raw: raw,
+            action: action,
+            gate: rejected,
+            execution: .init(status: .notExecuted, result: noted(reason, note)),
+            start: start,
+            observeMS: observeMS,
+            policyMS: policyMS,
+            gateMS: gateMS)
+        history.append(.init(action: action, result: noted("rejected: \(reason)", note)))
+        corrections.append(reason)
+        stepIndex += 1
+
+        if isTerminalRepeat {
+            return try await finish(.failed(reason: reason), outcome: "blocked: declined")
+        }
+        denialDeflectionCount = priorDeflections + 1
+        return nil
     }
 
     private func execute(_ observation: AgentObservation, _ raw: String, _ resolved: AgentResolvedAction,

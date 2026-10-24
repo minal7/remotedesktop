@@ -87,18 +87,106 @@ final class AgentActionGateTests: XCTestCase {
         XCTAssertEqual(try gate.evaluate(navigation, expectedScope: scope).result.decision, .allowed)
     }
 
-    func testNativeEnterKeepsOrdinaryFileActionsLowRiskAndRiskyLabelsHigh() throws {
+    func testHistoricalB1Web015CountryEnterProposalsRequireApprovalWithoutDispatch() throws {
+        // Reconstructed from B1 run b1-smoke20-20261020T080335Z, episode
+        // a72f146c-f5bd-4884-8d32-821292a5c2a0, steps 1 and 4. The source
+        // episode SHA-256 is 76bd8fa8d77da3baa2a42aea21ce0632fc67a18dbecd11a144c31a5574b977c6.
+        // Both original gate records said allowed/low; step 1 dispatched Enter.
+        let scope = AgentScope(taskID: "a72f146c-f5bd-4884-8d32-821292a5c2a0",
+                               kind: .web,
+                               identity: "64789:1792464735.745687:4294")
+        let country = AgentElement(
+            id: 14, role: "AXPopUpButton", name: "Country", value: nil,
+            state: ["visible"],
+            bbox: .init(x: 1051.111111111111, y: 111.11111111111111,
+                        width: 78.51851851851852, height: 15.555555555555555),
+            inView: true)
+        let countryFocus = AgentFocus(
+            id: 14, role: "AXPopUpButton", name: "Country", valuePrefix: "",
+            selection: .init(start: 0, end: 0))
+        let gate = AgentActionGate(
+            trustStore: MemoryTrustStore(trusted: ["web:http://127.0.0.1:8765"]),
+            allowPolicy: TestAllowPolicy())
+
+        for step in [1, 4] {
+            let observation = AgentObservation(
+                task: "Select Canada as the Country. Do not press Save.",
+                surface: .web(url: "http://127.0.0.1:8765/forms.html", title: "General form controls"),
+                screenshot: "",
+                elements: [country],
+                focus: countryFocus,
+                history: [],
+                budget: .init(step: step, maxSteps: 10))
+            let frame = AgentFrame(observation: observation, scope: scope)
+            let resolved = AgentResolvedAction(
+                action: .key(chord: "Enter"), frame: frame, targets: [],
+                targetContextLabel: nil, surfaceReadOnly: false)
+
+            let evaluation = try gate.evaluate(resolved, expectedScope: scope)
+            XCTAssertEqual(evaluation.result.decision, .needsApproval, "Historical B1 step \(step)")
+            XCTAssertEqual(evaluation.result.riskTier, "high", "Historical B1 step \(step)")
+            let approval = try XCTUnwrap(evaluation.approval)
+            let declined = try gate.resolveApproval(approval.id, approved: false,
+                                                    resolved: resolved, expectedScope: scope)
+            XCTAssertEqual(declined.result.decision, .rejected)
+            XCTAssertEqual(declined.result.reason, "rejected: user declined")
+        }
+        // This test has no AgentEnvironment or execute path; it only evaluates
+        // the two historical proposals and declines their gate requests.
+    }
+
+    func testNativeEnterUsesFocusedAndExactDefaultButtonEvidence() throws {
         let scope = AgentScope(taskID: "task-1", kind: .app, identity: "com.example.editor")
         let gate = AgentActionGate(trustStore: MemoryTrustStore(trusted: ["app:com.example.editor"]), allowPolicy: TestAllowPolicy())
-        let save = element(20, "AXButton", "Save")
-        let saveEnter = AgentResolvedAction(action: .key(chord: "enter"), frame: .init(observation: observation(.app(bundleID: "com.example.editor", title: "Document"), elements: [save]), scope: scope), targets: [])
-        XCTAssertEqual(try gate.evaluate(saveEnter, expectedScope: scope).result.decision, .allowed)
-        let replace = element(21, "AXButton", "Replace")
-        let replaceEnter = AgentResolvedAction(action: .key(chord: "enter"), frame: .init(observation: observation(.app(bundleID: "com.example.editor", title: "Document"), elements: [replace]), scope: scope), targets: [])
-        XCTAssertEqual(try gate.evaluate(replaceEnter, expectedScope: scope).result.decision, .needsApproval)
-        let delete = element(22, "AXButton", "Delete")
-        let deleteEnter = AgentResolvedAction(action: .key(chord: "enter"), frame: .init(observation: observation(.app(bundleID: "com.example.editor", title: "Document"), elements: [delete]), scope: scope), targets: [])
-        XCTAssertEqual(try gate.evaluate(deleteEnter, expectedScope: scope).result.decision, .needsApproval)
+        let filename = element(20, "AXTextField", "Filename")
+        let focus = AgentFocus(id: 20, role: "AXTextField", name: "Filename", valuePrefix: "", selection: .init(start: 0, end: 0))
+        let unrelatedSend = element(21, "AXButton", "Send")
+        func nativeFrame(_ evidence: AgentDefaultButtonEvidence, elements: [AgentElement], focus: AgentFocus?) -> AgentFrame {
+            .init(observation: observation(.app(bundleID: scope.identity, title: "Document"), elements: elements, focus: focus),
+                scope: scope, defaultButtonEvidence: evidence)
+        }
+        func enter(_ evidence: AgentDefaultButtonEvidence, elements: [AgentElement] = [filename, unrelatedSend]) -> AgentResolvedAction {
+            .init(action: .key(chord: "enter"),
+                frame: nativeFrame(evidence, elements: elements, focus: focus), targets: [])
+        }
+
+        XCTAssertEqual(try gate.evaluate(enter(.knownNone), expectedScope: scope).result.decision, .allowed,
+            "A known absence of a default button makes unrelated window buttons irrelevant.")
+        XCTAssertEqual(try gate.evaluate(enter(.button(identity: "send-1", role: "AXButton", name: "Send")),
+            expectedScope: scope).result.decision, .needsApproval)
+        let activeSheet = element(24, "AXSheet", "Open Dialog")
+        XCTAssertEqual(try gate.evaluate(enter(.unknown, elements: [filename, unrelatedSend, activeSheet]),
+            expectedScope: scope).result.decision, .needsApproval,
+            "An active sheet makes the window default-button evidence unknown and stays conservative.")
+        XCTAssertEqual(try gate.evaluate(enter(.button(identity: "save-1", role: "AXButton", name: "Save")),
+            expectedScope: scope).result.decision, .allowed)
+        XCTAssertEqual(try gate.evaluate(enter(.button(identity: "empty-1", role: "AXButton", name: "")),
+            expectedScope: scope).result.decision, .needsApproval,
+            "An unlabeled default button cannot be treated as harmless.")
+        let modifiedEnter = AgentResolvedAction(action: .key(chord: "cmd+Return"),
+            frame: nativeFrame(.button(identity: "save-1", role: "AXButton", name: "Save"),
+                elements: [filename, unrelatedSend], focus: focus), targets: [])
+        XCTAssertEqual(try gate.evaluate(modifiedEnter, expectedScope: scope).result.decision, .needsApproval,
+            "Modified Enter shortcuts stay conservative even when the default button is ordinary.")
+
+        let send = element(22, "AXButton", "Send")
+        let sendFocus = AgentFocus(id: 22, role: "AXButton", name: "Send", valuePrefix: "", selection: .init(start: 0, end: 0))
+        let focusedSend = AgentResolvedAction(action: .key(chord: "enter"),
+            frame: nativeFrame(.knownNone, elements: [send], focus: sendFocus), targets: [])
+        XCTAssertEqual(try gate.evaluate(focusedSend, expectedScope: scope).result.decision, .needsApproval)
+
+        let secure = element(23, "AXSecureTextField", "Password")
+        let secureFocus = AgentFocus(id: 23, role: "AXSecureTextField", name: "Password", valuePrefix: "", selection: .init(start: 0, end: 0))
+        let secureEnter = AgentResolvedAction(action: .key(chord: "enter"),
+            frame: nativeFrame(.unknown, elements: [secure], focus: secureFocus), targets: [])
+        XCTAssertEqual(try gate.evaluate(secureEnter, expectedScope: scope).result.decision, .rejected)
+
+        let defaultSend = enter(.button(identity: "send-1", role: "AXButton", name: "Send"))
+        let approval = try XCTUnwrap(gate.evaluate(defaultSend, expectedScope: scope).approval)
+        let changedDefault = enter(.knownNone)
+        XCTAssertEqual(try gate.resolveApproval(approval.id, approved: true,
+            resolved: changedDefault, expectedScope: scope).result.decision, .rejected,
+            "Approval must be bound to the observed default button.")
     }
 
     func testApprovalBindsActionTypedTextAndFullURL() throws {
@@ -251,8 +339,10 @@ final class AgentActionGateTests: XCTestCase {
         return .init(action: action, frame: frame(scope, elements: elements, title: title, url: url), targets: targets, targetContextLabel: label)
     }
     private func frame(_ scope: AgentScope, elements: [AgentElement] = [], focus: AgentFocus? = nil,
-                       title: String = "Inbox", url: String = "https://example.test/") -> AgentFrame {
-        .init(observation: observation(.web(url: url, title: title), elements: elements, focus: focus), scope: scope)
+                       title: String = "Inbox", url: String = "https://example.test/",
+                       defaultButton: AgentDefaultButtonEvidence = .unknown) -> AgentFrame {
+        .init(observation: observation(.web(url: url, title: title), elements: elements, focus: focus),
+              scope: scope, defaultButtonEvidence: defaultButton)
     }
     private func observation(_ surface: AgentSurface, elements: [AgentElement] = [], focus: AgentFocus? = nil) -> AgentObservation {
         .init(task: "A generic test task", surface: surface, screenshot: "", elements: elements, focus: focus,

@@ -66,6 +66,24 @@ final class AgentEvalApprovalPolicyTests: XCTestCase {
         XCTAssertFalse(AgentEvalApprovalPolicy.permits(candidate(request: interactionOnly, riskTier: "high"), request: interactionOnly))
     }
 
+    func testWebEnterNeedsCommitFlagAndRemainsBoundToFixtureOrigin() throws {
+        let url = "http://127.0.0.1:8765/forms.html"
+        let interactionOnly = try makeRequest(start: url, flags: ["allow_fixture_interaction": true])
+        let enterWithoutCommit = candidate(request: interactionOnly, action: .key(chord: "Enter"), riskTier: "high",
+                                           currentURL: url)
+        XCTAssertFalse(AgentEvalApprovalPolicy.permits(enterWithoutCommit, request: interactionOnly))
+
+        let commitAllowed = try makeRequest(start: url, flags: [
+            "allow_fixture_interaction": true, "allow_fixture_commit": true,
+        ])
+        let matchingFixtureEnter = candidate(request: commitAllowed, action: .key(chord: "Enter"), riskTier: "high",
+                                             currentURL: url)
+        XCTAssertTrue(AgentEvalApprovalPolicy.permits(matchingFixtureEnter, request: commitAllowed))
+        let foreignOriginEnter = candidate(request: commitAllowed, action: .key(chord: "Enter"), riskTier: "high",
+                                           currentURL: "http://127.0.0.1:8766/forms.html")
+        XCTAssertFalse(AgentEvalApprovalPolicy.permits(foreignOriginEnter, request: commitAllowed))
+    }
+
     func testOnlyExactIPv4LoopbackFixtureOriginCanBeAutoApproved() throws {
         XCTAssertThrowsError(try makeRequest(start: "http://[::1]:8765/page", flags: [
             "allow_fixture_interaction": true, "allow_fixture_commit": true,

@@ -47,6 +47,7 @@ struct PixelElementMarks {
     let contentRect: CGRect?
     let browserURL: String?
     let axState: [PixelAXElementState]?
+    var defaultButtonEvidence: AgentDefaultButtonEvidence = .unknown
 }
 
 enum PixelWindowDisposition: Equatable { case window, systemOverlay, unknown, notAppWindow }
@@ -493,14 +494,19 @@ enum ElementMarks {
             selectedBounds: selectedBounds, deadline: deadline,
             readOnly: AgentSafetyBoundary.readOnly(bundleID: application.bundleIdentifier, appName: application.localizedName),
             limit: limit)
+        let defaultButtonEvidence = AgentDefaultButtonAXEvidenceReader.read(window: window,
+            focusedWindowElement: focusedWindowElement, focusedBounds: focusedBounds, selectedBounds: selectedBounds,
+            marks: projected.marks, hasOverlay: !projected.overlayBounds.isEmpty, deadline: deadline)
         let result = PixelElementMarks(marks: projected.marks, focusedID: projected.focusedID,
             secureScreenRects: projected.secureScreenRects, overlayBounds: projected.overlayBounds,
             contentRect: projected.contentRect,
-            browserURL: browserURL ?? projected.browserURL, axState: projected.axState)
+            browserURL: browserURL ?? projected.browserURL, axState: projected.axState,
+            defaultButtonEvidence: defaultButtonEvidence)
         guard ContinuousClock.now < deadline else {
             return PixelElementMarks(marks: [], focusedID: nil, secureScreenRects: result.secureScreenRects,
                 overlayBounds: result.overlayBounds,
-                contentRect: result.contentRect, browserURL: browserURL, axState: nil)
+                contentRect: result.contentRect, browserURL: browserURL, axState: nil,
+                defaultButtonEvidence: .unknown)
         }
         return result
     }

@@ -14,12 +14,30 @@ struct AgentObservationContext {
     let budget: AgentStepBudget
 }
 
+/// Host-only evidence for the default button of the exact captured window.
+/// Unknown means the AX query or its mapping was incomplete and must not lower risk.
+enum AgentDefaultButtonEvidence: Equatable {
+    case unknown
+    case knownNone
+    case button(identity: String, role: String, name: String)
+
+    var approvalFingerprint: String {
+        switch self {
+        case .unknown: "unknown"
+        case .knownNone: "known-none"
+        case .button(let identity, let role, let name): "button|\(identity)|\(role)|\(name)"
+        }
+    }
+}
+
 struct AgentFrame {
     let observation: AgentObservation
     let scope: AgentScope
     /// Complete nonsecure payload digest, computed by the host adapter before model truncation.
     /// This authority metadata is deliberately absent from the policy observation schema.
     var authorityDigest: String? = nil
+    /// Exact-window host evidence; deliberately absent from the model-facing observation.
+    var defaultButtonEvidence: AgentDefaultButtonEvidence = .unknown
 }
 
 /// Freshly resolved targets and surface identity, never authority supplied by a model.
