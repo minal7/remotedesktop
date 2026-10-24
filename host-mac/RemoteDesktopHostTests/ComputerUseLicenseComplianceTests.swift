@@ -58,6 +58,7 @@ final class ComputerUseLicenseComplianceTests: XCTestCase {
         }
     }
 
+#if DEBUG
     func testNativeTextPackageInstallsItsOwnVerifiedLegalDocumentsIndependently() async throws {
         let fixture = try makeFixture(modelVariant: .nativeText4B)
         defer { try? FileManager.default.removeItem(at: fixture.root) }
@@ -81,6 +82,7 @@ final class ComputerUseLicenseComplianceTests: XCTestCase {
         XCTAssertTrue(notice.contains(ComputerUseArtifactManifest.nativeTextV2.modelArtifacts[0].sha256))
         XCTAssertEqual(ComputerUseArtifactManifest.current, .fara15)
     }
+#endif
 
     func testBundledModelAndLlamaCPPDocumentsMatchPinnedManifest() throws {
         XCTAssertEqual(
@@ -125,7 +127,9 @@ final class ComputerUseLicenseComplianceTests: XCTestCase {
         let notice = try String(
             contentsOf: bundledURL(for: ComputerUseArtifactManifest.modelNotice),
             encoding: .utf8)
+#if DEBUG
         XCTAssertTrue(notice.contains(ComputerUseArtifactManifest.osAtlasPro4BRevision))
+#endif
         XCTAssertTrue(notice.contains(ComputerUseArtifactManifest.llamaCPPRevision))
         XCTAssertTrue(notice.contains("split Q4_K_M GGUF"))
         XCTAssertTrue(notice.contains("F16 GGUF vision projector"))
@@ -191,7 +195,7 @@ final class ComputerUseLicenseComplianceTests: XCTestCase {
     }
 
     func testModelPackagesContainOnlyPinnedGGUFDownloads() throws {
-        for manifest in [ComputerUseArtifactManifest.current, .nativeTextV2] {
+        for manifest in [ComputerUseArtifactManifest.current] {
             XCTAssertFalse(manifest.modelArtifacts.isEmpty)
             XCTAssertTrue(manifest.modelArtifacts.allSatisfy {
                 $0.fileName.hasSuffix(".gguf") && $0.downloadURL.scheme == "https"
@@ -199,7 +203,15 @@ final class ComputerUseLicenseComplianceTests: XCTestCase {
             })
         }
         XCTAssertEqual(ComputerUseArtifactManifest.current.modelVariant, .fara15_4B)
-        XCTAssertEqual(ComputerUseArtifactManifest.nativeTextV2.modelArtifacts.map(\.kind), [.nativeTextPlannerModel])
+#if DEBUG
+        let nativeText = ComputerUseArtifactManifest.nativeTextV2
+        XCTAssertFalse(nativeText.modelArtifacts.isEmpty)
+        XCTAssertTrue(nativeText.modelArtifacts.allSatisfy {
+            $0.fileName.hasSuffix(".gguf") && $0.downloadURL.scheme == "https"
+                && $0.byteCount > 0 && $0.sha256.count == 64
+        })
+        XCTAssertEqual(nativeText.modelArtifacts.map(\.kind), [.nativeTextPlannerModel])
+#endif
     }
 
     private struct Fixture {
@@ -224,9 +236,14 @@ final class ComputerUseLicenseComplianceTests: XCTestCase {
                 withIntermediateDirectories: true)
         }
 
-        let documents = modelVariant == .nativeText4B
+        let documents: [ComputerUseArtifactManifest.BundledArtifact]
+#if DEBUG
+        documents = modelVariant == .nativeText4B
             ? ComputerUseArtifactManifest.nativeTextV2.legalArtifacts
             : ComputerUseArtifactManifest.modelLegalArtifacts
+#else
+        documents = ComputerUseArtifactManifest.modelLegalArtifacts
+#endif
         for artifact in documents {
             try Data(contentsOf: bundledURL(for: artifact)).write(
                 to: legalSource.appendingPathComponent(artifact.fileName),

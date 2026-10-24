@@ -969,6 +969,7 @@ final class ComputerUseDefaultBrowserControlPlannerTests: XCTestCase {
         }
     }
 
+#if DEBUG
     func testOptInInstalledModelProducesBootstrapProposalWithoutExecutingIt() async throws {
         guard ProcessInfo.processInfo.environment["RUN_DEFAULT_BROWSER_BOOTSTRAP_PROBE"] == "1" else {
             throw XCTSkip("Set RUN_DEFAULT_BROWSER_BOOTSTRAP_PROBE=1 to ask the installed local model for bounded bootstrap advice.")
@@ -1032,7 +1033,9 @@ final class ComputerUseDefaultBrowserControlPlannerTests: XCTestCase {
             throw error
         }
     }
+#endif
 
+#if DEBUG
     func testOptInInstalledModelAsksForMissingWebsiteDestination() async throws {
         guard ProcessInfo.processInfo.environment["RUN_DEFAULT_BROWSER_BOOTSTRAP_UNSPECIFIED_DESTINATION_PROBE"] == "1" else {
             throw XCTSkip("Set RUN_DEFAULT_BROWSER_BOOTSTRAP_UNSPECIFIED_DESTINATION_PROBE=1 to check a genuinely missing browser destination.")
@@ -1079,7 +1082,9 @@ final class ComputerUseDefaultBrowserControlPlannerTests: XCTestCase {
             throw error
         }
     }
+#endif
 
+#if DEBUG
     func testOptInInstalledModelReplaysRetainedNotQueriedDriveBootstrapContext() async throws {
         guard ProcessInfo.processInfo.environment["RUN_DEFAULT_BROWSER_BOOTSTRAP_RETAINED_REPLAY"] == "1" else {
             throw XCTSkip("Set RUN_DEFAULT_BROWSER_BOOTSTRAP_RETAINED_REPLAY=1 to replay the retained no-page Drive context locally.")
@@ -1151,6 +1156,7 @@ final class ComputerUseDefaultBrowserControlPlannerTests: XCTestCase {
             throw error
         }
     }
+#endif
 
     func testRetainedDriveBootstrapContextReconstructsExactlyBeforeInference() throws {
         guard ProcessInfo.processInfo.environment["RUN_DEFAULT_BROWSER_BOOTSTRAP_RETAINED_REPLAY"] == "1" else {

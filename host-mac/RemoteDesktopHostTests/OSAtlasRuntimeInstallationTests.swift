@@ -42,6 +42,7 @@ final class OSAtlasRuntimeInstallationTests: XCTestCase {
         await loader.deactivate()
     }
 
+#if DEBUG
     func testHoloReceiptResolvesOnlyItsPinnedTwoFilePackage() throws {
         let fixture = try makeTrainedFixture(.holo31)
         defer { try? FileManager.default.removeItem(at: fixture.root) }
@@ -95,7 +96,9 @@ final class OSAtlasRuntimeInstallationTests: XCTestCase {
             XCTAssertEqual(try Data(contentsOf: url).count, Int(artifact.byteCount))
         }
     }
+#endif
 
+#if DEBUG
     func testGUIOwlManifestPinsConvertedPairAndLegalAttributionWithoutChangingDefault() throws {
         let manifest = ComputerUseArtifactManifest.guiOwl15
         XCTAssertEqual(ComputerUseArtifactManifest.current, .fara15)
@@ -119,7 +122,9 @@ final class OSAtlasRuntimeInstallationTests: XCTestCase {
             XCTAssertEqual(SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined(), artifact.sha256)
         }
     }
+#endif
 
+#if DEBUG
     func testAgentVisionResolverChecksExactGUIOwlPairAndRejectsTampering() throws {
         let fixture = try makeFixture()
         defer { try? FileManager.default.removeItem(at: fixture.root) }
@@ -149,6 +154,7 @@ final class OSAtlasRuntimeInstallationTests: XCTestCase {
             modelRootURL: root, runtimeDirectoryURL: fixture.runtimeDirectory,
             enclosingBundleURL: fixture.bundleDirectory))
     }
+#endif
 
     func testUITarsResolverAllowsItsExistingDownloadCacheMetadata() throws {
         let fixture = try makeFixture()
@@ -245,6 +251,7 @@ final class OSAtlasRuntimeInstallationTests: XCTestCase {
                 modelDirectory: fixture.modelDirectory.path, installedAt: Date()))
     }
 
+#if DEBUG
     func testNativeTextReceiptResolvesWithoutVisualArtifactsAndCannotBecomeVisualPackage() throws {
         let fixture = try makeNativeTextFixture()
         defer { try? FileManager.default.removeItem(at: fixture.root) }
@@ -282,7 +289,9 @@ final class OSAtlasRuntimeInstallationTests: XCTestCase {
         XCTAssertThrowsError(try resolver.resolveNativeText(receipt: fixture.receipt,
             runtimeDirectoryURL: fixture.runtimeDirectory, enclosingBundleURL: fixture.bundleDirectory))
     }
+#endif
 
+#if DEBUG
     private func makeNativeTextFixture() throws -> Fixture {
         let fixture = try makeFixture()
         for artifact in fixture.manifest.modelArtifacts {
@@ -301,6 +310,7 @@ final class OSAtlasRuntimeInstallationTests: XCTestCase {
             runtimeDirectory: fixture.runtimeDirectory, modelDirectory: fixture.modelDirectory,
             manifest: manifest, receipt: receipt)
     }
+#endif
 
     func testAvailablePackageRejectsLegacyVisualPackageBeforeActivation() throws {
         let fixture = try makeFixture()

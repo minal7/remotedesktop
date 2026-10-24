@@ -1722,7 +1722,11 @@ final class ComputerUseFaraActionTests: XCTestCase {
     func testOptInFrozenDriveNavigationWithPreparedFile() async throws {
         let environment = ProcessInfo.processInfo.environment
         let workerSubgoalMode = environment["FROZEN_DRIVE_WORKER_SUBGOAL"] == "1"
+#if DEBUG
         let nativeDelegationMode = environment["FROZEN_DRIVE_NATIVE_DELEGATION"] == "1"
+#else
+        let nativeDelegationMode = false
+#endif
         guard environment["RUN_FROZEN_DRIVE_FILE_PREPARATION"] == "1"
                 || workerSubgoalMode || nativeDelegationMode else {
             throw XCTSkip("Opt-in: frozen screenshot proposals, no browser or input effects")
@@ -1751,6 +1755,7 @@ final class ComputerUseFaraActionTests: XCTestCase {
         do {
             var workerGoal: String?
             if nativeDelegationMode {
+#if DEBUG
                 let installedReceipt = await ComputerUseInstaller.nativeText().currentInstallation()
                 let installation = try XCTUnwrap(installedReceipt)
                 let runtimeDirectory = try OSAtlasVisualExecutorLoader.bundledRuntimeDirectoryURL(in: .main)
@@ -1762,6 +1767,9 @@ final class ComputerUseFaraActionTests: XCTestCase {
                         attachment.name = "Frozen Drive native delegation \(label)"
                         attachment.lifetime = .keepAlways; add(attachment)
                     }
+#else
+                preconditionFailure("Release builds do not enable native text delegation diagnostics.")
+#endif
             }
             let endpoint = try await runtime.activateFara(inputs)
             for (name, files) in contexts {

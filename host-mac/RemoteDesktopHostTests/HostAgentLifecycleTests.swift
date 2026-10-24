@@ -3,6 +3,7 @@ import XCTest
 
 @MainActor
 final class HostAgentLifecycleTests: XCTestCase {
+#if DEBUG
     func testDefaultManagerSelectsGeneralAgentFactoryWithoutExternalServices() {
         let manager = HostComputerUseManager(
             injector: InputInjector(),
@@ -24,6 +25,7 @@ final class HostAgentLifecycleTests: XCTestCase {
 
         XCTAssertFalse(manager.hasGeneralAgentFactory)
     }
+#endif
 
     func testLocalTakeoverRetainsPendingAgentApprovalAndResurfacesSameGate() async throws {
         let fixture = AdapterFixture(replies: [[

@@ -3153,12 +3153,17 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
         XCTAssertTrue(withControls.history.isEmpty, "This probe isolates the native-controls supplement from prior history")
 
         let faraInputs = try await FaraTestAssets.inputs(environment: environment)
+#if DEBUG
         let includesNativeDelegation = expectedControl == nil
             && environment["CAPTURED_BROWSER_MENU_NATIVE_DELEGATION"] == "1"
+#else
+        let includesNativeDelegation = false
+#endif
         let runtime = OSAtlasLlamaRuntime()
         do {
             var proposalInputs: [(String, ComputerUseFaraModel.Input)]
             if includesNativeDelegation {
+#if DEBUG
                 let installedReceipt = await ComputerUseInstaller.nativeText().currentInstallation()
                 let receipt = try XCTUnwrap(installedReceipt)
                 let runtimeDirectory = try await OSAtlasVisualExecutorLoader.bundledRuntimeDirectoryURL(in: .main)
@@ -3187,6 +3192,9 @@ final class ComputerUseDefaultBrowserSessionTests: XCTestCase {
                 XCTAssertEqual(delegatedInput.nativeControls, originalGoalInput.nativeControls)
                 XCTAssertEqual(delegatedInput.localFileCatalog, originalGoalInput.localFileCatalog)
                 proposalInputs = [("Original goal", originalGoalInput), ("Original goal plus native worker directive", delegatedInput)]
+#else
+                preconditionFailure("Release builds do not enable native text delegation diagnostics.")
+#endif
             } else if let expectedControl {
                 proposalInputs = [("With captured Safari native controls", withControls)]
                 let matches = controls.filter { $0.description == expectedControl }

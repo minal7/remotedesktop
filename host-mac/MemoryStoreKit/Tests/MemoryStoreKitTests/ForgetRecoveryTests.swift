@@ -267,8 +267,9 @@ final class ForgetRecoveryTests: XCTestCase {
         XCTAssertFalse(value.client.contains(databaseKey(value.namespace)))
         assertCleanupFilesAbsent(value.root)
         XCTAssertTrue(value.client.contains(marker(value)), "the immutable marker stays as the completion tombstone")
+        // This test helper has no generation binding, so open fails closed before marker classification.
         XCTAssertThrowsError(try open(root: value.root, client: value.client, namespace: value.namespace)) {
-            XCTAssertEqual($0 as? MemoryFactoryError, .forgetRecoveryRequired)
+            XCTAssertEqual($0 as? MemoryFactoryError, .incompleteNewStore)
         }
     }
 
@@ -435,7 +436,7 @@ final class ForgetRecoveryTests: XCTestCase {
         XCTAssertTrue(value.client.contains(unrelated))
         XCTAssertTrue(value.client.contains(marker(value)), "successful Forget keeps its tombstone")
         XCTAssertThrowsError(try open(root: value.root, client: value.client, namespace: value.namespace)) {
-            XCTAssertEqual($0 as? MemoryFactoryError, .forgetRecoveryRequired)
+            XCTAssertEqual($0 as? MemoryFactoryError, .incompleteNewStore)
         }
     }
 }

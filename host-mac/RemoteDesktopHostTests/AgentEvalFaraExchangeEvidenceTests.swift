@@ -1,3 +1,4 @@
+#if DEBUG
 import AppKit
 import CryptoKit
 import Darwin
@@ -641,3 +642,4 @@ private final class EvidenceFakeTransport: OSAtlasLlamaHTTPTransport, @unchecked
     }
     func cancelAll() async {}
 }
+#endif

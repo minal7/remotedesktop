@@ -1,3 +1,4 @@
+#if DEBUG
 import Foundation
 import Darwin
 import XCTest
@@ -458,3 +459,4 @@ private actor LifecycleDispatchGate {
         continuation = nil
     }
 }
+#endif

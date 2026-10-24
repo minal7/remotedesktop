@@ -1157,6 +1157,7 @@ final class ComputerUseTests: XCTestCase {
         }
     }
 
+#if DEBUG
     func test_manifestPinsAuditedRepositoriesRevisionsAndHashes() {
         let manifest = ComputerUseArtifactManifest.legacyVisualOnly
 
@@ -1196,6 +1197,7 @@ final class ComputerUseTests: XCTestCase {
             XCTAssertTrue(artifact.fileName.hasSuffix(".gguf"))
         }
     }
+#endif
 
     func test_computerUseReusesDeployedCloudKitSignalRecordType() {
         XCTAssertEqual(CloudKitComputerUseChannel.recordType, "WebRTCSignal")
@@ -4260,8 +4262,10 @@ final class ComputerUseTests: XCTestCase {
         let cardEnvelope = try XCTUnwrap(sent.first { $0.kind == .approvalRequest })
         let card = try ComputerUseApprovalRequest.decodeBody(cardEnvelope.body)
         XCTAssertEqual(UUID(uuidString: card.requestID), fixture.executor.activeLoop?.pendingStep?.approval.id)
+#if DEBUG
         XCTAssertNotNil(manager.debugPendingAgentApproval(taskID: prompt.id, requestID: card.requestID))
         XCTAssertNil(manager.debugPendingAgentApproval(taskID: "another-task", requestID: card.requestID))
+#endif
 
         let wrong = ComputerUseApprovalResponse(requestID: UUID().uuidString, approved: true,
             taskID: prompt.id, appliedControlRevision: card.appliedControlRevision,
@@ -4324,9 +4328,11 @@ final class ComputerUseTests: XCTestCase {
             let card = try ComputerUseApprovalRequest.decodeBody(cardEnvelope.body)
             XCTAssertEqual(card.taskID, answer.id,
                 "The phone approval belongs to the fresh answer message, while the AgentLoop remains rooted at the question.")
+#if DEBUG
             let pending = try XCTUnwrap(manager.debugPendingAgentApproval(taskID: answer.id,
                 requestID: card.requestID))
             XCTAssertEqual(pending.approval.taskID, root.id)
+#endif
 
             let response = ComputerUseApprovalResponse(requestID: card.requestID, approved: approved,
                 taskID: answer.id, appliedControlRevision: card.appliedControlRevision,
