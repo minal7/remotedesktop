@@ -4279,6 +4279,107 @@ final class ComputerUseTests: XCTestCase {
         XCTAssertEqual(fixture.policies[0].proposalCount, 2)
     }
 
+    func test_managerClarificationAnswerAliasCanDenyAndApproveAgentAction() async throws {
+        for approved in [false, true] {
+            let label = approved ? "approved" : "denied"
+            let episodeRoot = approved ? nil : FileManager.default.temporaryDirectory
+                .appendingPathComponent("clarification-approval-\(UUID().uuidString)", isDirectory: true)
+            defer { if let episodeRoot { try? FileManager.default.removeItem(at: episodeRoot) } }
+            let agent = AdapterFixture(replies: [[
+                .askUser(question: "Which city?", choices: nil),
+                .click(target: .element(id: 1), button: nil, count: nil),
+                .done(answer: "Finished after review")
+            ]], trajectoryRoot: episodeRoot)
+            let adapter = AgentCapabilityAdapter(executor: agent.executor)
+            let channel = FakeHostComputerUseChannel()
+            let ledgerURL = temporaryLedgerURL()
+            defer { try? FileManager.default.removeItem(at: ledgerURL.deletingLastPathComponent()) }
+            let manager = HostComputerUseManager(experimentalEnabled: { true }, injector: InputInjector(),
+                executor: ComputerUseCapabilityExecutor(agentAdapter: adapter),
+                taskLedger: ComputerUseTaskLedger(fileURL: ledgerURL), allowsExternalServices: false,
+                channelFactory: { _ in channel })
+            defer { manager.stop() }
+
+            let root = makeEnvelope(id: "clarification-root-\(label)", kind: .prompt,
+                body: try ComputerUsePromptRequest(prompt: "Fill the city field").encodedBody())
+            manager.authorizePeer(senderID: root.senderID)
+            XCTAssertTrue(manager.handle(root, channel: channel))
+            let question = try await clarificationUpdate(taskID: root.id, channel: channel)
+            XCTAssertEqual(question.outcome, .userInterventionRequired)
+            let reference = try XCTUnwrap(question.clarification)
+
+            let answer = makeEnvelope(id: "clarification-answer-\(label)", kind: .prompt,
+                body: try ComputerUsePromptRequest.answering(reference, text: "San Diego",
+                    supportsApprovedActionEvidence: true).encodedBody())
+            XCTAssertNotEqual(answer.id, root.id)
+            XCTAssertTrue(manager.handle(answer, channel: channel))
+            await waitUntil {
+                if case .awaitingApproval = manager.activity {
+                    return await channel.sentMessages().contains { $0.kind == .approvalRequest }
+                }
+                return false
+            }
+            let messages = await channel.sentMessages()
+            let cardEnvelope = try XCTUnwrap(messages.first { $0.kind == .approvalRequest })
+            let card = try ComputerUseApprovalRequest.decodeBody(cardEnvelope.body)
+            XCTAssertEqual(card.taskID, answer.id,
+                "The phone approval belongs to the fresh answer message, while the AgentLoop remains rooted at the question.")
+            let pending = try XCTUnwrap(manager.debugPendingAgentApproval(taskID: answer.id,
+                requestID: card.requestID))
+            XCTAssertEqual(pending.approval.taskID, root.id)
+
+            let response = ComputerUseApprovalResponse(requestID: card.requestID, approved: approved,
+                taskID: answer.id, appliedControlRevision: card.appliedControlRevision,
+                hostControlEpoch: card.hostControlEpoch)
+            XCTAssertTrue(manager.handle(makeEnvelope(kind: .approvalResponse,
+                body: try response.encodedBody()), channel: channel))
+            let terminal = try await clarificationUpdate(taskID: answer.id, channel: channel)
+            XCTAssertEqual(terminal.outcome, .taskCompleted)
+            XCTAssertEqual(terminal.text, "Finished after review")
+
+            let ledger = ComputerUseTaskLedger(fileURL: ledgerURL)
+            XCTAssertEqual(ledger.terminalOutcome(taskID: root.id), .userInterventionRequired,
+                "The question's first terminal result is immutable after its answer completes.")
+            XCTAssertEqual(ledger.terminalOutcome(taskID: answer.id), .taskCompleted,
+                "Completion is recorded against the fresh answer ID.")
+
+            if approved {
+                let approvalSteps = agent.recorder.steps.filter { step in
+                    guard let action = step.action else { return false }
+                    if case .click = action { return true }
+                    return false
+                }
+                XCTAssertGreaterThanOrEqual(approvalSteps.count, 2)
+                XCTAssertEqual(agent.environments.first?.executed.count, 1)
+                XCTAssertTrue(approvalSteps.contains { $0.gate.decision == .allowed && $0.execution.status == .ok })
+            } else {
+                XCTAssertEqual(agent.environments.first?.executed.count, 0)
+                let trajectory = try XCTUnwrap(agent.trajectoryRecorder)
+                let lines = try String(contentsOf: trajectory.directory.appendingPathComponent("episode.jsonl"),
+                    encoding: .utf8).split(separator: "\n")
+                let records = try lines.map { try JSONDecoder().decode(AgentEpisodeRecord.self, from: Data($0.utf8)) }
+                let steps = records.compactMap { record -> AgentEpisodeStep? in
+                    guard case .step(let step) = record else { return nil }
+                    return step
+                }
+                XCTAssertEqual(records.count, steps.count + 1, "The real writer should finish with one footer.")
+                if case .footer(let footer) = records.last {
+                    XCTAssertEqual(footer.episodeID, trajectory.episodeID)
+                    XCTAssertEqual(footer.outcome, "success")
+                } else {
+                    XCTFail("The real writer should finish with a terminal footer.")
+                }
+                XCTAssertEqual(steps.map(\.step), Array(0..<steps.count))
+                XCTAssertTrue(steps.allSatisfy { $0.step == $0.observation.budget.step })
+                XCTAssertTrue(steps.contains {
+                    guard let action = $0.action, case .click = action else { return false }
+                    return $0.gate.decision == .rejected && $0.gate.reason == "rejected: user declined"
+                        && $0.execution.status == .notExecuted
+                }, "The real trajectory writer must persist denial under the current observation step.")
+            }
+        }
+    }
+
     func test_changedVisualApprovalTargetReplansModelButKeepsTrustedPromptStable() async throws {
         let proposedAction = ComputerUsePredictedAction.key(
             usage: 0x28,

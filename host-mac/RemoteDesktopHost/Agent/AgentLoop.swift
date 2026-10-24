@@ -96,7 +96,13 @@ final class AgentLoop {
             let denied = AgentGateResult(decision: .rejected, reason: "rejected: user declined",
                 fingerprint: pending.approval.fingerprint, scopeIdentity: pending.approval.scopeIdentity,
                 riskTier: pending.approval.riskTier.rawValue)
-            try record(pending.resolved.frame.observation, raw: "", action: pending.resolved.action,
+            let priorObservation = pending.resolved.frame.observation
+            let denialObservation = AgentObservation(task: priorObservation.task,
+                surface: priorObservation.surface, screenshot: priorObservation.screenshot,
+                elements: priorObservation.elements, focus: priorObservation.focus,
+                history: priorObservation.history,
+                budget: AgentStepBudget(step: stepIndex, maxSteps: priorObservation.budget.maxSteps))
+            try record(denialObservation, raw: "", action: pending.resolved.action,
                        gate: denied, execution: .init(status: .notExecuted, result: noted(denied.reason, pending.note)),
                        start: continuationStart)
             corrections.append("Approval declined by the owner.")

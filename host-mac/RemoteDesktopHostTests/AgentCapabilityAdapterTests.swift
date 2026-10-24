@@ -1,3 +1,4 @@
+import AppKit
 import XCTest
 @testable import RemoteDesktopHost
 
@@ -196,6 +197,9 @@ final class AdapterFixture {
     private var replies: [[AgentAction]]
     private let secureObservationIndex: Int?
     private let trustedWeb: Bool
+    private let trajectoryRoot: URL?
+    private(set) lazy var recorder = AdapterRecorder()
+    private(set) var trajectoryRecorder: TrajectoryRecorder?
     private(set) var factoryPrompts: [String] = []
     private(set) var policies: [AdapterPolicy] = []
     private(set) var environments: [AdapterEnvironment] = []
@@ -204,21 +208,33 @@ final class AdapterFixture {
         return try self.makeLoop(taskID: taskID, prompt: prompt)
     }
 
-    init(replies: [[AgentAction]], secureObservationIndex: Int? = nil, trustedWeb: Bool = false) {
+    init(replies: [[AgentAction]], secureObservationIndex: Int? = nil, trustedWeb: Bool = false,
+         trajectoryRoot: URL? = nil) {
         self.replies = replies
         self.secureObservationIndex = secureObservationIndex
         self.trustedWeb = trustedWeb
+        self.trajectoryRoot = trajectoryRoot
     }
 
     private func makeLoop(taskID: String, prompt: String) throws -> AgentLoop {
         factoryPrompts.append(prompt)
         let environment = AdapterEnvironment(taskID: taskID, secureObservationIndex: secureObservationIndex)
         let policy = AdapterPolicy(replies: replies.isEmpty ? [] : replies.removeFirst())
+        let recorder: AgentRecording
+        if let trajectoryRoot {
+            let actualRecorder = try TrajectoryRecorder(root: trajectoryRoot, episodeID: taskID)
+            self.trajectoryRecorder = actualRecorder
+            recorder = actualRecorder
+        } else {
+            let testRecorder = AdapterRecorder(episodeID: taskID)
+            self.recorder = testRecorder
+            recorder = testRecorder
+        }
         environments.append(environment); policies.append(policy)
         return try AgentLoop(taskID: taskID, prompt: prompt, environment: environment, policy: policy,
             gate: AgentActionGate(trustStore: AdapterTrustStore(trustedWeb: trustedWeb),
                                   allowPolicy: AdapterAllowPolicy()),
-            recorder: AdapterRecorder(), journal: AdapterJournal())
+            recorder: recorder, journal: AdapterJournal())
     }
 }
 
@@ -251,6 +267,13 @@ final class AdapterEnvironment: AgentEnvironment {
     private(set) var executed: [AgentResolvedAction] = []
     private(set) var resumeCount = 0
 
+    private static let validScreenshot = {
+        let image = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 2, pixelsHigh: 2,
+            bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+            colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
+        return image.representation(using: .png, properties: [:])!.base64EncodedString()
+    }()
+
     init(taskID: String, secureObservationIndex: Int?) {
         self.taskID = taskID; self.secureObservationIndex = secureObservationIndex
     }
@@ -266,7 +289,7 @@ final class AdapterEnvironment: AgentEnvironment {
         let focus = secure ? AgentFocus(id: 7, role: "password", name: "Secure entry", valuePrefix: "",
             selection: .init(start: 0, end: 0)) : nil
         let observation = AgentObservation(task: context.task, surface: .web(url: "https://example.test/", title: nil),
-            screenshot: "", elements: elements, focus: focus, history: context.history, budget: context.budget)
+            screenshot: Self.validScreenshot, elements: elements, focus: focus, history: context.history, budget: context.budget)
         return AgentFrame(observation: observation,
             scope: AgentScope(taskID: taskID, kind: .web, identity: "stable-tab"))
     }
@@ -306,8 +329,22 @@ final class AdapterAllowPolicy: AgentAllowPolicy {
 
 @MainActor
 final class AdapterRecorder: AgentRecording {
-    func record(_ step: AgentEpisodeStep) throws {}
-    func finish(_ footer: AgentEpisodeFooter) throws {}
+    private let episodeID: String?
+    private(set) var steps: [AgentEpisodeStep] = []
+    private(set) var footers: [AgentEpisodeFooter] = []
+    init(episodeID: String? = nil) { self.episodeID = episodeID }
+    func record(_ step: AgentEpisodeStep) throws {
+        guard (episodeID == nil || step.episodeID == episodeID), step.step == step.observation.budget.step else {
+            throw TrajectoryRecorder.Failure.invalidEpisode
+        }
+        steps.append(step)
+    }
+    func finish(_ footer: AgentEpisodeFooter) throws {
+        guard episodeID == nil || footer.episodeID == episodeID else {
+            throw TrajectoryRecorder.Failure.invalidEpisode
+        }
+        footers.append(footer)
+    }
 }
 
 @MainActor
