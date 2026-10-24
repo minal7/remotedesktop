@@ -136,7 +136,12 @@ final class AgentActionGate {
         }
     }
     private func isCredentialEntry(_ resolved: AgentResolvedAction) -> Bool {
-        let message: String? = switch resolved.action { case .askUser(let q, let c): ([q] + (c ?? [])).joined(separator: " "); case .done(let a), .fail(let a): a; default: nil }
+        // Credential-language checks on terminal prose over-block harmless summaries.
+        // Keep this question guard: requests to send credentials in chat must be refused.
+        let message: String? = switch resolved.action {
+        case .askUser(let question, let choices): ([question] + (choices ?? [])).joined(separator: " ")
+        default: nil
+        }
         if let message, AgentCredentialRule.isSensitive(role: "textfield", name: message, state: []) { return true }
         switch resolved.action { case .type, .key, .select: break; default: return false }
         if resolved.targets.contains(where: isSensitive) { return true }
