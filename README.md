@@ -123,6 +123,15 @@ pruned when recording starts if they are more than seven days old, and can be
 deleted from the host's Computer Use settings. See the [Privacy Policy](docs/privacy.html)
 and [Support](docs/support.html) for details and setup help.
 
+Computer Use (Beta) also includes **Memory** for owner-saved preferences and
+ordinary facts. A memory is saved only after you review it and choose Save;
+the model does not automatically save facts from screenshots or task activity.
+Saved memories are stored encrypted on the Mac and can be viewed, edited, or
+deleted from Memory. They remain until you delete them or choose Forget; this
+is separate from the seven-day task-episode cleanup. Do not save passwords or
+other secrets in Memory. Incognito tasks do not read or save Memory. See the
+[Privacy Policy](docs/privacy.html).
+
 ## Getting started (developer)
 
 ### Prerequisites (CloudKit)

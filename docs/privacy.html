@@ -102,6 +102,23 @@
   history from the host's Computer Use settings while no task is active. The app restricts the
   history folder and files to the Mac user account.</p>
 
+  <h2>Saved Memory</h2>
+  <p>Computer Use (Beta) includes an optional Memory feature for ordinary owner facts and
+  preferences. Nothing is saved automatically from screenshots or task activity. To save an
+  item, you review it in the Memory form and choose Save. Do not save passwords or other
+  secrets. The encrypted Memory database is stored on the Mac; its encryption key is held in
+  the Mac user's Keychain. Saved items can be viewed, edited, or deleted in Memory from the
+  paired iPhone or iPad over the authenticated local connection, or in the host's Settings.</p>
+
+  <p>When you start a Computer Use task, relevant saved items may be used as context by the
+  model running locally on the Mac. Incognito tasks skip saved Memory retrieval and saving.
+  Memory content is not synced through CloudKit or sent to the developer. Saved items remain
+  until you delete them or choose Forget in Memory. Forget erases this app's saved memories;
+  it does not erase task episode history, exported copies, or content stored in other apps.
+  Task history can be deleted separately in the host's Computer Use settings; otherwise,
+  episode folders older than seven days are removed when a new recording starts. To use Memory
+  again after Forget, choose Start Fresh and reconnect.</p>
+
   <p>A receiving device attempts to delete a CloudKit setup record only after it has applied the
   message. If deletion is interrupted, the app retains a bounded cleanup identity and retries
   later. Both sides ignore setup records older than one hour and cap query pages, observed
