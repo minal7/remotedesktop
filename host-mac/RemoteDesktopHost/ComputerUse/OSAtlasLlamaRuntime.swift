@@ -507,8 +507,6 @@ struct OSAtlasLlamaLaunchConfiguration: Equatable, Sendable {
             let imageTokensPerScreenshot = trainedVisionAlias == ComputerUseFaraRuntimeInputs.modelAlias
                 ? Self.trainedVisionImageTokensPerScreenshot(for: .fara15_4b)
                 : Self.defaultTrainedVisionImageTokensPerScreenshot
-            // The pinned Fara runtime needs one in-memory checkpoint to reuse a prompt.
-            // The separate snapshot pool stays disabled.
             var arguments = [
                 "--model", modelFirstSplitURL.path, "--mmproj", multimodalProjectorURL.path,
                 "--alias", trainedVisionAlias,
@@ -516,8 +514,7 @@ struct OSAtlasLlamaLaunchConfiguration: Equatable, Sendable {
                 "--offline", "--no-ui", "--log-disable", "--parallel", "1", "--no-cont-batching",
                 "--ctx-size", String(isAgentFara ? 16_384 : resourceProfile.contextSize), "--no-context-shift",
                 "--batch-size", String(resourceProfile.logicalBatchSize), "--ubatch-size", String(resourceProfile.physicalBatchSize),
-                "--cache-ram", "0", "--ctx-checkpoints",
-                trainedVisionAlias == ComputerUseFaraRuntimeInputs.modelAlias ? "1" : "0", "--no-cache-idle-slots",
+                "--cache-ram", "0", "--ctx-checkpoints", "0", "--no-cache-idle-slots",
                 "--threads", String(Self.workerThreads), "--threads-batch", String(Self.workerThreads),
                 "--poll", "0", "--poll-batch", "0", "--n-gpu-layers", "99",
                 "--image-max-tokens", String(imageTokensPerScreenshot),
