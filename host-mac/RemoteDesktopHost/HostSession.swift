@@ -330,6 +330,17 @@ final class HostSession: ObservableObject {
         confirmedBinding != currentBinding
     }
 
+    /// A local computer-use peer is a visual sidecar for the already-advertised
+    /// LAN task session. Its lifetime must not withdraw that independent
+    /// discovery path. A primary remote-control peer still takes the host out
+    /// of advertising state after its offer is accepted.
+    static func shouldWithdrawAdvertisement(
+        afterAcceptedPeer classification:
+            HostComputerUseManager.WebRTCPeerClassification
+    ) -> Bool {
+        classification == .primaryRemoteControl
+    }
+
     /// Periodic defense for a missed or delayed CKAccountChanged notification.
     /// A short transient outage may continue only inside the bounded trust
     /// window established by a positive lookup in this process.
@@ -1036,12 +1047,15 @@ final class HostSession: ObservableObject {
                                   activeWebRTCPeer?.generation == offeredOwner.generation,
                                   !offeredPeer.isEnded else { continue }
                             flushPendingRemoteICEIfPossible()
-                            advertiser.stop()
-                            await client.stopAdvertising()
-                            guard !Task.isCancelled, peerSession === offeredPeer,
-                                  activeWebRTCPeer?.generation == offeredOwner.generation,
-                                  !offeredPeer.isEnded else { continue }
-                            state = .paired(clientDescription: clientName)
+                            if Self.shouldWithdrawAdvertisement(
+                                afterAcceptedPeer: offeredOwner.classification) {
+                                advertiser.stop()
+                                await client.stopAdvertising()
+                                guard !Task.isCancelled, peerSession === offeredPeer,
+                                      activeWebRTCPeer?.generation == offeredOwner.generation,
+                                      !offeredPeer.isEnded else { continue }
+                                state = .paired(clientDescription: clientName)
+                            }
                         } catch {
                             // A capture deadline/close can retire this exact
                             // peer while offer negotiation or advertisement

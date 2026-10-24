@@ -629,6 +629,17 @@ final class HostSessionTests: XCTestCase {
             "a lost or malformed owner marker cannot revive an old credential")
     }
 
+    func test_sidecarOfferKeepsDiscoveryWhilePrimaryPeerWithdrawsIt() {
+        XCTAssertFalse(
+            HostSession.shouldWithdrawAdvertisement(
+                afterAcceptedPeer: .localComputerUseSidecar),
+            "a visual sidecar must leave the independent LAN and CloudKit discovery paths active")
+        XCTAssertTrue(
+            HostSession.shouldWithdrawAdvertisement(
+                afterAcceptedPeer: .primaryRemoteControl),
+            "primary remote control retains its existing advertisement withdrawal")
+    }
+
     func test_grantNextPermission_requestsScreenRecordingWithoutForcingSettings() {
         let provider = MockPermissionsProvider()
         let session = makeSession(provider)
