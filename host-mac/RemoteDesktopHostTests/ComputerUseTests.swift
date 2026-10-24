@@ -483,6 +483,16 @@ final class ComputerUseTests: XCTestCase {
             XCTAssertEqual(rejected.outcome, .unableToComplete)
             XCTAssertTrue(setup.executor.answers.isEmpty)
             XCTAssertNotNil(try setup.executor.clarification(taskID: setup.root.id), "An invalid choice cannot consume its live question")
+
+            let validAnswer = makeEnvelope(id: "valid-after-\(attempt.id)", kind: .prompt,
+                body: try ComputerUsePromptRequest.answering(
+                    XCTUnwrap(setup.question.clarification), text: "Project Alpha.pptx",
+                    clarificationChoiceID: "candidate-a").encodedBody())
+            XCTAssertTrue(setup.manager.handle(validAnswer, channel: setup.channel))
+            let completed = try await clarificationUpdate(taskID: validAnswer.id, channel: setup.channel)
+            XCTAssertEqual(completed.outcome, .taskCompleted)
+            XCTAssertEqual(setup.executor.selectedChoices, [choices[0]])
+            XCTAssertEqual(setup.executor.answers.count, 1)
         }
     }
 
@@ -3641,6 +3651,41 @@ final class ComputerUseTests: XCTestCase {
         let lateResult = try await clarificationUpdate(taskID: late.id, channel: channel)
         XCTAssertEqual(lateResult.outcome, .unableToComplete)
         XCTAssertEqual(executor.normalPrompts.count, 1); XCTAssertTrue(executor.answers.isEmpty); XCTAssertEqual(executor.effects, 0)
+    }
+
+    func test_managerRetainsQuestionAfterForgedAndWrongSessionAnswersThenAcceptsOwnerAnswer() async throws {
+        let choice = try ComputerUseClarificationChoice(id: "candidate-a", label: "Project Alpha.pptx")
+        let setup = try await startChoiceQuestion(choices: [choice])
+        defer { setup.manager.stop(); try? FileManager.default.removeItem(at: setup.ledgerURL.deletingLastPathComponent()) }
+        let reference = try XCTUnwrap(setup.question.clarification)
+        let forged = try ComputerUseClarificationReference(
+            taskID: reference.taskID, nonce: UUID(), expiresAt: reference.expiresAt)
+        let badAnswers = [
+            makeEnvelope(id: "forged-reference", kind: .prompt,
+                body: try ComputerUsePromptRequest.answering(forged, text: "Project Alpha.pptx",
+                    clarificationChoiceID: "candidate-a").encodedBody()),
+            ComputerUseEnvelope(id: "wrong-session", senderID: setup.root.senderID,
+                targetID: setup.root.targetID, pairingCode: setup.root.pairingCode,
+                sessionID: "other-session", kind: .prompt,
+                body: try ComputerUsePromptRequest.answering(reference, text: "Project Alpha.pptx",
+                    clarificationChoiceID: "candidate-a").encodedBody()),
+        ]
+        for bad in badAnswers {
+            XCTAssertTrue(setup.manager.handle(bad, channel: setup.channel))
+            let rejected = try await clarificationUpdate(taskID: bad.id, channel: setup.channel)
+            XCTAssertEqual(rejected.outcome, .unableToComplete)
+            XCTAssertNotNil(try setup.executor.clarification(taskID: setup.root.id))
+            XCTAssertTrue(setup.executor.answers.isEmpty)
+        }
+
+        let valid = makeEnvelope(id: "valid-owner-answer", kind: .prompt,
+            body: try ComputerUsePromptRequest.answering(reference, text: "Project Alpha.pptx",
+                clarificationChoiceID: "candidate-a").encodedBody())
+        XCTAssertTrue(setup.manager.handle(valid, channel: setup.channel))
+        let completed = try await clarificationUpdate(taskID: valid.id, channel: setup.channel)
+        XCTAssertEqual(completed.outcome, .taskCompleted)
+        XCTAssertEqual(setup.executor.answers.count, 1)
+        XCTAssertEqual(setup.executor.selectedChoices, [choice])
     }
 
     func test_managerResumesClaimedAnswerWithTypedGoalAndRejectsRestartedReference() async throws {

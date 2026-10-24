@@ -187,6 +187,17 @@ final class ComputerUseClarificationStore {
         return Resolution(goal: goal, selectedChoice: selectedChoice)
     }
 
+    /// Checks host-retained owner identity without trusting a route supplied by
+    /// the answer. Expiry is deliberately separate: callers may retire an
+    /// expired question only after this exact reference and owner match.
+    func owns(_ reference: ComputerUseClarificationReference, for request: ComputerUseEnvelope) -> Bool {
+        guard let pending else { return false }
+        return pending.reference == reference
+            && request.id == reference.taskID
+            && pending.senderID == request.senderID
+            && pending.sessionID == request.sessionID
+    }
+
     func matches(_ reference: ComputerUseClarificationReference) -> Bool { pending?.reference == reference }
 
     /// Returns options only for the exact unexpired question owner. A ledger

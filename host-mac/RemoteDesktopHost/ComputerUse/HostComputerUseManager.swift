@@ -4091,6 +4091,14 @@ final class HostComputerUseManager: ObservableObject {
         let operation: PendingOperation
     }
 
+    /// Created only after the retained clarification store matches the exact
+    /// reference, task, sender, and session for an answer. Cleanup may use its
+    /// task ID; untrusted answer fields alone cannot construct this value.
+    private struct ValidatedTextClarificationOwner {
+        let reference: ComputerUseClarificationReference
+        let questionEnvelope: ComputerUseEnvelope
+    }
+
     private struct MemoryErasureFence {
         enum Authority: Equatable {
             case phone(peerID: String, sessionID: String, generation: UInt64)
@@ -6696,6 +6704,7 @@ final class HostComputerUseManager: ObservableObject {
 
         let continuation: TextClarificationContinuation?
         let acceptedMemoryPolicy: ComputerUseTaskMemoryPolicy
+        var validatedClarificationOwner: ValidatedTextClarificationOwner?
         do {
             if let reference = request.clarification {
                 guard let retained = pendingTextClarificationMemoryPolicy,
@@ -6703,12 +6712,23 @@ final class HostComputerUseManager: ObservableObject {
                     throw ComputerUseClarificationStore.Failure.invalidReference
                 }
                 acceptedMemoryPolicy = retained.policy
-                guard let continuing = executor as? any ComputerUseClarificationContinuing,
-                      let pending = try continuing.clarification(taskID: reference.taskID) else {
+                let originalQuestion = controlReplyEnvelope(taskID: reference.taskID, basedOn: envelope)
+                guard textClarifications.owns(reference, for: originalQuestion) else {
                     throw ComputerUseClarificationStore.Failure.invalidReference
                 }
-                let originalQuestion = controlReplyEnvelope(taskID: reference.taskID, basedOn: envelope)
+                let owner = ValidatedTextClarificationOwner(
+                    reference: reference, questionEnvelope: originalQuestion)
+                validatedClarificationOwner = owner
+                guard let continuing = executor as? any ComputerUseClarificationContinuing,
+                      let pending = try continuing.clarification(taskID: reference.taskID) else {
+                    retireTextClarification(owner)
+                    throw ComputerUseClarificationStore.Failure.invalidReference
+                }
                 guard textClarifications.retains(reference, native: pending, for: originalQuestion) else {
+                    // The reference and route are host-verified above. A stale
+                    // native scope or expired owner question can now be retired
+                    // without letting a forged reference erase another task.
+                    retireTextClarification(owner)
                     throw ComputerUseClarificationStore.Failure.invalidReference
                 }
                 let resolution = try textClarifications.consumeSelection(reference, answer: request.prompt,
@@ -6721,8 +6741,14 @@ final class HostComputerUseManager: ObservableObject {
                 continuation = nil
             }
         } catch {
-            if let reference = request.clarification {
-                invalidateTextClarification(for: reference, basedOn: envelope)
+            if let owner = validatedClarificationOwner,
+               let failure = error as? ComputerUseClarificationStore.Failure,
+               failure == .expired || failure == .scopeChanged {
+                // consumeSelection reaches these failures only after matching
+                // the stored reference and request owner. Invalid choices,
+                // forged references, and wrong-session answers retain the
+                // valid question for a later legitimate answer.
+                retireTextClarification(owner)
             }
             sendDurableTerminal("I couldn't validate this request or its clarification. Start a new request with the complete instruction.",
                 outcome: .unableToComplete, replyingTo: envelope, channel: channel)
@@ -7493,16 +7519,13 @@ final class HostComputerUseManager: ObservableObject {
         (executor as? any ComputerUseClarificationContinuing)?.invalidateClarification(taskID: nil)
     }
 
-    private func invalidateTextClarification(
-        for reference: ComputerUseClarificationReference,
-        basedOn envelope: ComputerUseEnvelope
-    ) {
-        if pendingTextClarificationMemoryPolicy?.reference == reference {
+    private func retireTextClarification(_ owner: ValidatedTextClarificationOwner) {
+        if pendingTextClarificationMemoryPolicy?.reference == owner.reference {
             pendingTextClarificationMemoryPolicy = nil
         }
-        let questionEnvelope = controlReplyEnvelope(taskID: reference.taskID, basedOn: envelope)
-        textClarifications.invalidate(for: questionEnvelope)
-        (executor as? any ComputerUseClarificationContinuing)?.invalidateClarification(taskID: reference.taskID)
+        textClarifications.invalidate(for: owner.questionEnvelope)
+        (executor as? any ComputerUseClarificationContinuing)?.invalidateClarification(
+            taskID: owner.reference.taskID)
     }
 
     private func startApprovalDelivery(_ approval: PendingApproval) {
