@@ -12,6 +12,8 @@ final class AgentEvalPreflightTests: XCTestCase {
         XCTAssertEqual(SuiteCleanStartWindowRole.classify("AXDialog"), .window)
         XCTAssertEqual(SuiteCleanStartWindowRole.classify("AXSheet"), .window)
         XCTAssertEqual(SuiteCleanStartWindowRole.classify("AXScrollArea"), .nonWindow)
+        XCTAssertEqual(SuiteCleanStartWindowRole.classify("AXHelpTag"), .nonWindow)
+        XCTAssertEqual(SuiteCleanStartWindowRole.classify("AXTextField"), .unknown)
         XCTAssertEqual(SuiteCleanStartWindowRole.classify("AXUnrecognizedRole"), .unknown)
     }
 

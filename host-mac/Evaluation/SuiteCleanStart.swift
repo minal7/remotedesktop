@@ -30,7 +30,9 @@ enum SuiteCleanStartWindowRole: Equatable {
     static func classify(_ role: String) -> Self {
         switch role {
         case "AXWindow", "AXDialog", "AXSheet": .window
-        case "AXScrollArea": .nonWindow
+        // Safari can surface help tags in AXWindows even though they are not
+        // app windows; ignore this known transient role, not unknown roles.
+        case "AXScrollArea", "AXHelpTag": .nonWindow
         default: .unknown
         }
     }
