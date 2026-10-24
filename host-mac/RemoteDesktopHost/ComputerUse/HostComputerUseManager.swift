@@ -4173,7 +4173,10 @@ final class HostComputerUseManager: ObservableObject {
     /// network request, so Task cancellation alone is not a sufficient fence.
     private var transportGeneration: UInt64 = 0
     private var peerAuthorizationGeneration: UInt64 = 0
-    private var executionTask: Task<Void, Never>?
+    private var executionTaskSlotID = UUID()
+    private var executionTask: Task<Void, Never>? {
+        didSet { executionTaskSlotID = UUID() }
+    }
     private var currentExecution: ExecutionContext?
     private var pausedExecution: ExecutionContext?
     /// One host task can be resumably paused at a time. Retaining its exact
@@ -4534,7 +4537,11 @@ final class HostComputerUseManager: ObservableObject {
 
     func revokeLocalPeerAuthorization(senderID: String) {
         guard localAuthorizedPeerID == senderID else { return }
-        taskMemoryContextSlot?.clear()
+        let boundMemoryTask = [currentExecution, pausedExecution, pendingApproval?.context]
+            .compactMap { $0 }
+            .first { $0.envelope.senderID == senderID
+                && taskMemoryContextSlot?.hasLease(taskID: $0.envelope.id) == true }
+        taskMemoryContextSlot?.revokeAuthorization()
         invalidateMemoryErasureFence()
         localAuthorizedPeerID = nil
         localMemorySessionID = nil
@@ -4546,6 +4553,34 @@ final class HostComputerUseManager: ObservableObject {
         } else {
             revokePeerAuthorization()
         }
+        if let boundMemoryTask {
+            terminateMemoryTaskAfterAuthorizationRevocation(boundMemoryTask)
+        }
+    }
+
+    private func terminateMemoryTaskAfterAuthorizationRevocation(_ context: ExecutionContext) {
+        let response: String
+        do {
+            let resolution = try taskLedger.cancelLocally(taskID: context.envelope.id,
+                senderID: context.envelope.senderID, sessionID: context.envelope.sessionID)
+            guard resolution.disposition != .identityMismatch,
+                  resolution.state == .cancelled,
+                  let terminalResponse = resolution.terminalResponse else {
+                throw ComputerUseTaskLedger.LedgerError.invalidIdentity
+            }
+            response = terminalResponse
+        } catch {
+            stopExecution(context)
+            send(kind: .assistant, body: Self.terminalPersistenceFailureResponse,
+                replyingTo: context.envelope, channel: context.channel,
+                outcome: .unableToComplete)
+            sendStatus("ready", replyingTo: context.envelope, channel: context.channel)
+            return
+        }
+        stopExecution(context)
+        sendDurableTerminal(response, outcome: .unableToComplete,
+            replyingTo: context.envelope, channel: context.channel)
+        sendStatus("ready", replyingTo: context.envelope, channel: context.channel)
     }
 
     /// Binds the authenticated local peer to the phone's explicit connection
@@ -5138,6 +5173,7 @@ final class HostComputerUseManager: ObservableObject {
         pollingTask?.cancel()
         pollingTask = nil
         executionTask?.cancel()
+        releaseExecutionTaskHandleAfterCancellation()
         currentExecution = nil
         pausedExecution = nil
         pendingApproval = nil
@@ -5846,6 +5882,7 @@ final class HostComputerUseManager: ObservableObject {
         cancelActiveVisualApprovalContinuation()
         cancelActiveTaskWork()
         executionTask?.cancel()
+        releaseExecutionTaskHandleAfterCancellation()
         currentExecution = nil
         pausedExecution = nil
         pendingApproval = nil
@@ -6079,6 +6116,21 @@ final class HostComputerUseManager: ObservableObject {
                 else { await agent.cancelAgent() }
             }
             return
+        }
+    }
+
+    /// Keep the execution handle as a join barrier until both the task and
+    /// serialized agent cancellation have unwound. A later task assignment
+    /// changes the slot identity, so stale cleanup cannot clear its handle.
+    private func releaseExecutionTaskHandleAfterCancellation() {
+        guard let retiringExecution = executionTask else { return }
+        let retiringSlotID = executionTaskSlotID
+        let lifecycle = agentLifecycleTask
+        Task { @MainActor [weak self] in
+            await retiringExecution.value
+            await lifecycle?.value
+            guard let self, self.executionTaskSlotID == retiringSlotID else { return }
+            self.executionTask = nil
         }
     }
 

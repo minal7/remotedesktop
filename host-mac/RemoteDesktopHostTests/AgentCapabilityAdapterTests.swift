@@ -1,6 +1,7 @@
 import AppKit
 import XCTest
 @testable import RemoteDesktopHost
+@testable import MemoryStoreKit
 
 @MainActor
 final class AgentCapabilityAdapterTests: XCTestCase {
@@ -157,6 +158,129 @@ final class AgentCapabilityAdapterTests: XCTestCase {
         XCTAssertEqual(fixture.environments[0].resumeCount, 1)
     }
 
+    func testFreshTaskAbandonsInvalidatedAskUserLoopBeforeStarting() async throws {
+        let fixture = AdapterFixture(replies: [
+            [.askUser(question: "Which detail is needed?", choices: nil)],
+            [.done(answer: "Fresh task completed")]
+        ])
+        let adapter = AgentCapabilityAdapter(executor: fixture.executor)
+        let first = try await adapter.execute(taskID: "old-question", prompt: "Old prompt",
+            trustedUserPrompt: "Old request", tools: hostTools(), progress: { _ in })
+        XCTAssertEqual(first, .clarificationRequired("Which detail is needed?"))
+        let oldLoop = try XCTUnwrap(fixture.executor.activeLoop)
+        let oldRecorder = fixture.recorder
+        let oldQuestion = try XCTUnwrap(adapter.clarification(taskID: "old-question"))
+
+        // This is the manager's ordinary-new-request path: the old durable
+        // clarification reference is retired before the new task executes.
+        adapter.invalidateClarification(taskID: "old-question")
+        let next = try await adapter.execute(taskID: "new-request", prompt: "New prompt",
+            trustedUserPrompt: "New request", tools: hostTools(), progress: { _ in })
+
+        XCTAssertEqual(next, .completed("Fresh task completed"))
+        XCTAssertEqual(oldRecorder.footers.last?.outcome, "cancelled")
+        XCTAssertNil(oldLoop.pendingQuestion)
+        XCTAssertEqual(fixture.factoryPrompts, ["Old request", "New request"])
+        XCTAssertEqual(fixture.executor.activeTaskID, "new-request")
+        do {
+            _ = try await adapter.continueClarification(taskID: "stale-answer",
+                originatingTaskID: "old-question", goal: oldQuestion.goal, progress: { _ in })
+            XCTFail("An abandoned question must not resume after a new task takes ownership")
+        } catch { XCTAssertEqual(error as? AgentCapabilityAdapter.AdapterError, .invalidClarification) }
+    }
+
+    func testFailedQuestionRetirementBlocksFreshTaskAndRetainsOwnership() async throws {
+        let fixture = AdapterFixture(replies: [
+            [.askUser(question: "Which detail is needed?", choices: nil)],
+            [.done(answer: "Must not start")]
+        ])
+        let adapter = AgentCapabilityAdapter(executor: fixture.executor)
+        _ = try await adapter.execute(taskID: "old-question", prompt: "Old prompt",
+            trustedUserPrompt: "Old request", tools: hostTools(), progress: { _ in })
+        fixture.recorder.failFinish = true
+        adapter.invalidateClarification(taskID: "old-question")
+
+        do {
+            _ = try await adapter.execute(taskID: "new-request", prompt: "New prompt",
+                trustedUserPrompt: "New request", tools: hostTools(), progress: { _ in })
+            XCTFail("A failed old-episode footer must not transfer executor ownership")
+        } catch { XCTAssertTrue(error is AgentLoopError) }
+        do {
+            _ = try await adapter.execute(taskID: "new-request", prompt: "New prompt",
+                trustedUserPrompt: "New request", tools: hostTools(), progress: { _ in })
+            XCTFail("A cancellation-fenced executor must keep rejecting replacement work")
+        } catch { XCTAssertEqual(error as? AgentTaskExecutorError, .cancellationInProgress) }
+        XCTAssertEqual(fixture.executor.activeTaskID, "old-question")
+        XCTAssertEqual(fixture.factoryPrompts, ["Old request"])
+    }
+
+    func testRetiringOldQuestionPreservesNewTaskMemoryContext() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "AdapterMemory-\(UUID())", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700])
+        defer { try? FileManager.default.removeItem(at: root) }
+        try MemoryStoreFactory.preparePrivateRoot(root)
+        let binding = try XCTUnwrap(MemoryStoreFactory.captureBindingForTesting(enabled: true,
+            root: root, client: ContextTestKeychain(), namespace: .testing(UUID().uuidString)))
+        let peer = UUID().uuidString.lowercased(), session = UUID().uuidString
+        let oldLease = LocalMemoryHostLease(peerID: peer, sessionID: session, taskID: "old-question",
+            authorizationGeneration: 1, taskAuthority: .active)
+        let newLease = LocalMemoryHostLease(peerID: peer, sessionID: session, taskID: "new-request",
+            authorizationGeneration: 1, taskAuthority: .active)
+        let slot = TaskMemoryContextSlot()
+        slot.stage("old synthetic context", taskID: "old-question", lease: oldLease,
+            binding: binding) { true }
+        let fixture = AdapterFixture(replies: [
+            [.askUser(question: "Which detail is needed?", choices: nil)],
+            [.done(answer: "Fresh task completed")]
+        ], memorySlot: slot)
+        let adapter = AgentCapabilityAdapter(executor: fixture.executor)
+        _ = try await adapter.execute(taskID: "old-question", prompt: "Old prompt",
+            trustedUserPrompt: "Old request", tools: hostTools(), progress: { _ in })
+        let oldLoop = try XCTUnwrap(fixture.executor.activeLoop)
+        adapter.invalidateClarification(taskID: "old-question")
+
+        // The manager prepares the next task's context before its adapter
+        // starts. Stopping the old pending-question policy must clear only
+        // the old task's slot binding.
+        slot.bindLease(newLease)
+        slot.stage("new synthetic context", taskID: "new-request", lease: newLease,
+            binding: binding) { true }
+        let next = try await adapter.execute(taskID: "new-request", prompt: "New prompt",
+            trustedUserPrompt: "New request", tools: hostTools(), progress: { _ in })
+        let staleRun = try await oldLoop.run()
+
+        XCTAssertEqual(next, .completed("Fresh task completed"))
+        XCTAssertEqual(staleRun, .cancelled)
+        XCTAssertEqual(fixture.policies[0].proposalCount, 1,
+            "The cancelled old loop must not propose again with stale context")
+        XCTAssertEqual(fixture.policies[1].observations.first?.task.contains("new synthetic context"), true)
+        XCTAssertEqual(fixture.policies[1].observations.first?.task.contains("old synthetic context"), false)
+        XCTAssertNil(slot.read(taskID: "new-request"), "The completed new loop must clear its own context")
+    }
+
+    func testFreshTaskDoesNotReplacePendingApproval() async throws {
+        let fixture = AdapterFixture(replies: [
+            [.click(target: .element(id: 1), button: nil, count: nil)],
+            [.done(answer: "Must not start")]
+        ])
+        let adapter = AgentCapabilityAdapter(executor: fixture.executor)
+        let first = try await adapter.execute(taskID: "approval-root", prompt: "Click",
+            trustedUserPrompt: "Click the control", tools: hostTools(), progress: { _ in })
+        guard case .agentApprovalRequired = first else {
+            return XCTFail("Expected an approval that must retain its task ownership")
+        }
+
+        do {
+            _ = try await adapter.execute(taskID: "new-request", prompt: "New prompt",
+                trustedUserPrompt: "New request", tools: hostTools(), progress: { _ in })
+            XCTFail("A new task must not discard a pending approval")
+        } catch { XCTAssertEqual(error as? AgentTaskExecutorError, .taskAlreadyActive("approval-root")) }
+        XCTAssertEqual(fixture.executor.activeTaskID, "approval-root")
+        XCTAssertEqual(fixture.factoryPrompts, ["Click the control"])
+    }
+
     func testOrdinarySamePromptContinuationReusesPendingQuestionLoop() async throws {
         let fixture = AdapterFixture(replies: [[.askUser(question: "Need detail", choices: ["A", "B"])]])
         let adapter = AgentCapabilityAdapter(executor: fixture.executor)
@@ -198,6 +322,7 @@ final class AdapterFixture {
     private let secureObservationIndex: Int?
     private let trustedWeb: Bool
     private let trajectoryRoot: URL?
+    private let memorySlot: TaskMemoryContextSlot?
     private(set) lazy var recorder = AdapterRecorder()
     private(set) var trajectoryRecorder: TrajectoryRecorder?
     private(set) var factoryPrompts: [String] = []
@@ -209,17 +334,19 @@ final class AdapterFixture {
     }
 
     init(replies: [[AgentAction]], secureObservationIndex: Int? = nil, trustedWeb: Bool = false,
-         trajectoryRoot: URL? = nil) {
+         trajectoryRoot: URL? = nil, memorySlot: TaskMemoryContextSlot? = nil) {
         self.replies = replies
         self.secureObservationIndex = secureObservationIndex
         self.trustedWeb = trustedWeb
         self.trajectoryRoot = trajectoryRoot
+        self.memorySlot = memorySlot
     }
 
     private func makeLoop(taskID: String, prompt: String) throws -> AgentLoop {
         factoryPrompts.append(prompt)
         let environment = AdapterEnvironment(taskID: taskID, secureObservationIndex: secureObservationIndex)
-        let policy = AdapterPolicy(replies: replies.isEmpty ? [] : replies.removeFirst())
+        let basePolicy = AdapterPolicy(replies: replies.isEmpty ? [] : replies.removeFirst())
+        let policy = TaskMemoryContextPolicy.applying(taskID: taskID, slot: memorySlot, base: basePolicy)
         let recorder: AgentRecording
         if let trajectoryRoot {
             let actualRecorder = try TrajectoryRecorder(root: trajectoryRoot, episodeID: taskID)
@@ -230,7 +357,7 @@ final class AdapterFixture {
             self.recorder = testRecorder
             recorder = testRecorder
         }
-        environments.append(environment); policies.append(policy)
+        environments.append(environment); policies.append(basePolicy)
         return try AgentLoop(taskID: taskID, prompt: prompt, environment: environment, policy: policy,
             gate: AgentActionGate(trustStore: AdapterTrustStore(trustedWeb: trustedWeb),
                                   allowPolicy: AdapterAllowPolicy()),
@@ -332,6 +459,7 @@ final class AdapterRecorder: AgentRecording {
     private let episodeID: String?
     private(set) var steps: [AgentEpisodeStep] = []
     private(set) var footers: [AgentEpisodeFooter] = []
+    var failFinish = false
     init(episodeID: String? = nil) { self.episodeID = episodeID }
     func record(_ step: AgentEpisodeStep) throws {
         guard (episodeID == nil || step.episodeID == episodeID), step.step == step.observation.budget.step else {
@@ -340,6 +468,7 @@ final class AdapterRecorder: AgentRecording {
         steps.append(step)
     }
     func finish(_ footer: AgentEpisodeFooter) throws {
+        if failFinish { throw TrajectoryRecorder.Failure.invalidEpisode }
         guard episodeID == nil || footer.episodeID == episodeID else {
             throw TrajectoryRecorder.Failure.invalidEpisode
         }

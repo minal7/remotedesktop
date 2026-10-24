@@ -62,6 +62,7 @@ final class TaskMemoryContextSlot {
     private var value: Value?
     private var revokedTaskID: String?
     private var boundTaskID: String?
+    private var authorizationRevokedTaskID: String?
     let leaseAuthorizationBox: TaskMemoryContextLeaseAuthorizationBox
 
     init(leaseAuthorizationBox: TaskMemoryContextLeaseAuthorizationBox = .init()) {
@@ -72,6 +73,7 @@ final class TaskMemoryContextSlot {
         guard let taskID = lease.taskID else { clear(); return }
         boundTaskID = taskID
         revokedTaskID = nil
+        authorizationRevokedTaskID = nil
         leaseAuthorizationBox.bind(lease)
     }
 
@@ -96,6 +98,23 @@ final class TaskMemoryContextSlot {
 
     func contains(taskID: String) -> Bool { value?.taskID == taskID || revokedTaskID == taskID }
 
+    func hasLease(taskID: String) -> Bool { boundTaskID == taskID || value?.taskID == taskID }
+
+    func authorizationWasRevoked(taskID: String) -> Bool {
+        authorizationRevokedTaskID == taskID
+    }
+
+    func revokeAuthorization() {
+        if let boundTaskID { authorizationRevokedTaskID = boundTaskID }
+        else if let value { authorizationRevokedTaskID = value.taskID }
+        clear()
+    }
+
+    func clear(taskID: String) {
+        guard boundTaskID == taskID || value?.taskID == taskID || revokedTaskID == taskID else { return }
+        clear()
+    }
+
     func clear() {
         leaseAuthorizationBox.clear()
         if let value { revokedTaskID = value.taskID }
@@ -111,6 +130,7 @@ final class TaskMemoryContextSlot {
         value = nil
         boundTaskID = nil
         revokedTaskID = nil
+        authorizationRevokedTaskID = nil
         return true
     }
 }
@@ -136,18 +156,28 @@ final class TaskMemoryContextPolicy: AgentPolicy {
     func propose(_ observation: AgentObservation) async throws -> AgentPolicyOutput {
         let hadContext = slot.contains(taskID: taskID)
         let context = slot.read(taskID: taskID)
-        guard !hadContext || context != nil else { throw TaskMemoryContextFailure.invalidLease }
+        guard !hadContext || context != nil else { throw invalidatedContextError() }
         guard !Task.isCancelled else { throw CancellationError() }
         let modelObservation = observationWithContext(observation, context?.text)
         if let context {
             TaskMemoryPromptEvidence.recordAppliedContext(context.text, taskID: taskID)
         }
-        let output = try await base.propose(modelObservation)
+        let output: AgentPolicyOutput
+        do { output = try await base.propose(modelObservation) }
+        catch {
+            if slot.authorizationWasRevoked(taskID: taskID) {
+                throw AgentPolicyTermination.authorizationRevoked
+            }
+            throw error
+        }
+        if slot.authorizationWasRevoked(taskID: taskID) {
+            throw AgentPolicyTermination.authorizationRevoked
+        }
         guard !Task.isCancelled else { throw CancellationError() }
         if let context {
             guard slot.read(taskID: taskID)?.lease == context.lease,
                   slot.read(taskID: taskID)?.binding == context.binding else {
-                throw TaskMemoryContextFailure.invalidLease
+                throw invalidatedContextError()
             }
         }
         return output
@@ -155,7 +185,13 @@ final class TaskMemoryContextPolicy: AgentPolicy {
 
     func suspend() async { await base.suspend() }
     func resume() async throws { try await base.resume() }
-    func stop() async { slot.clear(); await base.stop() }
+    func stop() async { slot.clear(taskID: taskID); await base.stop() }
+
+    private func invalidatedContextError() -> Error {
+        slot.authorizationWasRevoked(taskID: taskID)
+            ? AgentPolicyTermination.authorizationRevoked
+            : CancellationError()
+    }
 
     private func observationWithContext(_ observation: AgentObservation, _ context: String?) -> AgentObservation {
         guard let context else { return observation }

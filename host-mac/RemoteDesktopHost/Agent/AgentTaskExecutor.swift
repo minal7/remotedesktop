@@ -69,6 +69,15 @@ final class AgentTaskExecutor {
         return try await loop.resume(answer: answer)
     }
 
+    func abandonPendingQuestion(taskID: String, questionID: UUID) async throws {
+        let loop = try requireActive(taskID: taskID)
+        guard !loop.didFinish, !loop.isRunning, loop.pendingStep == nil,
+              loop.pendingQuestion?.id == questionID else {
+            throw AgentTaskExecutorError.staleQuestion
+        }
+        try await cancel()
+    }
+
     func pause() async {
         await active?.loop.pause()
     }

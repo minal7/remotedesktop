@@ -65,6 +65,22 @@ final class AgentCapabilityAdapter: ComputerUseTaskAwareExecuting, ComputerUseCl
         let executionTaskID: String
         let executionPrompt: String
         if rootTaskID != taskID && hostTaskID != taskID {
+            if executor.activeLoop?.cancelRequested == true {
+                throw AgentTaskExecutorError.cancellationInProgress
+            } else if let activeTaskID = executor.activeTaskID,
+                      let activeLoop = executor.activeLoop,
+                      activeTaskID == rootTaskID,
+                      let question = activeLoop.pendingQuestion {
+                // A fresh host task explicitly replaces the old ask_user
+                // handoff. Close its loop and episode before transferring
+                // executor ownership; running work and approvals still fail
+                // the ordinary active-task check below.
+                try await executor.abandonPendingQuestion(taskID: activeTaskID, questionID: question.id)
+                self.rootTaskID = nil
+                self.hostTaskID = nil
+                goal = nil
+                pendingQuestion = nil
+            }
             guard executor.activeTaskID == nil || executor.activeLoop?.didFinish == true else {
                 throw AgentTaskExecutorError.taskAlreadyActive(executor.activeTaskID ?? "")
             }

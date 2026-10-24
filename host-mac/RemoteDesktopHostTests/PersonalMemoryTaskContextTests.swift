@@ -131,7 +131,7 @@ final class PersonalMemoryTaskContextTests: XCTestCase {
         do {
             _ = try await policy.propose(observation)
             XCTFail("A revoked task context must fail closed")
-        } catch is TaskMemoryContextFailure {}
+        } catch is CancellationError {}
         XCTAssertNil(base.seen, "The stale context must be rejected before a policy call")
     }
     func testPolicyResultIsDiscardedWhenContextIsRevokedDuringAwait() async throws {
@@ -159,7 +159,190 @@ final class PersonalMemoryTaskContextTests: XCTestCase {
         do {
             _ = try await proposal.value
             XCTFail("A policy result from a revoked task context must not escape")
-        } catch is TaskMemoryContextFailure {}
+        } catch is CancellationError {}
+    }
+
+    func testRevocationMapsLatePolicyFailureToTerminalAuthorizationError() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("TaskContext-\(UUID())", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700])
+        defer { try? FileManager.default.removeItem(at: root) }
+        try MemoryStoreFactory.preparePrivateRoot(root)
+        let binding = try XCTUnwrap(MemoryStoreFactory.captureBindingForTesting(enabled: true,
+            root: root, client: ContextTestKeychain(), namespace: .testing(UUID().uuidString)))
+        let lease = LocalMemoryHostLease(peerID: UUID().uuidString.lowercased(), sessionID: "session",
+            taskID: "late-error-task", authorizationGeneration: 1, taskAuthority: .active)
+        let slot = TaskMemoryContextSlot()
+        slot.stage("synthetic context", taskID: "late-error-task", lease: lease, binding: binding) { true }
+        let base = LateFailureContextPolicy(error: URLError(.cancelled))
+        let policy = TaskMemoryContextPolicy.applying(taskID: "late-error-task", slot: slot, base: base)
+        let observation = AgentObservation(task: "Original", surface: .web(url: "https://example.test", title: nil),
+            screenshot: "synthetic", elements: [], focus: nil, history: [], budget: AgentStepBudget(step: 0, maxSteps: 1))
+        let proposal = Task { try await policy.propose(observation) }
+        let entered = await base.waitUntilEntered()
+        XCTAssertTrue(entered)
+        guard entered else { slot.revokeAuthorization(); return }
+
+        slot.revokeAuthorization()
+        await base.release()
+        do {
+            _ = try await proposal.value
+            XCTFail("A late policy failure after Memory authorization revocation must be terminalized.")
+        } catch AgentPolicyTermination.authorizationRevoked {}
+    }
+
+    func testAuthorizationRevocationTerminalizesPausedLoopWithoutPolicyRetries() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("TaskContext-\(UUID())", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700])
+        defer { try? FileManager.default.removeItem(at: root) }
+        try MemoryStoreFactory.preparePrivateRoot(root)
+        let binding = try XCTUnwrap(MemoryStoreFactory.captureBindingForTesting(enabled: true,
+            root: root, client: ContextTestKeychain(), namespace: .testing(UUID().uuidString)))
+        let taskID = "revoked-memory-task", slot = TaskMemoryContextSlot()
+        let lease = LocalMemoryHostLease(peerID: UUID().uuidString.lowercased(), sessionID: "session",
+            taskID: taskID, authorizationGeneration: 1, taskAuthority: .active)
+        slot.stage("synthetic context", taskID: taskID, lease: lease, binding: binding) { true }
+        let base = BlockingContextPolicy()
+        let policy = TaskMemoryContextPolicy.applying(taskID: taskID, slot: slot, base: base)
+        let recorder = RevocationContextRecorder()
+        let loop = try AgentLoop(taskID: taskID, prompt: "Use the saved fact",
+            environment: ContextEnvironment(taskID: taskID), policy: policy,
+            gate: AgentActionGate(trustStore: ContextTrustStore(), allowPolicy: ContextAllowPolicy()),
+            recorder: recorder, journal: ContextJournal())
+        let run = Task { try await loop.run() }
+        let entered = await base.waitUntilEntered()
+        XCTAssertTrue(entered)
+        guard entered else { slot.revokeAuthorization(); return }
+
+        slot.revokeAuthorization()
+        loop.pauseRequested = true
+        await base.release()
+        let result = try await run.value
+
+        XCTAssertEqual(result, .cancelled, "A revoked memory authorization is terminal even if a pause was requested.")
+        XCTAssertTrue(loop.didFinish)
+        XCTAssertEqual(recorder.stepCount, 0, "The stale policy output must not be recorded as an action.")
+        XCTAssertEqual(recorder.footer?.outcome, "cancelled")
+        XCTAssertEqual(loop.stepIndex, 0, "A revoked policy call must not be recorded or retried.")
+    }
+
+    func testOldTaskPolicyStopDoesNotClearNewTaskContext() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("TaskContext-\(UUID())", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700])
+        defer { try? FileManager.default.removeItem(at: root) }
+        try MemoryStoreFactory.preparePrivateRoot(root)
+        let binding = try XCTUnwrap(MemoryStoreFactory.captureBindingForTesting(enabled: true,
+            root: root, client: ContextTestKeychain(), namespace: .testing(UUID().uuidString)))
+        let slot = TaskMemoryContextSlot()
+        let oldLease = LocalMemoryHostLease(peerID: "old-peer", sessionID: "old-session",
+            taskID: "old-task", authorizationGeneration: 1, taskAuthority: .active)
+        slot.stage("old synthetic context", taskID: "old-task", lease: oldLease, binding: binding) { true }
+        let oldPolicy = TaskMemoryContextPolicy.applying(taskID: "old-task", slot: slot,
+            base: ContextRecordingPolicy())
+        let newLease = LocalMemoryHostLease(peerID: "new-peer", sessionID: "new-session",
+            taskID: "new-task", authorizationGeneration: 2, taskAuthority: .active)
+        slot.stage("new synthetic context", taskID: "new-task", lease: newLease, binding: binding) { true }
+
+        await oldPolicy.stop()
+
+        XCTAssertEqual(slot.read(taskID: "new-task")?.text, "new synthetic context")
+    }
+
+    func testLocalAuthorizationRevocationCancelsBoundMemoryTaskAndAllowsFreshTask() async throws {
+        let store = try ContextStoreFixture()
+        defer { store.cleanup() }
+        let peer = UUID().uuidString.lowercased(), session = UUID().uuidString
+        try store.service.writer.remember(kind: .fact, text: "Harbor City is a fictional saved preference.",
+            commandID: UUID().uuidString.lowercased(), context: OwnerMemoryContext(ownerID: store.owner,
+                sessionID: session, taskID: "revoked-task"))
+        let provider = BuilderContextProvider(binding: store.binding,
+            builder: MemoryContextBuilder(writer: store.service.writer, embedding: ContextEmbedding(),
+                tokenCounter: ContextTokenCounter()), ownerID: store.owner, sessionID: session)
+        let slot = TaskMemoryContextSlot(), observed = ContextObservedPolicy(blocksFirstProposal: true)
+        let agent = AgentTaskExecutor { taskID, prompt in
+            try self.makeLoop(taskID: taskID, prompt: prompt, policy: observed, slot: slot)
+        }
+        let executor = ComputerUseCapabilityExecutor(agentAdapter: AgentCapabilityAdapter(executor: agent))
+        let (manager, channel, ledgerURL) = makeManager(peer: peer, session: session,
+            executor: executor, provider: provider, slot: slot)
+        defer { try? FileManager.default.removeItem(at: ledgerURL.deletingLastPathComponent()) }
+
+        XCTAssertTrue(manager.authorizeLocalPeer(senderID: peer))
+        XCTAssertTrue(manager.bindLocalMemorySession(peerID: peer, sessionID: session))
+        XCTAssertTrue(manager.handle(try prompt("revoked-task", peer: peer, session: session), channel: channel))
+        let entered = await observed.waitUntilBlocked()
+        XCTAssertTrue(entered)
+        guard entered else { await manager.shutdown(); return }
+        XCTAssertTrue(slot.hasLease(taskID: "revoked-task"))
+        let revokedLoop = agent.activeLoop
+        XCTAssertNotNil(revokedLoop)
+
+        manager.revokeLocalPeerAuthorization(senderID: UUID().uuidString.lowercased())
+        XCTAssertTrue(slot.hasLease(taskID: "revoked-task"),
+            "A stale or unrelated peer revocation must not clear the active task's lease.")
+        if case .working(_) = manager.activity {} else {
+            XCTFail("An unrelated peer must not pause or terminate the active Memory task.")
+        }
+
+        manager.revokeLocalPeerAuthorization(senderID: peer)
+        await observed.releaseBlock()
+        await waitUntil {
+            manager.activity == .idle
+                && revokedLoop?.didFinish == true
+                && manager.permitsOwnerMemorySession
+        }
+        XCTAssertEqual(revokedLoop?.terminalResult, .cancelled)
+        XCTAssertTrue(revokedLoop?.didFinish == true)
+        XCTAssertTrue(manager.permitsOwnerMemorySession,
+            "A new authenticated session is available only after the cancelled execution has fully joined.")
+        XCTAssertNil(observed.recordedTask, "The revoked task must not record or expose the stale policy result.")
+
+        XCTAssertTrue(manager.authorizeLocalPeer(senderID: peer))
+        XCTAssertTrue(manager.bindLocalMemorySession(peerID: peer, sessionID: session))
+        XCTAssertTrue(manager.handle(try prompt("fresh-task-after-revocation", peer: peer, session: session),
+            channel: channel))
+        await waitUntil { observed.observations.count >= 2 && manager.activity == .idle }
+        XCTAssertEqual(observed.observations.count, 2)
+        let freshObservation = try XCTUnwrap(observed.observations.last)
+        XCTAssertTrue(freshObservation.task.contains("Harbor City"),
+            "A separately accepted task can prepare a fresh context after revoked work is terminal.")
+        let providerCalls = await provider.calls
+        XCTAssertEqual(providerCalls, 2)
+        await manager.shutdown()
+    }
+
+    func testRevokingPeerWithoutMemoryLeasePreservesOrdinaryPause() async throws {
+        let peer = UUID().uuidString.lowercased(), session = UUID().uuidString
+        let provider = CountingContextProvider(), slot = TaskMemoryContextSlot()
+        let observed = ContextObservedPolicy(blocksFirstProposal: true)
+        let agent = AgentTaskExecutor { taskID, prompt in
+            try self.makeLoop(taskID: taskID, prompt: prompt, policy: observed, slot: slot)
+        }
+        let executor = ComputerUseCapabilityExecutor(agentAdapter: AgentCapabilityAdapter(executor: agent))
+        let (manager, channel, ledgerURL) = makeManager(peer: peer, session: session,
+            executor: executor, provider: provider, slot: slot)
+        defer { try? FileManager.default.removeItem(at: ledgerURL.deletingLastPathComponent()) }
+
+        XCTAssertTrue(manager.authorizeLocalPeer(senderID: peer))
+        XCTAssertTrue(manager.bindLocalMemorySession(peerID: peer, sessionID: session))
+        XCTAssertTrue(manager.handle(try prompt("no-memory-task", peer: peer, session: session,
+            policy: .init(noMemory: true)), channel: channel))
+        let entered = await observed.waitUntilBlocked()
+        XCTAssertTrue(entered)
+        guard entered else { await manager.shutdown(); return }
+        manager.revokeLocalPeerAuthorization(senderID: peer)
+        await observed.releaseBlock()
+        await waitUntil { manager.activity == .paused }
+
+        XCTAssertEqual(manager.activity, .paused)
+        XCTAssertFalse(agent.activeLoop?.didFinish ?? true,
+            "An unrelated task with no Memory lease keeps the existing resumable pause behavior.")
+        let providerCounts = await provider.counts
+        XCTAssertEqual(providerCounts.capture, 0)
+        XCTAssertEqual(providerCounts.prepare, 0)
+        await manager.shutdown()
     }
     func testIncognitoAndNoMemorySkipAllContextProviderCalls() async throws {
         for policy in [ComputerUseTaskMemoryPolicy(noMemory: true),
@@ -504,4 +687,39 @@ final class PersonalMemoryTaskContextTests: XCTestCase {
         }
         XCTFail("Timed out waiting for synthetic task-context result")
     }
+}
+
+@MainActor
+private final class RevocationContextRecorder: AgentRecording {
+    private(set) var stepCount = 0
+    private(set) var footer: AgentEpisodeFooter?
+    func record(_ step: AgentEpisodeStep) throws { stepCount += 1 }
+    func finish(_ footer: AgentEpisodeFooter) throws { self.footer = footer }
+}
+
+@MainActor
+private final class LateFailureContextPolicy: AgentPolicy {
+    let promptVersion = "late-failure-context-test"
+    private let error: any Error
+    private var entered = false
+    private var releaseWaiter: CheckedContinuation<Void, Never>?
+
+    init(error: any Error) { self.error = error }
+
+    func propose(_ observation: AgentObservation) async throws -> AgentPolicyOutput {
+        entered = true
+        await withCheckedContinuation { releaseWaiter = $0 }
+        throw error
+    }
+
+    func waitUntilEntered() async -> Bool {
+        for _ in 0..<200 {
+            if entered { return true }
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+        return entered
+    }
+
+    func release() { releaseWaiter?.resume(); releaseWaiter = nil }
+    func stop() async { release() }
 }

@@ -1,5 +1,9 @@
 import Foundation
 
+enum AgentPolicyTermination: Error {
+    case authorizationRevoked
+}
+
 @MainActor
 final class AgentLoop {
     struct PendingStep { let resolved: AgentResolvedAction; let approval: AgentApprovalRequest; let note: String? }
@@ -72,6 +76,10 @@ final class AgentLoop {
         isRunning = true; defer { completeRunCall() }
         return try await withTaskCancellationHandler {
             do { return try await body() }
+            catch AgentPolicyTermination.authorizationRevoked {
+                corrections.append("Local authorization ended; the task stopped before using its stale result.")
+                return try await finish(.cancelled, outcome: "cancelled")
+            }
             catch is CancellationError {
                 if pauseRequested && !cancelRequested { return .paused }
                 return try await finish(.cancelled, outcome: "cancelled")
@@ -183,6 +191,9 @@ final class AgentLoop {
             let output: AgentPolicyOutput
             do { output = try await policy.propose(frame.observation) }
             catch is CancellationError { throw CancellationError() }
+            catch AgentPolicyTermination.authorizationRevoked {
+                throw AgentPolicyTermination.authorizationRevoked
+            }
             catch {
                 if let result = try recordRejection(frame, raw: "", action: nil, reason: "Policy error: \(error)",
                     start: start, observeMS: observeMS, policyMS: ms(policyStart)) { return result }

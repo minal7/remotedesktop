@@ -647,6 +647,10 @@
     "RemoteDesktopHostTests/PixelEnvironmentTests/testPixelPersonalDataGuardBlocksActualHitOrParentBeforeDispatch",
     "RemoteDesktopHostTests/AgentHostServicesTests/testAppRegistryDoesNotFollowArbitrarySymlinkBundles",
     "RemoteDesktopHostTests/AgentHostServicesTests/testCryptexSystemApplicationRootDiscoversGenericDisplayNames",
-    "RemoteDesktopHostTests/AgentSharedSupportTests/testMatchedWindowProjectsDetachedFocusedEditorWithoutLeakingSecureFocus"
+    "RemoteDesktopHostTests/AgentSharedSupportTests/testMatchedWindowProjectsDetachedFocusedEditorWithoutLeakingSecureFocus",
+    "RemoteDesktopHostTests/AgentCapabilityAdapterTests/testFailedQuestionRetirementBlocksFreshTaskAndRetainsOwnership",
+    "RemoteDesktopHostTests/AgentCapabilityAdapterTests/testFreshTaskAbandonsInvalidatedAskUserLoopBeforeStarting",
+    "RemoteDesktopHostTests/AgentCapabilityAdapterTests/testFreshTaskDoesNotReplacePendingApproval",
+    "RemoteDesktopHostTests/AgentCapabilityAdapterTests/testRetiringOldQuestionPreservesNewTaskMemoryContext"
   ]
 }
