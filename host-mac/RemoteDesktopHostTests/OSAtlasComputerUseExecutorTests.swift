@@ -542,6 +542,8 @@ final class OSAtlasLlamaRuntimeTests: XCTestCase {
                 ("--alias", ComputerUseHoloModel.modelAlias), ("--ctx-size", "8192"), ("--image-max-tokens", "1536"), ("--parallel", "1"), ("--poll", "0")] {
                 let index = try XCTUnwrap(configuration.arguments.firstIndex(of: flag)); XCTAssertEqual(configuration.arguments[index + 1], expected)
             }
+            let checkpointIndex = try XCTUnwrap(configuration.arguments.firstIndex(of: "--ctx-checkpoints"))
+            XCTAssertEqual(configuration.arguments[checkpointIndex + 1], "0", "Holo keeps its current checkpoint setting")
             XCTAssertFalse(configuration.arguments.contains(endpoint.bearerToken)); XCTAssertFalse(configuration.arguments.contains("--chat-template"))
             XCTAssertEqual(configuration.maximumProcessCount, 1)
             XCTAssertEqual(configuration.resourceProfile.maximumResidentMemoryBytes, 4 * 1_024 * 1_024 * 1_024)
@@ -666,6 +668,8 @@ final class OSAtlasLlamaRuntimeTests: XCTestCase {
                 let index = try XCTUnwrap(arguments.firstIndex(of: flag))
                 XCTAssertEqual(arguments[index + 1], value)
             }
+            let checkpointIndex = try XCTUnwrap(arguments.firstIndex(of: "--ctx-checkpoints"))
+            XCTAssertEqual(arguments[checkpointIndex + 1], "1", "Fara enables one context checkpoint")
             XCTAssertFalse(arguments.contains("--chat-template"))
             XCTAssertFalse(arguments.contains("--no-mmproj"))
             XCTAssertFalse(arguments.contains("--reasoning-budget"))
@@ -2731,6 +2735,9 @@ extension OSAtlasLlamaRuntimeTests {
             XCTAssertEqual(user.map { $0["type"] as? String ?? "" }, ["text", "image_url"])
             let launchConfigurations = await launcher.configurations()
             XCTAssertEqual(launchConfigurations.count, 1)
+            let configuration = try XCTUnwrap(launchConfigurations.first)
+            let checkpointIndex = try XCTUnwrap(configuration.arguments.firstIndex(of: "--ctx-checkpoints"))
+            XCTAssertEqual(configuration.arguments[checkpointIndex + 1], "1", "AgentVision using Fara also enables one context checkpoint")
         } catch {
             await runtime.shutdown()
             throw error
