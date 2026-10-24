@@ -140,6 +140,123 @@ final class AgentSharedSupportTests: XCTestCase {
         XCTAssertEqual(events.count, 0)
     }
 
+    func testMatchedWindowProjectsDetachedFocusedEditorWithoutLeakingSecureFocus() throws {
+        let bounds = CGRect(x: 100, y: 100, width: 400, height: 300)
+        let listed = MarkAXNode(identity: "listed-control", role: "AXButton",
+            rect: CGRect(x: 120, y: 130, width: 90, height: 28))
+        let detachedEditor = MarkAXNode(identity: "inline-editor", role: "AXTextField",
+            rect: CGRect(x: 150, y: 170, width: 140, height: 28))
+        func capture(_ focus: MarkAXNode, children: [MarkAXNode] = [listed], ancestors: [MarkAXNode] = [],
+                     owner: AnyHashable? = AnyHashable("selected-window"), focusPID: pid_t? = 42,
+                     windowPID: pid_t? = 42, maxNodes: Int = 160) -> PixelElementMarks {
+            let selected = MarkAXNode(identity: "selected-window", role: "AXWindow", rect: bounds, children: children)
+            let path: [any PixelAXNode] = [focus] + ancestors + [selected]
+            let validated = PixelFocusedAXProjection.project(path: path, ownerWindow: owner,
+                selectedWindow: selected.identity, focusPID: focusPID, selectedPID: windowPID,
+                expectedPID: 42, windowBounds: bounds, deadline: .now + .milliseconds(300))
+            let supplemental = validated.visibleRect.map {
+                MarkAXNode(identity: focus.identity, role: focus.role, rect: $0)
+            }
+            return ElementMarks.projectCaptureRoots(focusedWindow: selected, focusedBounds: bounds,
+                focusedElement: focus, detachedFocusedElement: supplemental, detachedSecureRects: validated.secureRects,
+                menuBar: nil, selectedBounds: bounds, deadline: .now + .milliseconds(300), maxNodes: maxNodes)
+        }
+
+        let projected = capture(detachedEditor)
+
+        XCTAssertEqual(projected.marks.compactMap { $0.identity as? String }, ["listed-control", "inline-editor"])
+        XCTAssertEqual(projected.focusedID, 2)
+        XCTAssertTrue(capture(detachedEditor, maxNodes: 2).marks.contains { $0.identity == AnyHashable("inline-editor") })
+
+        let duplicate = capture(detachedEditor, children: [listed, detachedEditor])
+        XCTAssertEqual(duplicate.marks.filter { $0.identity == AnyHashable("inline-editor") }.count, 1)
+        XCTAssertEqual(duplicate.focusedID, 2)
+
+        let foreignOwner = capture(detachedEditor, owner: "overlapping-window")
+        let missingOwner = capture(detachedEditor, owner: nil)
+        let foreignPID = capture(detachedEditor, focusPID: 99)
+        let foreignWindowPID = capture(detachedEditor, windowPID: 99)
+        let incomplete = PixelFocusedAXProjection.project(path: [detachedEditor],
+            ownerWindow: AnyHashable("selected-window"), selectedWindow: AnyHashable("selected-window"), focusPID: 42,
+            selectedPID: 42, expectedPID: 42, windowBounds: bounds, deadline: .now + .milliseconds(300))
+        let deadlineWindow = MarkAXNode(identity: "deadline-window", role: "AXWindow", rect: bounds)
+        let expired = PixelFocusedAXProjection.project(path: [detachedEditor, deadlineWindow],
+            ownerWindow: deadlineWindow.identity, selectedWindow: deadlineWindow.identity, focusPID: 42,
+            selectedPID: 42, expectedPID: 42, windowBounds: bounds, deadline: .now - .milliseconds(1))
+        XCTAssertFalse(foreignOwner.marks.contains { $0.identity == AnyHashable("inline-editor") })
+        XCTAssertFalse(missingOwner.marks.contains { $0.identity == AnyHashable("inline-editor") })
+        XCTAssertFalse(foreignPID.marks.contains { $0.identity == AnyHashable("inline-editor") })
+        XCTAssertFalse(foreignWindowPID.marks.contains { $0.identity == AnyHashable("inline-editor") })
+        XCTAssertNil(incomplete.visibleRect)
+        XCTAssertNil(expired.visibleRect)
+
+        let outside = MarkAXNode(identity: "outside-editor", role: "AXTextField",
+            rect: CGRect(x: 700, y: 170, width: 140, height: 28))
+        let outsideProjection = capture(outside)
+        XCTAssertFalse(outsideProjection.marks.contains { $0.identity == AnyHashable("outside-editor") })
+
+        let secure = MarkAXNode(identity: "secure-editor", role: "AXTextField",
+            rect: CGRect(x: 150, y: 210, width: 140, height: 28), secure: true)
+        let secureProjection = capture(secure)
+        XCTAssertFalse(secureProjection.marks.contains { $0.identity == AnyHashable("secure-editor") })
+        XCTAssertEqual(secureProjection.secureScreenRects, [CGRect(x: 150, y: 210, width: 140, height: 28)])
+        XCTAssertEqual(secure.valueReads, 0)
+
+        let hiddenFocused = MarkAXNode(identity: "hidden-editor", role: "AXTextField",
+            rect: CGRect(x: 160, y: 220, width: 120, height: 24))
+        let hiddenGroup = MarkAXNode(identity: "hidden-group", role: "AXGroup",
+            rect: CGRect(x: 140, y: 200, width: 180, height: 80), hidden: true, children: [hiddenFocused])
+        let hiddenProjection = capture(hiddenFocused, ancestors: [hiddenGroup])
+        XCTAssertFalse(hiddenProjection.marks.contains { $0.identity == AnyHashable("hidden-editor") })
+
+        let zeroFocused = MarkAXNode(identity: "zero-editor", role: "AXTextField",
+            rect: CGRect(x: 160, y: 220, width: 0, height: 24))
+        let zeroProjection = capture(zeroFocused)
+        XCTAssertFalse(zeroProjection.marks.contains { $0.identity == AnyHashable("zero-editor") })
+        let zeroAncestor = MarkAXNode(identity: "zero-ancestor", role: "AXGroup",
+            rect: CGRect(x: 140, y: 200, width: 0, height: 80))
+        let zeroAncestorProjection = capture(detachedEditor, ancestors: [zeroAncestor])
+        XCTAssertTrue(zeroAncestorProjection.marks.contains { $0.identity == AnyHashable("inline-editor") })
+        let geometrylessAncestor = MarkAXNode(identity: "geometryless-ancestor", role: "AXGroup", rect: nil)
+        XCTAssertTrue(capture(detachedEditor, ancestors: [geometrylessAncestor]).marks
+            .contains { $0.identity == AnyHashable("inline-editor") })
+
+        let clippedFocused = MarkAXNode(identity: "clipped-editor", role: "AXTextField",
+            rect: CGRect(x: 280, y: 220, width: 80, height: 24))
+        let clip = MarkAXNode(identity: "clip", role: "AXScrollArea",
+            rect: CGRect(x: 140, y: 200, width: 100, height: 80), children: [clippedFocused])
+        let clippedProjection = capture(clippedFocused, ancestors: [clip])
+        XCTAssertFalse(clippedProjection.marks.contains { $0.identity == AnyHashable("clipped-editor") })
+        let unknownClip = MarkAXNode(identity: "unknown-clip", role: "AXScrollArea", rect: nil)
+        XCTAssertFalse(capture(detachedEditor, ancestors: [unknownClip]).marks
+            .contains { $0.identity == AnyHashable("inline-editor") })
+        let partialFocused = MarkAXNode(identity: "partial-editor", role: "AXTextField",
+            rect: CGRect(x: 190, y: 220, width: 80, height: 24))
+        let partialClip = MarkAXNode(identity: "partial-clip", role: "AXScrollArea",
+            rect: CGRect(x: 200, y: 200, width: 60, height: 80))
+        let partialProjection = capture(partialFocused, children: [], ancestors: [partialClip])
+        XCTAssertEqual(partialProjection.marks.first?.identity, AnyHashable("partial-editor"))
+        XCTAssertEqual(partialProjection.marks.first?.screenRect, CGRect(x: 200, y: 220, width: 60, height: 24))
+
+        let scrollbarFocused = MarkAXNode(identity: "scrollbar-descendant-editor", role: "AXTextField",
+            rect: CGRect(x: 180, y: 220, width: 100, height: 24))
+        let scrollbar = MarkAXNode(identity: "scrollbar", role: "AXScrollBar",
+            rect: CGRect(x: 280, y: 200, width: 12, height: 100), children: [scrollbarFocused])
+        let scrollbarProjection = capture(scrollbarFocused, ancestors: [scrollbar])
+        XCTAssertFalse(scrollbarProjection.marks.contains { $0.identity == AnyHashable("scrollbar-descendant-editor") })
+
+        let protectedGroup = MarkAXNode(identity: "protected-group", role: "AXGroup",
+            rect: CGRect(x: 140, y: 200, width: 180, height: 80), protected: true, children: [detachedEditor])
+        let protectedProjection = capture(detachedEditor, ancestors: [protectedGroup])
+        XCTAssertFalse(protectedProjection.marks.contains { $0.identity == AnyHashable("inline-editor") })
+        XCTAssertEqual(protectedProjection.secureScreenRects, [protectedGroup.screenRect!])
+        let protectedWithoutFrame = MarkAXNode(identity: "protected-without-frame", role: "AXGroup",
+            rect: nil, protected: true)
+        let protectedFallback = capture(detachedEditor, ancestors: [protectedWithoutFrame])
+        XCTAssertFalse(protectedFallback.marks.contains { $0.identity == AnyHashable("inline-editor") })
+        XCTAssertEqual(protectedFallback.secureScreenRects, [bounds])
+    }
+
     func testElementMarksPruneHiddenScrollbarAndZeroAreaNodesButKeepVisiblePartialControls() throws {
         let hiddenChild = MarkAXNode(identity: "hidden-child", role: "AXButton",
             rect: CGRect(x: 10, y: 10, width: 20, height: 20))
@@ -350,16 +467,16 @@ final class AgentSharedSupportTests: XCTestCase {
         let screenRect: CGRect?
         let isEnabled: Bool? = true
         let isHidden: Bool
-        let isProtected = false
-        let isSecure = false
+        let isProtected: Bool
+        let isSecure: Bool
         let documentURL: String? = nil
         private let childNodes: [any PixelAXNode]
         private(set) var childrenReads = 0
 
         init(identity: AnyHashable, role: String, rect: CGRect?, hidden: Bool = false,
-             children: [any PixelAXNode] = []) {
+             secure: Bool = false, protected: Bool = false, children: [any PixelAXNode] = []) {
             self.identity = identity; self.role = role; screenRect = rect
-            isHidden = hidden; childNodes = children
+            isHidden = hidden; isSecure = secure; isProtected = protected; childNodes = children
             title = identity as? String
         }
         static func root(_ children: [any PixelAXNode]) -> MarkAXNode {

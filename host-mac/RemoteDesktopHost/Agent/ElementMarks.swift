@@ -319,7 +319,8 @@ enum ElementMarks {
     }
 
     static func projectCaptureRoots(focusedWindow: (any PixelAXNode)?, focusedBounds: CGRect?,
-                                    focusedElement: (any PixelAXNode)?, menuBar: (any PixelAXNode)?,
+                                    focusedElement: (any PixelAXNode)?, detachedFocusedElement: (any PixelAXNode)? = nil,
+                                    detachedSecureRects: [CGRect] = [], menuBar: (any PixelAXNode)?,
                                     selectedBounds: CGRect,
                                     deadline: ContinuousClock.Instant, readOnly: Bool = false,
                                     limit: Int = 60, maxNodes: Int = 160) -> PixelElementMarks {
@@ -331,7 +332,8 @@ enum ElementMarks {
         if matchedWindow == nil, let focusedWindow, focusedWindow.role == "AXWindow" {
             secureScan = collectSecureRects(root: focusedWindow, deadline: deadline, maxNodes: maxNodes)
         }
-        let roots = [matchedWindow, menuBar].compactMap { $0 }
+        // Visit the validated focus first so the bounded window walk cannot starve it.
+        let roots = [matchedWindow == nil ? nil : detachedFocusedElement, matchedWindow, menuBar].compactMap { $0 }
         var projected = project(root: PixelAXCompositeNode(nodes: roots), windowBounds: selectedBounds,
             focusedIdentity: matchedWindow == nil ? nil : focusedElement?.identity,
             readOnly: readOnly, limit: limit, maxNodes: max(0, maxNodes - secureScan.visited), deadline: deadline)
@@ -339,7 +341,7 @@ enum ElementMarks {
         if let focusedElement, ContinuousClock.now < deadline,
            (focusedElement.isProtected || focusedElement.isSecure),
            let rect = focusedElement.screenRect, valid(rect) { focusRect = rect }
-        var secureRects = secureScan.rects + projected.secureScreenRects
+        var secureRects = secureScan.rects + projected.secureScreenRects + detachedSecureRects
         if let focusRect, !secureRects.contains(focusRect) { secureRects.append(focusRect) }
         if secureRects != projected.secureScreenRects {
             projected = PixelElementMarks(marks: projected.marks, focusedID: projected.focusedID,
@@ -453,7 +455,7 @@ enum ElementMarks {
         var deduplicated: [Candidate] = []
         for candidate in sorted {
             let duplicate = deduplicated.contains { existing in
-                intersectionOverUnion(existing.sourceRect, candidate.sourceRect) >= 0.85
+                existing.identity == candidate.identity || intersectionOverUnion(existing.sourceRect, candidate.sourceRect) >= 0.85
             }
             if !duplicate { deduplicated.append(candidate) }
         }
@@ -486,11 +488,23 @@ enum ElementMarks {
         let focusedUIElement = ax(read(appRoot, kAXFocusedUIElementAttribute, deadline: deadline))
         let focusedNode = focusedWindowElement.map { AXPixelNode(element: $0, deadline: deadline) }
         let focusedElementNode = focusedUIElement.map { AXPixelNode(element: $0, deadline: deadline) }
+        let focusPath = PixelFocusedAXPath.read(focusedUIElement, window: focusedWindowElement,
+            appPID: application.processIdentifier, deadline: deadline)
+        let projectedFocusPath = focusPath?.elements.map { AXPixelNode(element: $0, deadline: deadline) }
+        let focusProjection = focusPath.flatMap { binding in
+            projectedFocusPath.map { PixelFocusedAXProjection.project(path: $0, ownerWindow: binding.ownerWindow,
+                selectedWindow: binding.selectedWindow, focusPID: binding.focusPID, selectedPID: binding.windowPID,
+                expectedPID: application.processIdentifier, windowBounds: selectedBounds, deadline: deadline) }
+        }
+        let detachedFocusNode = focusProjection?.visibleRect.flatMap { rect in
+            focusedUIElement.map { AXPixelNode(element: $0, deadline: deadline, visibleRect: rect) }
+        }
         let menuNode = ax(read(appRoot, kAXMenuBarAttribute, deadline: deadline))
             .map { AXPixelNode(element: $0, deadline: deadline) }
         let browserURL = window.flatMap { safeURL(read($0.element, "AXURL", deadline: deadline) ?? read($0.element, kAXDocumentAttribute, deadline: deadline)) }
         let projected = projectCaptureRoots(focusedWindow: focusedNode, focusedBounds: focusedBounds,
-            focusedElement: focusedElementNode, menuBar: menuNode,
+            focusedElement: focusedElementNode, detachedFocusedElement: detachedFocusNode,
+            detachedSecureRects: focusProjection?.secureRects ?? [], menuBar: menuNode,
             selectedBounds: selectedBounds, deadline: deadline,
             readOnly: AgentSafetyBoundary.readOnly(bundleID: application.bundleIdentifier, appName: application.localizedName),
             limit: limit)
@@ -670,12 +684,19 @@ enum ElementMarks {
 private struct AXPixelNode: PixelAXNode {
     let element: AXUIElement
     let deadline: ContinuousClock.Instant
+    let visibleRect: CGRect?
+
+    init(element: AXUIElement, deadline: ContinuousClock.Instant, visibleRect: CGRect? = nil) {
+        self.element = element; self.deadline = deadline; self.visibleRect = visibleRect
+    }
 
     var identity: AnyHashable { AnyHashable(PixelAXIdentity(element: element)) }
     var role: String { ElementMarks.read(element, kAXRoleAttribute, deadline: deadline) as? String ?? "unknown" }
     var title: String? { ElementMarks.label(element, deadline: deadline) }
     var value: String? { ElementMarks.normalizedAXValue(ElementMarks.read(element, kAXValueAttribute, deadline: deadline)) }
-    var screenRect: CGRect? { ElementMarks.rect(element, deadline: deadline) }
+    var screenRect: CGRect? {
+        ElementMarks.rect(element, deadline: deadline).map { rect in visibleRect.map { rect.intersection($0) } ?? rect }
+    }
     var isEnabled: Bool? { ElementMarks.read(element, kAXEnabledAttribute, deadline: deadline) as? Bool }
     var isHidden: Bool { ElementMarks.read(element, kAXHiddenAttribute, deadline: deadline) as? Bool == true }
     var isProtected: Bool { ElementMarks.read(element, "AXProtectedContent", deadline: deadline) as? Bool == true }

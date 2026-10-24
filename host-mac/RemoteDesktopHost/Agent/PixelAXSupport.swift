@@ -26,6 +26,74 @@ struct PixelAXIdentity: Hashable {
     func hash(into hasher: inout Hasher) { hasher.combine(CFHash(element)) }
 }
 
+@MainActor
+struct PixelFocusedAXPath {
+    let elements: [AXUIElement]
+    let ownerWindow: AnyHashable
+    let selectedWindow: AnyHashable
+    let focusPID: pid_t
+    let windowPID: pid_t
+
+    static func read(_ focus: AXUIElement?, window: AXUIElement?, appPID: pid_t,
+                     deadline: ContinuousClock.Instant) -> Self? {
+        guard let focus, let window, ContinuousClock.now < deadline,
+              let owner = ElementMarks.ax(ElementMarks.read(focus, kAXWindowAttribute, deadline: deadline)),
+              CFEqual(owner, window) else { return nil }
+        var focusPID: pid_t = 0, windowPID: pid_t = 0
+        guard AXUIElementGetPid(focus, &focusPID) == .success, AXUIElementGetPid(window, &windowPID) == .success,
+              focusPID == appPID, windowPID == appPID else { return nil }
+        var path = [focus], current = focus
+        for _ in 0..<16 {
+            guard ContinuousClock.now < deadline,
+                  let parent = ElementMarks.ax(ElementMarks.read(current, kAXParentAttribute, deadline: deadline)) else { return nil }
+            path.append(parent)
+            if CFEqual(parent, window) {
+                return Self(elements: path, ownerWindow: AnyHashable(PixelAXIdentity(element: owner)),
+                    selectedWindow: AnyHashable(PixelAXIdentity(element: window)), focusPID: focusPID, windowPID: windowPID)
+            }
+            current = parent
+        }
+        return nil
+    }
+}
+
+@MainActor
+enum PixelFocusedAXProjection {
+    static func project(path: [any PixelAXNode], ownerWindow: AnyHashable?, selectedWindow: AnyHashable?,
+                        focusPID: pid_t?, selectedPID: pid_t?, expectedPID: pid_t,
+                        windowBounds: CGRect, deadline: ContinuousClock.Instant) -> (visibleRect: CGRect?, secureRects: [CGRect]) {
+        guard ContinuousClock.now < deadline, ownerWindow == selectedWindow, let focusPID, let selectedPID,
+              focusPID == expectedPID, selectedPID == expectedPID, path.count > 1,
+              path.last?.identity == selectedWindow, path.last?.role == "AXWindow", valid(windowBounds),
+              let selectedRect = path.last?.screenRect, valid(selectedRect) else { return (nil, []) }
+        let focusRect = path.first?.screenRect
+        var clip = windowBounds.intersection(selectedRect), blocked = false, secure = false, secureRects: [CGRect] = []
+        for node in path {
+            guard ContinuousClock.now < deadline else { return (nil, secureRects) }
+            let role = node.role
+            if node.isProtected || node.isSecure {
+                secure = true
+                let rect = node.screenRect.flatMap { valid($0) ? $0 : nil } ?? windowBounds
+                secureRects.append(rect)
+            }
+            if node.isHidden || role == "AXScrollBar" { blocked = true }
+            if role == "AXScrollArea" || role == "AXClipView" {
+                guard let rect = node.screenRect, valid(rect) else { blocked = true; continue }
+                clip = clip.intersection(rect)
+            }
+        }
+        let visibleSecureRects = secureRects.map { $0.intersection(clip) }.filter { valid($0) }
+        if secure { return (nil, visibleSecureRects) }
+        guard !blocked, let focusRect, valid(focusRect), clip.contains(CGPoint(x: focusRect.midX, y: focusRect.midY)) else { return (nil, []) }
+        return (focusRect.intersection(clip), [])
+    }
+
+    private static func valid(_ rect: CGRect) -> Bool {
+        !rect.isNull && !rect.isEmpty && rect.minX.isFinite && rect.minY.isFinite &&
+            rect.width.isFinite && rect.height.isFinite
+    }
+}
+
 enum PixelAXHitIdentity {
     static func matches<Identity: Equatable>(hit: Identity, target: Identity, hitActionable: Bool = false,
                                              parents: [(identity: Identity, actionable: Bool)], maximumParents: Int = 5) -> Bool {
