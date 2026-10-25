@@ -421,6 +421,50 @@ def _checkpoint_is_complete(output: Path | None) -> bool:
             and isinstance(cleanup, dict) and not cleanup and set(keys) <= completed.keys())
 
 
+_INVALID_CHECKPOINT_PROGRESS = object()
+
+
+def _checkpoint_progress(output: Path | None) -> tuple[tuple[str, ...], frozenset[str]] | None | object:
+    """Read only a structurally valid checkpoint identity and its completed keys."""
+    if output is None:
+        return _INVALID_CHECKPOINT_PROGRESS
+    path = output / "checkpoint.json"
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    except (OSError, json.JSONDecodeError):
+        return _INVALID_CHECKPOINT_PROGRESS
+    if not isinstance(value, dict) or value.get("version") != 1:
+        return _INVALID_CHECKPOINT_PROGRESS
+    task_keys = value.get("task_keys")
+    completed = value.get("completed")
+    inflight = value.get("inflight", {})
+    cleanup = value.get("cleanup_pending", {})
+    if (not isinstance(task_keys, list) or any(not isinstance(key, str) or not key for key in task_keys)
+            or len(task_keys) != len(set(task_keys)) or not isinstance(completed, dict)
+            or any(key not in task_keys or not isinstance(row, dict) for key, row in completed.items())
+            or not isinstance(inflight, dict)
+            or any(key not in task_keys or not isinstance(row, dict) for key, row in inflight.items())
+            or not isinstance(cleanup, dict)
+            or any(key not in task_keys or not isinstance(row, dict) for key, row in cleanup.items())):
+        return _INVALID_CHECKPOINT_PROGRESS
+    return tuple(task_keys), frozenset(completed)
+
+
+def _checkpoint_progress_advanced(before: tuple[tuple[str, ...], frozenset[str]] | None | object,
+                                  after: tuple[tuple[str, ...], frozenset[str]] | None | object) -> bool:
+    if after is _INVALID_CHECKPOINT_PROGRESS or after is None:
+        return False
+    # Without a valid pre-run identity there is no safe way to prove that the
+    # newly visible checkpoint belongs to the same task-key sequence.
+    if before is None:
+        return False
+    if before is _INVALID_CHECKPOINT_PROGRESS:
+        return False
+    return before[0] == after[0] and after[1] > before[1]
+
+
 def _command_output(command: list[str]) -> Path | None:
     found = []
     index = 0
@@ -499,6 +543,7 @@ def supervise(command: list[str], *, log_stream: Any, max_restarts: int = 12,
     if max_restarts < 0 or base_delay < 0 or max_delay < base_delay:
         raise ValueError("invalid supervisor retry bounds")
     restarts = 0
+    backoff_level = 0
     deadline = time.monotonic() + deadline_seconds if deadline_seconds is not None else None
 
     def pause(delay: float) -> None:
@@ -515,15 +560,16 @@ def supervise(command: list[str], *, log_stream: Any, max_restarts: int = 12,
             screen_probe()
         except ScreenLocked:
             print("OWNER ACTION NEEDED: unlock the Mac", file=log_stream, flush=True)
-            pause(min(max_delay, base_delay * (2 ** min(restarts, 8))))
+            pause(min(max_delay, base_delay * (2 ** min(backoff_level, 8))))
             continue
         except Exception as error:
             print(f"OWNER ACTION NEEDED: Mac lock state unavailable ({type(error).__name__})",
                   file=log_stream, flush=True)
-            pause(min(max_delay, base_delay * (2 ** min(restarts, 8))))
+            pause(min(max_delay, base_delay * (2 ** min(backoff_level, 8))))
             continue
         remaining = max(0.0, deadline - time.monotonic()) if deadline is not None else None
         child_command = _command_for_checkpoint(command, output) if output is not None else list(command)
+        checkpoint_before = _checkpoint_progress(output)
         result = run(child_command, remaining) if run is not None else _run_child(child_command, remaining)
         code = int(result.returncode)
         if code == 0 or _checkpoint_is_complete(output):
@@ -532,8 +578,12 @@ def supervise(command: list[str], *, log_stream: Any, max_restarts: int = 12,
             print(f"Supervisor stopped after {restarts} restarts (last exit {code}).",
                   file=log_stream, flush=True)
             return code
+        checkpoint_after = _checkpoint_progress(output)
+        if _checkpoint_progress_advanced(checkpoint_before, checkpoint_after):
+            backoff_level = 0
         restarts += 1
-        delay = min(max_delay, base_delay * (2 ** min(restarts - 1, 8)))
+        delay = min(max_delay, base_delay * (2 ** min(backoff_level, 8)))
+        backoff_level += 1
         print(f"Suite exited {code}; resuming from checkpoint in {delay:g}s "
               f"(restart {restarts}/{max_restarts}).", file=log_stream, flush=True)
         pause(delay)

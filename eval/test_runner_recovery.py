@@ -253,6 +253,172 @@ class RecoveryTests(unittest.TestCase):
             self.assertNotIn("--resume", calls[0])
             self.assertIn("--resume", calls[1])
 
+    def test_supervisor_backoff_resets_only_on_strict_checkpoint_progress(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            checkpoint = Checkpoint(output, ["a", "b", "c", "d"])
+            checkpoint.mark_inflight("d", "seed")
+            calls, sleeps = [], []
+
+            def run(_command, _timeout=None):
+                calls.append(len(calls) + 1)
+                if len(calls) == 3:
+                    checkpoint.mark_completed("a", {"status": "INFRA-BLOCKED"})
+                elif len(calls) == 4:
+                    checkpoint.mark_completed("a", {"status": "rewritten"})
+                elif len(calls) == 5:
+                    checkpoint.mark_completed("b", {"status": "INFRA-BLOCKED"})
+                return SimpleNamespace(returncode=1)
+
+            log = io.StringIO()
+            code = supervise(["suite"], log_stream=log, max_restarts=6, base_delay=5,
+                             max_delay=300, output=output, run=run,
+                             screen_probe=lambda: True, sleep=sleeps.append)
+
+            self.assertEqual(code, 1)
+            self.assertEqual(calls, list(range(1, 8)))
+            self.assertEqual(sleeps, [5, 10, 5, 10, 5, 10])
+            self.assertIn("restart 6/6", log.getvalue())
+            self.assertIn("stopped after 6 restarts", log.getvalue())
+            self.assertEqual(set(checkpoint.completed), {"a", "b"})
+
+    def test_supervisor_backoff_does_not_reset_for_malformed_or_changed_task_sequence(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            checkpoint = Checkpoint(output, ["a", "b", "c"])
+            checkpoint.mark_inflight("a", "seed")
+            calls, sleeps = [], []
+
+            def run(_command, _timeout=None):
+                calls.append(len(calls) + 1)
+                if len(calls) == 2:
+                    checkpoint.path.write_text("{ malformed", encoding="utf-8")
+                elif len(calls) == 3:
+                    checkpoint.path.write_text(json.dumps({
+                        "version": 1, "task_keys": ["a", "b", "c"],
+                        "completed": {"a": {"status": "INFRA-BLOCKED"}},
+                        "inflight": {}, "cleanup_pending": {},
+                    }), encoding="utf-8")
+                elif len(calls) == 5:
+                    checkpoint.path.write_text(json.dumps({
+                        "version": 1, "task_keys": ["a", "b", "c"],
+                        "completed": {"a": {"status": "INFRA-BLOCKED"},
+                                      "b": {"status": "INFRA-BLOCKED"}},
+                        "inflight": {}, "cleanup_pending": {},
+                    }), encoding="utf-8")
+                return SimpleNamespace(returncode=1)
+
+            code = supervise(["suite"], log_stream=io.StringIO(), max_restarts=5,
+                             base_delay=5, max_delay=300, output=output, run=run,
+                             screen_probe=lambda: True, sleep=sleeps.append)
+
+            self.assertEqual(code, 1)
+            self.assertEqual(sleeps, [5, 10, 20, 40, 5])
+            self.assertEqual(calls, [1, 2, 3, 4, 5, 6])
+
+    def test_supervisor_backoff_does_not_reset_when_checkpoint_task_keys_change(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            checkpoint = Checkpoint(output, ["a", "b"])
+            checkpoint.mark_inflight("a", "seed")
+            calls, sleeps = [], []
+
+            def run(_command, _timeout=None):
+                calls.append(len(calls) + 1)
+                if len(calls) == 2:
+                    checkpoint.path.write_text(json.dumps({
+                        "version": 1, "task_keys": ["x", "y"],
+                        "completed": {"x": {"status": "INFRA-BLOCKED"}},
+                        "inflight": {}, "cleanup_pending": {},
+                    }), encoding="utf-8")
+                return SimpleNamespace(returncode=1)
+
+            code = supervise(["suite"], log_stream=io.StringIO(), max_restarts=2,
+                             base_delay=5, max_delay=300, output=output, run=run,
+                             screen_probe=lambda: True, sleep=sleeps.append)
+
+            self.assertEqual(code, 1)
+            self.assertEqual(sleeps, [5, 10])
+            self.assertEqual(calls, [1, 2, 3])
+
+    def test_supervisor_backoff_ignores_inflight_cleanup_and_completed_rewrites(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            checkpoint = Checkpoint(output, ["a", "b", "c"])
+            checkpoint.mark_completed("a", {"status": "INFRA-BLOCKED"})
+            sleeps = []
+
+            def run(_command, _timeout=None):
+                attempt = len(sleeps) + 1
+                if attempt == 1:
+                    checkpoint.mark_inflight("b", "attempt-1")
+                elif attempt == 2:
+                    checkpoint.mark_cleanup_pending("b", {"path": "synthetic"})
+                elif attempt == 3:
+                    checkpoint.mark_completed("a", {"status": "rewritten"})
+                elif attempt == 4:
+                    checkpoint.path.write_text(json.dumps({
+                        "version": 1, "task_keys": ["a", "b", "c"],
+                        "completed": {"b": {"status": "replacement"}},
+                        "inflight": {}, "cleanup_pending": {},
+                    }), encoding="utf-8")
+                elif attempt == 5:
+                    checkpoint.path.write_text(json.dumps({
+                        "version": 1, "task_keys": ["a", "b", "c"],
+                        "completed": {}, "inflight": {}, "cleanup_pending": {},
+                    }), encoding="utf-8")
+                return SimpleNamespace(returncode=1)
+
+            code = supervise(["suite"], log_stream=io.StringIO(), max_restarts=5,
+                             base_delay=5, max_delay=300, output=output, run=run,
+                             screen_probe=lambda: True, sleep=sleeps.append)
+
+            self.assertEqual(code, 1)
+            self.assertEqual(sleeps, [5, 10, 20, 40, 80])
+
+    def test_supervisor_backoff_does_not_reset_when_checkpoint_appears_after_missing_snapshot(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            sleeps = []
+
+            def run(_command, _timeout=None):
+                if len(sleeps) == 1:
+                    Checkpoint(output, ["a", "b"]).mark_completed(
+                        "a", {"status": "INFRA-BLOCKED"})
+                return SimpleNamespace(returncode=1)
+
+            code = supervise(["suite"], log_stream=io.StringIO(), max_restarts=2,
+                             base_delay=5, max_delay=300, output=output, run=run,
+                             screen_probe=lambda: True, sleep=sleeps.append)
+
+            self.assertEqual(code, 1)
+            self.assertEqual(sleeps, [5, 10])
+
+    def test_supervisor_progress_backoff_still_obeys_absolute_deadline(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            checkpoint = Checkpoint(output, ["a", "b"])
+            clock = [0.0]
+            sleeps = []
+
+            def sleep(seconds):
+                sleeps.append(seconds)
+                clock[0] += seconds
+
+            def run(_command, _timeout=None):
+                checkpoint.mark_completed("a", {"status": "INFRA-BLOCKED"})
+                return SimpleNamespace(returncode=1)
+
+            with patch("runner_recovery.time.monotonic", side_effect=lambda: clock[0]):
+                code = supervise(["suite"], log_stream=io.StringIO(), max_restarts=8,
+                                 base_delay=5, max_delay=300, output=output,
+                                 deadline_seconds=8, run=run,
+                                 screen_probe=lambda: True, sleep=sleep)
+
+            self.assertEqual(code, 124)
+            self.assertEqual(sleeps, [5, 3])
+            self.assertEqual(set(checkpoint.completed), {"a"})
+
     def test_supervisor_child_output_must_match_and_resume_flag_can_start_fresh(self):
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "fresh"
