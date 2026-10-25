@@ -190,6 +190,15 @@ final class AgentSharedSupportTests: XCTestCase {
         XCTAssertNil(incomplete.visibleRect)
         XCTAssertNil(expired.visibleRect)
 
+        let narrowerSelected = CGRect(x: 120, y: 120, width: 220, height: 180)
+        let outsideSelected = MarkAXNode(identity: "outside-selected-window", role: "AXTextField",
+            rect: CGRect(x: 360, y: 170, width: 40, height: 24))
+        let selectedNode = MarkAXNode(identity: "narrow-selected-window", role: "AXWindow", rect: narrowerSelected)
+        let noSheetOutside = PixelFocusedAXProjection.project(path: [outsideSelected, selectedNode],
+            ownerWindow: selectedNode.identity, selectedWindow: selectedNode.identity, focusPID: 42,
+            selectedPID: 42, expectedPID: 42, windowBounds: bounds, deadline: .now + .milliseconds(300))
+        XCTAssertNil(noSheetOutside.visibleRect, "Ordinary focus remains clipped to the selected-window intersection.")
+
         let outside = MarkAXNode(identity: "outside-editor", role: "AXTextField",
             rect: CGRect(x: 700, y: 170, width: 140, height: 28))
         let outsideProjection = capture(outside)
@@ -574,5 +583,189 @@ final class AgentSharedSupportTests: XCTestCase {
             focusPID: 42, windowPID: 42)
         XCTAssertThrowsError(try post(0x19)) // a focus/window switch also refuses Cmd+V
         XCTAssertEqual(events.keyEventCount, beforePaste)
+    }
+
+    func testAttachedSheetControlsRemainActionableOutsideOwnerWindowBounds() {
+        let ownerBounds = CGRect(x: 214, y: 112, width: 586, height: 488)
+        let sheetBounds = CGRect(x: 67, y: 180, width: 880, height: 448)
+        let fieldBounds = CGRect(x: 820, y: 300, width: 110, height: 28)
+        let field = MarkAXNode(identity: "save-name-field", role: "AXTextField", rect: fieldBounds)
+        let sheet = MarkAXNode(identity: "attached-save-sheet", role: "AXSheet", rect: sheetBounds,
+            children: [field])
+        let owner = MarkAXNode(identity: "selected-owner-window", role: "AXWindow", rect: ownerBounds,
+            children: [sheet])
+
+        let result = ElementMarks.projectCaptureRoots(focusedWindow: owner, focusedBounds: ownerBounds,
+            focusedElement: field, menuBar: nil, selectedBounds: ownerBounds,
+            deadline: .now + .milliseconds(300), attachedSheetIdentity: sheet.identity)
+
+        let mark = result.marks.first { $0.identity == AnyHashable("save-name-field") }
+        XCTAssertNotNil(mark, "A field in a positively attached sheet should not be clipped to its owner window.")
+        XCTAssertEqual(mark?.screenRect, fieldBounds)
+        XCTAssertTrue(result.overlayBounds.contains(sheetBounds))
+        XCTAssertTrue(PixelWindowActionBoundary.allows(CGPoint(x: fieldBounds.midX, y: fieldBounds.midY),
+            windowBounds: ownerBounds, menuBarBounds: [], sameAppDialogBounds: result.overlayBounds))
+        let unbound = ElementMarks.projectCaptureRoots(focusedWindow: owner, focusedBounds: ownerBounds,
+            focusedElement: field, menuBar: nil, selectedBounds: ownerBounds, deadline: .now + .milliseconds(300))
+        XCTAssertFalse(unbound.marks.contains { $0.identity == AnyHashable("save-name-field") })
+        XCTAssertFalse(unbound.overlayBounds.contains(sheetBounds))
+    }
+
+    func testAttachedSheetTypingRequiresExactBoundedOwnerPath() {
+        let window: AnyHashable = "owner-window"
+        let sheet: AnyHashable = "save-sheet"
+        let path: [(identity: AnyHashable, role: String, pid: pid_t)] = [
+            ("filename", "AXTextField", 42), ("group", "AXGroup", 42),
+            (sheet, "AXSheet", 42), (window, "AXWindow", 42)
+        ]
+        XCTAssertEqual(PixelAXOwnerPath.attachedSheet(path, selectedWindow: window,
+            attributeOwner: nil, expectedPID: 42)?.attachedSheet, sheet)
+        XCTAssertEqual(PixelAXOwnerPath.attachedSheet(path, selectedWindow: window,
+            attributeOwner: sheet, expectedPID: 42)?.attachedSheet, sheet)
+        XCTAssertNil(PixelAXOwnerPath.attachedSheet(path, selectedWindow: "other-window",
+            attributeOwner: nil, expectedPID: 42))
+        XCTAssertNil(PixelAXOwnerPath.attachedSheet(path, selectedWindow: window,
+            attributeOwner: "other-window", expectedPID: 42))
+        XCTAssertNil(PixelAXOwnerPath.attachedSheet(Array(path.dropLast()), selectedWindow: window,
+            attributeOwner: nil, expectedPID: 42))
+        let noSheetPath: [(identity: AnyHashable, role: String, pid: pid_t)] = [
+            ("field", "AXTextField", 42), (window, "AXWindow", 42)
+        ]
+        XCTAssertNil(PixelAXOwnerPath.attachedSheet(noSheetPath, selectedWindow: window,
+            attributeOwner: nil, expectedPID: 42))
+        var foreignPID = path; foreignPID[1].pid = 99
+        XCTAssertNil(PixelAXOwnerPath.attachedSheet(foreignPID, selectedWindow: window,
+            attributeOwner: nil, expectedPID: 42))
+        var cyclic = path; cyclic[1].identity = "filename"
+        XCTAssertNil(PixelAXOwnerPath.attachedSheet(cyclic, selectedWindow: window,
+            attributeOwner: nil, expectedPID: 42))
+
+        let binding = PixelTypingFocusBinding(focus: "filename", window: window, pid: 42, attachedSheet: sheet)
+        let replacementSheet = PixelTypingFocusBinding.Evidence(focus: "filename", ownerWindow: window,
+            selectedWindow: window, focusPID: 42, windowPID: 42, attachedSheet: "replacement-sheet")
+        XCTAssertFalse(PixelTypingFocusBinding.allows(replacementSheet, binding: binding))
+        let changedFocus = PixelTypingFocusBinding.Evidence(focus: "other-field", ownerWindow: window,
+            selectedWindow: window, focusPID: 42, windowPID: 42, attachedSheet: sheet)
+        XCTAssertFalse(PixelTypingFocusBinding.allows(changedFocus, binding: binding))
+    }
+
+    func testAttachedSheetFocusProjectionRetainsNestedClipAndSecureMasking() {
+        let ownerBounds = CGRect(x: 214, y: 112, width: 586, height: 488)
+        let sheetBounds = CGRect(x: 67, y: 180, width: 880, height: 448)
+        let clipBounds = CGRect(x: 420, y: 220, width: 180, height: 120)
+        let fieldBounds = CGRect(x: 430, y: 230, width: 200, height: 32)
+        let field = MarkAXNode(identity: "sheet-field", role: "AXTextField", rect: fieldBounds)
+        let clip = MarkAXNode(identity: "sheet-clip", role: "AXScrollArea", rect: clipBounds)
+        let sheet = MarkAXNode(identity: "bound-sheet", role: "AXSheet", rect: sheetBounds)
+        let owner = MarkAXNode(identity: "bound-owner", role: "AXWindow", rect: ownerBounds)
+        let path: [any PixelAXNode] = [field, clip, sheet, owner]
+        let projected = PixelFocusedAXProjection.project(path: path, ownerWindow: owner.identity,
+            selectedWindow: owner.identity, focusPID: 42, selectedPID: 42, expectedPID: 42,
+            windowBounds: ownerBounds, deadline: .now + .milliseconds(300))
+        XCTAssertEqual(projected.visibleRect, CGRect(x: 430, y: 230, width: 170, height: 32))
+
+        let secure = MarkAXNode(identity: "protected-parent", role: "AXGroup", rect: nil, protected: true)
+        let protectedPath: [any PixelAXNode] = [field, secure, sheet, owner]
+        let protected = PixelFocusedAXProjection.project(path: protectedPath, ownerWindow: owner.identity,
+            selectedWindow: owner.identity, focusPID: 42, selectedPID: 42, expectedPID: 42,
+            windowBounds: ownerBounds, deadline: .now + .milliseconds(300))
+        XCTAssertNil(protected.visibleRect)
+        XCTAssertEqual(protected.secureRects, [ownerBounds.union(sheetBounds)])
+
+        let protectedOwner = MarkAXNode(identity: "secure-window", role: "AXWindow", rect: ownerBounds, protected: true)
+        let protectedOwnerPath: [any PixelAXNode] = [field, sheet, protectedOwner]
+        let ownerProjection = PixelFocusedAXProjection.project(path: protectedOwnerPath,
+            ownerWindow: protectedOwner.identity, selectedWindow: protectedOwner.identity,
+            focusPID: 42, selectedPID: 42, expectedPID: 42, windowBounds: ownerBounds,
+            deadline: .now + .milliseconds(300))
+        XCTAssertNil(ownerProjection.visibleRect)
+        XCTAssertEqual(ownerProjection.secureRects, [ownerBounds.union(sheetBounds)])
+        XCTAssertFalse(PixelTypingFocusBinding.allowsPath(attachedSheet: sheet.identity,
+            hasProtectedOrSecureAncestor: true))
+        XCTAssertTrue(PixelTypingFocusBinding.allowsPath(attachedSheet: sheet.identity,
+            hasProtectedOrSecureAncestor: false))
+        XCTAssertTrue(PixelTypingFocusBinding.allowsPath(attachedSheet: nil,
+            hasProtectedOrSecureAncestor: true))
+    }
+
+    func testProtectedOwnerMasksAttachedSheetAndSuppressesItsMarks() {
+        let ownerBounds = CGRect(x: 214, y: 112, width: 586, height: 488)
+        let sheetBounds = CGRect(x: 67, y: 180, width: 880, height: 448)
+        let canary = MarkAXNode(identity: "protected-sheet-canary", role: "AXButton",
+            rect: CGRect(x: 820, y: 300, width: 110, height: 28))
+        let sheet = MarkAXNode(identity: "protected-owner-sheet", role: "AXSheet", rect: sheetBounds,
+            children: [canary])
+        let owner = MarkAXNode(identity: "protected-owner", role: "AXWindow", rect: ownerBounds,
+            protected: true, children: [sheet])
+
+        let result = ElementMarks.projectCaptureRoots(focusedWindow: owner, focusedBounds: ownerBounds,
+            focusedElement: canary, attachedSheetElement: sheet, menuBar: nil, selectedBounds: ownerBounds,
+            deadline: .now + .milliseconds(300), attachedSheetIdentity: sheet.identity)
+
+        XCTAssertFalse(result.marks.contains { $0.identity == canary.identity || $0.name == "protected-sheet-canary" })
+        XCTAssertFalse(result.axState?.contains { $0.title == "protected-sheet-canary" } ?? false)
+        XCTAssertTrue(result.secureScreenRects.contains(ownerBounds.union(sheetBounds)))
+    }
+
+    func testProtectedIntermediateSheetAncestorSuppressesWholeSheetProjection() {
+        let ownerBounds = CGRect(x: 214, y: 112, width: 586, height: 488)
+        let sheetBounds = CGRect(x: 67, y: 180, width: 880, height: 448)
+        let focused = MarkAXNode(identity: "protected-descendant", role: "AXTextField",
+            rect: CGRect(x: 120, y: 260, width: 120, height: 28))
+        let protectedGroup = MarkAXNode(identity: "protected-group", role: "AXGroup",
+            rect: CGRect(x: 100, y: 220, width: 180, height: 120), protected: true, children: [focused])
+        let siblingCanary = MarkAXNode(identity: "sheet-sibling-canary", role: "AXButton",
+            rect: CGRect(x: 820, y: 300, width: 110, height: 28))
+        let sheet = MarkAXNode(identity: "intermediate-protected-sheet", role: "AXSheet",
+            rect: sheetBounds, children: [protectedGroup, siblingCanary])
+        let owner = MarkAXNode(identity: "ordinary-owner", role: "AXWindow", rect: ownerBounds,
+            children: [sheet])
+
+        let result = ElementMarks.projectCaptureRoots(focusedWindow: owner, focusedBounds: ownerBounds,
+            focusedElement: focused, attachedSheetElement: sheet, menuBar: nil, selectedBounds: ownerBounds,
+            deadline: .now + .milliseconds(300), attachedSheetIdentity: sheet.identity,
+            attachedPathProtected: true)
+
+        XCTAssertFalse(result.marks.contains { $0.identity == focused.identity || $0.identity == siblingCanary.identity })
+        XCTAssertFalse(result.axState?.contains { $0.title == "sheet-sibling-canary" } ?? false)
+        XCTAssertTrue(result.secureScreenRects.contains(ownerBounds.union(sheetBounds)))
+        XCTAssertFalse(result.requiresProtectedRegionHandoff)
+    }
+
+    func testProtectedAttachedSheetWithUnknownBoundsRequiresHandoff() {
+        let ownerBounds = CGRect(x: 214, y: 112, width: 586, height: 488)
+        let canary = MarkAXNode(identity: "unknown-protected-sheet-canary", role: "AXButton",
+            rect: CGRect(x: 820, y: 300, width: 110, height: 28))
+
+        let unknownBounds: [CGRect?] = [nil, CGRect.null]
+        for sheetBounds in unknownBounds {
+            let sheet = MarkAXNode(identity: "unknown-protected-sheet", role: "AXSheet",
+                rect: sheetBounds, children: [canary])
+            let owner = MarkAXNode(identity: "known-owner", role: "AXWindow", rect: ownerBounds,
+                children: [sheet])
+            let result = ElementMarks.projectCaptureRoots(focusedWindow: owner, focusedBounds: ownerBounds,
+                focusedElement: canary, attachedSheetElement: sheet, menuBar: nil, selectedBounds: ownerBounds,
+                deadline: .now + .milliseconds(300), attachedSheetIdentity: sheet.identity,
+                attachedPathProtected: true)
+
+            XCTAssertTrue(result.requiresProtectedRegionHandoff)
+            XCTAssertTrue(result.secureScreenRects.contains(ownerBounds))
+            XCTAssertFalse(result.marks.contains { $0.identity == canary.identity })
+        }
+
+        let sheet = MarkAXNode(identity: "expired-protected-sheet", role: "AXSheet",
+            rect: nil, children: [canary])
+        let owner = MarkAXNode(identity: "expired-owner", role: "AXWindow", rect: ownerBounds,
+            children: [sheet])
+        let expired = ElementMarks.projectCaptureRoots(focusedWindow: owner, focusedBounds: ownerBounds,
+            focusedElement: canary, attachedSheetElement: sheet, menuBar: nil, selectedBounds: ownerBounds,
+            deadline: .now - .milliseconds(1), attachedSheetIdentity: sheet.identity,
+            attachedPathProtected: true)
+        XCTAssertTrue(expired.requiresProtectedRegionHandoff)
+
+        let ordinaryExpired = ElementMarks.projectCaptureRoots(focusedWindow: owner, focusedBounds: ownerBounds,
+            focusedElement: canary, menuBar: nil, selectedBounds: ownerBounds,
+            deadline: .now - .milliseconds(1))
+        XCTAssertFalse(ordinaryExpired.requiresProtectedRegionHandoff)
     }
 }

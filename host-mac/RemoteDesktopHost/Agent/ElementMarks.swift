@@ -22,38 +22,6 @@ extension PixelElementReference {
                     deadline: ContinuousClock.Instant) -> Bool? { nil }
 }
 
-struct PixelElementMark {
-    let id: Int
-    let role: String
-    let name: String
-    let screenRect: CGRect
-    let state: [String]
-    let inView: Bool
-    let reference: (any PixelElementReference)?
-    let identity: AnyHashable?
-
-    init(id: Int, role: String, name: String, screenRect: CGRect, state: [String], inView: Bool,
-         reference: (any PixelElementReference)? = nil, identity: AnyHashable? = nil) {
-        self.id = id; self.role = role; self.name = name; self.screenRect = screenRect
-        self.state = state; self.inView = inView; self.reference = reference; self.identity = identity
-    }
-}
-
-struct PixelElementMarks {
-    let marks: [PixelElementMark]
-    let focusedID: Int?
-    let secureScreenRects: [CGRect]
-    let overlayBounds: [CGRect]
-    let contentRect: CGRect?
-    let browserURL: String?
-    let axState: [PixelAXElementState]?
-    var defaultButtonEvidence: AgentDefaultButtonEvidence = .unknown
-}
-
-enum PixelWindowDisposition: Equatable { case window, systemOverlay, unknown, notAppWindow }
-
-enum PixelWindowTreeShape: Equatable { case singleButtonOnly, other, incomplete }
-
 enum SystemVoiceOverlayFailure: Error { case notFrontmost, secureFocus, inspectionUnavailable, persists, detected }
 extension SystemVoiceOverlayFailure {
     var environmentError: AgentEnvironmentError {
@@ -67,19 +35,6 @@ extension SystemVoiceOverlayFailure {
 }
 enum SystemVoiceOverlayInputState: Equatable { case blocking, nonblocking, unknown }
 enum SystemVoiceOverlayDecision: Equatable { case proceed, dismissOnce, handoff }
-
-struct PixelWindowEvidence {
-    let appPID: Int32
-    let ownerPID: Int32
-    let windowID: UInt32
-    let layer: Int
-    let role: String
-    let subrole: String?
-    let title: String?
-    let document: String?
-    let tree: PixelWindowTreeShape
-}
-
 
 /// A best-effort, deadline-bounded reader. A slow app contributes an empty mark list.
 @MainActor
@@ -320,22 +275,48 @@ enum ElementMarks {
 
     static func projectCaptureRoots(focusedWindow: (any PixelAXNode)?, focusedBounds: CGRect?,
                                     focusedElement: (any PixelAXNode)?, detachedFocusedElement: (any PixelAXNode)? = nil,
+                                    attachedSheetElement: (any PixelAXNode)? = nil,
                                     detachedSecureRects: [CGRect] = [], menuBar: (any PixelAXNode)?,
                                     selectedBounds: CGRect,
                                     deadline: ContinuousClock.Instant, readOnly: Bool = false,
+                                    attachedSheetIdentity: AnyHashable? = nil,
+                                    attachedPathProtected: Bool = false,
                                     limit: Int = 60, maxNodes: Int = 160) -> PixelElementMarks {
-        guard ContinuousClock.now < deadline else { return emptyProjection() }
+        guard ContinuousClock.now < deadline else {
+            var result = emptyProjection()
+            result.requiresProtectedRegionHandoff = attachedPathProtected && attachedSheetIdentity != nil
+            return result
+        }
         let matchedWindow = focusedWindow.flatMap {
             focusedWindowMatches(focusedBounds, selectedBounds: selectedBounds) ? $0 : nil
         }
         var secureScan: (rects: [CGRect], visited: Int) = ([], 0)
-        if matchedWindow == nil, let focusedWindow, focusedWindow.role == "AXWindow" {
+        let protectedOwner = focusedWindow.map {
+            $0.role == "AXWindow" && ($0.isProtected || $0.isSecure)
+        } ?? false
+        let protectedPath = attachedPathProtected || protectedOwner
+        let attachedSheetBounds = attachedSheetElement.flatMap {
+            $0.identity == attachedSheetIdentity ? $0.screenRect : nil
+        }.flatMap { valid($0) ? $0 : nil }
+        let protectedRegionExtentUnresolved = protectedPath && attachedSheetIdentity != nil && attachedSheetBounds == nil
+        if protectedPath, let focusedWindow {
+            let ownerRect = [focusedBounds, focusedWindow.screenRect].compactMap { $0 }.first(where: valid)
+            if let ownerRect, let attachedSheetBounds {
+                secureScan.rects = [ownerRect.union(attachedSheetBounds)]
+            } else {
+                secureScan.rects = [ownerRect, attachedSheetBounds].compactMap { $0 }
+            }
+        } else if matchedWindow == nil, let focusedWindow, focusedWindow.role == "AXWindow" {
             secureScan = collectSecureRects(root: focusedWindow, deadline: deadline, maxNodes: maxNodes)
         }
         // Visit the validated focus first so the bounded window walk cannot starve it.
-        let roots = [matchedWindow == nil ? nil : detachedFocusedElement, matchedWindow, menuBar].compactMap { $0 }
+        let roots = [matchedWindow == nil || protectedPath ? nil : detachedFocusedElement,
+            protectedPath || attachedSheetIdentity == nil ? nil : attachedSheetElement,
+            matchedWindow, menuBar].compactMap { $0 }
         var projected = project(root: PixelAXCompositeNode(nodes: roots), windowBounds: selectedBounds,
             focusedIdentity: matchedWindow == nil ? nil : focusedElement?.identity,
+            attachedSheetIdentity: attachedSheetIdentity,
+            suppressedAttachedSheetIdentity: protectedPath ? attachedSheetIdentity : nil,
             readOnly: readOnly, limit: limit, maxNodes: max(0, maxNodes - secureScan.visited), deadline: deadline)
         var focusRect: CGRect?
         if let focusedElement, ContinuousClock.now < deadline,
@@ -346,8 +327,11 @@ enum ElementMarks {
         if secureRects != projected.secureScreenRects {
             projected = PixelElementMarks(marks: projected.marks, focusedID: projected.focusedID,
                 secureScreenRects: secureRects, overlayBounds: projected.overlayBounds, contentRect: projected.contentRect,
-                browserURL: projected.browserURL, axState: projected.axState)
+                browserURL: projected.browserURL, axState: projected.axState,
+                defaultButtonEvidence: projected.defaultButtonEvidence,
+                requiresProtectedRegionHandoff: projected.requiresProtectedRegionHandoff)
         }
+        projected.requiresProtectedRegionHandoff = projected.requiresProtectedRegionHandoff || protectedRegionExtentUnresolved
         return projected
     }
 
@@ -373,6 +357,8 @@ enum ElementMarks {
     }
 
     static func project(root: any PixelAXNode, windowBounds: CGRect, focusedIdentity: AnyHashable? = nil,
+                        attachedSheetIdentity: AnyHashable? = nil,
+                        suppressedAttachedSheetIdentity: AnyHashable? = nil,
                         browserURL: String? = nil, readOnly: Bool = false, limit: Int = 60,
                         maxNodes: Int = 160, deadline: ContinuousClock.Instant? = nil) -> PixelElementMarks {
         var candidates: [Candidate] = [], secureRects: [CGRect] = [], overlayBounds: [CGRect] = []
@@ -381,14 +367,18 @@ enum ElementMarks {
         var resolvedURL = browserURL
         var visited = 0
 
-        func walk(_ node: any PixelAXNode, interactiveAncestors: [AnyHashable], viewportBounds: CGRect?) {
+        func walk(_ node: any PixelAXNode, interactiveAncestors: [AnyHashable], viewportBounds: CGRect?,
+                  attachedSheetBounds: CGRect?) {
             guard visited < maxNodes, candidates.count < limit,
                   deadline.map({ ContinuousClock.now < $0 }) ?? true else { return }
             visited += 1
             let role = node.role
             guard !node.isHidden, role != "AXScrollBar" else { return }
+            if role == "AXSheet", node.identity == suppressedAttachedSheetIdentity { return }
             let rect = node.screenRect
             var childViewportBounds = viewportBounds
+            let childSheetBounds = node.identity == attachedSheetIdentity && role == "AXSheet" && rect.map(valid) == true
+                ? rect : attachedSheetBounds
             if role == "AXScrollArea" || role == "AXClipView" {
                 if let rect, valid(rect) { childViewportBounds = viewportBounds.map { $0.intersection(rect) } ?? rect }
                 else { childViewportBounds = .null }
@@ -399,7 +389,8 @@ enum ElementMarks {
                 if let rect, valid(rect) { secureRects.append(rect) }
                 return
             }
-            if ["AXSheet", "AXDialog"].contains(role), let rect, valid(rect) { overlayBounds.append(rect) }
+            if (role == "AXDialog" || (role == "AXSheet" && node.identity == attachedSheetIdentity)),
+               let rect, valid(rect) { overlayBounds.append(rect) }
 
             let fullWindowContainer = structuralRoles.contains(role) && rect.map {
                 intersectionOverUnion($0, windowBounds) >= 0.9
@@ -423,7 +414,8 @@ enum ElementMarks {
                     let visibleRect: CGRect
                     if role == "AXMenuBarItem", viewportBounds == nil { visibleRect = rect }
                     else {
-                        let clip = viewportBounds.map { $0.intersection(windowBounds) } ?? windowBounds
+                        let surfaceBounds = childSheetBounds ?? windowBounds
+                        let clip = viewportBounds.map { $0.intersection(surfaceBounds) } ?? surfaceBounds
                         visibleRect = rect.intersection(clip)
                     }
                     let inWindow = role == "AXMenuBarItem" && viewportBounds == nil ? rect.intersects(windowBounds) :
@@ -437,11 +429,12 @@ enum ElementMarks {
             }
             let childAncestors = interactive ? interactiveAncestors + [node.identity] : interactiveAncestors
             for child in node.children() {
-                walk(child, interactiveAncestors: childAncestors, viewportBounds: childViewportBounds)
+                walk(child, interactiveAncestors: childAncestors, viewportBounds: childViewportBounds,
+                    attachedSheetBounds: childSheetBounds)
             }
         }
 
-        walk(root, interactiveAncestors: [], viewportBounds: nil)
+        walk(root, interactiveAncestors: [], viewportBounds: nil, attachedSheetBounds: nil)
         let named = candidates.map { candidate -> Candidate in
             guard candidate.name.isEmpty, let lifted = childText[candidate.identity], !lifted.isEmpty else { return candidate }
             return Candidate(identity: candidate.identity, role: candidate.role, name: lifted.joined(separator: " "),
@@ -490,6 +483,9 @@ enum ElementMarks {
         let focusedElementNode = focusedUIElement.map { AXPixelNode(element: $0, deadline: deadline) }
         let focusPath = PixelFocusedAXPath.read(focusedUIElement, window: focusedWindowElement,
             appPID: application.processIdentifier, deadline: deadline)
+        let attachedSheetNode = focusPath?.attachedSheet.flatMap { _ in
+            focusPath?.elements.first(where: { read($0, kAXRoleAttribute, deadline: deadline) as? String == "AXSheet" })
+        }.map { AXPixelNode(element: $0, deadline: deadline) }
         let projectedFocusPath = focusPath?.elements.map { AXPixelNode(element: $0, deadline: deadline) }
         let focusProjection = focusPath.flatMap { binding in
             projectedFocusPath.map { PixelFocusedAXProjection.project(path: $0, ownerWindow: binding.ownerWindow,
@@ -504,9 +500,12 @@ enum ElementMarks {
         let browserURL = window.flatMap { safeURL(read($0.element, "AXURL", deadline: deadline) ?? read($0.element, kAXDocumentAttribute, deadline: deadline)) }
         let projected = projectCaptureRoots(focusedWindow: focusedNode, focusedBounds: focusedBounds,
             focusedElement: focusedElementNode, detachedFocusedElement: detachedFocusNode,
+            attachedSheetElement: attachedSheetNode,
             detachedSecureRects: focusProjection?.secureRects ?? [], menuBar: menuNode,
             selectedBounds: selectedBounds, deadline: deadline,
             readOnly: AgentSafetyBoundary.readOnly(bundleID: application.bundleIdentifier, appName: application.localizedName),
+            attachedSheetIdentity: focusPath?.attachedSheet,
+            attachedPathProtected: focusPath?.attachedSheet != nil && focusPath?.hasProtectedOrSecureAncestor == true,
             limit: limit)
         let defaultButtonEvidence = AgentDefaultButtonAXEvidenceReader.read(window: window,
             focusedWindowElement: focusedWindowElement, focusedBounds: focusedBounds, selectedBounds: selectedBounds,
@@ -515,12 +514,14 @@ enum ElementMarks {
             secureScreenRects: projected.secureScreenRects, overlayBounds: projected.overlayBounds,
             contentRect: projected.contentRect,
             browserURL: browserURL ?? projected.browserURL, axState: projected.axState,
-            defaultButtonEvidence: defaultButtonEvidence)
+            defaultButtonEvidence: defaultButtonEvidence,
+            requiresProtectedRegionHandoff: projected.requiresProtectedRegionHandoff)
         guard ContinuousClock.now < deadline else {
             return PixelElementMarks(marks: [], focusedID: nil, secureScreenRects: result.secureScreenRects,
                 overlayBounds: result.overlayBounds,
                 contentRect: result.contentRect, browserURL: browserURL, axState: nil,
-                defaultButtonEvidence: .unknown)
+                defaultButtonEvidence: .unknown,
+                requiresProtectedRegionHandoff: result.requiresProtectedRegionHandoff)
         }
         return result
     }
@@ -589,6 +590,10 @@ enum ElementMarks {
 
     static func bounds(_ element: AXUIElement) -> CGRect? {
         rect(element, deadline: ContinuousClock.now + .milliseconds(10))
+    }
+
+    static func bounds(_ element: AXUIElement, deadline: ContinuousClock.Instant) -> CGRect? {
+        rect(element, deadline: deadline)
     }
 
     static func focusedElement(_ app: AXUIElement, timeout: Duration = .milliseconds(10)) -> AXUIElement? {

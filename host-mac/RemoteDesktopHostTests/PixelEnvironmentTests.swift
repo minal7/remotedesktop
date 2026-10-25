@@ -509,7 +509,7 @@ final class PixelEnvironmentTests: XCTestCase {
         let visibleSheet = TestPixelAXNode(identity: "sheet", role: "AXSheet", title: nil,
             rect: CGRect(x: 100, y: 100, width: 500, height: 380),
             children: [TestPixelAXNode(identity: "sheet-button", role: "AXButton", title: "Continue",
-                rect: CGRect(x: 350, y: 300, width: 90, height: 30))])
+                rect: CGRect(x: 530, y: 430, width: 50, height: 30))])
         let selected = TestPixelAXNode(identity: "selected-window", role: "AXWindow", title: nil, rect: bounds,
             children: [TestPixelAXNode(identity: "visible-editor", role: "AXTextArea", title: "Editor",
                 rect: CGRect(x: 120, y: 150, width: 300, height: 180)), visibleSheet])
@@ -521,7 +521,8 @@ final class PixelEnvironmentTests: XCTestCase {
                 rect: CGRect(x: 8, y: 0, width: 28, height: 20))])
 
         let result = ElementMarks.projectCaptureRoots(focusedWindow: selected, focusedBounds: bounds, focusedElement: nil,
-            menuBar: menu, selectedBounds: bounds, deadline: .now + .milliseconds(300))
+            menuBar: menu, selectedBounds: bounds, deadline: .now + .milliseconds(300),
+            attachedSheetIdentity: visibleSheet.identity)
 
         let names = Set(result.marks.map(\.name))
         XCTAssertTrue(names.contains("Editor"))
@@ -533,6 +534,11 @@ final class PixelEnvironmentTests: XCTestCase {
             menuBarBounds: [], sameAppDialogBounds: result.overlayBounds))
         XCTAssertFalse(PixelWindowActionBoundary.allows(CGPoint(x: 530, y: 430), windowBounds: bounds,
             menuBarBounds: [], sameAppDialogBounds: []))
+
+        let unbound = ElementMarks.projectCaptureRoots(focusedWindow: selected, focusedBounds: bounds,
+            focusedElement: nil, menuBar: menu, selectedBounds: bounds, deadline: .now + .milliseconds(300))
+        XCTAssertFalse(unbound.marks.contains { $0.name == "Continue" })
+        XCTAssertTrue(unbound.overlayBounds.isEmpty)
     }
 
     func testMissingOrMismatchedAXWindowDoesNotExposeApplicationSiblingMarks() {

@@ -343,5 +343,6 @@ extension PixelEnvironment {
         let activeWindowOwnerProcessID: Int32?
         let visibleWindowCount: Int
         let marks: PixelElementMarks?
+        var attachedSheetIdentity: AnyHashable? = nil
     }
 }

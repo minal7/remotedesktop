@@ -672,6 +672,12 @@
     "RemoteDesktopHostTests/AgentEvalWireTests/testOperatorApprovalMailboxPreservesMissingControlRevisionWithoutCoercingZero",
     "RemoteDesktopHostTests/AgentSharedSupportTests/testTypingBindingRejectsMissingOrForeignWindow",
     "RemoteDesktopHostTests/AgentSharedSupportTests/testTypingBindingAllowsVerifiedDescendant",
-    "RemoteDesktopHostTests/AgentSharedSupportTests/testTypingBindingRechecksRecipientBeforePaste"
+    "RemoteDesktopHostTests/AgentSharedSupportTests/testTypingBindingRechecksRecipientBeforePaste",
+    "RemoteDesktopHostTests/AgentSharedSupportTests/testAttachedSheetControlsRemainActionableOutsideOwnerWindowBounds",
+    "RemoteDesktopHostTests/AgentSharedSupportTests/testAttachedSheetFocusProjectionRetainsNestedClipAndSecureMasking",
+    "RemoteDesktopHostTests/AgentSharedSupportTests/testAttachedSheetTypingRequiresExactBoundedOwnerPath",
+    "RemoteDesktopHostTests/AgentSharedSupportTests/testProtectedIntermediateSheetAncestorSuppressesWholeSheetProjection",
+    "RemoteDesktopHostTests/AgentSharedSupportTests/testProtectedOwnerMasksAttachedSheetAndSuppressesItsMarks",
+    "RemoteDesktopHostTests/AgentSharedSupportTests/testProtectedAttachedSheetWithUnknownBoundsRequiresHandoff"
   ]
 }

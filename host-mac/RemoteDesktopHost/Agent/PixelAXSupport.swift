@@ -1,6 +1,80 @@
+import AppKit
 import CoreGraphics
 import Foundation
 import ApplicationServices
+
+enum PixelWindowDisposition: Equatable { case window, systemOverlay, unknown, notAppWindow }
+enum PixelWindowTreeShape: Equatable { case singleButtonOnly, other, incomplete }
+
+struct PixelWindowEvidence {
+    let appPID: Int32
+    let ownerPID: Int32
+    let windowID: UInt32
+    let layer: Int
+    let role: String
+    let subrole: String?
+    let title: String?
+    let document: String?
+    let tree: PixelWindowTreeShape
+}
+
+struct PixelElementMark {
+    let id: Int
+    let role: String
+    let name: String
+    let screenRect: CGRect
+    let state: [String]
+    let inView: Bool
+    let reference: (any PixelElementReference)?
+    let identity: AnyHashable?
+
+    init(id: Int, role: String, name: String, screenRect: CGRect, state: [String], inView: Bool,
+         reference: (any PixelElementReference)? = nil, identity: AnyHashable? = nil) {
+        self.id = id; self.role = role; self.name = name; self.screenRect = screenRect
+        self.state = state; self.inView = inView; self.reference = reference; self.identity = identity
+    }
+}
+
+struct PixelElementMarks {
+    let marks: [PixelElementMark]
+    let focusedID: Int?
+    let secureScreenRects: [CGRect]
+    let overlayBounds: [CGRect]
+    let contentRect: CGRect?
+    let browserURL: String?
+    let axState: [PixelAXElementState]?
+    var defaultButtonEvidence: AgentDefaultButtonEvidence = .unknown
+    var requiresProtectedRegionHandoff: Bool = false
+}
+
+@MainActor
+struct PixelClipboardLease {
+    private let board: NSPasteboard
+    private let saved: [[(NSPasteboard.PasteboardType, Data)]]
+    private let stagedChangeCount: Int
+
+    init(board: NSPasteboard, text: String) {
+        self.board = board
+        saved = board.pasteboardItems?.map { item in
+            item.types.compactMap { type in item.data(forType: type).map { (type, $0) } }
+        } ?? []
+        board.clearContents()
+        board.setString(text, forType: .string)
+        board.setData(Data("1".utf8), forType: NSPasteboard.PasteboardType("org.nspasteboard.TransientType"))
+        stagedChangeCount = board.changeCount
+    }
+
+    func restore() {
+        guard board.changeCount == stagedChangeCount else { return }
+        board.clearContents()
+        let items = saved.map { values -> NSPasteboardItem in
+            let item = NSPasteboardItem()
+            for (type, data) in values { item.setData(data, forType: type) }
+            return item
+        }
+        if !items.isEmpty { board.writeObjects(items) }
+    }
+}
 
 /// Small lazy seam shared by the production AX reader and deterministic tree tests.
 @MainActor
@@ -74,6 +148,69 @@ struct PixelAXIdentity: Hashable {
     func hash(into hasher: inout Hasher) { hasher.combine(CFHash(element)) }
 }
 
+enum PixelAXOwnerPath {
+    struct Result { let attachedSheet: AnyHashable? }
+
+    static func attachedSheet(_ path: [(identity: AnyHashable, role: String, pid: pid_t)],
+                              selectedWindow: AnyHashable, attributeOwner: AnyHashable?, expectedPID: pid_t) -> Result? {
+        guard let last = path.last, last.identity == selectedWindow, last.role == "AXWindow",
+              path.allSatisfy({ $0.pid == expectedPID }),
+              Set(path.map(\.identity)).count == path.count,
+              !path.dropLast().contains(where: { $0.role == "AXApplication" || $0.role == "AXWindow" }) else { return nil }
+        let sheets = path.filter { $0.role == "AXSheet" }
+        guard sheets.count <= 1,
+              (attributeOwner == nil ? sheets.count == 1 : attributeOwner == selectedWindow || attributeOwner == sheets.first?.identity) else { return nil }
+        return Result(attachedSheet: sheets.first?.identity)
+    }
+}
+
+@MainActor
+enum PixelAttachedSheetOwner {
+    struct Selection {
+        let window: AXUIElement?
+        let sheet: AXUIElement?
+    }
+
+    static func resolve(_ focusedWindow: AXUIElement?, appPID: Int32,
+                        deadline: ContinuousClock.Instant) -> Selection {
+        guard let focusedWindow else { return .init(window: nil, sheet: nil) }
+        guard ElementMarks.read(focusedWindow, kAXRoleAttribute, deadline: deadline) as? String == "AXSheet" else {
+            return .init(window: focusedWindow, sheet: nil)
+        }
+        guard let rect = ElementMarks.bounds(focusedWindow, deadline: deadline), valid(rect) else {
+            return .init(window: nil, sheet: focusedWindow)
+        }
+        var sheetPID: pid_t = 0
+        guard AXUIElementGetPid(focusedWindow, &sheetPID) == .success, sheetPID == appPID else {
+            return .init(window: nil, sheet: focusedWindow)
+        }
+        var current = focusedWindow, visited = [focusedWindow]
+        for _ in 0..<16 {
+            guard ContinuousClock.now < deadline,
+                  let parent = ElementMarks.ax(ElementMarks.read(current, kAXParentAttribute, deadline: deadline)),
+                  !visited.contains(where: { CFEqual($0, parent) }) else { return .init(window: nil, sheet: focusedWindow) }
+            var pid: pid_t = 0
+            guard AXUIElementGetPid(parent, &pid) == .success, pid == appPID else { return .init(window: nil, sheet: focusedWindow) }
+            visited.append(parent)
+            let role = ElementMarks.read(parent, kAXRoleAttribute, deadline: deadline) as? String
+            guard role != "AXApplication" else { return .init(window: nil, sheet: focusedWindow) }
+            if role == "AXWindow" {
+                guard let ownerBounds = ElementMarks.bounds(parent, deadline: deadline), valid(ownerBounds) else {
+                    return .init(window: nil, sheet: focusedWindow)
+                }
+                return .init(window: parent, sheet: focusedWindow)
+            }
+            current = parent
+        }
+        return .init(window: nil, sheet: focusedWindow)
+    }
+
+    private static func valid(_ rect: CGRect) -> Bool {
+        !rect.isNull && !rect.isEmpty && rect.minX.isFinite && rect.minY.isFinite &&
+            rect.width.isFinite && rect.height.isFinite
+    }
+}
+
 @MainActor
 struct PixelFocusedAXPath {
     let elements: [AXUIElement]
@@ -81,27 +218,56 @@ struct PixelFocusedAXPath {
     let selectedWindow: AnyHashable
     let focusPID: pid_t
     let windowPID: pid_t
+    let attachedSheet: AnyHashable?
+    let hasProtectedOrSecureAncestor: Bool
 
     static func read(_ focus: AXUIElement?, window: AXUIElement?, appPID: pid_t,
                      deadline: ContinuousClock.Instant) -> Self? {
-        guard let focus, let window, ContinuousClock.now < deadline,
-              let owner = ElementMarks.ax(ElementMarks.read(focus, kAXWindowAttribute, deadline: deadline)),
-              CFEqual(owner, window) else { return nil }
+        guard let focus, let window, ContinuousClock.now < deadline else { return nil }
+        let owner = ElementMarks.ax(ElementMarks.read(focus, kAXWindowAttribute, deadline: deadline))
         var focusPID: pid_t = 0, windowPID: pid_t = 0
         guard AXUIElementGetPid(focus, &focusPID) == .success, AXUIElementGetPid(window, &windowPID) == .success,
               focusPID == appPID, windowPID == appPID else { return nil }
         var path = [focus], current = focus
+        var visited: [AXUIElement] = [focus]
         for _ in 0..<16 {
             guard ContinuousClock.now < deadline,
                   let parent = ElementMarks.ax(ElementMarks.read(current, kAXParentAttribute, deadline: deadline)) else { return nil }
+            guard !visited.contains(where: { CFEqual($0, parent) }) else { return nil }
+            var parentPID: pid_t = 0
+            guard AXUIElementGetPid(parent, &parentPID) == .success, parentPID == appPID else { return nil }
+            visited.append(parent)
             path.append(parent)
             if CFEqual(parent, window) {
-                return Self(elements: path, ownerWindow: AnyHashable(PixelAXIdentity(element: owner)),
-                    selectedWindow: AnyHashable(PixelAXIdentity(element: window)), focusPID: focusPID, windowPID: windowPID)
+                let ownerPath = path.map { element in
+                    (identity: AnyHashable(PixelAXIdentity(element: element)),
+                     role: ElementMarks.read(element, kAXRoleAttribute, deadline: deadline) as? String ?? "",
+                     pid: pid(of: element))
+                }
+                guard let ownerPathResult = PixelAXOwnerPath.attachedSheet(ownerPath,
+                    selectedWindow: AnyHashable(PixelAXIdentity(element: window)),
+                    attributeOwner: owner.map { AnyHashable(PixelAXIdentity(element: $0)) }, expectedPID: appPID) else { return nil }
+                let protectedOrSecure = path.contains { element in
+                    guard ContinuousClock.now < deadline else { return true }
+                    let role = ElementMarks.read(element, kAXRoleAttribute, deadline: deadline) as? String ?? ""
+                    let subrole = ElementMarks.read(element, kAXSubroleAttribute, deadline: deadline) as? String ?? ""
+                    return ElementMarks.read(element, "AXProtectedContent", deadline: deadline) as? Bool == true ||
+                        AgentCredentialRule.isSensitive(role: role, name: "", state: [subrole])
+                }
+                guard ContinuousClock.now < deadline else { return nil }
+                return Self(elements: path, ownerWindow: AnyHashable(PixelAXIdentity(element: window)),
+                    selectedWindow: AnyHashable(PixelAXIdentity(element: window)), focusPID: focusPID, windowPID: windowPID,
+                    attachedSheet: ownerPathResult.attachedSheet, hasProtectedOrSecureAncestor: protectedOrSecure)
             }
             current = parent
         }
         return nil
+    }
+
+    private static func pid(of element: AXUIElement) -> pid_t {
+        var value: pid_t = 0
+        guard AXUIElementGetPid(element, &value) == .success else { return 0 }
+        return value
     }
 }
 
@@ -112,11 +278,23 @@ struct PixelTypingFocusBinding {
         let selectedWindow: AnyHashable?
         let focusPID: pid_t
         let windowPID: pid_t
+        let attachedSheet: AnyHashable?
+
+        init(focus: AnyHashable, ownerWindow: AnyHashable?, selectedWindow: AnyHashable?,
+             focusPID: pid_t, windowPID: pid_t, attachedSheet: AnyHashable? = nil) {
+            self.focus = focus; self.ownerWindow = ownerWindow; self.selectedWindow = selectedWindow
+            self.focusPID = focusPID; self.windowPID = windowPID; self.attachedSheet = attachedSheet
+        }
     }
 
     let focus: AnyHashable
     let window: AnyHashable
     let pid: pid_t
+    let attachedSheet: AnyHashable?
+
+    init(focus: AnyHashable, window: AnyHashable, pid: pid_t, attachedSheet: AnyHashable? = nil) {
+        self.focus = focus; self.window = window; self.pid = pid; self.attachedSheet = attachedSheet
+    }
 
     static func identity(_ element: AXUIElement) -> AnyHashable {
         AnyHashable(PixelAXIdentity(element: element))
@@ -129,18 +307,23 @@ struct PixelTypingFocusBinding {
         guard path.ownerWindow == selectedIdentity, path.selectedWindow == selectedIdentity,
               path.focusPID == expectedPID, path.windowPID == expectedPID else { return nil }
         return Evidence(focus: identity(focus), ownerWindow: path.ownerWindow,
-            selectedWindow: path.selectedWindow, focusPID: path.focusPID, windowPID: path.windowPID)
+            selectedWindow: path.selectedWindow, focusPID: path.focusPID, windowPID: path.windowPID,
+            attachedSheet: path.attachedSheet)
     }
 
     static func allows(_ evidence: Evidence?, binding: Self) -> Bool {
         guard let evidence else { return false }
         return evidence.focus == binding.focus && evidence.ownerWindow == binding.window &&
             evidence.selectedWindow == binding.window && evidence.focusPID == binding.pid &&
-            evidence.windowPID == binding.pid
+            evidence.windowPID == binding.pid && evidence.attachedSheet == binding.attachedSheet
     }
 
     static func require(_ evidence: Evidence?, binding: Self) throws {
         guard allows(evidence, binding: binding) else { throw AgentEnvironmentError.scopeChanged }
+    }
+
+    static func allowsPath(attachedSheet: AnyHashable?, hasProtectedOrSecureAncestor: Bool) -> Bool {
+        attachedSheet == nil || !hasProtectedOrSecureAncestor
     }
 
     @MainActor
@@ -153,7 +336,12 @@ struct PixelTypingFocusBinding {
         guard let path = PixelFocusedAXPath.read(focus, window: selectedWindow, appPID: pid, deadline: deadline) else {
             throw AgentEnvironmentError.scopeChanged
         }
-        let binding = expected ?? Self(focus: identity(focus), window: identity(selectedWindow), pid: pid)
+        guard allowsPath(attachedSheet: path.attachedSheet,
+                         hasProtectedOrSecureAncestor: path.hasProtectedOrSecureAncestor) else {
+            throw AgentEnvironmentError.credentialHandoff
+        }
+        let binding = expected ?? Self(focus: identity(focus), window: identity(selectedWindow), pid: pid,
+            attachedSheet: path.attachedSheet)
         try require(evidence(focus: focus, path: path, selectedWindow: selectedWindow, expectedPID: pid), binding: binding)
         try PixelPersonalDataTargetGuard.performIfAllowed(path: PixelPersonalDataTargetGuard.descriptors(from: focus)) {}
         return (focus, binding)
@@ -169,23 +357,33 @@ enum PixelFocusedAXProjection {
               focusPID == expectedPID, selectedPID == expectedPID, path.count > 1,
               path.last?.identity == selectedWindow, path.last?.role == "AXWindow", valid(windowBounds),
               let selectedRect = path.last?.screenRect, valid(selectedRect) else { return (nil, []) }
+        let sheets = path.filter { $0.role == "AXSheet" }
+        guard sheets.count <= 1 else { return (nil, []) }
+        let surfaceBounds = sheets.first?.screenRect ?? windowBounds
+        guard valid(surfaceBounds) else { return (nil, []) }
+        let secureFallback = windowBounds.union(surfaceBounds)
         let focusRect = path.first?.screenRect
-        var clip = windowBounds.intersection(selectedRect), blocked = false, secure = false, secureRects: [CGRect] = []
-        for node in path {
+        var clip = sheets.isEmpty ? windowBounds.intersection(selectedRect) : surfaceBounds
+        var blocked = false, secure = false, secureRects: [CGRect] = []
+        for node in path.reversed() {
             guard ContinuousClock.now < deadline else { return (nil, secureRects) }
             let role = node.role
             if node.isProtected || node.isSecure {
                 secure = true
-                let rect = node.screenRect.flatMap { valid($0) ? $0 : nil } ?? windowBounds
+                let rect = !sheets.isEmpty && node.identity == selectedWindow
+                    ? secureFallback : node.screenRect.flatMap { valid($0) ? $0 : nil } ?? secureFallback
                 secureRects.append(rect)
             }
             if node.isHidden || role == "AXScrollBar" { blocked = true }
+            if role == "AXSheet" {
+                guard let rect = node.screenRect, valid(rect), rect == surfaceBounds else { blocked = true; continue }
+            }
             if role == "AXScrollArea" || role == "AXClipView" {
                 guard let rect = node.screenRect, valid(rect) else { blocked = true; continue }
                 clip = clip.intersection(rect)
             }
         }
-        let visibleSecureRects = secureRects.map { $0.intersection(clip) }.filter { valid($0) }
+        let visibleSecureRects = secureRects.map { $0 == secureFallback ? $0 : $0.intersection(clip) }.filter { valid($0) }
         if secure { return (nil, visibleSecureRects) }
         guard !blocked, let focusRect, valid(focusRect), clip.contains(CGPoint(x: focusRect.midX, y: focusRect.midY)) else { return (nil, []) }
         return (focusRect.intersection(clip), [])

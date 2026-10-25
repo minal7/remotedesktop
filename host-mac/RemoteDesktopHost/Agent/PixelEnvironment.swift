@@ -12,35 +12,6 @@ struct PixelEnvironmentReadiness {
 }
 
 @MainActor
-struct PixelClipboardLease {
-    private let board: NSPasteboard
-    private let saved: [[(NSPasteboard.PasteboardType, Data)]]
-    private let stagedChangeCount: Int
-
-    init(board: NSPasteboard, text: String) {
-        self.board = board
-        saved = board.pasteboardItems?.map { item in
-            item.types.compactMap { type in item.data(forType: type).map { (type, $0) } }
-        } ?? []
-        board.clearContents()
-        board.setString(text, forType: .string)
-        board.setData(Data("1".utf8), forType: NSPasteboard.PasteboardType("org.nspasteboard.TransientType"))
-        stagedChangeCount = board.changeCount
-    }
-
-    func restore() {
-        guard board.changeCount == stagedChangeCount else { return }
-        board.clearContents()
-        let items = saved.map { values -> NSPasteboardItem in
-            let item = NSPasteboardItem()
-            for (type, data) in values { item.setData(data, forType: type) }
-            return item
-        }
-        if !items.isEmpty { board.writeObjects(items) }
-    }
-}
-
-@MainActor
 final class PixelEnvironment: AgentEnvironment {
     typealias Picker = @MainActor ([String]) async throws -> String
     private enum PasteResult: Equatable { case matches, unchanged, unavailable }
@@ -342,24 +313,26 @@ final class PixelEnvironment: AgentEnvironment {
                 }
             }
         }
-        let focusedAXWindow = appRoot.flatMap(ElementMarks.focusedWindow)
-        let focusedBounds = focusedAXWindow.flatMap(ElementMarks.bounds)
+        let focusSelection = PixelAttachedSheetOwner.resolve(appRoot.flatMap(ElementMarks.focusedWindow),
+            appPID: app?.processIdentifier ?? 0, deadline: ContinuousClock.now + .milliseconds(120))
+        let focusedSheet = focusSelection.sheet, selectedAXWindow = focusSelection.window
+        let focusedBounds = selectedAXWindow.flatMap(ElementMarks.bounds)
         let target: SCWindow? = app.flatMap { application in
-            guard let focusedAXWindow, let focusedBounds else { return nil }
-            let title = ElementMarks.string(focusedAXWindow, kAXTitleAttribute)
+            guard let selectedAXWindow, let focusedBounds else { return nil }
+            let title = ElementMarks.string(selectedAXWindow, kAXTitleAttribute)
             guard let windowID = AgentMacAccessibility.matchingWindowID(ownerPID: application.processIdentifier,
-                bounds: focusedBounds, focusedTitle: title) else { return nil }
+                bounds: focusedBounds, focusedTitle: title, requireUnique: focusedSheet != nil) else { return nil }
             return appWindows.first(where: { $0.windowID == windowID &&
                 ElementMarks.focusedWindowMatches(focusedBounds, selectedBounds: $0.frame) })
         }
         let mainTarget: SCWindow? = {
-            guard target == nil, let application = app, let appRoot, let mainWindow = ElementMarks.mainWindow(appRoot), let bounds = ElementMarks.bounds(mainWindow) else { return nil }
+            guard focusedSheet == nil, target == nil, let application = app, let appRoot, let mainWindow = ElementMarks.mainWindow(appRoot), let bounds = ElementMarks.bounds(mainWindow) else { return nil }
             let title = ElementMarks.string(mainWindow, kAXTitleAttribute)
             guard let windowID = AgentMacAccessibility.matchingWindowID(ownerPID: application.processIdentifier,
                 bounds: bounds, focusedTitle: title, requireUnique: true) else { return nil }
             return appWindows.first { $0.windowID == windowID && ElementMarks.focusedWindowMatches(bounds, selectedBounds: $0.frame) }
         }()
-        let actionTarget = target ?? mainTarget, usesMainFallback = target == nil && mainTarget != nil
+        let actionTarget = target ?? mainTarget, usesMainFallback = (target == nil && mainTarget != nil) || focusedSheet != nil
         let displayForWindow = actionTarget.flatMap { window in
             let center = CGPoint(x: window.frame.midX, y: window.frame.midY)
             return content.displays.first(where: { $0.frame.contains(center) })
@@ -372,21 +345,25 @@ final class PixelEnvironment: AgentEnvironment {
             throw AgentEnvironmentError.unavailable("No display can be captured.")
         }
         var axWindow: AgentMacAccessibility.Window?
-        if AXIsProcessTrusted(), let app, let target, let focusedAXWindow {
-            axWindow = AgentMacAccessibility.Window(application: app, element: focusedAXWindow,
+        if AXIsProcessTrusted(), let app, let target, let selectedAXWindow {
+            axWindow = AgentMacAccessibility.Window(application: app, element: selectedAXWindow,
                 bounds: target.frame, number: target.windowID, title: target.title ?? "")
         }
         let marks: PixelElementMarks?
         if AXIsProcessTrusted(), let app, let appRoot {
-            marks = ElementMarks.readCapture(window: axWindow, focusedWindowElement: focusedAXWindow,
+            marks = ElementMarks.readCapture(window: axWindow, focusedWindowElement: selectedAXWindow,
                 focusedBounds: axWindow == nil ? nil : focusedBounds, appRoot: appRoot, application: app,
                 selectedBounds: target?.frame ?? display.frame)
         } else { marks = nil }
+        if marks?.requiresProtectedRegionHandoff == true {
+            throw AgentEnvironmentError.systemHandoff(
+                "A protected window surface could not be verified safely. Inspect the Mac and tap Resume.")
+        }
         var image: CGImage
         var captureBounds: CGRect
         var identity: String
         var windowCapture = false
-        if capturePreference == .frontmostWindow, let target {
+        if capturePreference == .frontmostWindow, let target, focusedSheet == nil {
             do {
                 let captured = try await Self.captureNativeWindow(target, content.displays)
                 image = captured.image
@@ -434,7 +411,8 @@ final class PixelEnvironment: AgentEnvironment {
             elements: elements, focus: focus, screenBounds: screenshotBounds,
             activeWindowBounds: actionTarget?.frame, activeWindowNumber: actionTarget?.windowID,
             activeWindowOwnerProcessID: actionTarget?.owningApplication?.processID,
-            visibleWindowCount: visibleAppWindowCount, marks: marks)
+            visibleWindowCount: visibleAppWindowCount, marks: marks,
+            attachedSheetIdentity: focusedSheet.flatMap { target == nil ? nil : PixelTypingFocusBinding.identity($0) })
     }
 
     private func dismissSystemVoiceOverlayBeforeObservation() async throws {
@@ -502,6 +480,7 @@ final class PixelEnvironment: AgentEnvironment {
         guard let snapshot = snapshots[frame.scope.identity] else { throw AgentEnvironmentError.targetGone }
         if let target { try click(screenPoint(target, frame: frame, targets: targets, bindings: bindings), button: .left, count: 1) }
         let (focused, typingBinding) = try PixelTypingFocusBinding.current(in: snapshot)
+        guard typingBinding.attachedSheet == snapshot.attachedSheetIdentity else { throw AgentEnvironmentError.scopeChanged }
         let name = ElementMarks.label(focused)
         let expectedMark = targets.first ?? (target == nil ? frame.observation.focus.flatMap { focus in
             frame.observation.elements.first(where: { $0.id == focus.id })
