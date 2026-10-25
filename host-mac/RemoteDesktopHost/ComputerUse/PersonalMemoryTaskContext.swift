@@ -27,6 +27,10 @@ final class AgentMemoryDisclosureAuthority {
         guard lease.taskID == taskID, !text.isEmpty else { changed = true; return }
         guard let current = slot.read(taskID: taskID), current.lease == lease,
               current.binding == binding, current.text == text else { changed = true; return }
+        if Self.isEmptyJSONArray(text) {
+            if pinned != nil { changed = true }
+            return
+        }
         let snapshot = AgentMemoryContextSnapshot(lease: lease, binding: binding,
             textDigest: Self.digest(text), slotRevision: current.revision)
         if let pinned, pinned != snapshot { changed = true } else { pinned = snapshot }
@@ -82,6 +86,13 @@ final class AgentMemoryDisclosureAuthority {
 
     private static func digest(_ text: String) -> String {
         SHA256.hash(data: Data(text.utf8)).map { String(format: "%02x", $0) }.joined()
+    }
+
+    private static func isEmptyJSONArray(_ text: String) -> Bool {
+        guard let data = text.data(using: .utf8),
+              let value = try? JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed]),
+              let array = value as? [Any] else { return false }
+        return array.isEmpty
     }
 }
 

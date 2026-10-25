@@ -118,6 +118,63 @@ final class AgentActionGateTests: XCTestCase {
             "A rejected approval remains consumed after identical context is restored.")
     }
 
+    func testEmptyMemoryContextDoesNotCreateDisclosureAuthorityButCannotClearIt() async throws {
+        let scope = webScope(), fixture = try ContextStoreFixture()
+        defer { fixture.cleanup() }
+        let lease = LocalMemoryHostLease(peerID: UUID().uuidString.lowercased(), sessionID: "empty-context-session",
+            taskID: scope.taskID, authorizationGeneration: 12, taskAuthority: .active)
+        let field = element(4, "AXTextField", "Greeting")
+        let write = resolved(.type(target: .element(id: 4), text: "synthetic value", mode: .replace), scope,
+            elements: [field])
+        let emptySlot = TaskMemoryContextSlot()
+        emptySlot.bindLease(lease)
+        emptySlot.stage("[ \n ]", taskID: scope.taskID, lease: lease, binding: fixture.binding, isCurrent: { true })
+        let emptyAuthority = AgentMemoryDisclosureAuthority(taskID: scope.taskID, slot: emptySlot)
+        let emptyObserver = ContextObservedPolicy()
+        let emptyPolicy = TaskMemoryContextPolicy.applying(taskID: scope.taskID, slot: emptySlot,
+            base: emptyObserver, memoryDisclosureAuthority: emptyAuthority)
+        _ = try await emptyPolicy.propose(.init(task: "ordinary task", surface: .web(url: "https://example.test", title: ""),
+            screenshot: "", elements: [], focus: nil, history: [], budget: .init(step: 0, maxSteps: 2)))
+        XCTAssertTrue(emptyObserver.observations.first?.task.contains("<saved-memory-reference-data>\n[ \n ]") == true)
+        let ordinaryGate = AgentActionGate(trustStore: MemoryTrustStore(trusted: ["web:https://example.test"]), allowPolicy: TestAllowPolicy(),
+            memoryDisclosureAuthority: emptyAuthority)
+        XCTAssertEqual(try ordinaryGate.evaluate(write, expectedScope: scope).result.decision, .allowed,
+            "A verified empty retrieval must not require memory-disclosure approval.")
+
+        let populatedSlot = TaskMemoryContextSlot()
+        populatedSlot.bindLease(lease)
+        let populatedContext = "[{\"text\":\"synthetic saved entry\"}]"
+        populatedSlot.stage(populatedContext, taskID: scope.taskID, lease: lease,
+            binding: fixture.binding, isCurrent: { true })
+        let populatedAuthority = AgentMemoryDisclosureAuthority(taskID: scope.taskID, slot: populatedSlot)
+        populatedAuthority.pin(lease: lease, binding: fixture.binding, text: populatedContext)
+        let populatedGate = AgentActionGate(trustStore: MemoryTrustStore(trusted: ["web:https://example.test"]), allowPolicy: TestAllowPolicy(),
+            memoryDisclosureAuthority: populatedAuthority)
+        let pending = try XCTUnwrap(populatedGate.evaluate(write, expectedScope: scope).approval)
+        XCTAssertEqual(try populatedGate.evaluate(write, expectedScope: scope).result.decision, .needsApproval,
+            "A nonempty memory context remains disclosure-bound.")
+        populatedSlot.stage("[]", taskID: scope.taskID, lease: lease, binding: fixture.binding, isCurrent: { true })
+        populatedAuthority.pin(lease: lease, binding: fixture.binding, text: "[]")
+        XCTAssertEqual(try populatedGate.evaluate(write, expectedScope: scope).result.decision, .rejected,
+            "An empty context after a nonempty snapshot must remain stale and fail closed.")
+        XCTAssertEqual(try populatedGate.resolveApproval(pending.id, approved: true, resolved: write,
+            expectedScope: scope).result.decision, .rejected,
+            "An outstanding approval cannot survive the nonempty-to-empty context change.")
+
+        for malformedContext in ["{}", "{"] {
+            let malformedSlot = TaskMemoryContextSlot()
+            malformedSlot.bindLease(lease)
+            malformedSlot.stage(malformedContext, taskID: scope.taskID, lease: lease,
+                binding: fixture.binding, isCurrent: { true })
+            let malformedAuthority = AgentMemoryDisclosureAuthority(taskID: scope.taskID, slot: malformedSlot)
+            malformedAuthority.pin(lease: lease, binding: fixture.binding, text: malformedContext)
+            let malformedGate = AgentActionGate(trustStore: MemoryTrustStore(trusted: ["web:https://example.test"]), allowPolicy: TestAllowPolicy(),
+                memoryDisclosureAuthority: malformedAuthority)
+            XCTAssertEqual(try malformedGate.evaluate(write, expectedScope: scope).result.decision, .needsApproval,
+                "Malformed or non-array JSON must not be treated as an empty retrieval.")
+        }
+    }
+
     func testNoMemoryContextKeepsOrdinaryTypingAndOpaquePasteIsRefusedWhenTainted() throws {
         let scope = webScope(), store = MemoryTrustStore(trusted: ["web:https://example.test"])
         let field = element(4, "AXTextField", "Greeting")

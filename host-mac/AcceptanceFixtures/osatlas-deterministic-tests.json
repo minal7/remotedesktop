@@ -197,6 +197,7 @@
     "RemoteDesktopHostTests/AgentActionGateTests/testApprovalBindsActionTypedTextAndFullURL",
     "RemoteDesktopHostTests/AgentActionGateTests/testApprovalRejectsDifferentTaskAndDeclineIsOneShot",
     "RemoteDesktopHostTests/AgentActionGateTests/testChangedPointCoordinateInvalidatesApproval",
+    "RemoteDesktopHostTests/AgentActionGateTests/testEmptyMemoryContextDoesNotCreateDisclosureAuthorityButCannotClearIt",
     "RemoteDesktopHostTests/AgentActionGateTests/testIrreversibleApprovalIgnoresCoordinatesAndUnrelatedPageState",
     "RemoteDesktopHostTests/AgentActionGateTests/testOCRContextLabelRequiresIrreversibleApproval",
     "RemoteDesktopHostTests/AgentActionGateTests/testOpenAppNeedsRegistryIdentityAndOpenedSurfaceMatch",
