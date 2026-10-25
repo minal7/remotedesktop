@@ -2720,6 +2720,166 @@ final class ComputerUseSetupTests: XCTestCase {
         XCTAssertFalse(model.hasActivePrompt)
     }
 
+    func test_sessionStopWakesIdlePollWithoutBypassingHostRevisionOrTaskIdentity() async throws {
+        let hostID = "HOST-\(UUID().uuidString)"
+        let store = InMemoryComputerUsePendingPromptStore()
+        let channel = FakeComputerUseSessionChannel(initialEmptyPolls: 2)
+        let model = ComputerUseSessionModel(
+            hostName: "Studio Mac",
+            pairingCode: "123456",
+            hostID: hostID,
+            sessionID: "session-1",
+            pendingStore: store,
+            channel: channel)
+        defer {
+            model.stop()
+            store.remove(hostID: hostID)
+        }
+        model.start()
+        model.sendPrompt("Read the current local test page")
+        let sentPrompt = await waitForSentMessage(kind: .prompt, channel: channel)
+        let prompt = try XCTUnwrap(sentPrompt)
+        await waitUntilAsync { await channel.completedPollCount() == 1 }
+        // Ensure the poll loop has entered its regular idle interval after the
+        // deliberately empty first poll.
+        try await Task.sleep(for: .milliseconds(30))
+
+        let stopStartedAt = Date()
+        model.stopCurrentTask()
+        let sentCancel = await waitForSentMessage(kind: .cancel, channel: channel)
+        let cancelEnvelope = try XCTUnwrap(sentCancel)
+        let cancel = try ComputerUseControlRequest.decodeBody(cancelEnvelope.body)
+        XCTAssertEqual(cancel.taskID, prompt.id)
+        XCTAssertEqual(cancel.revision, 1)
+        XCTAssertEqual(cancel.observedHostControlEpoch, 0)
+        XCTAssertEqual(model.statusText, "Stopping the task…")
+        XCTAssertTrue(model.hasActivePrompt, "Stop must wait for an authenticated host result")
+
+        var postStopPollWasPrompt = false
+        for _ in 0..<30 {
+            if await channel.completedPollCount() >= 2 {
+                postStopPollWasPrompt = Date().timeIntervalSince(stopStartedAt) < 0.4
+                break
+            }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        guard postStopPollWasPrompt else {
+            XCTFail("Stop did not promptly wake polling after an empty host response")
+            return
+        }
+
+        let staleTask = ComputerUseTaskUpdate(
+            taskID: "other-task",
+            text: "Wrong task completed",
+            appliedControlRevision: 1,
+            hostControlEpoch: 0,
+            outcome: .taskCompleted)
+        let staleRevision = ComputerUseTaskUpdate(
+            taskID: prompt.id,
+            text: "Stale revision completed",
+            appliedControlRevision: 0,
+            hostControlEpoch: 0,
+            outcome: .taskCompleted)
+        let terminalText = "Stopped. You're in control of the Mac."
+        try await channel.enqueueHostEnvelope(kind: .assistant, body: staleTask.encodedBody(), senderID: hostID)
+        try await channel.enqueueHostEnvelope(kind: .assistant, body: staleRevision.encodedBody(), senderID: hostID)
+        try await channel.enqueueHostEnvelope(
+            kind: .assistant,
+            body: ComputerUseTaskUpdate(
+                taskID: prompt.id,
+                text: terminalText,
+                appliedControlRevision: cancel.revision,
+                hostControlEpoch: cancel.observedHostControlEpoch,
+                outcome: .taskCompleted).encodedBody(),
+            senderID: hostID)
+        let terminalEnqueuedAt = Date()
+        var consumedPromptly = false
+        for _ in 0..<50 {
+            if !model.hasActivePrompt {
+                consumedPromptly = true
+                break
+            }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        guard consumedPromptly else {
+            XCTFail("An authenticated terminal result waited behind the two-second idle poll")
+            return
+        }
+        XCTAssertLessThan(Date().timeIntervalSince(terminalEnqueuedAt), 0.5)
+
+        XCTAssertEqual(model.state, .ready)
+        XCTAssertEqual(model.statusText, "Task completed — ready for another request")
+        XCTAssertTrue(model.messages.contains { $0.author == .assistant && $0.text == terminalText })
+        XCTAssertFalse(model.messages.contains { $0.text == staleTask.text || $0.text == staleRevision.text })
+        let maximumConcurrentPolls = await channel.maximumConcurrentPollCount()
+        XCTAssertEqual(maximumConcurrentPolls, 1)
+    }
+
+    func test_sessionStopDuringEmptyPollKeepsWakeForHostTerminal() async throws {
+        let hostID = "HOST-\(UUID().uuidString)"
+        let store = InMemoryComputerUsePendingPromptStore()
+        let channel = FakeComputerUseSessionChannel(
+            blocksPollUntilReleased: true,
+            initialEmptyPolls: 1)
+        let model = ComputerUseSessionModel(
+            hostName: "Studio Mac",
+            pairingCode: "123456",
+            hostID: hostID,
+            sessionID: "session-1",
+            pendingStore: store,
+            channel: channel)
+        defer {
+            model.stop()
+            store.remove(hostID: hostID)
+        }
+        model.start()
+        model.sendPrompt("Read the current local test page")
+        let sentPrompt = await waitForSentMessage(kind: .prompt, channel: channel)
+        let prompt = try XCTUnwrap(sentPrompt)
+        await waitUntilAsync { await channel.pollAttemptCount() == 1 }
+
+        model.stopCurrentTask()
+        let sentCancel = await waitForSentMessage(kind: .cancel, channel: channel)
+        let cancelEnvelope = try XCTUnwrap(sentCancel)
+        let cancel = try ComputerUseControlRequest.decodeBody(cancelEnvelope.body)
+        XCTAssertEqual(cancel.taskID, prompt.id)
+        XCTAssertEqual(cancel.revision, 1)
+        XCTAssertTrue(model.hasActivePrompt, "Stop waits for the host's terminal result")
+
+        await channel.releaseBlockedPoll()
+        let secondPollStartedAt = Date()
+        var secondPollStartedPromptly = false
+        for _ in 0..<50 {
+            if await channel.pollAttemptCount() >= 2 {
+                secondPollStartedPromptly = Date().timeIntervalSince(secondPollStartedAt) < 0.5
+                break
+            }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        guard secondPollStartedPromptly else {
+            XCTFail("Stop while polling did not continue checking for an empty poll's terminal result")
+            return
+        }
+
+        let terminalText = "Stopped. You're in control of the Mac."
+        try await channel.enqueueHostEnvelope(
+            kind: .assistant,
+            body: ComputerUseTaskUpdate(
+                taskID: prompt.id,
+                text: terminalText,
+                appliedControlRevision: cancel.revision,
+                hostControlEpoch: cancel.observedHostControlEpoch,
+                outcome: .taskCompleted).encodedBody(),
+            senderID: hostID)
+        await waitUntil {
+            !model.hasActivePrompt
+                && model.messages.contains { $0.author == .assistant && $0.text == terminalText }
+        }
+        XCTAssertEqual(model.state, .ready)
+        let maximumConcurrentPolls = await channel.maximumConcurrentPollCount()
+        XCTAssertEqual(maximumConcurrentPolls, 1)
+    }
+
     func test_sessionDelayedApprovalFailureCannotReplaceNewTaskApproval() async throws {
         let hostID = "HOST-\(UUID().uuidString)"
         let store = ComputerUsePendingPromptStore()
@@ -3895,6 +4055,7 @@ private actor FakeComputerUseSessionChannel: ComputerUseSessionChannel {
     private let failingKinds: [ComputerUseEnvelope.Kind]
     private let cancellationIgnoringBlockedSendKind: ComputerUseEnvelope.Kind?
     private let blocksPollUntilReleased: Bool
+    private var initialEmptyPolls: Int
     private var sentPromptBodies: [String] = []
     private var sentPromptIDs: [String] = []
     private var sent: [ComputerUseEnvelope] = []
@@ -3905,6 +4066,8 @@ private actor FakeComputerUseSessionChannel: ComputerUseSessionChannel {
     private var blockedSendContinuation: CheckedContinuation<Void, Never>?
     private var pollAttempts = 0
     private var completedPolls = 0
+    private var activePolls = 0
+    private var maximumActivePolls = 0
     private var pollReleased = false
     private var blockedPollContinuation: CheckedContinuation<Void, Never>?
     private var acknowledgedCount = 0
@@ -3915,13 +4078,15 @@ private actor FakeComputerUseSessionChannel: ComputerUseSessionChannel {
         assistantReplies: [String] = [],
         failingKinds: [ComputerUseEnvelope.Kind] = [],
         cancellationIgnoringBlockedSendKind: ComputerUseEnvelope.Kind? = nil,
-        blocksPollUntilReleased: Bool = false
+        blocksPollUntilReleased: Bool = false,
+        initialEmptyPolls: Int = 0
     ) {
         self.failuresBeforeSuccess = failuresBeforeSuccess
         self.assistantReplies = assistantReplies
         self.failingKinds = failingKinds
         self.cancellationIgnoringBlockedSendKind = cancellationIgnoringBlockedSendKind
         self.blocksPollUntilReleased = blocksPollUntilReleased
+        self.initialEmptyPolls = initialEmptyPolls
     }
 
     func send(
@@ -3981,11 +4146,19 @@ private actor FakeComputerUseSessionChannel: ComputerUseSessionChannel {
     }
 
     func poll() async throws -> [ComputerUseEnvelope] {
+        activePolls += 1
+        maximumActivePolls = max(maximumActivePolls, activePolls)
+        defer { activePolls -= 1 }
         pollAttempts += 1
         if blocksPollUntilReleased, !pollReleased {
             await withCheckedContinuation { continuation in
                 blockedPollContinuation = continuation
             }
+        }
+        if initialEmptyPolls > 0 {
+            initialEmptyPolls -= 1
+            completedPolls += 1
+            return []
         }
         while incoming.isEmpty {
             try await Task.sleep(for: .milliseconds(10))
@@ -4032,6 +4205,10 @@ private actor FakeComputerUseSessionChannel: ComputerUseSessionChannel {
 
     func completedPollCount() -> Int {
         completedPolls
+    }
+
+    func maximumConcurrentPollCount() -> Int {
+        maximumActivePolls
     }
 
     func releaseBlockedPoll() {

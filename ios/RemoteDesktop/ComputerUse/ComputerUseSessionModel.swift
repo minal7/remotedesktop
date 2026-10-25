@@ -155,6 +155,8 @@ final class ComputerUseSessionModel: ObservableObject {
     private var requiresRecoveryReconnect = false
     private let localAccountBinding: CloudKitAccountBinding?
     private var pollingTask: Task<Void, Never>?
+    private var pollIdleSleepTask: Task<Void, Never>?
+    private var pollWakeRequested = false
     private var responseTimeoutTask: Task<Void, Never>?
     private var promptRefreshTask: Task<Void, Never>?
     private var controlRetryTask: Task<Void, Never>?
@@ -381,6 +383,9 @@ final class ComputerUseSessionModel: ObservableObject {
         isConnected = false
         pollingTask?.cancel()
         pollingTask = nil
+        pollIdleSleepTask?.cancel()
+        pollIdleSleepTask = nil
+        pollWakeRequested = false
         responseTimeoutTask?.cancel()
         responseTimeoutTask = nil
         promptRefreshTask?.cancel()
@@ -846,6 +851,7 @@ final class ComputerUseSessionModel: ObservableObject {
         state = .working
         guard isCurrentOperation(operationGeneration, promptID: promptID) else { return }
         statusText = "Stopping the task…"
+        wakePollLoop()
         scheduleResponseTimeout(
             message: "The Mac hasn’t confirmed Stop yet. Use the Mac directly to keep AI paused.")
         sendControl(.cancel, generation: operationGeneration)
@@ -945,6 +951,10 @@ final class ComputerUseSessionModel: ObservableObject {
         launchOutboundTask { model in
             do {
                 try await model.channel.send(kind: kind, body: body)
+                if kind == .cancel,
+                   model.pendingControlIntent == intent {
+                    model.wakePollLoop()
+                }
             } catch is CancellationError {
                 return
             } catch {
@@ -1196,7 +1206,10 @@ final class ComputerUseSessionModel: ObservableObject {
                 // Approval and completion often arrive back-to-back. Poll
                 // again immediately after real work so the confirmation
                 // result is not hidden behind the idle two-second cadence.
-                if !envelopes.isEmpty { continue }
+                if !envelopes.isEmpty {
+                    pollWakeRequested = false
+                    continue
+                }
             } catch is CancellationError {
                 return
             } catch {
@@ -1205,12 +1218,34 @@ final class ComputerUseSessionModel: ObservableObject {
                 statusText = "Secure connection interrupted — retrying…"
             }
 
-            do {
-                try await Task.sleep(for: .seconds(2))
-            } catch {
-                return
-            }
+            do { try await waitBeforePollingAgain() }
+            catch { return }
         }
+    }
+
+    private func wakePollLoop() {
+        pollWakeRequested = true
+        pollIdleSleepTask?.cancel()
+        pollIdleSleepTask = nil
+    }
+
+    private func waitBeforePollingAgain() async throws {
+        if pollWakeRequested {
+            pollWakeRequested = false
+            return
+        }
+        let interval: Duration = lastControlKind == .cancel
+            ? .milliseconds(100)
+            : .seconds(2)
+        let sleepTask = Task { @MainActor in
+            do { try await Task.sleep(for: interval) }
+            catch { }
+        }
+        pollIdleSleepTask = sleepTask
+        await sleepTask.value
+        guard !Task.isCancelled else { throw CancellationError() }
+        pollIdleSleepTask = nil
+        pollWakeRequested = false
     }
 
     private func consume(_ envelopes: [ComputerUseEnvelope]) {
@@ -2002,6 +2037,9 @@ final class ComputerUseSessionModel: ObservableObject {
         isLiveScreenPrivacyShielded = true
         advanceStateGeneration()
         pollingTask?.cancel()
+        pollIdleSleepTask?.cancel()
+        pollIdleSleepTask = nil
+        pollWakeRequested = false
         promptRefreshTask?.cancel(); controlRetryTask?.cancel(); responseTimeoutTask?.cancel()
         questionProbeSendTask?.cancel(); questionProbeTimeoutTask?.cancel(); questionDraftSaveTask?.cancel()
         questionProbeID = nil
