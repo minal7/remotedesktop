@@ -35,7 +35,7 @@ final class AgentLoop {
     var stepProgress: (@MainActor (String) -> Void)?
     private var progressNeedsSafeFallback = false
     private var deniedApprovalFingerprints: Set<String> = []
-    private var denialDeflectionCount = 0
+    private var taskDeclineCount = 0
 
     init(taskID: String, prompt: String, maxSteps: Int = 30, environment: AgentEnvironment,
          policy: AgentPolicy, gate: AgentActionGate, recorder: AgentRecording,
@@ -99,6 +99,7 @@ final class AgentLoop {
     private func continueApproval(_ pending: PendingStep, approved: Bool) async throws -> AgentLoopResult {
         let continuationStart = Date()
         if !approved {
+            taskDeclineCount += 1
             deniedApprovalFingerprints.insert(pending.approval.fingerprint)
             gate.cancelPendingApproval(pending.approval.id); pendingStep = nil
             let denied = AgentGateResult(decision: .rejected, reason: "rejected: user declined",
@@ -116,6 +117,9 @@ final class AgentLoop {
             corrections.append("Approval declined by the owner.")
             history.append(.init(action: pending.resolved.action, result: noted("rejected: user declined", pending.note)))
             stepIndex += 1; rejectionStreak += 1
+            if taskDeclineCount >= 2 {
+                return try await finish(.failed(reason: "BLOCKED: declined"), outcome: "blocked: declined")
+            }
             if let question = askAfterRejections() { return question }
             return try await runSteps()
         }
@@ -259,7 +263,6 @@ final class AgentLoop {
                     raw: output.rawOutput,
                     action: action,
                     evaluation: evaluation,
-                    priorDeflections: denialDeflectionCount,
                     start: start,
                     observeMS: observeMS,
                     policyMS: policyMS,
@@ -301,7 +304,6 @@ final class AgentLoop {
         raw: String,
         action: AgentAction,
         evaluation: AgentGateEvaluation,
-        priorDeflections: Int,
         start: Date,
         observeMS: Int,
         policyMS: Int,
@@ -311,10 +313,7 @@ final class AgentLoop {
         guard let fingerprint = evaluation.result.fingerprint else {
             throw AgentLoopError.invalidConfiguration
         }
-        let isTerminalRepeat = priorDeflections >= 2
-        let reason = isTerminalRepeat
-            ? "BLOCKED: declined"
-            : "The owner declined this exact action. Choose a different action."
+        let reason = "BLOCKED: declined"
         let rejected = AgentGateResult(
             decision: .rejected,
             reason: reason,
@@ -334,12 +333,7 @@ final class AgentLoop {
         history.append(.init(action: action, result: noted("rejected: \(reason)", note)))
         corrections.append(reason)
         stepIndex += 1
-
-        if isTerminalRepeat {
-            return try await finish(.failed(reason: reason), outcome: "blocked: declined")
-        }
-        denialDeflectionCount = priorDeflections + 1
-        return nil
+        return try await finish(.failed(reason: reason), outcome: "blocked: declined")
     }
 
     private func execute(_ observation: AgentObservation, _ raw: String, _ resolved: AgentResolvedAction,

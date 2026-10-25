@@ -585,11 +585,11 @@ final class AgentLoopTests: XCTestCase {
         XCTAssertEqual(loop.maxSteps, 30)
     }
 
-    func testRepeatedDeniedFingerprintDeflectsTwiceThenBlocksWithoutReapproval() async throws {
+    func testSameFingerprintRepeatConsumesSecondTaskDeclineAndBlocks() async throws {
         let frame = webFrame(elements: [button(id: 1, name: "Submit")])
         let action = AgentAction.click(target: .element(id: 1), button: nil, count: nil)
-        let environment = TestEnvironment(frames: Array(repeating: frame, count: 5))
-        let policy = TestPolicy([.action(action), .action(action), .action(action), .action(action)])
+        let environment = TestEnvironment(frames: Array(repeating: frame, count: 3))
+        let policy = TestPolicy([.action(action), .action(action), .action(action)])
         let recorder = TestRecorder()
         let loop = try makeLoop(environment: environment, policy: policy, recorder: recorder,
                                 journal: TestJournal())
@@ -604,28 +604,28 @@ final class AgentLoopTests: XCTestCase {
         let result = try await loop.resume(approvalID: approval.id, approved: false)
 
         guard case .failed(let reason) = result else {
-            return XCTFail("The third repeated proposal must end the task as blocked")
+            return XCTFail("One same-fingerprint repeat is the second task decline and must block")
         }
         XCTAssertEqual(reason, "BLOCKED: declined")
         XCTAssertEqual(recorder.footer?.outcome, "blocked: declined")
         XCTAssertEqual(recorder.steps.map(\.gate.decision),
-                       [.needsApproval, .rejected, .rejected, .rejected, .rejected])
+                       [.needsApproval, .rejected, .rejected])
         XCTAssertEqual(recorder.steps.filter { $0.gate.decision == .needsApproval }.count, 1)
         XCTAssertTrue(recorder.steps.allSatisfy { $0.gate.fingerprint == approval.fingerprint })
         XCTAssertEqual(recorder.steps[1].gate.reason, "rejected: user declined")
         XCTAssertEqual(recorder.steps[1].execution.status, .notExecuted)
-        XCTAssertTrue(recorder.steps[2].gate.reason.contains("owner declined"))
-        XCTAssertTrue(recorder.steps[3].gate.reason.contains("owner declined"))
-        XCTAssertEqual(recorder.steps[4].gate.reason, "BLOCKED: declined")
+        XCTAssertEqual(recorder.steps[2].gate.reason, "BLOCKED: declined")
+        XCTAssertEqual(recorder.steps[2].execution.status, .notExecuted)
         XCTAssertTrue(environment.executed.isEmpty)
     }
 
-    func testDifferentFingerprintAfterDenialStillUsesNormalApprovalGate() async throws {
+    func testDifferentFingerprintMayRequestOnceButSecondTaskDeclineBlocks() async throws {
         let first = AgentAction.click(target: .element(id: 1), button: nil, count: nil)
         let second = AgentAction.click(target: .element(id: 2), button: nil, count: nil)
         let frame = webFrame(elements: [button(id: 1, name: "Submit"), button(id: 2, name: "Continue")])
-        let environment = TestEnvironment(frames: [frame, frame, frame])
-        let policy = TestPolicy([.action(first), .action(second)])
+        let environment = TestEnvironment(frames: [frame, frame, frame, frame])
+        let policy = TestPolicy([.action(first), .action(.wait(seconds: 0.1)), .action(second),
+                                 .action(.done(answer: "Must not continue after the second decline"))])
         let recorder = TestRecorder()
         let loop = try makeLoop(environment: environment, policy: policy, recorder: recorder,
                                 journal: TestJournal())
@@ -640,8 +640,15 @@ final class AgentLoopTests: XCTestCase {
 
         XCTAssertNotEqual(firstApproval.fingerprint, secondApproval.fingerprint)
         XCTAssertEqual(secondApproval.action, second)
-        XCTAssertEqual(recorder.steps.map(\.gate.decision), [.needsApproval, .rejected, .needsApproval])
-        XCTAssertTrue(environment.executed.isEmpty)
+        guard case .failed(let reason) = try await loop.resume(approvalID: secondApproval.id, approved: false) else {
+            return XCTFail("The second task decline must terminate before a third proposal")
+        }
+        XCTAssertEqual(reason, "BLOCKED: declined")
+        XCTAssertEqual(recorder.footer?.outcome, "blocked: declined")
+        XCTAssertEqual(recorder.steps.map(\.gate.decision),
+                       [.needsApproval, .rejected, .allowed, .needsApproval, .rejected])
+        XCTAssertEqual(environment.executed.map(\.action), [.wait(seconds: 0.1)])
+        XCTAssertEqual(recorder.steps.filter { $0.gate.decision == .needsApproval }.count, 2)
     }
 
     private func makeLoop(environment: TestEnvironment, policy: any AgentPolicy, recorder: TestRecorder,
