@@ -272,9 +272,7 @@ final class DebugAgentEvalSession {
                        Self.operatorApprovalMatches(pending, request: approval,
                             taskID: request.taskID, fixtureCase: request.memoryFixture ?? "") {
                         if operatorWait == nil {
-                            guard let ticket = makeOperatorApprovalTicket(approval, pending: pending),
-                                  approval.appliedControlRevision != nil,
-                                  approval.hostControlEpoch != nil else {
+                            guard let ticket = makeOperatorApprovalTicket(approval, pending: pending) else {
                                 operatorApprovalInvalidCount += 1
                                 return await makeResult(outcome: "pending_approval", answer: approval.message)
                             }
@@ -339,7 +337,6 @@ final class DebugAgentEvalSession {
     private func makeOperatorApprovalTicket(_ requestApproval: ComputerUseApprovalRequest,
                                             pending: AgentLoop.PendingStep) -> AgentEvalOperatorApprovalTicket? {
         guard let fixtureCase = request.memoryFixture,
-              let revision = requestApproval.appliedControlRevision,
               let epoch = requestApproval.hostControlEpoch,
               pending.approval.purpose == .memoryDisclosure,
               pending.approval.riskTier != .high,
@@ -353,7 +350,7 @@ final class DebugAgentEvalSession {
         return AgentEvalOperatorApprovalTicket(runID: runStore.runID, caseID: fixtureCase,
             taskID: request.taskID, requestID: requestApproval.requestID,
             responseFile: "operator-approval-\(requestApproval.requestID).response.json",
-            controlRevision: revision, hostControlEpoch: epoch,
+            controlRevision: requestApproval.appliedControlRevision, hostControlEpoch: epoch,
             fingerprint: pending.approval.fingerprint, scopeIdentity: pending.approval.scopeIdentity,
             approvalPurpose: pending.approval.purpose.rawValue, riskTier: pending.approval.riskTier.rawValue,
             action: pending.resolved.action,

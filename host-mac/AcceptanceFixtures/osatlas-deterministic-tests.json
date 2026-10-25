@@ -190,7 +190,8 @@
     "RemoteDesktopHostTests/ScreenCaptureSizingTests/test_capturedVideoFrameRejectsInvalidAndNotReadyBuffers",
     "RemoteDesktopHostTests/ScreenCaptureSizingTests/test_capturedVideoFrameRetainsTheCompleteSampleBufferAndItsClockEvidence",
     "RemoteDesktopHostTests/ScreenCaptureSizingTests/test_fullDisplayConfigurationFillsCodecSurfaceWithoutAspectPadding",
-    "RemoteDesktopHostTests/StrictSemanticJSONParserTests"
+    "RemoteDesktopHostTests/StrictSemanticJSONParserTests",
+    "RemoteDesktopHostTests/AgentEvalWireTests/testOperatorApprovalMailboxPreservesMissingControlRevisionWithoutCoercingZero"
   ],
   "expectedTests": [
     "RemoteDesktopHostTests/AgentActionGateTests/testApprovalBindsActionTypedTextAndFullURL",
@@ -666,6 +667,7 @@
     "RemoteDesktopHostTests/AgentActionGateTests/testClearedPinnedMemoryBeforeFirstGateEvaluationDoesNotBecomeUnTainted",
     "RemoteDesktopHostTests/AgentActionGateTests/testLiveMemoryContextRequiresExactOneTimeDisclosureApproval",
     "RemoteDesktopHostTests/AgentActionGateTests/testMemoryDisclosureApprovalPreservesHighRiskWarning",
-    "RemoteDesktopHostTests/AgentActionGateTests/testNoMemoryContextKeepsOrdinaryTypingAndOpaquePasteIsRefusedWhenTainted"
+    "RemoteDesktopHostTests/AgentActionGateTests/testNoMemoryContextKeepsOrdinaryTypingAndOpaquePasteIsRefusedWhenTainted",
+    "RemoteDesktopHostTests/AgentEvalWireTests/testOperatorApprovalMailboxPreservesMissingControlRevisionWithoutCoercingZero"
   ]
 }

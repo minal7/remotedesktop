@@ -24,7 +24,7 @@ struct AgentEvalOperatorApprovalTicket: Encodable {
     let taskID: String
     let requestID: String
     let responseFile: String
-    let controlRevision: UInt64
+    let controlRevision: UInt64?
     let hostControlEpoch: UInt64
     let fingerprint: String
     let scopeIdentity: String
@@ -48,6 +48,27 @@ struct AgentEvalOperatorApprovalTicket: Encodable {
         case contextBinding = "context_binding", contextRevision = "context_revision"
         case contextDigest = "context_sha256"
     }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(version, forKey: .version)
+        try container.encode(runID, forKey: .runID)
+        try container.encode(caseID, forKey: .caseID)
+        try container.encode(taskID, forKey: .taskID)
+        try container.encode(requestID, forKey: .requestID)
+        try container.encode(responseFile, forKey: .responseFile)
+        try container.encode(controlRevision, forKey: .controlRevision)
+        try container.encode(hostControlEpoch, forKey: .hostControlEpoch)
+        try container.encode(fingerprint, forKey: .fingerprint)
+        try container.encode(scopeIdentity, forKey: .scopeIdentity)
+        try container.encode(approvalPurpose, forKey: .approvalPurpose)
+        try container.encode(riskTier, forKey: .riskTier)
+        try container.encode(action, forKey: .action)
+        try container.encode(targets, forKey: .targets)
+        try container.encode(contextBinding, forKey: .contextBinding)
+        try container.encode(contextRevision, forKey: .contextRevision)
+        try container.encode(contextDigest, forKey: .contextDigest)
+    }
 }
 
 struct AgentEvalOperatorApprovalDecision {
@@ -56,7 +77,7 @@ struct AgentEvalOperatorApprovalDecision {
     let caseID: String
     let taskID: String
     let requestID: String
-    let controlRevision: UInt64
+    let controlRevision: UInt64?
     let hostControlEpoch: UInt64
     let fingerprint: String
     let scopeIdentity: String
@@ -85,7 +106,7 @@ struct AgentEvalOperatorApprovalDecision {
               CFGetTypeID(approved) == CFBooleanGetTypeID(),
               let runID = object["run_id"] as? String, let caseID = object["case_id"] as? String,
               let taskID = object["task_id"] as? String, let requestID = object["request_id"] as? String,
-              let revision = Self.uint64(object["control_revision"]),
+              let revision = Self.optionalUInt64(object["control_revision"]),
               let epoch = Self.uint64(object["host_control_epoch"]),
               let fingerprint = object["fingerprint"] as? String,
               let scopeIdentity = object["scope_identity"] as? String,
@@ -106,6 +127,13 @@ struct AgentEvalOperatorApprovalDecision {
         if value is NSNull { return .some(nil) }
         guard let string = value as? String else { return nil }
         return .some(string)
+    }
+
+    private static func optionalUInt64(_ value: Any?) -> UInt64?? {
+        guard let value else { return nil }
+        if value is NSNull { return .some(nil) }
+        guard let number = uint64(value) else { return nil }
+        return .some(number)
     }
 
     private static func uint64(_ value: Any?) -> UInt64? {

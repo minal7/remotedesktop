@@ -435,6 +435,48 @@ final class AgentEvalWireTests: XCTestCase {
         }
     }
 
+    func testOperatorApprovalMailboxPreservesMissingControlRevisionWithoutCoercingZero() throws {
+        let ticket = AgentEvalOperatorApprovalTicket(runID: "run-1", caseID: "memory-recall-10-01",
+            taskID: "task-1", requestID: "request-no-revision",
+            responseFile: "operator-approval-request-no-revision.response.json",
+            controlRevision: nil, hostControlEpoch: 0, fingerprint: String(repeating: "a", count: 64),
+            scopeIdentity: "http://127.0.0.1:8765/memory-seat.html", approvalPurpose: "memoryDisclosure",
+            riskTier: "low", action: .type(target: .element(id: 2), text: "aisle", mode: .replace),
+            targets: [], contextBinding: "binding-1", contextRevision: "revision-1",
+            contextDigest: String(repeating: "b", count: 64))
+        let encodedTicket = try JSONEncoder().encode(ticket)
+        let ticketObject = try XCTUnwrap(JSONSerialization.jsonObject(with: encodedTicket) as? [String: Any])
+        XCTAssertTrue(ticketObject["control_revision"] is NSNull,
+            "the request must preserve the absent host revision instead of omitting or coercing it")
+
+        var response: [String: Any] = ["version": 1, "run_id": "run-1", "case_id": "memory-recall-10-01",
+            "task_id": "task-1", "request_id": "request-no-revision", "control_revision": NSNull(),
+            "host_control_epoch": 0, "fingerprint": String(repeating: "a", count: 64),
+            "scope_identity": "http://127.0.0.1:8765/memory-seat.html",
+            "approval_purpose": "memoryDisclosure", "risk_tier": "low", "context_binding": "binding-1",
+            "context_revision": "revision-1", "context_sha256": String(repeating: "b", count: 64), "approved": true]
+        let nilRevision = try XCTUnwrap(AgentEvalOperatorApprovalDecision.decodeStrict(
+            JSONSerialization.data(withJSONObject: response)))
+        XCTAssertNil(nilRevision.controlRevision)
+        XCTAssertEqual(nilRevision.hostControlEpoch, 0)
+        XCTAssertTrue(nilRevision.matches(ticket))
+
+        response["control_revision"] = 0
+        let zeroRevision = try XCTUnwrap(AgentEvalOperatorApprovalDecision.decodeStrict(
+            JSONSerialization.data(withJSONObject: response)))
+        XCTAssertEqual(zeroRevision.controlRevision, 0)
+        XCTAssertFalse(zeroRevision.matches(ticket), "nil and zero revisions must remain distinct")
+        response["control_revision"] = true
+        XCTAssertNil(AgentEvalOperatorApprovalDecision.decodeStrict(
+            try JSONSerialization.data(withJSONObject: response)), "boolean revisions are malformed")
+
+        let wireResponse = ComputerUseApprovalResponse(requestID: ticket.requestID, approved: true,
+            taskID: ticket.taskID, appliedControlRevision: nil, hostControlEpoch: 0)
+        let decodedWireResponse = try ComputerUseApprovalResponse.decodeBody(wireResponse.encodedBody())
+        XCTAssertNil(decodedWireResponse.appliedControlRevision)
+        XCTAssertEqual(decodedWireResponse.hostControlEpoch, 0)
+    }
+
     func testNoContextPrivacyCasesAdmitOnlyTheirExactFlagAndBoundFixture() throws {
         let token = String(repeating: "a", count: 32)
         let driverID = "01234567-89ab-cdef-0123-456789abcdef"
