@@ -534,4 +534,45 @@ final class AgentSharedSupportTests: XCTestCase {
             })
         }
     }
+
+    func testTypingBindingRejectsMissingOrForeignWindow() {
+        let binding = PixelTypingFocusBinding(focus: "field-a", window: "window-a", pid: 42)
+        let missingWindow = PixelTypingFocusBinding.Evidence(focus: "field-a", ownerWindow: nil,
+            selectedWindow: nil, focusPID: 42, windowPID: 42)
+        let foreignWindow = PixelTypingFocusBinding.Evidence(focus: "field-a", ownerWindow: "window-b",
+            selectedWindow: "window-b", focusPID: 42, windowPID: 42)
+        XCTAssertFalse(PixelTypingFocusBinding.allows(missingWindow, binding: binding))
+        XCTAssertFalse(PixelTypingFocusBinding.allows(foreignWindow, binding: binding))
+    }
+
+    func testTypingBindingAllowsVerifiedDescendant() {
+        let binding = PixelTypingFocusBinding(focus: "field-a", window: "window-a", pid: 42)
+        let descendant = PixelTypingFocusBinding.Evidence(focus: "field-a", ownerWindow: "window-a",
+            selectedWindow: "window-a", focusPID: 42, windowPID: 42)
+        XCTAssertTrue(PixelTypingFocusBinding.allows(descendant, binding: binding))
+    }
+
+    func testTypingBindingRechecksRecipientBeforePaste() throws {
+        let binding = PixelTypingFocusBinding(focus: "field-a", window: "window-a", pid: 42)
+        let valid = PixelTypingFocusBinding.Evidence(focus: "field-a", ownerWindow: "window-a",
+            selectedWindow: "window-a", focusPID: 42, windowPID: 42)
+        var current: PixelTypingFocusBinding.Evidence? = valid
+        let events = PostedHostEvents()
+        let injector = InputInjector(eventPoster: { events.append($0) }, physicalInputState: { .released })
+        func post(_ usage: Int) throws {
+            try injector.applyHostKeyStroke(usage: usage, modifiers: 1 << 3, ifAllowed: { true }) {
+                try PixelTypingFocusBinding.require(current, binding: binding)
+            }
+        }
+        try post(0x04) // Cmd+A was permitted for the observed recipient
+        let beforePaste = events.keyEventCount
+        current = .init(focus: "field-b", ownerWindow: "window-a", selectedWindow: "window-a",
+            focusPID: 42, windowPID: 42)
+        XCTAssertThrowsError(try post(0x19)) // same window, different field: Cmd+V is refused
+        XCTAssertEqual(events.keyEventCount, beforePaste)
+        current = .init(focus: "field-a", ownerWindow: "window-b", selectedWindow: "window-b",
+            focusPID: 42, windowPID: 42)
+        XCTAssertThrowsError(try post(0x19)) // a focus/window switch also refuses Cmd+V
+        XCTAssertEqual(events.keyEventCount, beforePaste)
+    }
 }

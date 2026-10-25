@@ -499,9 +499,9 @@ final class PixelEnvironment: AgentEnvironment {
 
     private func type(_ text: String, mode: AgentTextMode, target: AgentTarget?, frame: AgentFrame,
                       targets: [AgentElement], bindings: PixelResolvedTargets?) async throws -> String {
-        guard snapshots[frame.scope.identity] != nil else { throw AgentEnvironmentError.targetGone }
+        guard let snapshot = snapshots[frame.scope.identity] else { throw AgentEnvironmentError.targetGone }
         if let target { try click(screenPoint(target, frame: frame, targets: targets, bindings: bindings), button: .left, count: 1) }
-        let focused = try ensureNonSecureFocus()
+        let (focused, typingBinding) = try PixelTypingFocusBinding.current(in: snapshot)
         let name = ElementMarks.label(focused)
         let expectedMark = targets.first ?? (target == nil ? frame.observation.focus.flatMap { focus in
             frame.observation.elements.first(where: { $0.id == focus.id })
@@ -515,18 +515,19 @@ final class PixelEnvironment: AgentEnvironment {
         let expectedValue = PixelTextInsertion.expectedValue(oldValue: oldValue, inserted: text,
             mode: mode, selection: selection)
         let pasted = try await paste(text, replace: mode == .replace, oldValue: oldValue,
-            expectedValue: expectedValue, expectedFocus: focused)
+            expectedValue: expectedValue, expectedFocus: focused, snapshot: snapshot, binding: typingBinding)
         let status = pasted == .matches ? "matches" : pasted == .unchanged ? "unchanged" : "unverified"
         return "typed \(text.count) chars\(name.isEmpty ? "" : " into \"\(name)\"") → read-back \(status)"
     }
 
-    private func paste(_ text: String, replace: Bool, oldValue: String?,
-                       expectedValue: String?, expectedFocus: AXUIElement) async throws -> PasteResult {
+    private func paste(_ text: String, replace: Bool, oldValue: String?, expectedValue: String?,
+                       expectedFocus: AXUIElement, snapshot: Snapshot,
+                       binding: PixelTypingFocusBinding) async throws -> PasteResult {
         guard text.utf8.count <= 65_536 else { throw AgentEnvironmentError.unsupportedAction }
         let lease = PixelClipboardLease(board: .general, text: text)
         defer { lease.restore() }
-        if replace { try postClipboardKey("cmd+a") }
-        try postClipboardKey("cmd+v")
+        if replace { try postClipboardKey("cmd+a", typingSnapshot: snapshot, binding: binding) }
+        try postClipboardKey("cmd+v", typingSnapshot: snapshot, binding: binding)
         try await Task.sleep(for: .milliseconds(300))
         let processID = NSWorkspace.shared.frontmostApplication?.processIdentifier
         if let processID, let currentFocus = ElementMarks.focusedElement(AXUIElementCreateApplication(processID)) {
@@ -545,10 +546,16 @@ final class PixelEnvironment: AgentEnvironment {
         return .unavailable
     }
 
-    private func postClipboardKey(_ chord: String) throws {
+    private func postClipboardKey(_ chord: String, typingSnapshot: Snapshot? = nil, binding: PixelTypingFocusBinding? = nil) throws {
         let stroke = try AgentKeyStroke.parse(chord)
         try injector.applyHostKeyStroke(usage: stroke.usage, modifiers: stroke.modifiers,
-            ifAllowed: inputAllowed, beforePosting: { _ = try ensureNonSecureFocus() })
+            ifAllowed: inputAllowed, beforePosting: {
+                if let typingSnapshot, let binding {
+                    _ = try PixelTypingFocusBinding.current(in: typingSnapshot, binding: binding)
+                } else {
+                    _ = try ensureNonSecureFocus()
+                }
+            })
     }
 
     private func select(_ option: String, target: AgentTarget, frame: AgentFrame, targets: [AgentElement],

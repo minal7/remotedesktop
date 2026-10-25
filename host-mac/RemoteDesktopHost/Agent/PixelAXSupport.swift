@@ -105,6 +105,61 @@ struct PixelFocusedAXPath {
     }
 }
 
+struct PixelTypingFocusBinding {
+    struct Evidence {
+        let focus: AnyHashable
+        let ownerWindow: AnyHashable?
+        let selectedWindow: AnyHashable?
+        let focusPID: pid_t
+        let windowPID: pid_t
+    }
+
+    let focus: AnyHashable
+    let window: AnyHashable
+    let pid: pid_t
+
+    static func identity(_ element: AXUIElement) -> AnyHashable {
+        AnyHashable(PixelAXIdentity(element: element))
+    }
+
+    @MainActor
+    static func evidence(focus: AXUIElement, path: PixelFocusedAXPath,
+                         selectedWindow: AXUIElement, expectedPID: pid_t) -> Evidence? {
+        let selectedIdentity = identity(selectedWindow)
+        guard path.ownerWindow == selectedIdentity, path.selectedWindow == selectedIdentity,
+              path.focusPID == expectedPID, path.windowPID == expectedPID else { return nil }
+        return Evidence(focus: identity(focus), ownerWindow: path.ownerWindow,
+            selectedWindow: path.selectedWindow, focusPID: path.focusPID, windowPID: path.windowPID)
+    }
+
+    static func allows(_ evidence: Evidence?, binding: Self) -> Bool {
+        guard let evidence else { return false }
+        return evidence.focus == binding.focus && evidence.ownerWindow == binding.window &&
+            evidence.selectedWindow == binding.window && evidence.focusPID == binding.pid &&
+            evidence.windowPID == binding.pid
+    }
+
+    static func require(_ evidence: Evidence?, binding: Self) throws {
+        guard allows(evidence, binding: binding) else { throw AgentEnvironmentError.scopeChanged }
+    }
+
+    @MainActor
+    static func current(in snapshot: PixelEnvironment.Snapshot, binding expected: Self? = nil)
+        throws -> (AXUIElement, Self) {
+        guard let selectedWindow = snapshot.window?.element,
+              let pid = snapshot.application?.processIdentifier else { throw AgentEnvironmentError.scopeChanged }
+        let focus = try PixelFocusedRecipient.current(expectedPID: pid)
+        let deadline = ContinuousClock.now + .milliseconds(100)
+        guard let path = PixelFocusedAXPath.read(focus, window: selectedWindow, appPID: pid, deadline: deadline) else {
+            throw AgentEnvironmentError.scopeChanged
+        }
+        let binding = expected ?? Self(focus: identity(focus), window: identity(selectedWindow), pid: pid)
+        try require(evidence(focus: focus, path: path, selectedWindow: selectedWindow, expectedPID: pid), binding: binding)
+        try PixelPersonalDataTargetGuard.performIfAllowed(path: PixelPersonalDataTargetGuard.descriptors(from: focus)) {}
+        return (focus, binding)
+    }
+}
+
 @MainActor
 enum PixelFocusedAXProjection {
     static func project(path: [any PixelAXNode], ownerWindow: AnyHashable?, selectedWindow: AnyHashable?,
