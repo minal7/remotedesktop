@@ -75,9 +75,11 @@ struct AgentEvalFocusProbeResponse: Encodable {
     let reason: String?
     let inputEventsPosted = 0
     let samples: [AgentEvalFocusProbeSample]
+    let axFocusDiagnostics: AgentEvalFocusDiagnostics?
 
     private enum CodingKeys: String, CodingKey {
         case operation, abandoned, reason, samples
+        case axFocusDiagnostics = "ax_focus_diagnostics"
         case axTrusted = "ax_trusted"
         case expectedPID = "expected_pid"
         case frontmostPIDBefore = "frontmost_pid_before"
@@ -87,9 +89,54 @@ struct AgentEvalFocusProbeResponse: Encodable {
     }
 }
 
+struct AgentEvalFocusDiagnostics: Encodable {
+    struct Element: Encodable {
+        let attributeError: Int32?
+        let typeValid: Bool?
+        let ownerPID: Int32?
+        let role: String?
+        let bounds: [Double]?
+        let matchingWindowID: UInt32?
+
+        private enum CodingKeys: String, CodingKey {
+            case role, bounds
+            case attributeError = "attribute_error"
+            case typeValid = "type_valid"
+            case ownerPID = "owner_pid"
+            case matchingWindowID = "matching_window_id"
+        }
+    }
+
+    struct Parent: Encodable {
+        let role: String?
+        let ownerPID: Int32?
+        let matchesFocusedWindow: Bool
+        let matchesMainWindow: Bool
+    }
+
+    let focusedWindow: Element?
+    let mainWindow: Element?
+    let focusedUIElement: Element?
+    let focusedElementWindow: Element?
+    let focusParents: [Parent]
+    let parentWalkComplete: Bool
+    let elapsedMilliseconds: Double
+
+    private enum CodingKeys: String, CodingKey {
+        case focusedWindow = "focused_window"
+        case mainWindow = "main_window"
+        case focusedUIElement = "focused_ui_element"
+        case focusedElementWindow = "focused_element_window"
+        case focusParents = "focus_parents"
+        case parentWalkComplete = "parent_walk_complete"
+        case elapsedMilliseconds = "elapsed_ms"
+    }
+}
+
 @MainActor
 enum AgentEvalFocusProbe {
     private static let totalLimit: Duration = .milliseconds(1_500)
+    private static let diagnosticLimit: Duration = .milliseconds(300)
     private enum ProbeError: Error { case stop(String), timeoutSet(Int32) }
 
     static func run(_ request: AgentEvalFocusProbeRequest) -> AgentEvalFocusProbeResponse {
@@ -99,6 +146,7 @@ enum AgentEvalFocusProbe {
         var reason: String?
         var abandoned = false
         var samples: [AgentEvalFocusProbeSample] = []
+        var focusDiagnostics: AgentEvalFocusDiagnostics?
         if !trusted { reason = "Accessibility is unavailable; no prompt was requested." }
         else if before != request.expectedPID { reason = "Expected process is not frontmost; no AX query was made." }
         else {
@@ -115,6 +163,8 @@ enum AgentEvalFocusProbe {
                         throw ProbeError.stop("sample \(name)/\(timeout) aborted; partial reads omitted. \(stopReason)")
                     }
                 }
+                // Optional diagnostic reads are capped separately and never affect probe admission.
+                focusDiagnostics = try diagnoseFocus(expectedPID: request.expectedPID)
             } catch ProbeError.stop(let stopReason) {
                 abandoned = true
                 reason = stopReason
@@ -134,8 +184,156 @@ enum AgentEvalFocusProbe {
         let response = AgentEvalFocusProbeResponse(axTrusted: trusted,
             expectedPID: Int32(request.expectedPID), frontmostPIDBefore: beforePID,
             frontmostPIDAfter: afterPID, elapsedMilliseconds: elapsedMilliseconds,
-            abandoned: abandoned, reason: reason, samples: samples)
+            abandoned: abandoned, reason: reason, samples: samples,
+            axFocusDiagnostics: focusDiagnostics)
         return response
+    }
+
+    private static func diagnoseFocus(expectedPID: pid_t) throws -> AgentEvalFocusDiagnostics {
+        let started = ContinuousClock.now
+        let deadline = started + diagnosticLimit
+        let app = AXUIElementCreateApplication(expectedPID)
+        let focusedWindow = try diagnosticElement(kAXFocusedWindowAttribute as CFString,
+                                                   from: app, expectedPID: expectedPID, deadline: deadline)
+        let mainWindow = try diagnosticElement(kAXMainWindowAttribute as CFString,
+                                               from: app, expectedPID: expectedPID, deadline: deadline)
+        let focus = try diagnosticElement(kAXFocusedUIElementAttribute as CFString,
+                                         from: app, expectedPID: expectedPID, deadline: deadline)
+        let ownWindow: AgentEvalFocusDiagnostics.Element?
+        if let focusElement = focus.element {
+            ownWindow = try diagnosticElement(kAXWindowAttribute as CFString, from: focusElement,
+                                              expectedPID: expectedPID, deadline: deadline).metadata
+        } else {
+            ownWindow = nil
+        }
+
+        var parents: [AgentEvalFocusDiagnostics.Parent] = []
+        var current = focus.element
+        var complete = current == nil
+        for _ in 0..<8 {
+            guard let element = current, ContinuousClock.now < deadline else { break }
+            let parent = try diagnosticElement(kAXParentAttribute as CFString, from: element,
+                                               expectedPID: expectedPID, deadline: deadline)
+            guard let parentElement = parent.element else { complete = true; break }
+            try checkFrontmost(expectedPID)
+            let role = try diagnosticScalar(kAXRoleAttribute as CFString, from: parentElement,
+                                            expectedPID: expectedPID, deadline: deadline)
+            var pid: pid_t = 0
+            let pidError = AXUIElementGetPid(parentElement, &pid)
+            try checkFrontmost(expectedPID)
+            parents.append(.init(role: role.value, ownerPID: pidError == .success ? Int32(pid) : nil,
+                matchesFocusedWindow: focusedWindow.element.map { CFEqual(parentElement, $0) } ?? false,
+                matchesMainWindow: mainWindow.element.map { CFEqual(parentElement, $0) } ?? false))
+            current = parentElement
+        }
+        if current != nil && !complete && parents.count == 8 { complete = false }
+        try checkFrontmost(expectedPID)
+        return .init(focusedWindow: focusedWindow.metadata, mainWindow: mainWindow.metadata,
+            focusedUIElement: focus.metadata, focusedElementWindow: ownWindow, focusParents: parents,
+            parentWalkComplete: complete, elapsedMilliseconds: millis(started.duration(to: .now)))
+    }
+
+    private struct DiagnosticElementResult {
+        let metadata: AgentEvalFocusDiagnostics.Element?
+        let element: AXUIElement?
+    }
+
+    private struct DiagnosticScalarResult {
+        let value: String?
+        let error: Int32?
+        let valid: Bool?
+    }
+
+    private struct DiagnosticCopyResult {
+        let value: CFTypeRef?
+        let error: Int32?
+    }
+
+    private static func diagnosticElement(_ attribute: CFString, from source: AXUIElement,
+                                         expectedPID: pid_t, deadline: ContinuousClock.Instant) throws
+        -> DiagnosticElementResult {
+        try checkFrontmost(expectedPID)
+        let copied = try diagnosticCopy(attribute, from: source, expectedPID: expectedPID,
+                                        deadline: deadline)
+        guard let value = copied.value else {
+            return .init(metadata: .init(attributeError: copied.error, typeValid: nil,
+                ownerPID: nil, role: nil, bounds: nil, matchingWindowID: nil), element: nil)
+        }
+        guard CFGetTypeID(value) == AXUIElementGetTypeID() else {
+            return .init(metadata: .init(attributeError: copied.error, typeValid: false,
+                ownerPID: nil, role: nil, bounds: nil, matchingWindowID: nil), element: nil)
+        }
+        let element = unsafeBitCast(value, to: AXUIElement.self)
+        try checkFrontmost(expectedPID)
+        var pid: pid_t = 0
+        let pidError = AXUIElementGetPid(element, &pid)
+        guard pidError == .success, pid == expectedPID else {
+            return .init(metadata: .init(attributeError: copied.error, typeValid: true,
+                ownerPID: pidError == .success ? Int32(pid) : nil, role: nil, bounds: nil,
+                matchingWindowID: nil), element: element)
+        }
+        let roleResult = try diagnosticScalar(kAXRoleAttribute as CFString, from: element,
+                                              expectedPID: expectedPID, deadline: deadline)
+        let bounds = try diagnosticBounds(element, expectedPID: expectedPID, deadline: deadline)
+        let windowID: UInt32?
+        if roleResult.value == (kAXWindowRole as String), let bounds {
+            try checkFrontmost(expectedPID)
+            windowID = AgentMacAccessibility.matchingWindowID(ownerPID: Int32(pid), bounds: bounds,
+                                                               focusedTitle: nil, requireUnique: true)
+        } else {
+            windowID = nil
+        }
+        return .init(metadata: .init(attributeError: copied.error, typeValid: true,
+            ownerPID: pidError == .success ? Int32(pid) : nil, role: roleResult.value,
+            bounds: bounds.map { [Double($0.origin.x), Double($0.origin.y), Double($0.width), Double($0.height)] },
+            matchingWindowID: windowID), element: element)
+    }
+
+    private static func diagnosticScalar(_ attribute: CFString, from element: AXUIElement,
+                                         expectedPID: pid_t, deadline: ContinuousClock.Instant) throws
+        -> DiagnosticScalarResult {
+        let copied = try diagnosticCopy(attribute, from: element, expectedPID: expectedPID,
+                                        deadline: deadline)
+        guard let value = copied.value else {
+            return .init(value: nil, error: copied.error, valid: nil)
+        }
+        guard CFGetTypeID(value) == CFStringGetTypeID(), let role = value as? String else {
+            return .init(value: nil, error: copied.error, valid: false)
+        }
+        return .init(value: String(role.prefix(80)), error: copied.error, valid: true)
+    }
+
+    private static func diagnosticBounds(_ element: AXUIElement, expectedPID: pid_t,
+                                         deadline: ContinuousClock.Instant) throws -> CGRect? {
+        guard let positionValue = try diagnosticCopy(kAXPositionAttribute as CFString, from: element,
+                expectedPID: expectedPID, deadline: deadline).value,
+              let sizeValue = try diagnosticCopy(kAXSizeAttribute as CFString, from: element,
+                expectedPID: expectedPID, deadline: deadline).value,
+              CFGetTypeID(positionValue) == AXValueGetTypeID(), CFGetTypeID(sizeValue) == AXValueGetTypeID() else {
+            return nil
+        }
+        var point = CGPoint.zero, size = CGSize.zero
+        guard AXValueGetValue(positionValue as! AXValue, .cgPoint, &point),
+              AXValueGetValue(sizeValue as! AXValue, .cgSize, &size),
+              point.x.isFinite, point.y.isFinite, size.width.isFinite, size.height.isFinite else { return nil }
+        return CGRect(origin: point, size: size)
+    }
+
+    private static func diagnosticCopy(_ attribute: CFString, from element: AXUIElement,
+                                       expectedPID: pid_t, deadline: ContinuousClock.Instant) throws
+        -> DiagnosticCopyResult {
+        try checkFrontmost(expectedPID)
+        let remaining = deadline - ContinuousClock.now
+        guard remaining > .zero else { return .init(value: nil, error: nil) }
+        let timeout = min(0.015, durationSeconds(remaining))
+        guard timeout > 0 else { return .init(value: nil, error: nil) }
+        let timeoutError = AXUIElementSetMessagingTimeout(element, Float(timeout))
+        guard timeoutError == .success else { return .init(value: nil, error: timeoutError.rawValue) }
+        var value: CFTypeRef?
+        let error = AXUIElementCopyAttributeValue(element, attribute, &value)
+        try checkFrontmost(expectedPID)
+        guard error == .success else { return .init(value: nil, error: error.rawValue) }
+        return .init(value: value, error: error.rawValue)
     }
 
     private static func sample(_ root: AXUIElement, name: String, budget: Int,
