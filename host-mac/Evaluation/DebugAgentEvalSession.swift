@@ -257,6 +257,7 @@ final class DebugAgentEvalSession {
         return AgentEvalApprovalPolicy.permits(.init(
             taskID: pending.approval.taskID,
             requestID: pending.approval.id.uuidString,
+            approvalPurpose: pending.approval.purpose,
             fingerprint: pending.approval.fingerprint,
             approvalScope: pending.approval.scopeIdentity,
             resolvedScope: pending.resolved.frame.scope.identity,

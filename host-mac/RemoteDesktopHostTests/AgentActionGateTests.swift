@@ -58,6 +58,145 @@ final class AgentActionGateTests: XCTestCase {
         XCTAssertEqual(result.riskTier, "low")
     }
 
+    func testLiveMemoryContextRequiresExactOneTimeDisclosureApproval() throws {
+        let taskID = "memory-disclosure-task", scope = AgentScope(taskID: "memory-disclosure-task",
+            kind: .web, identity: "memory-tab")
+        let store = MemoryTrustStore()
+        let slot = TaskMemoryContextSlot()
+        let fixture = try ContextStoreFixture()
+        defer { fixture.cleanup() }
+        let lease = LocalMemoryHostLease(peerID: UUID().uuidString.lowercased(), sessionID: "memory-session",
+            taskID: taskID, authorizationGeneration: 7, taskAuthority: .active)
+        slot.bindLease(lease)
+        let savedContext = "<saved-memory-reference-data>synthetic preference</saved-memory-reference-data>"
+        slot.stage(savedContext, taskID: taskID, lease: lease, binding: fixture.binding, isCurrent: { true })
+        let authority = AgentMemoryDisclosureAuthority(taskID: taskID, slot: slot)
+        authority.pin(lease: lease, binding: fixture.binding, text: savedContext)
+        let gate = AgentActionGate(trustStore: store, allowPolicy: TestAllowPolicy(),
+            memoryDisclosureAuthority: authority)
+        let field = element(4, "AXTextField", "Greeting")
+        let write = resolved(.type(target: .element(id: 4), text: "synthetic value", mode: .replace), scope,
+            elements: [field])
+        let first = try XCTUnwrap(gate.evaluate(write, expectedScope: scope).approval)
+        XCTAssertEqual(first.purpose, .memoryDisclosure)
+        XCTAssertEqual(first.memoryContext?.lease, lease)
+        XCTAssertEqual(first.memoryContext?.binding, fixture.binding)
+        XCTAssertEqual(try gate.resolveApproval(first.id, approved: true, resolved: write,
+            expectedScope: scope).result.decision, .allowed)
+        XCTAssertFalse(try store.isTrusted(kind: .web, identity: "https://example.test"),
+            "A memory disclosure approval must never create persistent surface trust.")
+        let pending = try XCTUnwrap(gate.evaluate(write, expectedScope: scope).approval)
+        XCTAssertEqual(pending.purpose, .memoryDisclosure, "The next action requires a new owner confirmation.")
+
+        let changed = "<saved-memory-reference-data>different synthetic preference</saved-memory-reference-data>"
+        slot.stage(changed, taskID: taskID, lease: lease, binding: fixture.binding, isCurrent: { true })
+        XCTAssertEqual(try gate.resolveApproval(pending.id, approved: true, resolved: write,
+            expectedScope: scope).result.decision, .rejected,
+            "Changing context after approval creation must invalidate it.")
+        XCTAssertEqual(try gate.evaluate(write, expectedScope: scope).result.decision, .rejected,
+            "Changing context after it was attached must block rather than mint a new approval.")
+        slot.clear()
+        XCTAssertEqual(try gate.evaluate(write, expectedScope: scope).result.decision, .rejected,
+            "Clearing context after it was attached must not turn the task into an untainted task.")
+
+        let restoredSlot = TaskMemoryContextSlot()
+        restoredSlot.bindLease(lease)
+        restoredSlot.stage(savedContext, taskID: taskID, lease: lease, binding: fixture.binding, isCurrent: { true })
+        let restoredAuthority = AgentMemoryDisclosureAuthority(taskID: taskID, slot: restoredSlot)
+        restoredAuthority.pin(lease: lease, binding: fixture.binding, text: savedContext)
+        let restoredGate = AgentActionGate(trustStore: MemoryTrustStore(), allowPolicy: TestAllowPolicy(),
+            memoryDisclosureAuthority: restoredAuthority)
+        let restoredApproval = try XCTUnwrap(restoredGate.evaluate(write, expectedScope: scope).approval)
+        restoredSlot.clear()
+        restoredSlot.bindLease(lease)
+        restoredSlot.stage(savedContext, taskID: taskID, lease: lease, binding: fixture.binding, isCurrent: { true })
+        XCTAssertEqual(try restoredGate.resolveApproval(restoredApproval.id, approved: true, resolved: write,
+            expectedScope: scope).result.decision, .rejected,
+            "Clearing and restoring identical context must not revive an outstanding approval.")
+        XCTAssertEqual(try restoredGate.resolveApproval(restoredApproval.id, approved: true, resolved: write,
+            expectedScope: scope).result.decision, .rejected,
+            "A rejected approval remains consumed after identical context is restored.")
+    }
+
+    func testNoMemoryContextKeepsOrdinaryTypingAndOpaquePasteIsRefusedWhenTainted() throws {
+        let scope = webScope(), store = MemoryTrustStore(trusted: ["web:https://example.test"])
+        let field = element(4, "AXTextField", "Greeting")
+        let write = resolved(.type(target: .element(id: 4), text: "ordinary value", mode: .replace), scope,
+            elements: [field])
+        let ordinary = AgentActionGate(trustStore: store, allowPolicy: TestAllowPolicy())
+        XCTAssertEqual(try ordinary.evaluate(write, expectedScope: scope).result.decision, .allowed)
+
+        let fixture = try ContextStoreFixture()
+        defer { fixture.cleanup() }
+        let slot = TaskMemoryContextSlot()
+        let lease = LocalMemoryHostLease(peerID: UUID().uuidString.lowercased(), sessionID: "memory-session",
+            taskID: scope.taskID, authorizationGeneration: 8, taskAuthority: .active)
+        slot.bindLease(lease)
+        let context = "synthetic"
+        slot.stage(context, taskID: scope.taskID, lease: lease, binding: fixture.binding, isCurrent: { true })
+        let authority = AgentMemoryDisclosureAuthority(taskID: scope.taskID, slot: slot)
+        authority.pin(lease: lease, binding: fixture.binding, text: context)
+        let tainted = AgentActionGate(trustStore: store, allowPolicy: TestAllowPolicy(),
+            memoryDisclosureAuthority: authority)
+        XCTAssertEqual(try tainted.evaluate(resolved(.key(chord: "A"), scope), expectedScope: scope).result.decision,
+            .needsApproval)
+        XCTAssertEqual(try tainted.evaluate(resolved(.key(chord: "Cmd+V"), scope), expectedScope: scope).result.decision,
+            .rejected, "Opaque clipboard paste cannot be reviewed or approved while memory is active.")
+    }
+
+    func testClearedPinnedMemoryBeforeFirstGateEvaluationDoesNotBecomeUnTainted() throws {
+        let scope = webScope(), fixture = try ContextStoreFixture(), slot = TaskMemoryContextSlot()
+        defer { fixture.cleanup() }
+        let lease = LocalMemoryHostLease(peerID: UUID().uuidString.lowercased(), sessionID: "stale-memory-session",
+            taskID: scope.taskID, authorizationGeneration: 9, taskAuthority: .active)
+        slot.bindLease(lease)
+        slot.stage("synthetic saved context", taskID: scope.taskID, lease: lease,
+            binding: fixture.binding, isCurrent: { true })
+        let authority = AgentMemoryDisclosureAuthority(taskID: scope.taskID, slot: slot)
+        authority.pin(lease: lease, binding: fixture.binding, text: "synthetic saved context")
+        slot.clear()
+        let trustStore = MemoryTrustStore()
+        let gate = AgentActionGate(trustStore: trustStore, allowPolicy: TestAllowPolicy(),
+            memoryDisclosureAuthority: authority)
+        let field = element(4, "AXTextField", "Greeting")
+        XCTAssertEqual(try gate.evaluate(resolved(.type(target: .element(id: 4), text: "value", mode: .replace),
+            scope, elements: [field]), expectedScope: scope).result.decision, .rejected)
+
+        let replacementLease = LocalMemoryHostLease(peerID: UUID().uuidString.lowercased(), sessionID: "new-session",
+            taskID: scope.taskID, authorizationGeneration: 10, taskAuthority: .active)
+        slot.bindLease(replacementLease)
+        slot.stage("replacement synthetic context", taskID: scope.taskID, lease: replacementLease,
+            binding: fixture.binding, isCurrent: { true })
+        XCTAssertEqual(try gate.evaluate(resolved(.type(target: .element(id: 4), text: "value", mode: .replace),
+            scope, elements: [field]), expectedScope: scope).result.decision, .rejected,
+            "Rebinding after a memory snapshot was pinned must not make the old task untainted.")
+    }
+
+    func testMemoryDisclosureApprovalPreservesHighRiskWarning() throws {
+        let scope = webScope(), fixture = try ContextStoreFixture(), slot = TaskMemoryContextSlot()
+        defer { fixture.cleanup() }
+        let lease = LocalMemoryHostLease(peerID: UUID().uuidString.lowercased(), sessionID: "risk-session",
+            taskID: scope.taskID, authorizationGeneration: 11, taskAuthority: .active)
+        slot.bindLease(lease)
+        slot.stage("synthetic context", taskID: scope.taskID, lease: lease,
+            binding: fixture.binding, isCurrent: { true })
+        let authority = AgentMemoryDisclosureAuthority(taskID: scope.taskID, slot: slot)
+        authority.pin(lease: lease, binding: fixture.binding, text: "synthetic context")
+        let trustStore = MemoryTrustStore()
+        let gate = AgentActionGate(trustStore: trustStore, allowPolicy: TestAllowPolicy(),
+            memoryDisclosureAuthority: authority)
+        let field = element(4, "AXTextField", "Delete account")
+        let action = resolved(.type(target: .element(id: 4), text: "synthetic value", mode: .replace), scope,
+            elements: [field])
+        let approval = try XCTUnwrap(gate.evaluate(action, expectedScope: scope).approval)
+        XCTAssertEqual(approval.riskTier, .high)
+        XCTAssertTrue(approval.reason.contains("This action may use saved memory in this app."))
+        XCTAssertTrue(approval.reason.contains("This action may commit, delete, share, or change permissions."))
+        XCTAssertEqual(try gate.resolveApproval(approval.id, approved: true, resolved: action,
+            expectedScope: scope).result.decision, .allowed)
+        XCTAssertFalse(try trustStore.isTrusted(kind: .web, identity: "https://example.test"))
+    }
+
     func testWebEnterAndReturnRequireApprovalWithoutReliableNonCommitSemantics() throws {
         let scope = webScope()
         let gate = AgentActionGate(trustStore: MemoryTrustStore(trusted: ["web:https://example.test"]), allowPolicy: TestAllowPolicy())

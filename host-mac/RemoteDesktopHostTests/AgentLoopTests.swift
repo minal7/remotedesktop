@@ -121,6 +121,55 @@ final class AgentLoopTests: XCTestCase {
         XCTAssertTrue(recorder.steps[1].gate.reason.contains("changed"))
     }
 
+    func testMemoryDisclosureApprovalCannotDispatchAfterContextRebind() async throws {
+        let fixture = try ContextStoreFixture()
+        defer { fixture.cleanup() }
+        let slot = TaskMemoryContextSlot()
+        let lease = LocalMemoryHostLease(peerID: UUID().uuidString.lowercased(), sessionID: "memory-loop-session",
+            taskID: "task-1", authorizationGeneration: 21, taskAuthority: .active)
+        slot.bindLease(lease)
+        slot.stage("synthetic saved preference", taskID: "task-1", lease: lease,
+            binding: fixture.binding, isCurrent: { true })
+        let authority = AgentMemoryDisclosureAuthority(taskID: "task-1", slot: slot)
+        let basePolicy = TestPolicy([.action(.type(target: .element(id: 4), text: "synthetic value", mode: .replace)),
+                                     .action(.done(answer: "No dispatch")),
+                                     .action(.done(answer: "No dispatch"))])
+        let policy = TaskMemoryContextPolicy.applying(taskID: "task-1", slot: slot,
+            base: basePolicy, memoryDisclosureAuthority: authority)
+        let field = AgentElement(id: 4, role: "AXTextField", name: "Greeting", value: nil,
+            state: ["enabled"], bbox: .init(x: 1, y: 2, width: 40, height: 12), inView: true)
+        let frame = webFrame(elements: [field])
+        let environment = TestEnvironment(frames: [frame, frame, frame, frame])
+        let recorder = TestRecorder()
+        let loop = try AgentLoop(taskID: "task-1", prompt: "Complete a generic task", maxSteps: 3,
+            environment: environment, policy: policy,
+            gate: AgentActionGate(trustStore: TestTrustStore(trustedWeb: true),
+                allowPolicy: TestAllowPolicy(appIdentity: nil), memoryDisclosureAuthority: authority),
+            recorder: recorder, journal: TestJournal())
+
+        guard case .pendingApproval(let approval) = try await loop.run() else {
+            return XCTFail("A write proposed with attached saved memory must wait for owner approval.")
+        }
+        XCTAssertEqual(approval.purpose, .memoryDisclosure)
+        let replacementLease = LocalMemoryHostLease(peerID: lease.peerID, sessionID: "replacement-session",
+            taskID: "task-1", authorizationGeneration: 22, taskAuthority: .active)
+        slot.bindLease(replacementLease)
+        slot.stage("replacement synthetic context", taskID: "task-1", lease: replacementLease,
+            binding: fixture.binding, isCurrent: { true })
+
+        _ = try await loop.resume(approvalID: approval.id, approved: true)
+
+        XCTAssertTrue(environment.executed.isEmpty, "A stale memory-bound approval must never dispatch.")
+        XCTAssertEqual(recorder.steps.first?.gate.decision, .needsApproval)
+        XCTAssertTrue(recorder.steps.dropFirst().allSatisfy { $0.gate.decision == .rejected })
+        do {
+            _ = try await loop.resume(approvalID: approval.id, approved: true)
+            XCTFail("A one-time memory approval cannot be replayed.")
+        } catch AgentLoopError.noMatchingApproval {
+            // The pending approval was consumed by the first resolution.
+        }
+    }
+
     func testCancellingPendingApprovalRecordsTheUnexecutedStep() async throws {
         let environment = TestEnvironment(frames: [webFrame(elements: [button(id: 1, name: "Submit")])])
         let policy = TestPolicy([.action(.click(target: .element(id: 1), button: nil, count: nil))])

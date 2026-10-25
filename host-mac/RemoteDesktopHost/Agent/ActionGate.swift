@@ -23,6 +23,8 @@ struct AgentApprovalRequest: Equatable {
     let id: UUID; let taskID: String; let scopeIdentity: String; let fingerprint: String
     let riskTier: AgentRiskTier; let reason: String; let action: AgentAction
     var reviewFields: [ReviewField] = []
+    var memoryContext: AgentMemoryContextSnapshot? = nil
+    var purpose: AgentApprovalPurpose { memoryContext == nil ? .ordinary : .memoryDisclosure }
 }
 struct AgentGateEvaluation: Equatable { let result: AgentGateResult; let approval: AgentApprovalRequest? }
 @MainActor
@@ -38,10 +40,24 @@ final class AgentActionGate {
     private struct Assessment { let risk: AgentRiskTier; let fingerprint: String; let reason: String?; let trustKey: TrustKey?; let deniedReason: String? }
     private let trustStore: AgentTrustStore
     private let allowPolicy: AgentAllowPolicy
+    private let memoryDisclosureAuthority: AgentMemoryDisclosureAuthority?
     private var pendingApprovals: [UUID: PendingApproval] = [:]
-    init(trustStore: AgentTrustStore, allowPolicy: AgentAllowPolicy) { self.trustStore = trustStore; self.allowPolicy = allowPolicy }
+    init(trustStore: AgentTrustStore, allowPolicy: AgentAllowPolicy,
+         memoryDisclosureAuthority: AgentMemoryDisclosureAuthority? = nil) {
+        self.trustStore = trustStore; self.allowPolicy = allowPolicy
+        self.memoryDisclosureAuthority = memoryDisclosureAuthority
+    }
     func evaluate(_ resolved: AgentResolvedAction, expectedScope: AgentScope) throws -> AgentGateEvaluation {
-        let assessment = try assess(resolved, expectedScope: expectedScope)
+        var assessment = try assess(resolved, expectedScope: expectedScope)
+        let disclosure = memoryDisclosureAuthority?.approvalState(taskID: expectedScope.taskID,
+            action: resolved.action, risk: assessment.risk, existingReason: assessment.reason) ?? .none
+        if case .rejected(let reason) = disclosure { return rejection(reason, resolved.frame.scope) }
+        let memoryContext: AgentMemoryContextSnapshot?
+        if case .approval(let snapshot, let reason) = disclosure {
+            memoryContext = snapshot
+            assessment = .init(risk: assessment.risk, fingerprint: assessment.fingerprint,
+                reason: reason, trustKey: nil, deniedReason: assessment.deniedReason)
+        } else { memoryContext = nil }
         if let reason = assessment.deniedReason {
             return .init(result: result(.rejected, reason, assessment, resolved.frame.scope), approval: nil)
         }
@@ -50,7 +66,8 @@ final class AgentActionGate {
         }
         let request = AgentApprovalRequest(id: UUID(), taskID: expectedScope.taskID,
                                            scopeIdentity: expectedScope.identity, fingerprint: assessment.fingerprint,
-                                           riskTier: assessment.risk, reason: reason, action: resolved.action)
+                                           riskTier: assessment.risk, reason: reason, action: resolved.action,
+                                           memoryContext: memoryContext)
         pendingApprovals[request.id] = .init(request: request, trustKey: assessment.trustKey)
         return .init(result: result(.needsApproval, reason, assessment, resolved.frame.scope), approval: request)
     }
@@ -63,7 +80,22 @@ final class AgentActionGate {
             return rejection("Approval no longer matches the task or surface.", resolved.frame.scope, request.fingerprint)
         }
         guard approved else { return rejection("rejected: user declined", resolved.frame.scope, request.fingerprint) }
-        let assessment = try assess(resolved, expectedScope: expectedScope)
+        var assessment = try assess(resolved, expectedScope: expectedScope)
+        let disclosure = memoryDisclosureAuthority?.approvalState(taskID: expectedScope.taskID,
+            action: resolved.action, risk: assessment.risk, existingReason: assessment.reason) ?? .none
+        if case .rejected(let reason) = disclosure {
+            return rejection(reason, resolved.frame.scope, request.fingerprint)
+        }
+        let memoryContext: AgentMemoryContextSnapshot?
+        if case .approval(let snapshot, let reason) = disclosure {
+            memoryContext = snapshot
+            assessment = .init(risk: assessment.risk, fingerprint: assessment.fingerprint,
+                reason: reason, trustKey: nil, deniedReason: assessment.deniedReason)
+        } else { memoryContext = nil }
+        guard request.purpose == (memoryContext == nil ? .ordinary : .memoryDisclosure),
+              request.memoryContext == memoryContext else {
+            return rejection("The saved-memory context changed; approval is no longer valid.", resolved.frame.scope, request.fingerprint)
+        }
         guard assessment.deniedReason == nil, assessment.fingerprint == request.fingerprint else {
             return rejection(assessment.deniedReason ?? "The approved action or target label changed.",
                              resolved.frame.scope, assessment.fingerprint, assessment.risk)

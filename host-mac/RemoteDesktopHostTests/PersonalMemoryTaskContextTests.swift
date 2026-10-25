@@ -91,6 +91,43 @@ final class PersonalMemoryTaskContextTests: XCTestCase {
             sessionID: session, taskID: "memory-task", authorizationGeneration: 1,
             taskAuthority: .active)))
     }
+
+    func testDisclosureSnapshotPinsOnlyContextActuallyPassedToPolicy() async throws {
+        let store = try ContextStoreFixture()
+        defer { store.cleanup() }
+        let taskID = "disclosure-policy-task", slot = TaskMemoryContextSlot()
+        let lease = LocalMemoryHostLease(peerID: UUID().uuidString.lowercased(), sessionID: "disclosure-session",
+            taskID: taskID, authorizationGeneration: 12, taskAuthority: .active)
+        slot.bindLease(lease)
+        let context = "<saved-memory-reference-data>synthetic only</saved-memory-reference-data>"
+        slot.stage(context, taskID: taskID, lease: lease, binding: store.binding, isCurrent: { true })
+        let authority = AgentMemoryDisclosureAuthority(taskID: taskID, slot: slot)
+        let base = ContextObservedPolicy()
+        let policy = TaskMemoryContextPolicy.applying(taskID: taskID, slot: slot, base: base,
+            memoryDisclosureAuthority: authority)
+        _ = try await policy.propose(.init(task: "synthetic task", surface: .web(url: "https://example.test", title: ""),
+            screenshot: "", elements: [], focus: nil, history: [], budget: .init(step: 0, maxSteps: 2)))
+        guard case .current(let snapshot) = authority.state(for: taskID) else {
+            return XCTFail("The authority must pin the exact context actually passed to the policy.")
+        }
+        XCTAssertEqual(snapshot.lease, lease)
+        XCTAssertEqual(snapshot.binding, store.binding)
+        XCTAssertEqual(snapshot.textDigest.count, 64)
+        slot.clear()
+        guard case .stale = authority.state(for: taskID) else {
+            return XCTFail("Clearing a previously attached context must retain taint as stale, not empty.")
+        }
+
+        let memorylessSlot = TaskMemoryContextSlot()
+        let memorylessAuthority = AgentMemoryDisclosureAuthority(taskID: taskID, slot: memorylessSlot)
+        let memoryless = TaskMemoryContextPolicy.applying(taskID: taskID, slot: memorylessSlot,
+            base: ContextObservedPolicy(), memoryDisclosureAuthority: memorylessAuthority)
+        _ = try await memoryless.propose(.init(task: "ordinary task", surface: .web(url: "https://example.test", title: ""),
+            screenshot: "", elements: [], focus: nil, history: [], budget: .init(step: 0, maxSteps: 2)))
+        guard case .none = memorylessAuthority.state(for: taskID) else {
+            return XCTFail("No-memory tasks must remain untainted.")
+        }
+    }
     func testPolicyReceivesContextCopyWithoutChangingSourceObservation() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("TaskContext-\(UUID())", isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])

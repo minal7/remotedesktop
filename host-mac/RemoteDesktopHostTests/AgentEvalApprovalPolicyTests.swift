@@ -66,6 +66,20 @@ final class AgentEvalApprovalPolicyTests: XCTestCase {
         XCTAssertFalse(AgentEvalApprovalPolicy.permits(candidate(request: interactionOnly, riskTier: "high"), request: interactionOnly))
     }
 
+    func testFixtureInteractionCannotAutoApproveMemoryDisclosurePurpose() throws {
+        let request = try makeRequest(start: "http://127.0.0.1:8765/page", flags: [
+            "allow_fixture_interaction": true, "allow_fixture_commit": true,
+        ])
+        let write = AgentAction.type(target: .element(id: 4), text: "synthetic saved value", mode: .replace)
+        let memoryWrite = candidate(request: request, action: write, riskTier: "medium",
+            approvalPurpose: .memoryDisclosure)
+        XCTAssertFalse(AgentEvalApprovalPolicy.permits(memoryWrite, request: request),
+            "Fixture flags must never authorize a memory-disclosure approval.")
+        XCTAssertTrue(AgentEvalApprovalPolicy.permits(candidate(request: request, action: write,
+            riskTier: "medium"), request: request),
+            "Ordinary fixture interaction remains available.")
+    }
+
     func testWebEnterNeedsCommitFlagAndRemainsBoundToFixtureOrigin() throws {
         let url = "http://127.0.0.1:8765/forms.html"
         let interactionOnly = try makeRequest(start: url, flags: ["allow_fixture_interaction": true])
@@ -148,12 +162,14 @@ final class AgentEvalApprovalPolicyTests: XCTestCase {
 
     private func candidate(request: AgentEvalRequest, action: AgentAction = .key(chord: "Enter"),
                            riskTier: String = "high", currentURL: String? = nil,
+                           approvalPurpose: AgentApprovalPurpose = .ordinary,
                            approvalScope: String = "tab-id", resolvedScope: String = "tab-id",
                            fingerprint: String = String(repeating: "a", count: 64),
                            currentApp: String? = nil, expectedApp: String? = nil,
                            targetRoles: [String] = [], hasSensitiveTarget: Bool = false,
                            hasSyntheticFileRoot: Bool = false) -> AgentEvalApprovalCandidate {
         AgentEvalApprovalCandidate(taskID: request.taskID, requestID: UUID().uuidString,
+            approvalPurpose: approvalPurpose,
             fingerprint: fingerprint, approvalScope: approvalScope, resolvedScope: resolvedScope,
             riskTier: riskTier, action: action, currentURL: currentURL ?? request.start.url,
             expectedURL: request.start.url, currentApp: currentApp, expectedApp: expectedApp,

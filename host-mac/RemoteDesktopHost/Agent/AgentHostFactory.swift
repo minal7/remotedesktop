@@ -66,24 +66,17 @@ enum AgentHostFactory {
             let finder: AgentWebFileFinder = { query, kind, after in
                 try await files.find(query: query, kind: kind, modifiedAfter: after)
             }
-            let pixel: PixelEnvironment
+            let startURL: String?, startApp: String?
             switch configuration.initialSurface {
-            case .web(let url):
-                pixel = PixelEnvironment(taskID: taskID, injector: injector, registry: registry,
-                    allowed: mayAct, finder: finder, picker: { try await picker.select($0) }, startURL: url,
-                    capturePreference: configuration.policy.capturePreference, metadataURL: pixelMetadata,
-                    requireCleanStart: configuration.requireCleanStart)
-            case .app(let name):
-                pixel = PixelEnvironment(taskID: taskID, injector: injector, registry: registry,
-                    allowed: mayAct, finder: finder, picker: { try await picker.select($0) }, startApp: name,
-                    capturePreference: configuration.policy.capturePreference, metadataURL: pixelMetadata,
-                    requireCleanStart: configuration.requireCleanStart)
-            case nil:
-                pixel = PixelEnvironment(taskID: taskID, injector: injector, registry: registry,
-                    allowed: mayAct, finder: finder, picker: { try await picker.select($0) },
-                    capturePreference: configuration.policy.capturePreference, metadataURL: pixelMetadata,
-                    requireCleanStart: configuration.requireCleanStart)
+            case .web(let url): (startURL, startApp) = (url, nil)
+            case .app(let name): (startURL, startApp) = (nil, name)
+            case nil: (startURL, startApp) = (nil, nil)
             }
+            let pixel = PixelEnvironment(taskID: taskID, injector: injector, registry: registry,
+                allowed: mayAct, finder: finder, picker: { try await picker.select($0) },
+                startURL: startURL, startApp: startApp,
+                capturePreference: configuration.policy.capturePreference, metadataURL: pixelMetadata,
+                requireCleanStart: configuration.requireCleanStart)
             let recordingRoot = configuration.storageDirectory?.appendingPathComponent("episodes", isDirectory: true)
                 ?? TrajectoryRecorder.defaultRoot
             let recorder = try TrajectoryRecorder(root: recordingRoot, episodeID: taskID)
@@ -91,12 +84,17 @@ enum AgentHostFactory {
                 directory: configuration.storageDirectory?.appendingPathComponent("AgentEffects", isDirectory: true)
                     ?? support.appendingPathComponent("AgentEffects", isDirectory: true))
             let basePolicy = try LlamaVLMPolicy(runtimeInputs: runtimeInputs, runtime: runtime, bundle: bundle)
+            let memoryDisclosureAuthority = taskMemoryContextSlot.map {
+                AgentMemoryDisclosureAuthority(taskID: taskID, slot: $0)
+            }
             let policy = TaskMemoryContextPolicy.applying(
-                taskID: taskID, slot: taskMemoryContextSlot, base: basePolicy)
+                taskID: taskID, slot: taskMemoryContextSlot, base: basePolicy,
+                memoryDisclosureAuthority: memoryDisclosureAuthority)
             return try AgentLoop(taskID: taskID, prompt: prompt, maxSteps: configuration.maxSteps,
                 environment: pixel,
                 policy: policy,
-                gate: AgentActionGate(trustStore: trust, allowPolicy: HostAgentAllowPolicy(registry: registry)),
+                gate: AgentActionGate(trustStore: trust, allowPolicy: HostAgentAllowPolicy(registry: registry),
+                    memoryDisclosureAuthority: memoryDisclosureAuthority),
                 recorder: recorder, journal: journal)
         }
         return ComputerUseCapabilityExecutor(agentAdapter: AgentCapabilityAdapter(executor: taskExecutor))

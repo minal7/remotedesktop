@@ -260,6 +260,7 @@
     "RemoteDesktopHostTests/AgentLoopTests/testAskUserReturnsTypedQuestionAndAcceptedAnswerContinuesTask",
     "RemoteDesktopHostTests/AgentLoopTests/testCancellingPendingApprovalRecordsTheUnexecutedStep",
     "RemoteDesktopHostTests/AgentLoopTests/testChangedTargetInvalidatesApprovalAndDoesNotExecute",
+    "RemoteDesktopHostTests/AgentLoopTests/testMemoryDisclosureApprovalCannotDispatchAfterContextRebind",
     "RemoteDesktopHostTests/AgentLoopTests/testCredentialHandoffIsRecordedNonterminalAndFeedsRejectionBackToPolicy",
     "RemoteDesktopHostTests/AgentLoopTests/testDeclinedApprovalDoesNotRebindVanishedTargetOrChangedSurface",
     "RemoteDesktopHostTests/AgentLoopTests/testDeclinedApprovalIsFedBackAndDoesNotExecuteOrGrantTrust",
@@ -657,6 +658,10 @@
     "RemoteDesktopHostTests/AgentCapabilityAdapterTests/testFreshTaskDoesNotReplacePendingApproval",
     "RemoteDesktopHostTests/AgentCapabilityAdapterTests/testRetiringOldQuestionPreservesNewTaskMemoryContext",
     "RemoteDesktopHostTests/PixelEnvironmentTests/testSelectedIdenticalTextPasteIsAlreadyComplete",
-    "RemoteDesktopHostTests/PixelEnvironmentTests/testTextInsertionExpectedValueUsesValidatedUTF16Selection"
+    "RemoteDesktopHostTests/PixelEnvironmentTests/testTextInsertionExpectedValueUsesValidatedUTF16Selection",
+    "RemoteDesktopHostTests/AgentActionGateTests/testClearedPinnedMemoryBeforeFirstGateEvaluationDoesNotBecomeUnTainted",
+    "RemoteDesktopHostTests/AgentActionGateTests/testLiveMemoryContextRequiresExactOneTimeDisclosureApproval",
+    "RemoteDesktopHostTests/AgentActionGateTests/testMemoryDisclosureApprovalPreservesHighRiskWarning",
+    "RemoteDesktopHostTests/AgentActionGateTests/testNoMemoryContextKeepsOrdinaryTypingAndOpaquePasteIsRefusedWhenTainted"
   ]
 }

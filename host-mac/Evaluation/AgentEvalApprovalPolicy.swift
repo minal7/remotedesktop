@@ -4,6 +4,7 @@ import Foundation
 struct AgentEvalApprovalCandidate {
     let taskID: String
     let requestID: String
+    var approvalPurpose: AgentApprovalPurpose = .ordinary
     let fingerprint: String
     let approvalScope: String
     let resolvedScope: String
@@ -23,6 +24,7 @@ enum AgentEvalApprovalPolicy {
                         request: AgentEvalRequest) -> Bool {
         guard candidate.taskID == request.taskID,
               UUID(uuidString: candidate.requestID) != nil,
+              candidate.approvalPurpose == .ordinary,
               candidate.approvalScope == candidate.resolvedScope,
               isFingerprint(candidate.fingerprint),
               !candidate.hasSensitiveTarget else { return false }
