@@ -3,6 +3,13 @@ import CryptoKit
 import MemoryStoreKit
 import OSLog
 
+fileprivate func isSemanticallyEmptyMemoryContext(_ text: String) -> Bool {
+    guard let data = text.data(using: .utf8),
+          let value = try? JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed]),
+          let array = value as? [Any] else { return false }
+    return array.isEmpty
+}
+
 enum AgentApprovalPurpose: String { case ordinary, memoryDisclosure }
 
 struct AgentMemoryContextSnapshot: Equatable {
@@ -27,7 +34,7 @@ final class AgentMemoryDisclosureAuthority {
         guard lease.taskID == taskID, !text.isEmpty else { changed = true; return }
         guard let current = slot.read(taskID: taskID), current.lease == lease,
               current.binding == binding, current.text == text else { changed = true; return }
-        if Self.isEmptyJSONArray(text) {
+        if isSemanticallyEmptyMemoryContext(text) {
             if pinned != nil { changed = true }
             return
         }
@@ -88,12 +95,6 @@ final class AgentMemoryDisclosureAuthority {
         SHA256.hash(data: Data(text.utf8)).map { String(format: "%02x", $0) }.joined()
     }
 
-    private static func isEmptyJSONArray(_ text: String) -> Bool {
-        guard let data = text.data(using: .utf8),
-              let value = try? JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed]),
-              let array = value as? [Any] else { return false }
-        return array.isEmpty
-    }
 }
 
 /// Lock-backed authority shared with synchronous writer callbacks. It is
@@ -263,9 +264,10 @@ final class TaskMemoryContextPolicy: AgentPolicy {
         guard !hadContext || context != nil else { throw invalidatedContextError() }
         guard !Task.isCancelled else { throw CancellationError() }
         if let context { memoryDisclosureAuthority?.pin(lease: context.lease, binding: context.binding, text: context.text) }
-        let modelObservation = observationWithContext(observation, context?.text)
-        if let context {
-            TaskMemoryPromptEvidence.recordAppliedContext(context.text, taskID: taskID)
+        let modelContext = context.flatMap { isSemanticallyEmptyMemoryContext($0.text) ? nil : $0.text }
+        let modelObservation = observationWithContext(observation, modelContext)
+        if let modelContext {
+            TaskMemoryPromptEvidence.recordAppliedContext(modelContext, taskID: taskID)
         }
         let output: AgentPolicyOutput
         do { output = try await base.propose(modelObservation) }
