@@ -672,7 +672,7 @@ final class OSAtlasLlamaRuntimeTests: XCTestCase {
                 XCTAssertEqual(arguments[index + 1], value)
             }
             let checkpointIndex = try XCTUnwrap(arguments.firstIndex(of: "--ctx-checkpoints"))
-            XCTAssertEqual(arguments[checkpointIndex + 1], "4")
+            XCTAssertEqual(arguments[checkpointIndex + 1], "0")
             XCTAssertTrue(arguments.contains("--no-cache-idle-slots"))
             XCTAssertFalse(arguments.contains("--chat-template"))
             XCTAssertFalse(arguments.contains("--no-mmproj"))
@@ -2811,7 +2811,7 @@ extension OSAtlasLlamaRuntimeTests {
             let configurations = await launcher.configurations()
             let configuration = try XCTUnwrap(configurations.first)
             let checkpointIndex = try XCTUnwrap(configuration.arguments.firstIndex(of: "--ctx-checkpoints"))
-            XCTAssertEqual(configuration.arguments[checkpointIndex + 1], "4")
+            XCTAssertEqual(configuration.arguments[checkpointIndex + 1], "0")
             let cacheRAMIndex = try XCTUnwrap(configuration.arguments.firstIndex(of: "--cache-ram"))
             XCTAssertEqual(configuration.arguments[cacheRAMIndex + 1], "0")
             XCTAssertTrue(configuration.arguments.contains("--no-cache-idle-slots"))
