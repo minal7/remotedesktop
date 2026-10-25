@@ -110,7 +110,7 @@
   the Mac user's Keychain. Saved items can be viewed, edited, or deleted in Memory from the
   paired iPhone or iPad over the authenticated local connection, or in the host's Settings.</p>
 
-  <p>When you start a Computer Use task, relevant saved items may be used as context by the
+  <p>When you start a Computer Use task, saved items may be used as context by the
   model running locally on the Mac. Incognito tasks skip saved Memory retrieval and saving.
   Memory content is not synced through CloudKit or sent to the developer. Saved items remain
   until you delete them or choose Forget in Memory. Forget erases this app's saved memories;
@@ -118,6 +118,12 @@
   Task history can be deleted separately in the host's Computer Use settings; otherwise,
   episode folders older than seven days are removed when a new recording starts. To use Memory
   again after Forget, choose Start Fresh and reconnect.</p>
+
+  <p><strong>Current candidate limitation:</strong> Memory has not passed release privacy
+  validation. In testing, instructions on a page caused an unrelated saved fact to appear
+  in a task answer. Saved facts can therefore also appear in local task history. Use only
+  synthetic test data in this candidate; local processing alone does not prevent this
+  kind of disclosure.</p>
 
   <p>A receiving device attempts to delete a CloudKit setup record only after it has applied the
   message. If deletion is interrupted, the app retains a bounded cleanup identity and retries

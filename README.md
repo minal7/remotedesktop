@@ -132,6 +132,11 @@ is separate from the seven-day task-episode cleanup. Do not save passwords or
 other secrets in Memory. Incognito tasks do not read or save Memory. See the
 [Privacy Policy](docs/privacy.html).
 
+Memory has not passed release privacy validation. Testing found that a page's
+instructions could cause an unrelated saved fact to appear in a task answer.
+Use synthetic test data only in this candidate. Local storage does not prevent
+saved facts from appearing in task responses or local task history.
+
 ## Getting started (developer)
 
 ### Prerequisites (CloudKit)

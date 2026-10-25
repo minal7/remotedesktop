@@ -115,6 +115,11 @@ automatically created from screen content, are not synced through CloudKit, and
 are not sent to the developer. See [docs/privacy.html](docs/privacy.html) for
 details and controls.
 
+Memory remains blocked from release acceptance: testing found that untrusted
+page instructions could cause an unrelated saved fact to appear in a task
+answer. This was a local answer disclosure, not a transmission to the developer.
+Use synthetic test data only until the privacy and injection gates pass.
+
 ## Next release
 
 - **L1 — Zoom action:** let the model request a 2× crop as its next screenshot; measure it on dense native interfaces.
