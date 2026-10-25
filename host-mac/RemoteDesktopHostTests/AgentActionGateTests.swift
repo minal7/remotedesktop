@@ -135,7 +135,8 @@ final class AgentActionGateTests: XCTestCase {
             base: emptyObserver, memoryDisclosureAuthority: emptyAuthority)
         _ = try await emptyPolicy.propose(.init(task: "ordinary task", surface: .web(url: "https://example.test", title: ""),
             screenshot: "", elements: [], focus: nil, history: [], budget: .init(step: 0, maxSteps: 2)))
-        XCTAssertTrue(emptyObserver.observations.first?.task.contains("<saved-memory-reference-data>\n[ \n ]") == true)
+        XCTAssertEqual(emptyObserver.observations.first?.task, "ordinary task",
+            "A verified empty retrieval must preserve the original task without adding a memory wrapper.")
         let ordinaryGate = AgentActionGate(trustStore: MemoryTrustStore(trusted: ["web:https://example.test"]), allowPolicy: TestAllowPolicy(),
             memoryDisclosureAuthority: emptyAuthority)
         XCTAssertEqual(try ordinaryGate.evaluate(write, expectedScope: scope).result.decision, .allowed,
