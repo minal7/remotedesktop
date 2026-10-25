@@ -1,5 +1,6 @@
 #if DEBUG
 import AppKit
+import CoreFoundation
 import Darwin
 import Foundation
 
@@ -237,6 +238,7 @@ struct AgentEvalRequest: Decodable {
     let faraExchangeCapture: FaraExchangeCapture?
     let memoryFixture: String?
     let memoryPolicy: ComputerUseTaskMemoryPolicy
+    let operatorApprovalMailbox: Bool
 
     private enum CodingKeys: String, CodingKey, CaseIterable {
         case taskID = "task_id"
@@ -248,13 +250,14 @@ struct AgentEvalRequest: Decodable {
         case faraExchangeCapture = "fara_exchange_capture"
         case memoryFixture = "memory_fixture"
         case memoryPolicy = "memory_policy"
+        case operatorApprovalMailbox = "operator_approval_mailbox"
     }
 
     static func decodeStrict(_ data: Data,
                              homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser,
                              environment: [String: String] = ProcessInfo.processInfo.environment) throws -> Self {
         guard let root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-              Set(root.keys).isSubset(of: ["task_id", "prompt", "start", "max_steps", "policy", "approval_policy", "setup_document", "fara_exchange_capture", "memory_fixture", "memory_policy"]),
+              Set(root.keys).isSubset(of: ["task_id", "prompt", "start", "max_steps", "policy", "approval_policy", "setup_document", "fara_exchange_capture", "memory_fixture", "memory_policy", "operator_approval_mailbox"]),
               !root.keys.contains("setup_document") || root["setup_document"] is String,
               ["task_id", "prompt", "start", "max_steps", "policy"].allSatisfy({ root[$0] != nil }),
               let start = root["start"] as? [String: Any],
@@ -273,6 +276,20 @@ struct AgentEvalRequest: Decodable {
         }
         if root.keys.contains("memory_policy"), !(root["memory_policy"] is [String: Any]) {
             throw AgentEvalWireError.invalidRequest
+        }
+        if root.keys.contains("operator_approval_mailbox") {
+            guard let value = root["operator_approval_mailbox"] as? NSNumber,
+                  CFGetTypeID(value) == CFBooleanGetTypeID() else {
+                throw AgentEvalWireError.invalidRequest
+            }
+            if value.boolValue {
+                guard let approval = root["approval_policy"] as? [String: Any],
+                      Set(approval.keys) == ["allow_fixture_interaction"],
+                      let interaction = approval["allow_fixture_interaction"] as? NSNumber,
+                      CFGetTypeID(interaction) == CFBooleanGetTypeID(), interaction.boolValue else {
+                    throw AgentEvalWireError.invalidRequest
+                }
+            }
         }
         if let approval = root["approval_policy"] as? [String: Any],
            !Set(approval.keys).isSubset(of: ["allow_fixture_commit", "allow_fixture_interaction", "allow_start_interaction"]) {
@@ -306,6 +323,7 @@ struct AgentEvalRequest: Decodable {
         faraExchangeCapture = try container.decodeIfPresent(FaraExchangeCapture.self, forKey: .faraExchangeCapture)
         memoryFixture = try container.decodeIfPresent(String.self, forKey: .memoryFixture)
         memoryPolicy = try container.decodeIfPresent(ComputerUseTaskMemoryPolicy.self, forKey: .memoryPolicy) ?? .init()
+        operatorApprovalMailbox = try container.decodeIfPresent(Bool.self, forKey: .operatorApprovalMailbox) ?? false
         if let path = try container.decodeIfPresent(String.self, forKey: .setupDocument) {
             guard start.app != nil, approvalPolicy?.allowStartInteraction == true,
                   let task = ProcessInfo.processInfo.environment["EVAL_TASK_ID"],
@@ -338,10 +356,22 @@ struct AgentEvalRequest: Decodable {
                   app.utf8.count <= 256 else { throw AgentEvalWireError.invalidRequest }
         }
         try validateMemoryFixture()
+        if operatorApprovalMailbox, memoryFixture == nil {
+            throw AgentEvalWireError.invalidRequest
+        }
     }
 
     func validateMemoryFixture() throws {
         guard let memoryFixture else { return }
+        if operatorApprovalMailbox {
+            guard Set((1...10).map { String(format: "memory-recall-10-%02d", $0) }).contains(memoryFixture),
+                  approvalPolicy?.allowFixtureInteraction == true,
+                  approvalPolicy?.allowFixtureCommit != true,
+                  approvalPolicy?.allowStartInteraction != true,
+                  faraExchangeCapture?.caseID == memoryFixture else {
+                throw AgentEvalWireError.invalidRequest
+            }
+        }
         var fixturePaths = ["memory-recall-10-01": "/memory-seat.html"]
 #if DEBUG
         fixturePaths["memory-recall-10-02"] = "/memory-contact.html"
@@ -515,11 +545,20 @@ struct AgentEvalResponse: Encodable {
     let realHostApp = true
     let memoryFixtureReceipt: AgentEvalMemoryFixtureReceipt?
     let memoryFixtureStoreEvidence: AgentEvalMemoryFixtureStoreEvidence?
+    let operatorApprovalMode: String?
+    let operatorApprovalResponseCount: Int?
+    let operatorApprovalApprovedCount: Int?
+    let operatorApprovalDeniedCount: Int?
+    let operatorApprovalTimeoutCount: Int?
+    let operatorApprovalInvalidCount: Int?
 
     init(taskID: String, outcome: String, answer: String, episodePath: String,
          wallSeconds: Double, policy: String, cropMode: String, requestedCropMode: String,
          memoryFixtureReceipt: AgentEvalMemoryFixtureReceipt? = nil,
-         memoryFixtureStoreEvidence: AgentEvalMemoryFixtureStoreEvidence? = nil) {
+         memoryFixtureStoreEvidence: AgentEvalMemoryFixtureStoreEvidence? = nil,
+         operatorApprovalMode: String? = nil, operatorApprovalResponseCount: Int? = nil,
+         operatorApprovalApprovedCount: Int? = nil, operatorApprovalDeniedCount: Int? = nil,
+         operatorApprovalTimeoutCount: Int? = nil, operatorApprovalInvalidCount: Int? = nil) {
         self.taskID = taskID
         self.outcome = outcome
         self.answer = answer
@@ -530,6 +569,12 @@ struct AgentEvalResponse: Encodable {
         self.requestedCropMode = requestedCropMode
         self.memoryFixtureReceipt = memoryFixtureReceipt
         self.memoryFixtureStoreEvidence = memoryFixtureStoreEvidence
+        self.operatorApprovalMode = operatorApprovalMode
+        self.operatorApprovalResponseCount = operatorApprovalResponseCount
+        self.operatorApprovalApprovedCount = operatorApprovalApprovedCount
+        self.operatorApprovalDeniedCount = operatorApprovalDeniedCount
+        self.operatorApprovalTimeoutCount = operatorApprovalTimeoutCount
+        self.operatorApprovalInvalidCount = operatorApprovalInvalidCount
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -542,6 +587,12 @@ struct AgentEvalResponse: Encodable {
         case realHostApp = "real_host_app"
         case memoryFixtureReceipt = "memory_fixture_receipt"
         case memoryFixtureStoreEvidence = "memory_fixture_store_evidence"
+        case operatorApprovalMode = "operator_approval_mode"
+        case operatorApprovalResponseCount = "operator_approval_response_count"
+        case operatorApprovalApprovedCount = "operator_approval_approved_count"
+        case operatorApprovalDeniedCount = "operator_approval_denied_count"
+        case operatorApprovalTimeoutCount = "operator_approval_timeout_count"
+        case operatorApprovalInvalidCount = "operator_approval_invalid_count"
     }
 }
 

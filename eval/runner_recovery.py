@@ -347,8 +347,9 @@ class Checkpoint:
                 pass
 
 
-def pin_run_identity(output: Path, driver_command: list[str], tasks: Iterable[Any], policy: str) -> dict[str, str]:
-    """Bind a resumable output directory to the same driver, tasks, and policy."""
+def pin_run_identity(output: Path, driver_command: list[str], tasks: Iterable[Any], policy: str,
+                     measurement_mode: str = "unattended") -> dict[str, str]:
+    """Bind a resumable output directory to the same driver, tasks, policy, and approval mode."""
     if not driver_command or not policy:
         raise RecoveryError("driver command and policy are required to pin a run")
     binary = Path(driver_command[0]).expanduser()
@@ -361,8 +362,12 @@ def pin_run_identity(output: Path, driver_command: list[str], tasks: Iterable[An
     task_values = [item.value if hasattr(item, "value") else item for item in tasks]
     task_sha = hashlib.sha256(json.dumps(task_values, sort_keys=True, ensure_ascii=False,
                                          separators=(",", ":")).encode()).hexdigest()
+    if measurement_mode not in {"unattended", "operator-reviewed"}:
+        raise RecoveryError("unsupported approval measurement mode")
     identity = {"driver_sha256": driver_sha, "driver_argv_sha256": argv_sha,
                 "tasks_sha256": task_sha, "policy": policy}
+    if measurement_mode == "operator-reviewed":
+        identity["measurement_mode"] = measurement_mode
     path = Path(output) / "run_identity.json"
     if path.exists():
         try:

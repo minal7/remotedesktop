@@ -58,6 +58,7 @@
 		304E0EE72F59C9714A1B7FD2 /* LocalComputerUseTransportTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9998D2A9BBCC15FA929764EA /* LocalComputerUseTransportTests.swift */; };
 		31A0659A7A8B7A8D2EAFAE1F /* ComputerUseOCRQualificationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 547D9391C75FFF219AD9FE5C /* ComputerUseOCRQualificationTests.swift */; };
 		323EB15585B5A0956B0B2033 /* DebugAgentEvalSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = 73FE58B8A939AC524DA3ED54 /* DebugAgentEvalSession.swift */; };
+		B17A991A9F434B608441B7A1 /* AgentEvalOperatorApprovalMailbox.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6D3E30B5376E7D565D33538C /* AgentEvalOperatorApprovalMailbox.swift */; };
 		329C35890F366BD995FDF8A7 /* PermissionsProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5AEEF525524B99DFE1BEBFDC /* PermissionsProvider.swift */; };
 		335F3049413654BA69CF7721 /* MemoryStoreKit in Frameworks */ = {isa = PBXBuildFile; productRef = C35FDF79A7DEA937B8CFBF0C /* MemoryStoreKit */; };
 		3429236596E52F2EBF64A1A1 /* LocalComputerUseCredentials.swift in Sources */ = {isa = PBXBuildFile; fileRef = 883356287E3F636BF4AD3816 /* LocalComputerUseCredentials.swift */; };
@@ -403,6 +404,7 @@
 		71ACE701D8FA20434852D6FB /* DebugAgentEvalCommand.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DebugAgentEvalCommand.swift; sourceTree = "<group>"; };
 		72EC39F2E8D1A2EF246C1CB7 /* HostSetupView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HostSetupView.swift; sourceTree = "<group>"; };
 		73FE58B8A939AC524DA3ED54 /* DebugAgentEvalSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DebugAgentEvalSession.swift; sourceTree = "<group>"; };
+		6D3E30B5376E7D565D33538C /* AgentEvalOperatorApprovalMailbox.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentEvalOperatorApprovalMailbox.swift; sourceTree = "<group>"; };
 		74BAA05E5EEF67FEE4C9E15B /* QWEN35-NOTICE.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = "QWEN35-NOTICE.txt"; sourceTree = "<group>"; };
 		7517D04078838715914F149B /* HOLO-NOTICE.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = "HOLO-NOTICE.txt"; sourceTree = "<group>"; };
 		7591D6527E14ABA8CB770182 /* ContractValidation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContractValidation.swift; sourceTree = "<group>"; };
@@ -579,6 +581,7 @@
 				FCB6EB2FAD0160F490ADB2D7 /* DebugAgentEvalBroker.swift */,
 				71ACE701D8FA20434852D6FB /* DebugAgentEvalCommand.swift */,
 				73FE58B8A939AC524DA3ED54 /* DebugAgentEvalSession.swift */,
+				6D3E30B5376E7D565D33538C /* AgentEvalOperatorApprovalMailbox.swift */,
 				66454D35C3E809688555785E /* DebugResidentHostConfiguration.swift */,
 				C968753A2B052BA6F238FEB3 /* EvalFaraHostExchangeCaptureConfiguration.swift */,
 				6D229171FEC7014E24B36850 /* SuiteCleanStart.swift */,
@@ -1302,6 +1305,7 @@
 				565E901F528114B9EA5F6266 /* DebugAgentEvalBroker.swift in Sources */,
 				0C1505E54746F62839AE2CDC /* DebugAgentEvalCommand.swift in Sources */,
 				323EB15585B5A0956B0B2033 /* DebugAgentEvalSession.swift in Sources */,
+				B17A991A9F434B608441B7A1 /* AgentEvalOperatorApprovalMailbox.swift in Sources */,
 				93B71CEAFFABA51B218AD4C7 /* DebugResidentHostConfiguration.swift in Sources */,
 				54C1AC89B9CC946B1165A237 /* DesktopVideoQuality.swift in Sources */,
 				BF403E7DAA32C64672327159 /* DeviceIdentity.swift in Sources */,

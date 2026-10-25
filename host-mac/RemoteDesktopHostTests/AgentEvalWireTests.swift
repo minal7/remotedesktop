@@ -348,6 +348,93 @@ final class AgentEvalWireTests: XCTestCase {
             environment: ["EVAL_TASK_ID": unknown, "EVAL_RUN_TOKEN": token]))
     }
 
+    func testOperatorApprovalMailboxIsLimitedToExactRecallFixtureAndInteractionFlag() throws {
+        let token = String(repeating: "a", count: 32)
+        let payload = #"{"task_id":"01234567-89ab-cdef-0123-456789abcdef","prompt":"Choose my saved seat.","start":{"url":"http://127.0.0.1:8765/memory-seat.html?__eval_run=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"max_steps":8,"policy":"fara15-4b","approval_policy":{"allow_fixture_interaction":true},"memory_fixture":"memory-recall-10-01","memory_policy":{},"fara_exchange_capture":{"case_id":"memory-recall-10-01","run_token":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"operator_approval_mailbox":true}"#
+        let environment = ["EVAL_TASK_ID": "memory-recall-10-01", "EVAL_RUN_TOKEN": token]
+        XCTAssertTrue(try AgentEvalRequest.decodeStrict(Data(payload.utf8), environment: environment)
+            .operatorApprovalMailbox)
+        var root = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(payload.utf8)) as? [String: Any])
+        var invalid: [[String: Any]] = []
+        var changed = root; changed["approval_policy"] = ["allow_fixture_interaction": 1]; invalid.append(changed)
+        changed = root; changed["approval_policy"] = ["allow_fixture_interaction": true, "allow_fixture_commit": true]; invalid.append(changed)
+        changed = root; changed["start"] = ["url": "http://127.0.0.1:8765/forms.html?__eval_run=\(token)"]; invalid.append(changed)
+        changed = root; changed["memory_policy"] = ["noMemory": true]; invalid.append(changed)
+        changed = root; changed["memory_fixture"] = "memory-privacy-10-01"; invalid.append(changed)
+        changed = root; changed.removeValue(forKey: "fara_exchange_capture"); invalid.append(changed)
+        for candidate in invalid {
+            XCTAssertThrowsError(try AgentEvalRequest.decodeStrict(
+                JSONSerialization.data(withJSONObject: candidate), environment: environment))
+        }
+        root["operator_approval_mailbox"] = 1
+        XCTAssertThrowsError(try AgentEvalRequest.decodeStrict(
+            JSONSerialization.data(withJSONObject: root), environment: environment))
+    }
+
+    func testOperatorApprovalMailboxConsumesOneExactlyBoundDecision() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("operator-mailbox-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false,
+            attributes: [.posixPermissions: 0o700])
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let ticket = AgentEvalOperatorApprovalTicket(runID: "run-1", caseID: "memory-recall-10-01",
+            taskID: "task-1", requestID: "request-1", responseFile: "operator-approval-request-1.response.json",
+            controlRevision: 3, hostControlEpoch: 4, fingerprint: String(repeating: "a", count: 64),
+            scopeIdentity: "http://127.0.0.1:8765/memory-seat.html", approvalPurpose: "memoryDisclosure",
+            riskTier: "low", action: .type(target: .element(id: 2), text: "aisle", mode: .replace),
+            targets: [], contextBinding: "binding-1", contextRevision: "revision-1", contextDigest: String(repeating: "b", count: 64))
+        let mailbox = AgentEvalOperatorApprovalMailbox(directory: directory, ticket: ticket)
+        try mailbox.writeTicket()
+        let ticketJSON = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf:
+            directory.appendingPathComponent(ticket.requestFilename))) as? [String: Any])
+        XCTAssertEqual(ticketJSON["response_file"] as? String, ticket.responseFilename)
+        guard case .absent = mailbox.consumeDecision() else {
+            return XCTFail("an absent response must remain pending")
+        }
+
+        let response: [String: Any] = ["version": 1, "run_id": "run-1", "case_id": "memory-recall-10-01",
+            "task_id": "task-1", "request_id": "request-1", "control_revision": 3,
+            "host_control_epoch": 4, "fingerprint": String(repeating: "a", count: 64),
+            "scope_identity": "http://127.0.0.1:8765/memory-seat.html",
+            "approval_purpose": "memoryDisclosure", "risk_tier": "low", "context_binding": "binding-1",
+            "context_revision": "revision-1", "context_sha256": String(repeating: "b", count: 64), "approved": true]
+        try JSONSerialization.data(withJSONObject: response).write(to: directory.appendingPathComponent(ticket.responseFilename))
+        try FileManager.default.setAttributes([.posixPermissions: 0o600],
+            ofItemAtPath: directory.appendingPathComponent(ticket.responseFilename).path)
+        guard case .decision(let decision) = mailbox.consumeDecision() else {
+            return XCTFail("the exact response should be accepted")
+        }
+        XCTAssertTrue(decision.approved)
+        XCTAssertTrue(decision.matches(ticket))
+        try JSONSerialization.data(withJSONObject: response).write(to: directory.appendingPathComponent(ticket.responseFilename))
+        try FileManager.default.setAttributes([.posixPermissions: 0o600],
+            ofItemAtPath: directory.appendingPathComponent(ticket.responseFilename).path)
+        guard case .invalid = mailbox.consumeDecision() else {
+            return XCTFail("a consumed response must not be replayable")
+        }
+
+        let secondDirectory = directory.appendingPathComponent("second", isDirectory: true)
+        try FileManager.default.createDirectory(at: secondDirectory, withIntermediateDirectories: false,
+            attributes: [.posixPermissions: 0o700])
+        let secondTicket = AgentEvalOperatorApprovalTicket(runID: "run-1", caseID: "memory-recall-10-01",
+            taskID: "task-1", requestID: "request-2", responseFile: "operator-approval-request-2.response.json",
+            controlRevision: 3, hostControlEpoch: 4, fingerprint: String(repeating: "a", count: 64),
+            scopeIdentity: "http://127.0.0.1:8765/memory-seat.html", approvalPurpose: "memoryDisclosure",
+            riskTier: "low", action: .type(target: .element(id: 2), text: "aisle", mode: .replace),
+            targets: [], contextBinding: "binding-1", contextRevision: "revision-1", contextDigest: String(repeating: "b", count: 64))
+        let secondMailbox = AgentEvalOperatorApprovalMailbox(directory: secondDirectory, ticket: secondTicket)
+        var staleResponse = response
+        staleResponse["request_id"] = "request-2"
+        staleResponse["context_revision"] = "stale-revision"
+        try JSONSerialization.data(withJSONObject: staleResponse).write(to:
+            secondDirectory.appendingPathComponent(secondTicket.responseFilename))
+        try FileManager.default.setAttributes([.posixPermissions: 0o600],
+            ofItemAtPath: secondDirectory.appendingPathComponent(secondTicket.responseFilename).path)
+        guard case .invalid = secondMailbox.consumeDecision() else {
+            return XCTFail("a context-mismatched response must not be accepted")
+        }
+    }
+
     func testNoContextPrivacyCasesAdmitOnlyTheirExactFlagAndBoundFixture() throws {
         let token = String(repeating: "a", count: 32)
         let driverID = "01234567-89ab-cdef-0123-456789abcdef"

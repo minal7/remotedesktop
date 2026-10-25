@@ -1070,7 +1070,8 @@ def authorized_fixture_submit_approved(records: list[dict[str, Any]], authorized
     )
 
 def _run_driver(command: list[str], task: Task, policy: str, token: str, task_id: str, timeout: float,
-                setup_document: Path | None = None) -> tuple[dict[str, Any] | None, str | None]:
+                setup_document: Path | None = None,
+                operator_approval_mailbox: bool = False) -> tuple[dict[str, Any] | None, str | None]:
     request = {
         "task_id": task_id,
         "prompt": task.value["prompt"],
@@ -1093,6 +1094,8 @@ def _run_driver(command: list[str], task: Task, policy: str, token: str, task_id
         request["memory_fixture"] = task.value["memory_fixture"]
         request["memory_policy"] = task.value.get("memory_policy", {})
         request["fara_exchange_capture"] = {"case_id": task.task_id, "run_token": token}
+        if operator_approval_mailbox:
+            request["operator_approval_mailbox"] = True
     started = time.monotonic()
     env = dict(os.environ)
     try:
@@ -1141,6 +1144,18 @@ def _run_driver(command: list[str], task: Task, policy: str, token: str, task_id
             or response["policy"] not in SUPPORTED_POLICIES):
         return None, "driver response contains invalid field types"
     if task.value.get("memory_fixture"):
+        operator_fields = ("operator_approval_response_count", "operator_approval_approved_count",
+                           "operator_approval_denied_count", "operator_approval_timeout_count",
+                           "operator_approval_invalid_count")
+        if operator_approval_mailbox and (response.get("operator_approval_mode") != "operator-reviewed"
+                or any(not isinstance(response.get(field), int)
+                       or isinstance(response.get(field), bool) or response[field] < 0
+                       for field in operator_fields)):
+            return None, "driver did not return operator-review measurement metadata"
+        if not operator_approval_mailbox and response.get("operator_approval_mode") is not None:
+            return None, "driver approval measurement mode did not match the requested mode"
+        if not operator_approval_mailbox and any(field in response for field in operator_fields):
+            return None, "driver returned operator-review counts when the mode was not requested"
         receipt = response.get("memory_fixture_receipt")
         no_context_policy = NO_CONTEXT_MEMORY_POLICIES.get(task.task_id)
         if no_context_policy is not None:
@@ -1677,6 +1692,11 @@ def _schedule_tasks(tasks: list[Task], runs: int) -> list[tuple[int, Task]]:
 def _prepare_run(args: argparse.Namespace) -> tuple[list[Task], list[str], list[str], Any, Path] | None:
     tasks = smoke_tasks() if args.suite == "smoke" else load_tasks(args.suite)
     tasks = _select_tasks(tasks, getattr(args, "task_ids", None))
+    if getattr(args, "operator_approval_mailbox", False) and (
+            args.suite != "memory-recall-10" or args.execution != "real-host"
+            or not tasks or any(not task.value.get("memory_fixture") for task in tasks)):
+        print("BLOCKED: operator approval is only admitted for real-host memory recall fixtures.", file=sys.stderr)
+        return None
     if args.execution != "real-host" and any(
             task.value.get("setup", {}).get("open_document")
             or task.value.get("setup", {}).get("new_untitled")
@@ -1739,7 +1759,9 @@ def run(args: argparse.Namespace) -> int:
         runner_guard_entered = True
         checkpoint = Checkpoint(output, task_keys)
         runner_guard.check_screen_unlocked()
-        pin_run_identity(output, driver, [task for _, task in schedule], args.policy)
+        pin_run_identity(output, driver, [task for _, task in schedule], args.policy,
+                         "operator-reviewed" if getattr(args, "operator_approval_mailbox", False)
+                         else "unattended")
         if resume:
             checkpoint.record_abandoned_inflight()
         if args.execution == "real-host":
@@ -1976,6 +1998,11 @@ def _run_one_task(task: Task, run_number: int, args: argparse.Namespace, driver:
         if task.value.get("memory_fixture"):
             row["memory_context_delivery"] = _memory_delivery_unavailable()
             row.update(coverage_status="incomplete", b7_pass=False)
+        if getattr(args, "operator_approval_mailbox", False):
+            row["approval_measurement_mode"] = "operator-reviewed"
+            row.update({"operator_approval_response_count": 0, "operator_approval_approved_count": 0,
+                        "operator_approval_denied_count": 0, "operator_approval_timeout_count": 0,
+                        "operator_approval_invalid_count": 0})
         if notes_setup_receipt is not None:
             row["setup_fixture"] = {"kind": "notes_selection", **notes_setup_receipt}
         if checkpoint is None:
@@ -2092,6 +2119,8 @@ def _run_one_task(task: Task, run_number: int, args: argparse.Namespace, driver:
             setup_document = (scratch / setup["open_document"]
                               if scratch is not None and setup.get("open_document") else None)
             driver_options = {"setup_document": setup_document} if setup_document is not None else {}
+            if getattr(args, "operator_approval_mailbox", False):
+                driver_options["operator_approval_mailbox"] = True
             response, error = _run_driver(driver, runtime_task, args.policy, token, driver_task_id,
                                           args.timeout, **driver_options)
             if error or response is None:
@@ -2104,6 +2133,12 @@ def _run_one_task(task: Task, run_number: int, args: argparse.Namespace, driver:
                     task.tags, args.execution, str(error), args.policy)
                 status = "INFRA-BLOCKED (episode evaluation failed)"
             _attach_memory_context_delivery(attempt_row, runtime_task, response, token, driver_task_id)
+            if getattr(args, "operator_approval_mailbox", False):
+                attempt_row["approval_measurement_mode"] = "operator-reviewed"
+                for field in ("operator_approval_response_count", "operator_approval_approved_count",
+                              "operator_approval_denied_count", "operator_approval_timeout_count",
+                              "operator_approval_invalid_count"):
+                    attempt_row[field] = response[field]
             privacy_evidence_status = _apply_no_context_privacy_admission(
                 attempt_row, runtime_task, response)
             if privacy_evidence_status is not None:
@@ -2232,6 +2267,8 @@ def main() -> int:
                         help="overall in-process deadline; use the recovery supervisor for automatic restart")
     parser.add_argument("--output")
     parser.add_argument("--resume", action="store_true", help="resume an existing checkpoint when present")
+    parser.add_argument("--operator-approval-mailbox", action="store_true",
+                        help="wait for one explicitly reviewed response per pending memory-recall fixture approval")
     args = parser.parse_args()
     if args.runs < 1 or args.timeout <= 0 or args.deadline_seconds <= 0:
         parser.error("--runs, --timeout, and --deadline-seconds must be positive")

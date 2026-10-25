@@ -197,6 +197,16 @@ class RecoveryTests(unittest.TestCase):
             self.assertEqual(pin_run_identity(output, [str(binary)], [{"id": "a"}], "fara15-4b"), first)
             with self.assertRaisesRegex(RecoveryError, "changed"):
                 pin_run_identity(output, [str(binary)], [{"id": "b"}], "fara15-4b")
+            with self.assertRaisesRegex(RecoveryError, "changed"):
+                pin_run_identity(output, [str(binary)], [{"id": "a"}], "fara15-4b", "operator-reviewed")
+            operator_output = Path(directory) / "operator-output"
+            operator = pin_run_identity(operator_output, [str(binary)], [{"id": "a"}],
+                                        "fara15-4b", "operator-reviewed")
+            self.assertEqual(operator["measurement_mode"], "operator-reviewed")
+            self.assertEqual(pin_run_identity(operator_output, [str(binary)], [{"id": "a"}],
+                "fara15-4b", "operator-reviewed"), operator)
+            with self.assertRaisesRegex(RecoveryError, "changed"):
+                pin_run_identity(operator_output, [str(binary)], [{"id": "a"}], "fara15-4b")
 
     def test_supervisor_restarts_partial_checkpoint_then_stops_on_complete(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -931,6 +931,32 @@ class TaskAndCheckerTests(unittest.TestCase):
             "case_id": "memory-recall-10-01", "run_token": "a" * 32})
         self.assertIn("__eval_run=a", request["start"]["url"])
 
+        operator_response = dict(response, operator_approval_mode="operator-reviewed",
+            operator_approval_response_count=1, operator_approval_approved_count=1,
+            operator_approval_denied_count=0, operator_approval_timeout_count=0,
+            operator_approval_invalid_count=0)
+        with patch.object(run_suite.subprocess, "run", return_value=type("Process", (), {
+                "returncode": 0, "stdout": json.dumps(operator_response)})()) as operator_invoke, \
+             patch.object(run_suite, "_prepare_episode_root", return_value=Path("/tmp/eval-root")), \
+             patch.object(run_suite, "_vm_project_root", return_value=None), \
+             patch.object(run_suite, "_vm_remote_eval_root", return_value=None):
+            result, error = run_suite._run_driver(["fake-driver"], task, "fara15-4b", "a" * 32,
+                operator_response["task_id"], 5, operator_approval_mailbox=True)
+        self.assertIsNone(error)
+        self.assertIsNotNone(result)
+        self.assertTrue(json.loads(operator_invoke.call_args.kwargs["input"])["operator_approval_mailbox"])
+
+        unexpected_mode = dict(response, operator_approval_mode="operator-reviewed")
+        with patch.object(run_suite.subprocess, "run", return_value=type("Process", (), {
+                "returncode": 0, "stdout": json.dumps(unexpected_mode)})()) as unexpected_invoke, \
+             patch.object(run_suite, "_prepare_episode_root", return_value=Path("/tmp/eval-root")), \
+             patch.object(run_suite, "_vm_project_root", return_value=None), \
+             patch.object(run_suite, "_vm_remote_eval_root", return_value=None):
+            result, error = run_suite._run_driver(["fake-driver"], task, "fara15-4b", "a" * 32,
+                response["task_id"], 5)
+        self.assertIsNone(result)
+        self.assertIn("mode did not match", error or "")
+
     def test_memory_recall_driver_rejects_wrong_task_or_context_receipt(self) -> None:
         value = {
             "id": "memory-recall-10-01", "surface": "web",

@@ -1,5 +1,6 @@
 #if DEBUG
 import AppKit
+import CoreFoundation
 import CryptoKit
 import Darwin
 import Foundation
@@ -27,6 +28,12 @@ final class DebugAgentEvalSession {
     private var memoryFixtureBeforeSnapshot: AgentEvalMemoryFixtureStoreSnapshot?
     private var memoryFixtureBeforeSnapshotAttempted = false
     private var pendingAcknowledgements: [String] = []
+    private var operatorApprovalResponseCount = 0
+    private var operatorApprovalApprovedCount = 0
+    private var operatorApprovalDeniedCount = 0
+    private var operatorApprovalTimeoutCount = 0
+    private var operatorApprovalInvalidCount = 0
+    private var consumedOperatorApprovalIDs: Set<String> = []
 
     init(request: AgentEvalRequest) throws {
         try request.validateFaraExchangeCapture(environment: ProcessInfo.processInfo.environment)
@@ -193,16 +200,97 @@ final class DebugAgentEvalSession {
                                credential: LocalComputerUseCredential,
                                endpoint: LocalComputerUseEndpoint) async throws -> AgentEvalResponse {
         let deadline = startedAt + 15 * 60
+        var operatorWait: (approval: ComputerUseApprovalRequest,
+                           pending: AgentLoop.PendingStep,
+                           mailbox: AgentEvalOperatorApprovalMailbox,
+                           expiresAt: TimeInterval)?
         while ProcessInfo.processInfo.systemUptime < deadline {
             try Task.checkCancellation()
             let response = try await exchange(bootstrap: bootstrap, credential: credential,
                 endpoint: endpoint, envelopes: [], acknowledgements: pendingAcknowledgements)
             pendingAcknowledgements.removeAll()
+            var outgoing: [ComputerUseEnvelope] = []
+            var operatorWaitEnd: (String, String)?
+            if let wait = operatorWait {
+                let now = ProcessInfo.processInfo.systemUptime
+                if let current = manager.debugPendingAgentApproval(taskID: request.taskID,
+                        requestID: wait.approval.requestID),
+                   current.approval == wait.pending.approval,
+                   current.resolved.action == wait.pending.resolved.action,
+                   Self.operatorApprovalMatches(current, request: wait.approval,
+                        taskID: request.taskID, fixtureCase: request.memoryFixture ?? "") {
+                    if now >= wait.expiresAt {
+                        operatorApprovalTimeoutCount += 1
+                        operatorWait = nil
+                        operatorWaitEnd = ("pending_approval", wait.approval.message)
+                    } else {
+                        switch wait.mailbox.consumeDecision() {
+                        case .absent:
+                            break
+                        case .invalid:
+                            operatorApprovalInvalidCount += 1
+                            operatorWait = nil
+                            operatorWaitEnd = ("pending_approval", wait.approval.message)
+                        case .decision(let decision):
+                            guard decision.matches(wait.mailbox.ticket),
+                                  Self.operatorApprovalMatches(current, request: wait.approval,
+                                    taskID: request.taskID, fixtureCase: request.memoryFixture ?? "") else {
+                                operatorApprovalInvalidCount += 1
+                                operatorWait = nil
+                                operatorWaitEnd = ("pending_approval", wait.approval.message)
+                                break
+                            }
+                            consumedOperatorApprovalIDs.insert(wait.approval.requestID)
+                            operatorApprovalResponseCount += 1
+                            if decision.approved { operatorApprovalApprovedCount += 1 }
+                            else { operatorApprovalDeniedCount += 1 }
+                            let approvalResponse = ComputerUseApprovalResponse(requestID: wait.approval.requestID,
+                                approved: decision.approved, taskID: wait.approval.taskID,
+                                appliedControlRevision: wait.approval.appliedControlRevision,
+                                hostControlEpoch: wait.approval.hostControlEpoch)
+                            outgoing.append(makeEnvelope(kind: .approvalResponse,
+                                body: try approvalResponse.encodedBody()))
+                            operatorWait = nil
+                        }
+                    }
+                } else {
+                    operatorApprovalInvalidCount += 1
+                    operatorWait = nil
+                    operatorWaitEnd = ("pending_approval", wait.approval.message)
+                }
+            }
             for envelope in response.envelopes where envelope.targetID == senderID {
                 pendingAcknowledgements.append(envelope.id)
                 if envelope.kind == .approvalRequest,
                    let approval = try? ComputerUseApprovalRequest.decodeBody(envelope.body),
                    approval.taskID == request.taskID {
+                    if operatorWaitEnd != nil { continue }
+                    if consumedOperatorApprovalIDs.contains(approval.requestID) { continue }
+                    if request.operatorApprovalMailbox,
+                       let pending = manager.debugPendingAgentApproval(taskID: request.taskID,
+                            requestID: approval.requestID),
+                       Self.operatorApprovalMatches(pending, request: approval,
+                            taskID: request.taskID, fixtureCase: request.memoryFixture ?? "") {
+                        if operatorWait == nil {
+                            guard let ticket = makeOperatorApprovalTicket(approval, pending: pending),
+                                  approval.appliedControlRevision != nil,
+                                  approval.hostControlEpoch != nil else {
+                                operatorApprovalInvalidCount += 1
+                                return await makeResult(outcome: "pending_approval", answer: approval.message)
+                            }
+                            let mailbox = AgentEvalOperatorApprovalMailbox(directory: runStore.directory, ticket: ticket)
+                            do { try mailbox.writeTicket() }
+                            catch {
+                                operatorApprovalInvalidCount += 1
+                                return await makeResult(outcome: "pending_approval", answer: approval.message)
+                            }
+                            operatorWait = (approval, pending, mailbox, ProcessInfo.processInfo.systemUptime + 120)
+                        } else if operatorWait?.approval.requestID != approval.requestID {
+                            operatorApprovalInvalidCount += 1
+                            return await makeResult(outcome: "pending_approval", answer: approval.message)
+                        }
+                        continue
+                    }
                     if try await approveFixtureRequest(approval, bootstrap: bootstrap,
                         credential: credential, endpoint: endpoint) { continue }
                     return await makeResult(outcome: "pending_approval", answer: approval.message)
@@ -215,6 +303,14 @@ final class DebugAgentEvalSession {
                    update.outcome == .userInterventionRequired {
                     return await makeResult(outcome: "handoff", answer: update.text)
                 }
+            }
+            if let operatorWaitEnd {
+                return await makeResult(outcome: operatorWaitEnd.0, answer: operatorWaitEnd.1)
+            }
+            if !outgoing.isEmpty {
+                _ = try await exchange(bootstrap: bootstrap, credential: credential,
+                    endpoint: endpoint, envelopes: outgoing, acknowledgements: pendingAcknowledgements)
+                pendingAcknowledgements.removeAll()
             }
             do { try await Task.sleep(for: .milliseconds(100)) } catch { break }
         }
@@ -238,6 +334,74 @@ final class DebugAgentEvalSession {
             endpoint: endpoint, envelopes: [envelope], acknowledgements: pendingAcknowledgements)
         pendingAcknowledgements.removeAll()
         return true
+    }
+
+    private func makeOperatorApprovalTicket(_ requestApproval: ComputerUseApprovalRequest,
+                                            pending: AgentLoop.PendingStep) -> AgentEvalOperatorApprovalTicket? {
+        guard let fixtureCase = request.memoryFixture,
+              let revision = requestApproval.appliedControlRevision,
+              let epoch = requestApproval.hostControlEpoch,
+              pending.approval.purpose == .memoryDisclosure,
+              pending.approval.riskTier != .high,
+              !hasSensitiveTarget(pending),
+              Self.operatorActionIsAllowed(pending.resolved.action),
+              Self.isExactMemoryFixtureSurface(pending.resolved.frame.observation.surface,
+                    fixtureCase: fixtureCase, startURL: request.start.url,
+                    runToken: request.faraExchangeCapture?.runToken),
+              Self.operatorApprovalMatches(pending, request: requestApproval,
+                taskID: request.taskID, fixtureCase: fixtureCase) else { return nil }
+        return AgentEvalOperatorApprovalTicket(runID: runStore.runID, caseID: fixtureCase,
+            taskID: request.taskID, requestID: requestApproval.requestID,
+            responseFile: "operator-approval-\(requestApproval.requestID).response.json",
+            controlRevision: revision, hostControlEpoch: epoch,
+            fingerprint: pending.approval.fingerprint, scopeIdentity: pending.approval.scopeIdentity,
+            approvalPurpose: pending.approval.purpose.rawValue, riskTier: pending.approval.riskTier.rawValue,
+            action: pending.resolved.action,
+            targets: pending.resolved.targets.map(AgentEvalOperatorApprovalTarget.init),
+            contextBinding: pending.approval.memoryContext?.binding.reference,
+            contextRevision: pending.approval.memoryContext?.slotRevision.uuidString,
+            contextDigest: pending.approval.memoryContext?.textDigest)
+    }
+
+    private static func operatorActionIsAllowed(_ action: AgentAction) -> Bool {
+        switch action {
+        case .type, .key, .select: true
+        default: false
+        }
+    }
+
+    private static func isExactMemoryFixtureSurface(_ surface: AgentSurface, fixtureCase: String,
+                                                    startURL: String?, runToken: String?) -> Bool {
+        guard case .web(let value, _) = surface, let components = URLComponents(string: value),
+              components.scheme == "http", components.host == "127.0.0.1", components.port == 8765,
+              components.user == nil, components.password == nil, components.fragment == nil,
+              let runToken, runToken.utf8.count == 32, runToken.utf8.allSatisfy({
+                (48...57).contains($0) || (97...102).contains($0)
+              }), let startURL, let startComponents = URLComponents(string: startURL),
+              startComponents.scheme == "http", startComponents.host == "127.0.0.1",
+              startComponents.port == 8765, startComponents.user == nil,
+              startComponents.password == nil, startComponents.fragment == nil,
+              startComponents.queryItems == [URLQueryItem(name: "__eval_run", value: runToken)],
+              components.queryItems == nil
+                || components.queryItems == [URLQueryItem(name: "__eval_run", value: runToken)] else { return false }
+        return Self.isRecallFixtureCase(fixtureCase) && components.path == startComponents.path
+    }
+
+    private static func isRecallFixtureCase(_ value: String) -> Bool {
+        (1...10).contains { value == String(format: "memory-recall-10-%02d", $0) }
+    }
+
+    private static func operatorApprovalMatches(_ pending: AgentLoop.PendingStep,
+                                               request: ComputerUseApprovalRequest,
+                                               taskID: String, fixtureCase: String) -> Bool {
+        let admitted = Set((1...10).map { String(format: "memory-recall-10-%02d", $0) })
+        return admitted.contains(fixtureCase) && pending.approval.taskID == taskID
+            && request.taskID == taskID && pending.approval.id.uuidString == request.requestID
+            && pending.approval.action == pending.resolved.action
+            && pending.approval.scopeIdentity == pending.resolved.frame.scope.identity
+            && pending.approval.fingerprint.utf8.count == 64
+            && pending.approval.purpose == .memoryDisclosure
+            && pending.approval.memoryContext != nil
     }
 
     private func isAuthorizedApproval(_ pending: AgentLoop.PendingStep,
@@ -325,7 +489,13 @@ final class DebugAgentEvalSession {
             episodePath: runStore.episodePath,
             wallSeconds: max(0, ProcessInfo.processInfo.systemUptime - startedAt),
             policy: request.policy, cropMode: cropMode, requestedCropMode: requestedCropMode,
-            memoryFixtureReceipt: await memoryContextProvider?.receipt())
+            memoryFixtureReceipt: await memoryContextProvider?.receipt(),
+            operatorApprovalMode: request.operatorApprovalMailbox ? "operator-reviewed" : nil,
+            operatorApprovalResponseCount: request.operatorApprovalMailbox ? operatorApprovalResponseCount : nil,
+            operatorApprovalApprovedCount: request.operatorApprovalMailbox ? operatorApprovalApprovedCount : nil,
+            operatorApprovalDeniedCount: request.operatorApprovalMailbox ? operatorApprovalDeniedCount : nil,
+            operatorApprovalTimeoutCount: request.operatorApprovalMailbox ? operatorApprovalTimeoutCount : nil,
+            operatorApprovalInvalidCount: request.operatorApprovalMailbox ? operatorApprovalInvalidCount : nil)
     }
 
     private func addingMemoryFixtureStoreEvidence(to response: AgentEvalResponse) -> AgentEvalResponse {
@@ -334,7 +504,13 @@ final class DebugAgentEvalSession {
             policy: response.policy, cropMode: response.cropMode,
             requestedCropMode: response.requestedCropMode,
             memoryFixtureReceipt: response.memoryFixtureReceipt,
-            memoryFixtureStoreEvidence: memoryFixtureStoreEvidenceAfterTask())
+            memoryFixtureStoreEvidence: memoryFixtureStoreEvidenceAfterTask(),
+            operatorApprovalMode: response.operatorApprovalMode,
+            operatorApprovalResponseCount: response.operatorApprovalResponseCount,
+            operatorApprovalApprovedCount: response.operatorApprovalApprovedCount,
+            operatorApprovalDeniedCount: response.operatorApprovalDeniedCount,
+            operatorApprovalTimeoutCount: response.operatorApprovalTimeoutCount,
+            operatorApprovalInvalidCount: response.operatorApprovalInvalidCount)
     }
 
     private func captureMemoryFixtureBeforeSnapshot() {
@@ -615,5 +791,6 @@ struct DebugAgentEvalMemoryFixtureDefinition {
         }
     }
 }
+
 
 #endif
