@@ -640,7 +640,6 @@
     "RemoteDesktopHostTests/AgentActionGateTests/testPersonalDataRetrievalKeyboardActivationIsDeniedButEscapeAndNavigationRemainAvailable",
     "RemoteDesktopHostTests/AgentActionGateTests/testWebEnterAndReturnRequireApprovalWithoutReliableNonCommitSemantics",
     "RemoteDesktopHostTests/AgentLlamaVLMPolicyTests/testLiveFaraPromptCarriesLocalCredentialHandoffRuleAndKeepsClarificationAction",
-    "RemoteDesktopHostTests/AgentLlamaVLMPolicyTests/testNativeFaraPromptAdvertisesOnlyActionsSupportedByThisAdapter",
     "RemoteDesktopHostTests/AgentLoopTests/testCancellationIgnoringPolicyCannotExecuteItsLateInput",
     "RemoteDesktopHostTests/AgentLoopTests/testCredentialQuestionAfterRepeatedRejectionsHandsOffWithoutPendingQuestion",
     "RemoteDesktopHostTests/AgentLoopTests/testDifferentFingerprintMayRequestOnceButSecondTaskDeclineBlocks",

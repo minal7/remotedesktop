@@ -13,7 +13,7 @@ final class AgentLlamaVLMPolicyTests: XCTestCase {
 
         let output = try await policy.propose(observation)
 
-        XCTAssertEqual(policy.promptVersion, "v3-fara-native-action-inventory-16k-f16kv-768img-one-prior-credential-handoff-privacy-reference-v1")
+        XCTAssertEqual(policy.promptVersion, "v2-fara-macos-native-coordinates-16k-f16kv-768img-one-prior-credential-handoff-privacy-reference-v1")
         XCTAssertEqual(output.rawOutput, raw)
         XCTAssertEqual(output.action, .click(target: .point(x: 1, y: 2), button: nil, count: nil))
         let input = try XCTUnwrap(transport.inputs.first)
@@ -29,47 +29,6 @@ final class AgentLlamaVLMPolicyTests: XCTestCase {
         XCTAssertEqual(input.messages[1].content.imageValues, [png])
         XCTAssertFalse(input.messages[1].content.textValue?.contains(png.base64EncodedString()) == true)
         XCTAssertEqual(transport.callCount, 1)
-    }
-
-    func testNativeFaraPromptAdvertisesOnlyActionsSupportedByThisAdapter() async throws {
-        let transport = RecordingAgentVLMTransport(response: try completion(arguments: #"{"action":"wait","time":1}"#))
-        let (policy, observation, _) = try fixture(transport: transport)
-        _ = try await policy.propose(observation)
-
-        let prompt = try XCTUnwrap(transport.inputs.first?.messages.first?.content.textValue)
-        let tools = try XCTUnwrap(prompt.range(of: "<tools>\n")?.upperBound)
-        let toolsEnd = try XCTUnwrap(prompt.range(of: "</tools>", range: tools..<prompt.endIndex)?.lowerBound)
-        let toolSchema = String(prompt[tools..<toolsEnd])
-        let supported = ["key", "type", "left_click", "right_click", "double_click", "triple_click",
-                         "scroll", "hscroll", "visit_url", "history_back", "ask_user_question",
-                         "wait", "terminate", "open_app"]
-        let unsupported = ["mouse_move", "left_click_drag", "web_search", "read_page_answer_question",
-                           "pause_and_memorize_fact"]
-        let document = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(toolSchema.utf8)) as? [String: Any])
-        let function = try XCTUnwrap(document["function"] as? [String: Any])
-        XCTAssertEqual(function["name"] as? String, "computer_use")
-        let parameters = try XCTUnwrap(function["parameters"] as? [String: Any])
-        let properties = try XCTUnwrap(parameters["properties"] as? [String: Any])
-        let actionSchema = try XCTUnwrap(properties["action"] as? [String: Any])
-        let advertised = try XCTUnwrap(actionSchema["enum"] as? [String])
-        XCTAssertEqual(Set(advertised), Set(supported))
-        XCTAssertNotNil(properties["name"], "open_app requires its name argument")
-        let coordinate = try XCTUnwrap(properties["coordinate"] as? [String: Any])
-        let coordinateItem = try XCTUnwrap(coordinate["items"] as? [String: Any])
-        XCTAssertEqual((coordinateItem["minimum"] as? NSNumber)?.doubleValue, 0)
-        XCTAssertEqual((coordinateItem["maximum"] as? NSNumber)?.doubleValue, 1000)
-        XCTAssertTrue((coordinate["description"] as? String)?.contains("top-left") == true)
-        let pixels = try XCTUnwrap(properties["pixels"] as? [String: Any])
-        let scrollDescription = try XCTUnwrap(pixels["description"] as? String)
-        XCTAssertTrue(scrollDescription.contains("nonzero") && scrollDescription.contains("at most 1000"))
-        XCTAssertTrue(scrollDescription.contains("positive is up and negative is down"))
-        XCTAssertTrue(scrollDescription.contains("positive is right and negative is left"))
-        let wait = try XCTUnwrap(properties["time"] as? [String: Any])
-        XCTAssertEqual((wait["maximum"] as? NSNumber)?.doubleValue, 10)
-        XCTAssertTrue((wait["description"] as? String)?.contains("greater than 0") == true)
-        let text = try XCTUnwrap(properties["text"] as? [String: Any])
-        XCTAssertTrue((text["description"] as? String)?.contains("current selection without pressing Enter") == true)
-        for action in unsupported { XCTAssertFalse(toolSchema.contains(action), action) }
     }
 
     func testLiveFaraPromptCarriesLocalCredentialHandoffRuleAndKeepsClarificationAction() async throws {
@@ -694,12 +653,8 @@ final class AgentLlamaVLMPolicyTests: XCTestCase {
         let messages = try XCTUnwrap(body["messages"] as? [[String: Any]])
         let system = try XCTUnwrap(messages[0]["content"] as? String)
         XCTAssertTrue(system.contains("Qwen3.5-4B"))
-        let toolStart = try XCTUnwrap(system.range(of: "<tools>\n")?.upperBound)
-        let toolEnd = try XCTUnwrap(system.range(of: "</tools>", range: toolStart..<system.endIndex)?.lowerBound)
-        let toolJSON = String(system[toolStart..<toolEnd])
-        let toolDocument = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(toolJSON.utf8)) as? [String: Any])
-        let toolFunction = try XCTUnwrap(toolDocument["function"] as? [String: Any])
-        XCTAssertEqual(toolFunction["name"] as? String, "computer_use")
+        XCTAssertTrue(system.contains("<tools>"))
+        XCTAssertTrue(system.contains("\"name\": \"computer_use\""))
         XCTAssertTrue(system.contains("<tool_call>"))
         let content = try XCTUnwrap(messages[1]["content"] as? [[String: Any]])
         XCTAssertEqual(content.compactMap { $0["type"] as? String }, ["text", "image_url"])

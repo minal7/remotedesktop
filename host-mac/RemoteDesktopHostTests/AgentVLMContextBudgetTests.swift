@@ -62,16 +62,15 @@ final class AgentVLMContextBudgetTests: XCTestCase {
             projectorURL: URL(fileURLWithPath: "/models/mmproj-Fara1.5-4B-f16.gguf"),
             llamaServerURL: URL(fileURLWithPath: "/runtime/llama-server"))
         let policy = try LlamaVLMPolicy(runtimeInputs: inputs, runtime: runtime)
-        await transport.setElementTokenCosts([900: 5_000, 901: 5_000, 902: 5_000, 903: 5_000])
-        let fixtureName = "fixture mark"
+        let huge = String(repeating: "z", count: 7_000)
         let marks = [
-            AgentElement(id: 900, role: "textfield", name: fixtureName, value: nil,
+            AgentElement(id: 900, role: "textfield", name: huge, value: nil,
                 state: ["enabled", "focused"], bbox: .init(x: 90, y: 90, width: 8, height: 8), inView: true),
-            AgentElement(id: 901, role: "button", name: fixtureName, value: nil,
+            AgentElement(id: 901, role: "button", name: huge, value: nil,
                 state: ["enabled"], bbox: .init(x: 80, y: 80, width: 8, height: 8), inView: true),
-            AgentElement(id: 902, role: "button", name: fixtureName, value: nil,
+            AgentElement(id: 902, role: "button", name: huge, value: nil,
                 state: ["enabled"], bbox: .init(x: 49, y: 49, width: 2, height: 2), inView: true),
-            AgentElement(id: 903, role: "button", name: fixtureName, value: nil,
+            AgentElement(id: 903, role: "button", name: huge, value: nil,
                 state: ["enabled"], bbox: .init(x: 0, y: 0, width: 8, height: 8), inView: true),
         ]
         let current = makeObservation(task: "Keep current task", png: try testPNG(), elements: marks,
@@ -172,12 +171,11 @@ final class AgentVLMContextBudgetTests: XCTestCase {
         XCTAssertTrue(fitsBudget, "The selected request must fit exact token and reserved image/completion budget")
 
         let twoLargeMarks = [
-            AgentElement(id: 700, role: "button", name: "focused fixture", value: nil,
+            AgentElement(id: 700, role: "button", name: String(repeating: "focused ", count: 3_750), value: nil,
                 state: ["enabled", "focused"], bbox: .init(x: 490, y: 490, width: 20, height: 20), inView: true),
-            AgentElement(id: 701, role: "button", name: "optional fixture", value: nil,
+            AgentElement(id: 701, role: "button", name: String(repeating: "optional ", count: 3_750), value: nil,
                 state: ["enabled"], bbox: .init(x: 800, y: 800, width: 20, height: 20), inView: true),
         ]
-        await transport.setElementTokenCosts([700: 15_000, 701: 15_000])
         let twoMarkObservation = makeObservation(task: "Keep task and current screenshot", png: png,
             elements: twoLargeMarks, focusID: 700,
             history: [.init(action: .wait(seconds: 1), result: "LATEST RESULT MUST REMAIN")], step: 9)
@@ -354,7 +352,6 @@ private actor ContextBudgetTransport: OSAtlasLlamaHTTPTransport {
     private(set) var completedRequestBody: Data?
     private(set) var lastTokenCount = 0
     private var forcedTokenCount: Int?
-    private var elementTokenCosts: [Int: Int]?
     private var blockedTokenizationRequest: Int?
     private var blockedTokenization: CheckedContinuation<Int, Error>?
     private var tokenizationWaiter: CheckedContinuation<Void, Never>?
@@ -366,7 +363,6 @@ private actor ContextBudgetTransport: OSAtlasLlamaHTTPTransport {
         lastTokenCount = 0
     }
     func setForcedTokenCount(_ value: Int?) { forcedTokenCount = value }
-    func setElementTokenCosts(_ costs: [Int: Int]?) { elementTokenCosts = costs }
     func blockTokenization(onRequest number: Int) { blockedTokenizationRequest = number }
     func waitForBlockedTokenization() async {
         if blockedTokenization != nil { return }
@@ -386,22 +382,8 @@ private actor ContextBudgetTransport: OSAtlasLlamaHTTPTransport {
                 tokenizationWaiter = nil
             }
         }
-        lastTokenCount = forcedTokenCount ?? elementTokenCounts(in: body).map { count in
-            1_000 + count.reduce(0) { $0 + (elementTokenCosts?[$1] ?? 0) }
-        } ?? body.count / 2
+        lastTokenCount = forcedTokenCount ?? body.count / 2
         return lastTokenCount
-    }
-
-    private func elementTokenCounts(in body: Data) -> [Int]? {
-        guard elementTokenCosts != nil,
-              let request = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
-              let messages = request["messages"] as? [[String: Any]],
-              let content = messages.last?["content"] as? [[String: Any]],
-              let text = content.compactMap({ $0["text"] as? String }).first,
-              let observationData = String(text.prefix { $0 != "\n" }).data(using: .utf8),
-              let observation = try? JSONSerialization.jsonObject(with: observationData) as? [String: Any],
-              let elements = observation["elements"] as? [[String: Any]] else { return nil }
-        return elements.compactMap { $0["id"] as? Int }
     }
     func complete(request: URLRequest) async throws -> Data {
         completionCount += 1

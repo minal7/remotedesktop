@@ -122,12 +122,6 @@ protocol AgentVLMTransport: AnyObject {
 
 @MainActor
 final class LlamaVLMPolicy: AgentPolicy {
-    private static let nativeFaraTools = #"""
-    <tools>
-    {"type":"function","function":{"name":"computer_use","description":"Use the desktop controls described by the current observation. Make one action per call.","parameters":{"type":"object","required":["action"],"properties":{"action":{"type":"string","description":"One supported action.","enum":["key","type","left_click","right_click","double_click","triple_click","scroll","hscroll","visit_url","history_back","ask_user_question","wait","terminate","open_app"]},"keys":{"type":"array","items":{"type":"string"},"description":"Required for key."},"text":{"type":"string","description":"Required for type; inserts at the current selection without pressing Enter."},"coordinate":{"type":"array","items":{"type":"number","minimum":0,"maximum":1000},"minItems":2,"maxItems":2,"description":"Normalized [x,y] in the 0–1000 top-left-origin image space for pointer actions or located scrolling."},"pixels":{"type":"number","description":"Required for scroll or hscroll; nonzero with absolute value at most 1000. For scroll, positive is up and negative is down; for hscroll, positive is right and negative is left."},"url":{"type":"string","description":"Required for visit_url; use an absolute HTTP or HTTPS URL."},"question":{"type":"string","description":"Required for ask_user_question."},"time":{"type":"number","minimum":0,"maximum":10,"description":"Required for wait; seconds must be greater than 0 and at most 10."},"answer":{"type":"string","description":"Required for terminate."},"name":{"type":"string","description":"Required for open_app."}}}}}
-    </tools>
-    """#
-
     let promptVersion: String
 
     private let transport: any AgentVLMTransport
@@ -148,7 +142,7 @@ final class LlamaVLMPolicy: AgentPolicy {
         self.transport = transport
         self.model = model
         self.promptVersion = switch model {
-        case .fara15_4b: "v3-fara-native-action-inventory-16k-f16kv-768img-one-prior-credential-handoff-privacy-reference-v1"
+        case .fara15_4b: "v2-fara-macos-native-coordinates-16k-f16kv-768img-one-prior-credential-handoff-privacy-reference-v1"
         case .uiTars15_7b: "v1-ui-tars-native-coordinates-compact-history"
         case .guiOwl15_4b: "v1-gui-owl-native-coordinates-compact-history"
         }
@@ -461,13 +455,8 @@ final class LlamaVLMPolicy: AgentPolicy {
             guard let criticalPoints = official.range(of: "A critical point is a situation") else {
                 return official4BIdentity
             }
-            var native = official4BIdentity + "\n\n" + String(official[criticalPoints.lowerBound...])
-            guard let toolStart = native.range(of: "<tools>\n"),
-                  let toolEnd = native.range(of: "</tools>", range: toolStart.lowerBound..<native.endIndex) else {
-                return official4BIdentity
-            }
-            native.replaceSubrange(toolStart.lowerBound..<toolEnd.upperBound, with: nativeFaraTools)
-            native += "\n\nElement bounding boxes in observation JSON are [x, y, width, height] in Fara's normalized 0–1000 display coordinates. Use the center of a box for a click."
+            let native = official4BIdentity + "\n\n" + String(official[criticalPoints.lowerBound...])
+                + "\n\nElement bounding boxes in observation JSON are [x, y, width, height] in Fara's normalized 0–1000 display coordinates. Use the center of a box for a click."
             let appendix = base.trimmingCharacters(in: .whitespacesAndNewlines)
             return appendix.hasPrefix("You are operating macOS.") ? native + "\n\n" + appendix : native
         }
