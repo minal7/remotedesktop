@@ -538,6 +538,11 @@ final class OSAtlasLlamaRuntimeTests: XCTestCase {
             XCTAssertEqual(configurations.count, 2)
             let configuration = try XCTUnwrap(configurations.last), credential = try XCTUnwrap(configuration.authenticationFile)
             try credential.verify()
+            let checkpointIndex = try XCTUnwrap(configuration.arguments.firstIndex(of: "--ctx-checkpoints"))
+            XCTAssertEqual(configuration.arguments[checkpointIndex + 1], "0")
+            let cacheRAMIndex = try XCTUnwrap(configuration.arguments.firstIndex(of: "--cache-ram"))
+            XCTAssertEqual(configuration.arguments[cacheRAMIndex + 1], "0")
+            XCTAssertTrue(configuration.arguments.contains("--no-cache-idle-slots"))
             for (flag, expected) in [("--model", holoInputs.modelURL.path), ("--mmproj", holoInputs.projectorURL.path),
                 ("--alias", ComputerUseHoloModel.modelAlias), ("--ctx-size", "8192"), ("--image-max-tokens", "1536"), ("--parallel", "1"), ("--poll", "0")] {
                 let index = try XCTUnwrap(configuration.arguments.firstIndex(of: flag)); XCTAssertEqual(configuration.arguments[index + 1], expected)
@@ -666,6 +671,9 @@ final class OSAtlasLlamaRuntimeTests: XCTestCase {
                 let index = try XCTUnwrap(arguments.firstIndex(of: flag))
                 XCTAssertEqual(arguments[index + 1], value)
             }
+            let checkpointIndex = try XCTUnwrap(arguments.firstIndex(of: "--ctx-checkpoints"))
+            XCTAssertEqual(arguments[checkpointIndex + 1], "4")
+            XCTAssertTrue(arguments.contains("--no-cache-idle-slots"))
             XCTAssertFalse(arguments.contains("--chat-template"))
             XCTAssertFalse(arguments.contains("--no-mmproj"))
             XCTAssertFalse(arguments.contains("--reasoning-budget"))
@@ -2800,6 +2808,13 @@ extension OSAtlasLlamaRuntimeTests {
                 projectorURL: URL(fileURLWithPath: "/models/mmproj-Fara1.5-4B-f16.gguf"),
                 llamaServerURL: URL(fileURLWithPath: "/runtime/llama-server"))
             let endpoint = try await runtime.activateAgentVision(inputs)
+            let configurations = await launcher.configurations()
+            let configuration = try XCTUnwrap(configurations.first)
+            let checkpointIndex = try XCTUnwrap(configuration.arguments.firstIndex(of: "--ctx-checkpoints"))
+            XCTAssertEqual(configuration.arguments[checkpointIndex + 1], "4")
+            let cacheRAMIndex = try XCTUnwrap(configuration.arguments.firstIndex(of: "--cache-ram"))
+            XCTAssertEqual(configuration.arguments[cacheRAMIndex + 1], "0")
+            XCTAssertTrue(configuration.arguments.contains("--no-cache-idle-slots"))
             let input = try agentRuntimeRequestInput()
             let owner = Task { try await runtime.completeAgentAction(endpoint: endpoint, input: input) }
             await transport.waitUntilCompletionStarted()
