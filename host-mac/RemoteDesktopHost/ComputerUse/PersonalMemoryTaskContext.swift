@@ -289,11 +289,8 @@ final class TaskMemoryContextPolicy: AgentPolicy {
 
     private func observationWithContext(_ observation: AgentObservation, _ context: String?) -> AgentObservation {
         guard let context else { return observation }
-        let reference = context.replacingOccurrences(of: "&", with: "&amp;")
-            .replacingOccurrences(of: "<", with: "&lt;")
-            .replacingOccurrences(of: ">", with: "&gt;")
-        let task = "<saved-memory-reference-data>\n" + reference
-            + "\n</saved-memory-reference-data>\n\nCurrent owner request:\n" + observation.task
+        let task = observation.task + "\n\n<saved-memory-reference-data>\n" + context
+            + "\n</saved-memory-reference-data>"
         return AgentObservation(task: task, surface: observation.surface, screenshot: observation.screenshot,
             elements: observation.elements, focus: observation.focus, history: observation.history,
             budget: observation.budget)
