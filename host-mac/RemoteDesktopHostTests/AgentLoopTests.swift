@@ -58,7 +58,6 @@ final class AgentLoopTests: XCTestCase {
         XCTAssertEqual(recorder.steps[0].gate.decision, .rejected)
         XCTAssertTrue(environment.lastContext?.history.last?.result.contains("Target resolution rejected") == true)
         XCTAssertTrue(environment.lastContext?.history.last?.result.contains("targetGone") == true)
-        XCTAssertTrue(environment.executed.isEmpty, "Missing element IDs must not dispatch input")
     }
 
     func testPixelFrontmostWindowChangeRebindsToRealFreshScope() async throws {

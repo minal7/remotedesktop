@@ -13,7 +13,7 @@ final class AgentLlamaVLMPolicyTests: XCTestCase {
 
         let output = try await policy.propose(observation)
 
-        XCTAssertEqual(policy.promptVersion, "v3-fara-macos-native-element-id-clicks-16k-f16kv-768img-one-prior-credential-handoff-privacy-reference-v1")
+        XCTAssertEqual(policy.promptVersion, "v2-fara-macos-native-coordinates-16k-f16kv-768img-one-prior-credential-handoff-privacy-reference-v1")
         XCTAssertEqual(output.rawOutput, raw)
         XCTAssertEqual(output.action, .click(target: .point(x: 1, y: 2), button: nil, count: nil))
         let input = try XCTUnwrap(transport.inputs.first)
@@ -23,26 +23,6 @@ final class AgentLlamaVLMPolicyTests: XCTestCase {
         XCTAssertTrue(nativePrompt.contains("<tools>"))
         XCTAssertTrue(nativePrompt.contains("<tool_call>"))
         XCTAssertTrue(nativePrompt.contains(#"{"action":"open_app","name":"App name"}"#))
-        let toolStart = try XCTUnwrap(nativePrompt.range(of: "<tools>\n"))
-        let toolEnd = try XCTUnwrap(nativePrompt.range(of: "</tools>", range: toolStart.upperBound..<nativePrompt.endIndex))
-        let tool = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(nativePrompt[toolStart.upperBound..<toolEnd.lowerBound].utf8)) as? [String: Any])
-        let function = try XCTUnwrap(tool["function"] as? [String: Any])
-        let parameters = try XCTUnwrap(function["parameters"] as? [String: Any])
-        let properties = try XCTUnwrap(parameters["properties"] as? [String: Any])
-        let originalToolStart = try XCTUnwrap(ComputerUseFaraModel.officialSystemPrompt.range(of: "<tools>\n"))
-        let originalToolEnd = try XCTUnwrap(ComputerUseFaraModel.officialSystemPrompt.range(of: "</tools>", range: originalToolStart.upperBound..<ComputerUseFaraModel.officialSystemPrompt.endIndex))
-        let originalTool = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(ComputerUseFaraModel.officialSystemPrompt[originalToolStart.upperBound..<originalToolEnd.lowerBound].utf8)) as? [String: Any])
-        let originalFunction = try XCTUnwrap(originalTool["function"] as? [String: Any])
-        let originalParameters = try XCTUnwrap(originalFunction["parameters"] as? [String: Any])
-        let originalProperties = try XCTUnwrap(originalParameters["properties"] as? [String: Any])
-        XCTAssertEqual((properties["action"] as? [String: Any])?["enum"] as? [String],
-            (originalProperties["action"] as? [String: Any])?["enum"] as? [String], "R4 must retain the existing Fara action list")
-        let elementID = try XCTUnwrap(properties["element_id"] as? [String: Any])
-        XCTAssertEqual(elementID["type"] as? String, "integer")
-        XCTAssertEqual(elementID["minimum"] as? Int, 1)
-        XCTAssertTrue((elementID["description"] as? String)?.contains("latest observation") == true)
-        XCTAssertTrue(nativePrompt.contains("Element bounding boxes in observation JSON are [x, y, width, height] in Fara's normalized 0–1000 display coordinates"))
-        XCTAssertTrue(nativePrompt.contains("Read the ID from each latest observation; previous-observation IDs are stale"))
         XCTAssertEqual(input.messages.map(\.role), [.system, .user])
         XCTAssertTrue(input.messages[0].content.textValue?.contains("<tools>") == true)
         XCTAssertTrue(input.messages[1].content.textValue?.contains(#""elements":[{"bbox":[250,250,500,500]"#) == true)
@@ -87,16 +67,7 @@ final class AgentLlamaVLMPolicyTests: XCTestCase {
                     try completionWithoutToolCall(content: #"<tool_call>{"name":"computer_use","arguments":{"type":"done","answer":"ok"}}</tool_call>"#),
                     try completion(arguments: #"{"action":"terminate","answer":"ok","tool":"extra"}"#),
                     try completion(arguments: validArguments, extraCalls: true),
-                    try completion(arguments: validArguments, toolName: "other"),
-                    try completion(arguments: #"{"action":"left_click","element_id":1}"#, extraCalls: true),
-                    try completion(arguments: #"{"action":"left_click","element_id":1}"#, toolName: "other"),
-                    try completion(arguments: #"{"action":"left_click","element_id":0}"#),
-                    try completion(arguments: #"{"action":"left_click","element_id":-1}"#),
-                    try completion(arguments: #"{"action":"left_click","element_id":1.5}"#),
-                    try completion(arguments: #"{"action":"left_click","element_id":"1"}"#),
-                    try completion(arguments: #"{"action":"left_click","element_id":1,"coordinate":[100,100]}"#),
-                    try completion(arguments: #"{"action":"left_click","element_id":1,"extra":true}"#),
-                    try completion(arguments: #"{"action":"type","text":"x","element_id":1}"#)] {
+                    try completion(arguments: validArguments, toolName: "other")] {
             let transport = RecordingAgentVLMTransport(response: raw)
             let (policy, observation, _) = try fixture(transport: transport)
             let output = try await policy.propose(observation)
@@ -110,10 +81,6 @@ final class AgentLlamaVLMPolicyTests: XCTestCase {
     func testFaraXMLProposalMapsSupportedActionsWithoutInventingInput() throws {
         let cases: [(String, String)] = [
             (#"{"action":"left_click","coordinate":[120,45]}"#, #"{"type":"click","target":{"x":120,"y":45}}"#),
-            (#"{"action":"left_click","element_id":5}"#, #"{"type":"click","target":{"id":5}}"#),
-            (#"{"action":"right_click","element_id":5}"#, #"{"type":"click","target":{"id":5},"button":"right"}"#),
-            (#"{"action":"double_click","element_id":5}"#, #"{"type":"click","target":{"id":5},"count":2}"#),
-            (#"{"action":"triple_click","element_id":5}"#, #"{"type":"click","target":{"id":5},"count":3}"#),
             (#"{"action":"right_click","coordinate":[120,45]}"#, #"{"type":"click","target":{"x":120,"y":45},"button":"right"}"#),
             (#"{"action":"type","text":"sample","coordinate":[700,800]}"#, #"{"type":"type","text":"sample","mode":"append"}"#),
             (#"{"action":"key","keys":["CTRL","L"]}"#, #"{"type":"key","chord":"cmd+l"}"#),
@@ -687,7 +654,7 @@ final class AgentLlamaVLMPolicyTests: XCTestCase {
         let system = try XCTUnwrap(messages[0]["content"] as? String)
         XCTAssertTrue(system.contains("Qwen3.5-4B"))
         XCTAssertTrue(system.contains("<tools>"))
-        XCTAssertTrue(system.replacingOccurrences(of: " ", with: "").contains(#""name":"computer_use""#))
+        XCTAssertTrue(system.contains("\"name\": \"computer_use\""))
         XCTAssertTrue(system.contains("<tool_call>"))
         let content = try XCTUnwrap(messages[1]["content"] as? [[String: Any]])
         XCTAssertEqual(content.compactMap { $0["type"] as? String }, ["text", "image_url"])
