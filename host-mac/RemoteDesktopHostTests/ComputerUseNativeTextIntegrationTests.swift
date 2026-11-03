@@ -1611,8 +1611,10 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
                 calls += 1
                 if calls == 1 {
                     changed = true
+                    let x: CGFloat = target.midX / display.width * 1000
+                    let y: CGFloat = target.midY / display.height * 1000
                     return .init(response: "click", action: .pointer(.leftClick,
-                        .init(x: target.midX / display.width * 1000, y: target.midY / display.height * 1000)))
+                        .init(x: Double(x), y: Double(y))))
                 }
                 XCTAssertEqual(calls, 2, name); XCTAssertEqual(input.actionError == nil, admitted, name)
                 return .init(response: "done", action: .reportCompletion("Checked"))
@@ -1620,7 +1622,7 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
                 rejectionPairs.append((expected, fresh, action, diagnostic))
             })
             let result = try await executor.execute(taskID: "pointer-region", prompt: "Click Query", trustedUserPrompt: "Click Query", tools: tools, progress: { _ in })
-            XCTAssertEqual(result, .completed("Checked"), name); XCTAssertEqual(effects, admitted ? 1 : 0, name)
+            XCTAssertEqual(result, ComputerUseExecutionResult.completed("Checked"), name); XCTAssertEqual(effects, admitted ? 1 : 0, name)
             XCTAssertEqual(rejectionPairs.count, admitted ? 0 : 1, name)
             if !admitted, let pair = rejectionPairs.first {
                 XCTAssertNotEqual(pair.0.png, pair.1.png, name)
