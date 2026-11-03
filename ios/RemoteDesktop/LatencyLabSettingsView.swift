@@ -16,7 +16,7 @@ struct LatencyLabSettingsView: View {
                         }
                     }
                 }
-                Toggle("Faster capture and encoding (F2)", isOn: $settings.f2Encoder)
+                Toggle("Lower encoding delay (F2)", isOn: $settings.f2Encoder)
                 Toggle("Faster LAN sending (F3)", isOn: $settings.f3Sender)
                 Toggle("Metal rendering at 120 Hz (F4)", isOn: $settings.f4Renderer)
                 Section {

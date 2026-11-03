@@ -72,12 +72,27 @@ enum DesktopEncoderConfiguration {
 
     static func properties(fps: UInt32, bitrateKbps: UInt32) -> [(CFString, CFTypeRef)] {
         [(kVTCompressionPropertyKey_RealTime, kCFBooleanTrue),
+         (kVTCompressionPropertyKey_PrioritizeEncodingSpeedOverQuality, kCFBooleanTrue),
          (kVTCompressionPropertyKey_AllowFrameReordering, kCFBooleanFalse),
          (kVTCompressionPropertyKey_MaxFrameDelayCount, 0 as CFNumber),
          (kVTCompressionPropertyKey_ProfileLevel, kVTProfileLevel_H264_ConstrainedHigh_AutoLevel),
          (kVTCompressionPropertyKey_ExpectedFrameRate, fps as CFNumber),
          (kVTCompressionPropertyKey_MaxKeyFrameInterval, (fps * 2) as CFNumber),
          (kVTCompressionPropertyKey_AverageBitRate, (Int64(bitrateKbps) * 1_000) as CFNumber)]
+    }
+
+    /// The experiment is valid only when the encoder advertises the speed
+    /// hint and every requested property, including that hint, is accepted.
+    static func configure(_ properties: [(CFString, CFTypeRef)], speedHintSupported: Bool,
+                          set: (CFString, CFTypeRef) -> OSStatus) -> Bool {
+        guard speedHintSupported else { return false }
+        return properties.allSatisfy { set($0.0, $0.1) == noErr }
+    }
+
+    static func supportsSpeedHint(_ supported: CFDictionary?) -> Bool {
+        guard let supported else { return false }
+        let key = Unmanaged.passUnretained(kVTCompressionPropertyKey_PrioritizeEncodingSpeedOverQuality).toOpaque()
+        return CFDictionaryContainsKey(supported, key)
     }
 }
 
@@ -98,7 +113,7 @@ final class DesktopLowLatencyH264Encoder: NSObject, LKRTCVideoEncoder, @unchecke
     private var generation = 0
     private var keyframeGate = DesktopKeyframeGate()
     private var bitrateKbps: UInt32 = 0
-    private var frameRate: UInt32 = 60
+    private var frameRate: UInt32 = UInt32(DesktopVideoQuality.targetFramesPerSecond)
 
     init(fallback: any LKRTCVideoEncoder, sessionCreator: @escaping SessionCreator = { width, height, specification, output in
         VTCompressionSessionCreate(allocator: kCFAllocatorDefault, width: width, height: height,
@@ -118,7 +133,8 @@ final class DesktopLowLatencyH264Encoder: NSObject, LKRTCVideoEncoder, @unchecke
         _ = release()
         self.settings = settings; self.cores = numberOfCores
         bitrateKbps = settings.startBitrate
-        frameRate = settings.maxFramerate > 0 ? min(settings.maxFramerate, 60) : 60
+        let captureRate = UInt32(DesktopVideoQuality.targetFramesPerSecond)
+        frameRate = settings.maxFramerate > 0 ? min(settings.maxFramerate, captureRate) : captureRate
         guard settings.width > 0, settings.height > 0 else { return startFallback() }
         let specification = DesktopEncoderConfiguration.specification()
         var created: VTCompressionSession?
@@ -128,14 +144,24 @@ final class DesktopLowLatencyH264Encoder: NSObject, LKRTCVideoEncoder, @unchecke
             return startFallback()
         }
         let properties = DesktopEncoderConfiguration.properties(fps: frameRate, bitrateKbps: bitrateKbps)
-        guard properties.allSatisfy({ VTSessionSetProperty(created, key: $0.0, value: $0.1) == noErr }),
+        var supported: CFDictionary?
+        let queried = VTSessionCopySupportedPropertyDictionary(created, supportedPropertyDictionaryOut: &supported) == noErr
+        let speedHintSupported = queried && DesktopEncoderConfiguration.supportsSpeedHint(supported)
+        guard speedHintSupported else {
+            log.warning("F2 speed-priority hint is not advertised; using stock encoder")
+            VTCompressionSessionInvalidate(created)
+            return startFallback()
+        }
+        guard DesktopEncoderConfiguration.configure(properties,
+                speedHintSupported: speedHintSupported,
+                set: { VTSessionSetProperty(created, key: $0, value: $1) }),
               VTCompressionSessionPrepareToEncodeFrames(created) == noErr else {
             VTCompressionSessionInvalidate(created)
             return startFallback()
         }
         lock.lock(); generation += 1; session = created; usingFallback = false; fallbackNeeded = false
         keyframeGate = DesktopKeyframeGate(); lock.unlock()
-        log.notice("F2 VideoToolbox low-latency encoder active")
+        log.notice("F2 VideoToolbox low-latency encoder active; speed-priority hint accepted")
         return 0
     }
 
@@ -201,7 +227,7 @@ final class DesktopLowLatencyH264Encoder: NSObject, LKRTCVideoEncoder, @unchecke
     }
 
     func setBitrate(_ bitrateKbit: UInt32, framerate: UInt32) -> Int32 {
-        lock.lock(); bitrateKbps = bitrateKbit; frameRate = framerate > 0 ? min(framerate, 60) : frameRate
+        lock.lock(); bitrateKbps = bitrateKbit; frameRate = framerate > 0 ? min(framerate, UInt32(DesktopVideoQuality.targetFramesPerSecond)) : frameRate
         let current = session, activeFallback = usingFallback, rate = frameRate; lock.unlock()
         if activeFallback { return fallback.setBitrate(bitrateKbit, framerate: framerate) }
         guard let current else { return -1 }

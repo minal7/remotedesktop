@@ -776,8 +776,7 @@ final class HostPeerSession: NSObject {
     }
 
     private func applyVideoSenderPolicy(
-        _ policy: DesktopVideoQuality.SenderPolicy,
-        requestedFramesPerSecond: Int? = nil
+        _ policy: DesktopVideoQuality.SenderPolicy
     ) {
         guard let videoSender else {
             log.warning("couldn't apply desktop video quality policy: missing sender")
@@ -789,12 +788,9 @@ final class HostPeerSession: NSObject {
             log.warning("couldn't apply desktop video quality policy: missing encoding")
             return
         }
-        let effectiveFramesPerSecond = latencyF2Enabled && captureFrameRate == 60
-            ? (requestedFramesPerSecond.map { $0 > 0 ? min(60, max(10, $0)) : 60 } ?? 60)
-            : policy.maximumFramesPerSecond
         for encoding in encodings {
             encoding.maxBitrateBps = NSNumber(value: policy.maximumBitrateBps)
-            encoding.maxFramerate = NSNumber(value: effectiveFramesPerSecond)
+            encoding.maxFramerate = NSNumber(value: policy.maximumFramesPerSecond)
             encoding.scaleResolutionDownBy = 1
         }
         parameters.encodings = encodings
@@ -808,7 +804,7 @@ final class HostPeerSession: NSObject {
             maxBitrateBps: NSNumber(value: policy.maximumBitrateBps)) ?? false
         let captureLimit = (try? captureStartParameters().1) ?? 0
         log.info(
-            "desktop video quality captureMacroblocks=\(captureLimit, privacy: .public) maxBitrate=\(policy.maximumBitrateBps, privacy: .public) maxFps=\(effectiveFramesPerSecond, privacy: .public) degradation=\(policy.degradationPreference.rawValue, privacy: .public) bweUpdated=\(bweUpdated, privacy: .public)")
+            "desktop video quality captureMacroblocks=\(captureLimit, privacy: .public) maxBitrate=\(policy.maximumBitrateBps, privacy: .public) maxFps=\(policy.maximumFramesPerSecond, privacy: .public) degradation=\(policy.degradationPreference.rawValue, privacy: .public) bweUpdated=\(bweUpdated, privacy: .public)")
     }
 
     private func handleCaptureStopped(_ receipt: CaptureStopReceipt, error: Error) {
@@ -1500,7 +1496,7 @@ extension HostPeerSession: RTCDataChannelDelegate {
             applyVideoSenderPolicy(DesktopVideoQuality.senderPolicy(
                 targetFramesPerSecond: targetFps,
                 maximumBitrateKbps: maxBitrateKbps,
-                preference: prefer), requestedFramesPerSecond: targetFps)
+                preference: prefer))
         }
     }
 }

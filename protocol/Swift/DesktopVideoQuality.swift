@@ -35,9 +35,8 @@ enum DesktopVideoQuality {
             profileLevelID?.lowercased() == "640c33" && packetizationMode == "1"
     }
 
-    /// The experimental path is deliberately limited to the explicitly
-    /// negotiated profile/rate combination; legacy and software peers retain
-    /// their original resolution and frame rate.
+    /// F2 changes only the encoder. Capture keeps the negotiated size limit
+    /// and the established 30 fps; legacy and software peers stay unchanged.
     static func capturePolicy(negotiatedCodecs: [LKRTCRtpCodecParameters], f2Requested: Bool) -> CapturePolicy {
         let current = maximumMacroblocksPerFrame(negotiatedCodecs: negotiatedCodecs)
         let codec = negotiatedCodecs.first(where: {
@@ -57,8 +56,8 @@ enum DesktopVideoQuality {
             return CapturePolicy(framesPerSecond: Int32(targetFramesPerSecond),
                                  maximumMacroblocksPerFrame: currentLimit, lowLatencyEncoder: false)
         }
-        return CapturePolicy(framesPerSecond: 60, maximumMacroblocksPerFrame: min(currentLimit, 983_040 / 60),
-                             lowLatencyEncoder: true)
+        return CapturePolicy(framesPerSecond: Int32(targetFramesPerSecond),
+                             maximumMacroblocksPerFrame: currentLimit, lowLatencyEncoder: true)
         #else
         return CapturePolicy(framesPerSecond: Int32(targetFramesPerSecond),
                              maximumMacroblocksPerFrame: currentLimit, lowLatencyEncoder: false)

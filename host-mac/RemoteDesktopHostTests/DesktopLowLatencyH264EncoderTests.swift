@@ -13,6 +13,7 @@ final class DesktopLowLatencyH264EncoderTests: XCTestCase {
         settings.width = 1280; settings.height = 720; settings.startBitrate = 8_000; settings.maxFramerate = 60
         XCTAssertEqual(encoder.startEncode(with: settings, numberOfCores: 2), 0)
         XCTAssertEqual(fallback.startCount, 1)
+        XCTAssertEqual(fallback.bitrates.last?.1, 30)
         XCTAssertEqual(encoder.implementationName(), "test stock fallback")
         XCTAssertEqual(encoder.setBitrate(6_000, framerate: 30), 0)
         XCTAssertEqual(fallback.bitrates.last?.0, 6_000)
@@ -25,15 +26,38 @@ final class DesktopLowLatencyH264EncoderTests: XCTestCase {
         let spec = DesktopEncoderConfiguration.specification()
         XCTAssertEqual(spec[kVTVideoEncoderSpecification_EnableLowLatencyRateControl] as? Bool, true)
         XCTAssertEqual(spec[kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder] as? Bool, true)
-        let values = Dictionary(uniqueKeysWithValues: DesktopEncoderConfiguration.properties(fps: 60, bitrateKbps: 8_000))
+        let values = Dictionary(uniqueKeysWithValues: DesktopEncoderConfiguration.properties(fps: 30, bitrateKbps: 8_000))
         XCTAssertEqual((values[kVTCompressionPropertyKey_RealTime] as? NSNumber)?.boolValue, true)
+        XCTAssertEqual((values[kVTCompressionPropertyKey_PrioritizeEncodingSpeedOverQuality] as? NSNumber)?.boolValue, true)
         XCTAssertEqual((values[kVTCompressionPropertyKey_AllowFrameReordering] as? NSNumber)?.boolValue, false)
         XCTAssertEqual((values[kVTCompressionPropertyKey_MaxFrameDelayCount] as? NSNumber)?.intValue, 0)
-        XCTAssertEqual((values[kVTCompressionPropertyKey_ExpectedFrameRate] as? NSNumber)?.intValue, 60)
-        XCTAssertEqual((values[kVTCompressionPropertyKey_MaxKeyFrameInterval] as? NSNumber)?.intValue, 120)
+        XCTAssertEqual((values[kVTCompressionPropertyKey_ExpectedFrameRate] as? NSNumber)?.intValue, 30)
+        XCTAssertEqual((values[kVTCompressionPropertyKey_MaxKeyFrameInterval] as? NSNumber)?.intValue, 60)
         XCTAssertEqual((values[kVTCompressionPropertyKey_AverageBitRate] as? NSNumber)?.intValue, 8_000_000)
         XCTAssertEqual(values[kVTCompressionPropertyKey_ProfileLevel] as? String,
                        kVTProfileLevel_H264_ConstrainedHigh_AutoLevel as String)
+    }
+
+    func testSpeedHintMustBeSupportedAndAcceptedBeforeUsingExperimentalEncoder() {
+        let key = kVTCompressionPropertyKey_PrioritizeEncodingSpeedOverQuality as String
+        let supported = [key: [:] as [String: String]] as CFDictionary
+        let unsupported = ["another-property": [:] as [String: String]] as CFDictionary
+        XCTAssertTrue(DesktopEncoderConfiguration.supportsSpeedHint(supported))
+        XCTAssertFalse(DesktopEncoderConfiguration.supportsSpeedHint(unsupported))
+        XCTAssertFalse(DesktopEncoderConfiguration.supportsSpeedHint(nil))
+
+        let properties = DesktopEncoderConfiguration.properties(fps: 30, bitrateKbps: 8_000)
+        var visited: [String] = []
+        XCTAssertFalse(DesktopEncoderConfiguration.configure(properties, speedHintSupported: false) { key, _ in
+            visited.append(key as String); return noErr
+        })
+        XCTAssertTrue(visited.isEmpty, "An unadvertised hint must not enable the experimental path")
+        XCTAssertFalse(DesktopEncoderConfiguration.configure(properties, speedHintSupported: true) { property, _ in
+            visited.append(property as String)
+            return (property as String) == key ? -1 : noErr
+        }, "A rejected speed hint must trigger stock-encoder fallback")
+        XCTAssertTrue(visited.contains(key))
+        XCTAssertTrue(DesktopEncoderConfiguration.configure(properties, speedHintSupported: true) { _, _ in noErr })
     }
 
     func testAVCCConversionPrependsParameterSetsAndRejectsTruncation() {
