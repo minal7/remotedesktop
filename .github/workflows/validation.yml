@@ -62,6 +62,10 @@ jobs:
     name: macOS computer-use and iOS
     runs-on: macos-15
     timeout-minutes: 60
+    defaults:
+      run:
+        # XcodeGen includes the checkout folder name in shared-file group IDs.
+        working-directory: remote desktop
     env:
       # macos-15 defaults /Applications/Xcode.app to an older toolchain. Keep
       # FoundationModels enabled by using the same SDK as the Release gate.
@@ -75,6 +79,7 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 0
+          path: remote desktop
 
       - name: Validate Xcode 26 toolchain
         run: |
@@ -120,7 +125,7 @@ jobs:
           host-mac/scripts/build_memory_sqlcipher.sh
 
       - name: Regenerate iOS project
-        working-directory: ios
+        working-directory: remote desktop/ios
         run: xcodegen generate
 
       - name: Validate paired Apple CloudKit configurations
