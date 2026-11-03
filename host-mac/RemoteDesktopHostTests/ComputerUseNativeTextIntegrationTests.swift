@@ -1620,7 +1620,7 @@ final class ComputerUseNativeTextIntegrationTests: XCTestCase {
                 return .init(response: "done", action: .reportCompletion("Checked"))
             }, revalidationFailureObserver: { expected, fresh, action, diagnostic in
                 rejectionPairs.append((expected, fresh, action, diagnostic))
-            })
+            }, screenConsentRecognizer: { _ in false }) // The synthetic white/blue images contain no text or dialogs.
             let result = try await executor.execute(taskID: "pointer-region", prompt: "Click Query", trustedUserPrompt: "Click Query", tools: tools, progress: { _ in })
             XCTAssertEqual(result, ComputerUseExecutionResult.completed("Checked"), name); XCTAssertEqual(effects, admitted ? 1 : 0, name)
             XCTAssertEqual(rejectionPairs.count, admitted ? 0 : 1, name)
