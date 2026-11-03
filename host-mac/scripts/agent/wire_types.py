@@ -200,6 +200,7 @@ class EpisodeStep(TypedDict):
     step: int
     observation: Observation
     prompt_version: str
+    source: NotRequired[Literal["direct"]]
     raw_model_output: str
     action: Action | None
     gate: Gate

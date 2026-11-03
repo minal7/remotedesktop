@@ -213,9 +213,11 @@ class ContractTests(unittest.TestCase):
 
     def test_episode_step_footer_roundtrip(self) -> None:
         step = step_record()
+        direct_step = step_record()
+        direct_step["source"] = "direct"
         footer = {"type": "footer", "episode_id": "episode-1", "outcome": "success",
                   "approvals": [], "corrections": [], "checker_verdict": "passed"}
-        for record in (step, footer):
+        for record in (step, direct_step, footer):
             encoded = compact_json(record)
             decoded = json.loads(encoded)
             validate_episode(decoded)
