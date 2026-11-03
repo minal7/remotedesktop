@@ -5,12 +5,10 @@ import SwiftUI
 enum HostSetupStep: Equatable {
     case screenRecording
     case accessibility
-    case optionalAudio
     case ready
 
     static func current(
-        permissions: HostSession.Permissions,
-        optionalAudioSkipped: Bool
+        permissions: HostSession.Permissions
     ) -> HostSetupStep {
         if !permissions.screenRecording {
             return .screenRecording
@@ -18,28 +16,21 @@ enum HostSetupStep: Equatable {
         if !permissions.accessibility {
             return .accessibility
         }
-        if HostConfig.enableSystemAudio,
-           !permissions.audioEnabled,
-           !optionalAudioSkipped {
-            return .optionalAudio
-        }
         return .ready
     }
 
     var progress: Double {
         switch self {
-        case .screenRecording: return 1.0 / 3.0
-        case .accessibility: return 2.0 / 3.0
-        case .optionalAudio: return 1.0
+        case .screenRecording: return 0
+        case .accessibility: return 0.5
         case .ready: return 1.0
         }
     }
 
     var progressLabel: String {
         switch self {
-        case .screenRecording: return "Step 1 of 3"
-        case .accessibility: return "Step 2 of 3"
-        case .optionalAudio: return "Optional audio"
+        case .screenRecording: return "Step 1 of 2"
+        case .accessibility: return "Step 2 of 2"
         case .ready: return "Setup complete"
         }
     }
@@ -62,6 +53,11 @@ enum HostSetupPreferences {
     static func markCompleted(defaults: UserDefaults = .standard) {
         defaults.set(true, forKey: completedKey)
         defaults.removeObject(forKey: resumeAfterRestartKey)
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "unknown"
+        HostPermissionHistory.recordSuccessfulGrants(
+            version: version,
+            designatedRequirement: HostPermissionHistory.currentRequirement,
+            defaults: defaults)
     }
 
     static func markRestartRequested(defaults: UserDefaults = .standard) {
@@ -89,13 +85,13 @@ struct HostSetupView: View {
     let onRestart: () -> Void
     let onCorePermissionsReady: () -> Void
 
-    @State private var optionalAudioSkipped = false
-    @State private var restartHelpForStep: HostSetupStep?
+    @State private var permissionFlow = HostPermissionSetupState()
+    @State private var now = ProcessInfo.processInfo.systemUptime
+    @State private var repairingPermission: PermissionKind?
+    @State private var failedRepair: PermissionKind?
 
     private var step: HostSetupStep {
-        HostSetupStep.current(
-            permissions: session.permissions,
-            optionalAudioSkipped: optionalAudioSkipped)
+        HostSetupStep.current(permissions: session.permissions)
     }
 
     var body: some View {
@@ -107,7 +103,7 @@ struct HostSetupView: View {
                     Text(step.progressLabel)
                         .font(.caption.weight(.semibold))
                     Spacer()
-                    Text("Screen and control are required. Audio is optional.")
+                    Text("Screen sharing and remote control")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -117,14 +113,17 @@ struct HostSetupView: View {
 
             Divider()
 
+            HStack(spacing: 18) {
+                setupSummaryRow("Screen Recording", enabled: session.permissions.screenRecording)
+                setupSummaryRow("Accessibility", enabled: session.permissions.accessibility)
+            }
+
             Group {
                 switch step {
                 case .screenRecording:
                     screenRecordingStep
                 case .accessibility:
                     accessibilityStep
-                case .optionalAudio:
-                    optionalAudioStep
                 case .ready:
                     readyStep
                 }
@@ -133,15 +132,29 @@ struct HostSetupView: View {
         }
         .padding(28)
         .frame(minWidth: 540, idealWidth: 560, minHeight: 470, idealHeight: 500)
-        .onAppear { session.refreshPermissions() }
+        .onAppear {
+            _ = permissionFlow.screenGrantRequiresRestart(session.permissions.screenRecording)
+            refreshPermissionsAndAdvance()
+        }
+        .onReceive(Timer.publish(every: 1, on: .main, in: .common).autoconnect()) { _ in
+            guard !permissionFlow.didRequestRestart, repairingPermission == nil else { return }
+            refreshPermissionsAndAdvance()
+        }
         .onReceive(NotificationCenter.default.publisher(
             for: NSApplication.didBecomeActiveNotification)) { _ in
-                session.refreshPermissions()
+                refreshPermissionsAndAdvance()
             }
-        .onChange(of: session.permissions.coreReady) { _, coreReady in
-            if coreReady {
-                onCorePermissionsReady()
-            }
+    }
+
+    private func refreshPermissionsAndAdvance() {
+        guard !permissionFlow.didRequestRestart, repairingPermission == nil else { return }
+        now = ProcessInfo.processInfo.systemUptime
+        session.refreshPermissions()
+        if permissionFlow.screenGrantRequiresRestart(session.permissions.screenRecording) {
+            HostSetupPreferences.markRestartRequested()
+            onRestart()
+        } else if session.permissions.coreReady {
+            onCorePermissionsReady()
         }
     }
 
@@ -164,17 +177,7 @@ struct HostSetupView: View {
             permission: .screenRecording,
             icon: "rectangle.inset.filled",
             title: "Allow Screen Recording",
-            explanation: "This lets your iPhone or iPad see the Mac screen. The host only shares it while you are connected.",
-            instructions: [
-                "Request screen recording access.",
-                "Follow the macOS prompt to allow Remote Desktop Host.",
-                "Return here. We’ll check automatically.",
-            ],
-            primaryTitle: "Request Screen Recording…",
-            primaryAction: {
-                restartHelpForStep = .screenRecording
-                session.requestCorePermission(.screenRecording)
-            })
+            explanation: "Screen Recording lets your iPhone or iPad see this Mac’s screen.")
     }
 
     private var accessibilityStep: some View {
@@ -182,63 +185,7 @@ struct HostSetupView: View {
             permission: .accessibility,
             icon: "cursorarrow.motionlines",
             title: "Allow Accessibility",
-            explanation: "This lets the host perform the clicks and typing you send. It does not read passwords or keystrokes from other apps.",
-            instructions: [
-                "Request accessibility access.",
-                "Follow the macOS prompt to allow Remote Desktop Host.",
-                "Return here. We’ll check automatically.",
-            ],
-            primaryTitle: "Request Accessibility…",
-            primaryAction: {
-                restartHelpForStep = .accessibility
-                session.requestCorePermission(.accessibility)
-            })
-    }
-
-    private var optionalAudioStep: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            setupTitle(
-                icon: "speaker.wave.2.fill",
-                title: "Hear Mac Audio (Optional)",
-                explanation: "Remote viewing and control are already ready, and AI setup can continue without audio. Enable this only if you also want sound from the Mac on your iPhone or iPad.")
-
-            Label("The host never sends microphone audio. The WebRTC audio bridge uses macOS’s microphone permission to forward system sound.", systemImage: "hand.raised.fill")
-                .font(.callout)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-
-            if let error = session.optionalAudioError {
-                Label(error, systemImage: "exclamationmark.triangle.fill")
-                    .font(.callout)
-                    .foregroundStyle(.orange)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-
-            HStack(spacing: 10) {
-                Button("Enable Mac Audio…") {
-                    session.requestOptionalAudioPermission()
-                }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.large)
-
-                Button("Not Now") {
-                    optionalAudioSkipped = true
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.large)
-            }
-
-            HStack(spacing: 12) {
-                Button("Open Microphone Settings") {
-                    session.openSystemSettings(for: .microphone)
-                }
-                .buttonStyle(.bordered)
-                Button("Check Again") {
-                    session.refreshPermissions()
-                }
-                .buttonStyle(.link)
-            }
-        }
+            explanation: "Accessibility lets your iPhone or iPad control the mouse and keyboard.")
     }
 
     private var readyStep: some View {
@@ -307,59 +254,82 @@ struct HostSetupView: View {
         permission: PermissionKind,
         icon: String,
         title: String,
-        explanation: String,
-        instructions: [String],
-        primaryTitle: String,
-        primaryAction: @escaping () -> Void
+        explanation: String
     ) -> some View {
         VStack(alignment: .leading, spacing: 18) {
             setupTitle(icon: icon, title: title, explanation: explanation)
+            Text("In Settings, turn on Remote Desktop Host. We’ll check automatically.")
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
 
-            VStack(alignment: .leading, spacing: 10) {
-                ForEach(Array(instructions.enumerated()), id: \.offset) { index, instruction in
-                    HStack(alignment: .firstTextBaseline, spacing: 10) {
-                        Text("\(index + 1)")
-                            .font(.caption.bold())
-                            .foregroundStyle(.white)
-                            .frame(width: 22, height: 22)
-                            .background(Color.accentColor, in: Circle())
-                        Text(instruction)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                }
-            }
-
-            HStack(spacing: 10) {
-                Button(primaryTitle, action: primaryAction)
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.large)
-                Button("Open Settings") {
-                    session.openSystemSettings(for: permission)
-                }
-                .buttonStyle(.bordered)
+            Button("Allow") { allow(permission) }
+                .buttonStyle(.borderedProminent)
                 .controlSize(.large)
-                Button("Check Again") {
-                    session.refreshPermissions()
-                }
-                .buttonStyle(.link)
-            }
+                .disabled(repairingPermission != nil)
 
-            if restartHelpForStep == step {
-                HStack(alignment: .center, spacing: 10) {
-                    Label("Still shown as required after turning it on? Restart the host once so macOS can apply the change.", systemImage: "arrow.clockwise")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                    Spacer()
-                    Button("Restart Host") {
-                        HostSetupPreferences.markRestartRequested()
-                        onRestart()
+            if permissionFlow.offersFix(
+                for: permission,
+                granted: permissionGranted(permission),
+                previouslyGranted: HostPermissionHistory.previouslyGranted(),
+                now: now) {
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("Already switched on? Click Fix to refresh it.")
+                        .font(.callout)
+                    Button(repairingPermission == permission ? "Fixing…" : "Fix") {
+                        fix(permission)
                     }
                     .buttonStyle(.bordered)
+                    .disabled(repairingPermission != nil)
+                    if failedRepair == permission {
+                        Label("Select Remote Desktop Host in Settings, click −, then click Allow again.", systemImage: "minus.circle")
+                            .font(.callout)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                 }
                 .padding(12)
                 .background(.quaternary, in: RoundedRectangle(cornerRadius: 10))
             }
+        }
+    }
+
+    private func permissionGranted(_ permission: PermissionKind) -> Bool {
+        switch permission {
+        case .screenRecording: return session.permissions.screenRecording
+        case .accessibility: return session.permissions.accessibility
+        case .microphone: return session.permissions.microphone
+        }
+    }
+
+    private func allow(_ permission: PermissionKind) {
+        session.refreshPermissions()
+        guard !permissionGranted(permission), permission != .microphone else {
+            refreshPermissionsAndAdvance()
+            return
+        }
+        session.requestCorePermission(permission)
+        session.openSystemSettings(for: permission)
+        permissionFlow.openedSettings(for: permission, now: ProcessInfo.processInfo.systemUptime)
+        refreshPermissionsAndAdvance()
+    }
+
+    private func fix(_ permission: PermissionKind) {
+        guard repairingPermission == nil else { return }
+        repairingPermission = permission
+        failedRepair = nil
+        Task { @MainActor in
+            session.refreshPermissions()
+            do {
+                try await HostPermissionRepair.fix(
+                    permission,
+                    isGranted: { permissionGranted(permission) },
+                    reset: { try await HostPermissionRepair.resetOwnGrant(for: $0) },
+                    request: { session.requestCorePermission($0) },
+                    openSettings: { session.openSystemSettings(for: $0) })
+            } catch {
+                failedRepair = permission
+            }
+            repairingPermission = nil
+            refreshPermissionsAndAdvance()
         }
     }
 

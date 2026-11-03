@@ -9,8 +9,8 @@ settings:
   SWIFT_VERSION: "5.10"
   SWIFT_STRICT_CONCURRENCY: targeted
   ENABLE_USER_SCRIPT_SANDBOXING: YES
-  MARKETING_VERSION: 0.3.0
-  CURRENT_PROJECT_VERSION: 1
+  MARKETING_VERSION: 0.3.1
+  CURRENT_PROJECT_VERSION: 2
 
 packages:
   MemoryStoreKit:
@@ -116,7 +116,7 @@ targets:
       properties:
         LSUIElement: true
         LSApplicationCategoryType: public.app-category.utilities
-        CFBundleDisplayName: Remote Desktop Host
+        CFBundleDisplayName: Remote Desktop
         CFBundleShortVersionString: $(MARKETING_VERSION)
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         NSAudioCaptureUsageDescription: "Remote Desktop Host captures your Mac's system audio so sound playing on the host can be heard on your client device."
@@ -147,17 +147,22 @@ targets:
         HOST_BUNDLE_IDENTIFIER: com.threadmark.remotedesktop.host
         HOST_CODE_SIGN_ENTITLEMENTS: RemoteDesktopHost/RemoteDesktopHost.entitlements
         ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+        ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS: YES
+        INFOPLIST_KEY_CFBundleDisplayName: Remote Desktop
+        INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.utilities
         COMBINE_HIDPI_IMAGES: YES
         ENABLE_HARDENED_RUNTIME: YES
         MACOSX_DEPLOYMENT_TARGET: "14.0"
       configs:
         Debug:
+          HOST_BUNDLE_IDENTIFIER: com.threadmark.remotedesktop.host.debug
           CODE_SIGN_ENTITLEMENTS: $(HOST_CODE_SIGN_ENTITLEMENTS)
           ICLOUD_CONTAINER_ENVIRONMENT: Development
         Release:
+          CODE_SIGN_IDENTITY: Developer ID Application
           CODE_SIGN_ENTITLEMENTS: $(HOST_CODE_SIGN_ENTITLEMENTS)
+          CODE_SIGN_REQUIREMENTS: $(SRCROOT)/scripts/expected_designated_requirement.txt
           ICLOUD_CONTAINER_ENVIRONMENT: Production
-          SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) MEMORY_V1_SHIPPING_BETA"
 
   # Compile the shipped phone session state for composed app-hosted tests.
   # This framework is a test dependency only; it is not embedded in the host app.
@@ -199,6 +204,3 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.threadmark.remotedesktop.host.tests
         MACOSX_DEPLOYMENT_TARGET: "14.0"
         GENERATE_INFOPLIST_FILE: YES
-      configs:
-        Release:
-          SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) MEMORY_V1_SHIPPING_BETA"

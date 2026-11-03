@@ -1300,31 +1300,28 @@ final class HostSessionTests: XCTestCase {
         }
     }
 
-    func test_setupGuide_ordersRequiredPermissionsBeforeOptionalAudio() {
+    func test_setupGuide_ordersOnlyRequiredPermissions() {
         XCTAssertEqual(
             HostSetupStep.current(
                 permissions: .init(
                     screenRecording: false,
                     accessibility: false,
-                    microphone: false),
-                optionalAudioSkipped: false),
+                    microphone: false)),
             .screenRecording)
         XCTAssertEqual(
             HostSetupStep.current(
                 permissions: .init(
                     screenRecording: true,
                     accessibility: false,
-                    microphone: false),
-                optionalAudioSkipped: false),
+                    microphone: false)),
             .accessibility)
         XCTAssertEqual(
             HostSetupStep.current(
                 permissions: .init(
                     screenRecording: true,
                     accessibility: true,
-                    microphone: false),
-                optionalAudioSkipped: false),
-            .optionalAudio)
+                    microphone: false)),
+            .ready)
     }
 
     func test_setupGuide_canFinishWhileOptionalAudioIsOff() {
@@ -1335,8 +1332,7 @@ final class HostSessionTests: XCTestCase {
 
         XCTAssertEqual(
             HostSetupStep.current(
-                permissions: permissions,
-                optionalAudioSkipped: true),
+                permissions: permissions),
             .ready)
         XCTAssertTrue(permissions.coreReady)
         XCTAssertFalse(permissions.audioEnabled)
