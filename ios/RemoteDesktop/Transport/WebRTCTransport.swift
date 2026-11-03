@@ -233,7 +233,7 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
             await MainActor.run {
                 guard let self, !self.isClosing, !self.connectedOnce else { return }
                 self.iceDeadlineTask = nil
-                self.finishDisconnect(reason: "Can't reach your computer — try putting both devices on the same Wi-Fi.")
+                self.finishDisconnect(reason: "Can't reach your computer — try putting both devices on the same Wi-Fi.", category: .peerConnection)
             }
         }
     }
@@ -249,7 +249,7 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
             return
         case .pointer, .scroll, .key, .text:
             guard let permission = directInputState.authorizeNextInput() else {
-                if directInputState.isClosed { finishDisconnect(reason: "Reconnect to start a new input session.") }
+                if directInputState.isClosed { finishDisconnect(reason: "Reconnect to start a new input session.", category: .input) }
                 return
             }
             if case .scoped(let value) = permission { stamp = value }
@@ -260,7 +260,7 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
         let data = message.encoded(seq: seq, ts: ts, inputStamp: stamp)
         if !dataChannel.sendData(RTCDataBuffer(data: data, isBinary: false)), !isClosing {
             // Retrying text or a key transition could duplicate an effect.
-            finishDisconnect(reason: "Remote input could not be sent. Reconnect to continue.")
+            finishDisconnect(reason: "Remote input could not be sent. Reconnect to continue.", category: .input)
         }
     }
 
@@ -268,9 +268,15 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
         close(reason: reason, notifyRemote: true)
     }
 
-    private func finishDisconnect(reason: String) {
+    private enum DisconnectCategory: String {
+        case renderer, peerConnection, dataChannel, signaling, remoteBye, input
+    }
+
+    private func finishDisconnect(reason: String, category: DisconnectCategory) {
         guard !didReportDisconnect else { return }
         didReportDisconnect = true
+        // Never log reason: it can contain remote or signaling-provided text.
+        log.notice("transport ended category=\(category.rawValue, privacy: .public) sidecar=\(self.mediaPolicy == .computerUseVisualSidecar, privacy: .public) connectedOnce=\(self.connectedOnce, privacy: .public)")
         let callback = onDisconnect
         close(reason: reason, notifyRemote: false)
         callback?(reason)
@@ -441,7 +447,7 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
                         }
                         try await handleRemoteICECandidate(candidate)
                     case .bye:
-                        finishDisconnect(reason: envelope.payload["reason"] ?? "Disconnected")
+                        finishDisconnect(reason: envelope.payload["reason"] ?? "Disconnected", category: .remoteBye)
                         return
                     case .offer:
                         continue
@@ -454,7 +460,7 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
                 log.error("poll loop failed: \(String(describing: error), privacy: .public)")
                 let message = (error as? LocalizedError)?.errorDescription
                     ?? error.localizedDescription
-                finishDisconnect(reason: "The WebRTC signaling loop ended unexpectedly: \(message)")
+                finishDisconnect(reason: "The WebRTC signaling loop ended unexpectedly: \(message)", category: .signaling)
                 return
             }
 
@@ -472,7 +478,7 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
             ts: UInt64(DispatchTime.now().uptimeNanoseconds / 1_000), inputHello: hello)
         guard dataChannel.sendData(RTCDataBuffer(data: data, isBinary: false)),
               directInputState.markHelloSent(hello) else {
-            finishDisconnect(reason: "The input handshake could not be sent.")
+            finishDisconnect(reason: "The input handshake could not be sent.", category: .input)
             return
         }
         inputHandshakeDeadlineTask?.cancel()
@@ -480,7 +486,7 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
             do { try await Task.sleep(for: timeout) } catch { return }
             guard let self, !self.isClosing, self.directInputState.hello == hello,
                   !self.directInputState.isReady else { return }
-            self.finishDisconnect(reason: "The computer did not acknowledge the input session. Reconnect to try again.")
+            self.finishDisconnect(reason: "The computer did not acknowledge the input session. Reconnect to try again.", category: .input)
         }
     }
 
@@ -538,7 +544,7 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
                       currentDisplay == display, inputPresentation.acceptsFrame(lease), directInputState.isReady else { continue }
                 // A failed native surface cannot produce trustworthy readiness.
                 // For Computer Use this ends only the optional video sidecar.
-                finishDisconnect(reason: "The remote screen renderer could not be prepared. Reconnect to try again.")
+                finishDisconnect(reason: "The remote screen renderer could not be prepared. Reconnect to try again.", category: .renderer)
                 return
             }
             // Forwarding a decoded frame is no longer the readiness receipt.
@@ -561,7 +567,7 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
                     self.hasReportedRendererFrame = false
                     if reported { self.onVideoFrameUnavailable?() }
                 case .failed(_, let message):
-                    self.finishDisconnect(reason: message)
+                    self.finishDisconnect(reason: message, category: .renderer)
                 }
             }
             guard rendererRegistration?.attachment === attachment else { continue }
@@ -578,7 +584,7 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
             await MainActor.run {
                 guard let self, !self.isClosing, self.connectedOnce else { return }
                 self.connectionRecoveryTask = nil
-                self.finishDisconnect(reason: "Can’t reconnect to your computer. Keep the host app open and check that both devices are on the same Wi-Fi.")
+                self.finishDisconnect(reason: "Can’t reconnect to your computer. Keep the host app open and check that both devices are on the same Wi-Fi.", category: .peerConnection)
             }
         }
     }
@@ -740,22 +746,22 @@ extension WebRTCTransport: RTCPeerConnectionDelegate {
                 sendHelloIfPossible()
             case .failed:
                 if !connectedOnce {
-                    finishDisconnect(reason: "Can't reach your computer — try putting both devices on the same Wi-Fi.")
+                    finishDisconnect(reason: "Can't reach your computer — try putting both devices on the same Wi-Fi.", category: .peerConnection)
                 } else {
-                    finishDisconnect(reason: "The connection to your computer was lost. Check your Wi-Fi and try again.")
+                    finishDisconnect(reason: "The connection to your computer was lost. Check your Wi-Fi and try again.", category: .peerConnection)
                 }
             case .disconnected:
                 invalidateInputPresentation()
                 inputHandshakeDeadlineTask?.cancel()
                 inputHandshakeDeadlineTask = nil
                 guard directInputState.connectionChanged(connected: false) else {
-                    finishDisconnect(reason: "The connection was interrupted. Reconnect to resume remote control.")
+                    finishDisconnect(reason: "The connection was interrupted. Reconnect to resume remote control.", category: .peerConnection)
                     return
                 }
                 guard connectedOnce else { return }
                 scheduleConnectionRecoveryTimeout()
             case .closed:
-                finishDisconnect(reason: "Your computer ended the connection. Open the host app and try again.")
+                finishDisconnect(reason: "Your computer ended the connection. Open the host app and try again.", category: .peerConnection)
             default:
                 break
             }
@@ -840,7 +846,7 @@ extension WebRTCTransport: RTCDataChannelDelegate {
         Task { @MainActor [weak self] in
             guard let self, !self.isClosing, self.dataChannel === dataChannel else { return }
             if dataChannel.readyState == .closing || dataChannel.readyState == .closed {
-                self.finishDisconnect(reason: "The input channel closed.")
+                self.finishDisconnect(reason: "The input channel closed.", category: .dataChannel)
                 return
             }
             self.sendHelloIfPossible()
@@ -857,7 +863,7 @@ extension WebRTCTransport: RTCDataChannelDelegate {
                                                inputInvalidation: hello.inputInvalidation) {
                 case .ignored: return
                 case .invalid:
-                    finishDisconnect(reason: "The computer sent an invalid input-session acknowledgement.")
+                    finishDisconnect(reason: "The computer sent an invalid input-session acknowledgement.", category: .input)
                     return
                 case .accepted: break
                 }
@@ -873,7 +879,7 @@ extension WebRTCTransport: RTCDataChannelDelegate {
                 switch directInputState.invalidate(scope) {
                 case .ignored: return
                 case .invalid:
-                    finishDisconnect(reason: "The computer sent an invalid input-unavailable event.")
+                    finishDisconnect(reason: "The computer sent an invalid input-unavailable event.", category: .input)
                     return
                 case .accepted: break
                 }
@@ -893,7 +899,7 @@ extension WebRTCTransport: RTCDataChannelDelegate {
                     onDisplay?(display)
                 }
             case .bye(let reason):
-                finishDisconnect(reason: reason)
+                finishDisconnect(reason: reason, category: .remoteBye)
             case nil:
                 break
             }

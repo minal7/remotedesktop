@@ -1,6 +1,7 @@
 import Foundation
 import LiveKitWebRTC
 import Metal
+import OSLog
 import QuartzCore
 import UIKit
 
@@ -11,6 +12,7 @@ final class RemoteVideoPresentationSurface: NSObject, RTCVideoRenderer {
     let view: RemoteVideoMetalView
     let presentation: RemoteVideoSurfacePresentation
     private let producer: RemoteVideoPresentationProducer
+    private let log = Logger(subsystem: "com.threadmark.remotedesktop", category: "video-presentation")
     nonisolated private let mailbox = RemoteVideoLatestFrameMailbox<RTCVideoFrame>()
     private var active = true
     private var contentMode: RemoteVideoPresentationProducer.ContentMode = .fill
@@ -31,6 +33,18 @@ final class RemoteVideoPresentationSurface: NSObject, RTCVideoRenderer {
     private var deadline: Task<Void, Never>?
     private var deadlineID: UUID?
     private var failedAttempts = 0
+    private var layoutChangeCount = 0
+    private var lastLayoutWasContinuous = false
+    private var lastLayoutHadPendingFrame = false
+    private enum FailureCategory: String { case unsupportedFrame, presentationExpired, retryExhausted, deadline }
+
+    private var phaseCategory: String {
+        switch phase {
+        case .idle: "idle"
+        case .acquiring: "acquiring"
+        case .submitted: "submitted"
+        }
+    }
 
     static func make() -> RemoteVideoPresentationSurface? {
         let view = RemoteVideoMetalView(frame: .zero)
@@ -99,6 +113,12 @@ final class RemoteVideoPresentationSurface: NSObject, RTCVideoRenderer {
         mailbox.replaceContext(next == nil ? nil : context,
                                preservingLatestFrom: continuous ? previousContext : nil)
         presentation.begin(context: context)
+        layoutChangeCount = min(layoutChangeCount + 1, 17)
+        lastLayoutWasContinuous = continuous
+        lastLayoutHadPendingFrame = mailbox.hasPending(context: context)
+        if layoutChangeCount <= 16 {
+            log.notice("layout changed visible=\(next != nil, privacy: .public) continuous=\(continuous, privacy: .public) pending=\(self.lastLayoutHadPendingFrame, privacy: .public)")
+        }
         guard isCurrent(context), layout != nil else { return }
         ensureDeadline(context)
         requestNext()
@@ -129,7 +149,7 @@ final class RemoteVideoPresentationSurface: NSObject, RTCVideoRenderer {
                 self.mailbox.restoreUnlessNewer(entry)
                 self.retryLater(context)
             case .unsupportedFrame:
-                self.fail(context, message: "This remote screen format is not supported. Reconnect to try again.")
+                self.fail(context, message: "This remote screen format is not supported. Reconnect to try again.", category: .unsupportedFrame)
             }
         }
         if !admitted { phase = .idle; retryLater(context) }
@@ -144,7 +164,7 @@ final class RemoteVideoPresentationSurface: NSObject, RTCVideoRenderer {
         switch result {
         case .skipped, .failed: mailbox.discard(frame: frame, context: context)
         case .expired:
-            fail(context, message: "The remote screen stopped refreshing. Reconnect to try again.")
+            fail(context, message: "The remote screen stopped refreshing. Reconnect to try again.", category: .presentationExpired)
             return
         case .presented, .rendered: break
         }
@@ -169,7 +189,7 @@ final class RemoteVideoPresentationSurface: NSObject, RTCVideoRenderer {
         guard isCurrent(context), layout != nil else { return }
         failedAttempts += 1
         guard failedAttempts <= 30 else {
-            fail(context, message: "The remote screen could not be refreshed. Reconnect to try again."); return
+            fail(context, message: "The remote screen could not be refreshed. Reconnect to try again.", category: .retryExhausted); return
         }
         presentation.wait(context: context)
         guard isCurrent(context) else { return }
@@ -194,7 +214,7 @@ final class RemoteVideoPresentationSurface: NSObject, RTCVideoRenderer {
             guard let self, self.active, self.layout != nil, self.deadlineID == id else { return }
             // The same recovery episode spans continuous layout contexts.
             // Its original timer must still fail the current context.
-            self.fail(self.producer.contextID, message: "The remote screen could not be refreshed. Reconnect to try again.")
+            self.fail(self.producer.contextID, message: "The remote screen could not be refreshed. Reconnect to try again.", category: .deadline)
         }
     }
 
@@ -210,8 +230,9 @@ final class RemoteVideoPresentationSurface: NSObject, RTCVideoRenderer {
         deadline?.cancel(); deadline = nil; deadlineID = nil
     }
 
-    private func fail(_ context: UUID, message: String) {
+    private func fail(_ context: UUID, message: String, category: FailureCategory) {
         guard isCurrent(context) else { return }
+        log.notice("presentation failed category=\(category.rawValue, privacy: .public) phase=\(self.phaseCategory, privacy: .public) pending=\(self.mailbox.hasPending(context: context), privacy: .public) attempts=\(self.failedAttempts, privacy: .public) layoutChanges=\(self.layoutChangeCount, privacy: .public) lastLayoutContinuous=\(self.lastLayoutWasContinuous, privacy: .public) lastLayoutPending=\(self.lastLayoutHadPendingFrame, privacy: .public)")
         active = false; layout = nil; layoutWindow = nil; phase = .idle
         cancelWaits(); mailbox.replaceContext(nil); producer.retire()
         view.onGeometryChange = nil; view.isHidden = true

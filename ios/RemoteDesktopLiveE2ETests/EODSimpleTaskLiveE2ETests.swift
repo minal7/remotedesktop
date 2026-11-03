@@ -58,17 +58,15 @@ final class EODSimpleTaskLiveE2ETests: XCTestCase {
         let host = hosts.element(boundBy: 0)
         let hostLabel = host.label
         host.tap()
-        let local = app.descendants(matching: .any)["computer-use-local-connection"]
-        let composer = app.textFields.matching(NSPredicate(
-            format: "placeholderValue == %@", "Tell your Mac what to do")).firstMatch
-        guard wait(seconds: 45, until: { local.exists && composer.exists && composer.isEnabled }) else {
-            throw fail("The authenticated local conversation did not become ready.")
+        guard VisualDiagnosticComposer.prepare(in: app, beforeExpiredReset: {
+            self.attachDiagnostics(named: "expired-question-before-reset") {
+                self.approvalDetails(in: app)
+            }
+        }) else {
+            throw fail("The authenticated conversation was not ready, or its state requires user attention.")
         }
+        let composer = VisualDiagnosticComposer.readyField(in: app)
         try requireNoSystemPrompt(in: app)
-        guard !app.buttons["computer-use-stop-task"].exists,
-              !app.buttons["computer-use-resume-ai"].exists else {
-            throw fail("An earlier task is still active. Resolve it before another attempt.")
-        }
         let suffix = "\(task.rawValue)-\(run)-\(UUID().uuidString.prefix(8))"
         let prompt = task.prompt(uniqueSuffix: suffix)
         let assistantMessages = app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", "AI: "))
@@ -96,6 +94,17 @@ final class EODSimpleTaskLiveE2ETests: XCTestCase {
                     named: "approval-\(suffix)",
                     details: { self.approvalDetails(in: app) })
                 throw fail("EOD_NEEDS_USER task=\(task.rawValue) run=\(run): approval requested; no action selected.")
+            }
+            if userMessages.count > priorUserCount,
+               app.buttons["computer-use-resume-ai"].exists {
+                Self.needsHuman = true
+                attachDiagnostics(named: "paused-\(suffix)") {
+                    self.approvalDetails(in: app)
+                }
+                // Stop only this submitted task; never resume or dismiss prompts.
+                let stop = app.buttons["computer-use-stop-task"]
+                if stop.exists && stop.isHittable { stop.tap() }
+                throw fail("EOD_NEEDS_USER task=\(task.rawValue) run=\(run): task paused; inspect the host before continuing.")
             }
             if userMessages.count > priorUserCount,
                assistantMessages.count > priorAssistantCount,
@@ -145,7 +154,7 @@ final class EODSimpleTaskLiveE2ETests: XCTestCase {
     }
 
     private func approvalDetails(in app: XCUIApplication) -> String {
-        let identifiers = ["computer-use-status", "computer-use-approval-outcome", "computer-use-approval-deny"]
+        let identifiers = ["computer-use-status", "computer-use-approval-outcome", "computer-use-approval-deny", "computer-use-resume-ai", "computer-use-stop-task"]
         return identifiers.map { identifier in
             let element = app.descendants(matching: .any)[identifier]
             return element.exists
@@ -221,4 +230,195 @@ final class EODSimpleTaskLiveE2ETests: XCTestCase {
     func test08CalculatorRun3() throws { try perform(.calculator, run: 3) }
     func test08CalculatorRun4() throws { try perform(.calculator, run: 4) }
     func test08CalculatorRun5() throws { try perform(.calculator, run: 5) }
+}
+
+/// Only the explicitly expired question is eligible for the existing reset
+/// control. Active tasks, approvals, alerts, and unknown states remain untouched.
+private enum VisualDiagnosticComposer {
+    static func readyField(in app: XCUIApplication) -> XCUIElement {
+        app.textFields.matching(NSPredicate(
+            format: "placeholderValue == %@", "Tell your Mac what to do")).firstMatch
+    }
+
+    private static func safeToProceed(_ app: XCUIApplication) -> Bool {
+        let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
+        return springboard.alerts.count == 0 && app.alerts.count == 0
+            && !app.buttons["computer-use-stop-task"].exists
+            && !app.buttons["computer-use-resume-ai"].exists
+            && !app.buttons["computer-use-approval-deny"].exists
+    }
+
+    static func prepare(in app: XCUIApplication, beforeExpiredReset: () -> Void) -> Bool {
+        let expired = app.textFields.matching(NSPredicate(
+            format: "placeholderValue == %@", "Start a new request to continue")).firstMatch
+        let start = app.buttons["computer-use-new-request"]
+        let deadline = Date().addingTimeInterval(45)
+        repeat {
+            guard safeToProceed(app) else { return false }
+            let ready = readyField(in: app)
+            if ready.exists && ready.isEnabled { return true }
+            if expired.exists && !expired.isEnabled && start.exists && start.isHittable {
+                beforeExpiredReset()
+                guard safeToProceed(app), expired.exists, !expired.isEnabled,
+                      start.exists, start.isHittable else { return false }
+                start.tap()
+                // The button focuses the composer but sends no request.
+                repeat {
+                    guard safeToProceed(app) else { return false }
+                    if readyField(in: app).exists && readyField(in: app).isEnabled { return true }
+                    RunLoop.current.run(until: Date().addingTimeInterval(0.25))
+                } while Date() < deadline
+                return false
+            }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.25))
+        } while Date() < deadline
+        return false
+    }
+}
+
+/// Connection-only diagnostic. It does not submit a task or interact with the Mac.
+final class ComputerUseVisualSidecarLiveE2ETests: XCTestCase {
+    func testVisualSidecarConnectionOnly() throws {
+        guard ProcessInfo.processInfo.environment["RUN_COMPUTER_USE_LIVE_E2E"] == "1",
+              ProcessInfo.processInfo.environment["RUN_VISUAL_SIDECAR_LIVE_E2E"] == "1" else {
+            throw XCTSkip("Set RUN_VISUAL_SIDECAR_LIVE_E2E=1 for the connection-only diagnostic.")
+        }
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        if app.state == .notRunning { app.launch() }
+        else if app.state != .runningForeground { app.activate() }
+        guard app.wait(for: .runningForeground, timeout: 10) else {
+            XCTFail("The client did not enter the foreground.")
+            return
+        }
+        let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
+        guard springboard.alerts.count == 0, app.alerts.count == 0 else {
+            record(app, name: "visual-sidecar-alert")
+            XCTFail("A system or application alert is visible; no alert was dismissed.")
+            return
+        }
+        let hosts = app.buttons.matching(NSPredicate(
+            format: "label BEGINSWITH %@", "Use AI Computer Use on "))
+        guard wait(seconds: 45, until: { hosts.count > 0 }), hosts.count == 1 else {
+            record(app, name: "visual-sidecar-host-unavailable")
+            XCTFail("Exactly one paired AI-ready host must be visible.")
+            return
+        }
+        hosts.element(boundBy: 0).tap()
+        let started = Date()
+        record(app, name: "visual-sidecar-entry")
+
+        let live = app.descendants(matching: .any).matching(NSPredicate(
+            format: "label BEGINSWITH %@", "Live interactive screen for ")).firstMatch
+        let unavailable = app.descendants(matching: .any).matching(NSPredicate(
+            format: "label CONTAINS %@", "The live screen is unavailable.")).firstMatch
+        var sawUnavailable = false
+        var failures: [String] = []
+        for checkpoint in [15.0, 60.0] {
+            let deadline = started.addingTimeInterval(checkpoint)
+            repeat {
+                if unavailable.exists { sawUnavailable = true }
+                let now = Date()
+                if now >= deadline { break }
+                RunLoop.current.run(until: min(deadline, now.addingTimeInterval(1)))
+            } while true
+            record(app, name: "visual-sidecar-\(Int(checkpoint))s")
+            if !live.exists { failures.append("No live interactive screen at \(Int(checkpoint)) seconds.") }
+            if springboard.alerts.count > 0 || app.alerts.count > 0 {
+                XCTFail("A system or application alert appeared; no alert was dismissed.")
+                return
+            }
+        }
+        if sawUnavailable { failures.append("The live screen became unavailable.") }
+        if !failures.isEmpty { XCTFail(failures.joined(separator: " ")) }
+    }
+
+    /// The operator supplies a static synthetic host screen; this test only
+    /// focuses the empty iPad composer and never submits a task.
+    func testVisualSidecarKeyboardLayout() throws {
+        guard ProcessInfo.processInfo.environment["RUN_COMPUTER_USE_LIVE_E2E"] == "1",
+              ProcessInfo.processInfo.environment["RUN_VISUAL_SIDECAR_KEYBOARD_E2E"] == "1" else {
+            throw XCTSkip("Set RUN_VISUAL_SIDECAR_KEYBOARD_E2E=1 for the keyboard diagnostic.")
+        }
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        if app.state == .notRunning { app.launch() }
+        else if app.state != .runningForeground { app.activate() }
+        guard app.wait(for: .runningForeground, timeout: 10) else {
+            XCTFail("The client did not enter the foreground."); return
+        }
+        let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
+        guard springboard.alerts.count == 0, app.alerts.count == 0 else {
+            record(app, name: "visual-keyboard-alert")
+            XCTFail("A system or application alert is visible; no alert was dismissed."); return
+        }
+        let hosts = app.buttons.matching(NSPredicate(
+            format: "label BEGINSWITH %@", "Use AI Computer Use on "))
+        guard wait(seconds: 45, until: { hosts.count > 0 }), hosts.count == 1 else {
+            record(app, name: "visual-keyboard-host-unavailable")
+            XCTFail("Exactly one paired AI-ready host must be visible."); return
+        }
+        hosts.element(boundBy: 0).tap()
+        let live = app.descendants(matching: .any).matching(NSPredicate(
+            format: "label BEGINSWITH %@", "Live interactive screen for ")).firstMatch
+        let unavailable = app.descendants(matching: .any).matching(NSPredicate(
+            format: "label CONTAINS %@", "The live screen is unavailable.")).firstMatch
+        guard live.waitForExistence(timeout: 45) else {
+            record(app, name: "visual-keyboard-no-live-screen")
+            XCTFail("The live screen did not become ready."); return
+        }
+        let baseline = Date().addingTimeInterval(15)
+        while Date() < baseline {
+            if unavailable.exists { record(app, name: "visual-keyboard-unavailable-before-focus"); XCTFail("The live screen became unavailable."); return }
+            RunLoop.current.run(until: min(baseline, Date().addingTimeInterval(0.5)))
+        }
+        record(app, name: "visual-keyboard-before-focus")
+        guard !app.keyboards.firstMatch.exists else {
+            XCTFail("The software keyboard was already visible; a before/after layout comparison is not possible."); return
+        }
+        guard live.exists, VisualDiagnosticComposer.prepare(in: app, beforeExpiredReset: {
+            self.record(app, name: "visual-keyboard-expired-question-before-reset")
+        }) else {
+            XCTFail("The conversation is not ready for an empty new request; no task was sent."); return
+        }
+        let composer = VisualDiagnosticComposer.readyField(in: app)
+        if !app.keyboards.firstMatch.exists { composer.tap() }
+        record(app, name: "visual-keyboard-after-focus")
+        guard app.keyboards.firstMatch.waitForExistence(timeout: 5) else {
+            XCTFail("The software keyboard did not appear, so no keyboard-layout conclusion is possible."); return
+        }
+        let deadline = Date().addingTimeInterval(15)
+        var sawUnavailable = false
+        while Date() < deadline {
+            if unavailable.exists { sawUnavailable = true }
+            RunLoop.current.run(until: min(deadline, Date().addingTimeInterval(0.5)))
+        }
+        record(app, name: "visual-keyboard-15s-after-focus")
+        guard springboard.alerts.count == 0, app.alerts.count == 0 else {
+            XCTFail("A system or application alert appeared; no alert was dismissed."); return
+        }
+        XCTAssertFalse(sawUnavailable, "The live screen became unavailable after the keyboard appeared.")
+        XCTAssertTrue(live.exists, "No live interactive screen remained 15 seconds after focus.")
+    }
+
+    private func record(_ app: XCUIApplication, name: String) {
+        let timestamp = ISO8601DateFormatter().string(from: Date())
+        let screenshot = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+        screenshot.name = "\(name)-screenshot-\(timestamp)"
+        screenshot.lifetime = .keepAlways
+        add(screenshot)
+        let hierarchy = XCTAttachment(string: "timestamp_utc=\(timestamp)\n\(app.debugDescription)")
+        hierarchy.name = "\(name)-accessibility-\(timestamp)"
+        hierarchy.lifetime = .keepAlways
+        add(hierarchy)
+    }
+
+    private func wait(seconds: TimeInterval, until predicate: () -> Bool) -> Bool {
+        let deadline = Date().addingTimeInterval(seconds)
+        repeat {
+            if predicate() { return true }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.25))
+        } while Date() < deadline
+        return predicate()
+    }
 }
