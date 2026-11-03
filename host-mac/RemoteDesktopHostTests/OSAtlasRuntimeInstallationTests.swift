@@ -12,6 +12,32 @@ actor PreparationRejectingLauncher: OSAtlasLlamaServerLaunching {
     }
 }
 
+private struct PreparationResources: OSAtlasLlamaResourceInspecting {
+    func snapshot() throws -> OSAtlasLlamaResourceSnapshot {
+        .init(physicalMemoryBytes: 32 * 1_024 * 1_024 * 1_024,
+              reclaimableMemoryBytes: 16 * 1_024 * 1_024 * 1_024)
+    }
+}
+
+private struct PreparationPort: OSAtlasLlamaPortProviding {
+    func availableLoopbackPort() throws -> UInt16 { 43130 }
+}
+
+private struct PreparationToken: OSAtlasLlamaTokenProviding {
+    func bearerToken() -> String { "private-preparation-test-token" }
+}
+
+private struct PreparationTransport: OSAtlasLlamaHTTPTransport, OSAtlasLlamaHTTPTransportMaking {
+    func makeTransport() -> any OSAtlasLlamaHTTPTransport { self }
+    func health(baseURL: URL, bearerToken: String) async throws -> Bool { throw OSAtlasLlamaRuntimeError.invalidResponse }
+    func modelIsHealthy(baseURL: URL, bearerToken: String, model: OSAtlasLlamaServedModel) async throws -> Bool { throw OSAtlasLlamaRuntimeError.invalidResponse }
+    func loadModel(baseURL: URL, bearerToken: String, model: OSAtlasLlamaServedModel) async throws { throw OSAtlasLlamaRuntimeError.invalidResponse }
+    func unloadModel(baseURL: URL, bearerToken: String, model: OSAtlasLlamaServedModel) async throws { throw OSAtlasLlamaRuntimeError.invalidResponse }
+    func complete(request: URLRequest) async throws -> Data { throw OSAtlasLlamaRuntimeError.invalidResponse }
+    func exactInputTokenCount(completionRequest: URLRequest) async throws -> Int { throw OSAtlasLlamaRuntimeError.invalidResponse }
+    func cancelAll() async {}
+}
+
 final class OSAtlasRuntimeInstallationTests: XCTestCase {
     @MainActor
     func testPreparingFaraPackageDoesNotActivateModelButSetupStillDoes() async throws {
@@ -21,7 +47,9 @@ final class OSAtlasRuntimeInstallationTests: XCTestCase {
         try PropertyListSerialization.data(fromPropertyList: info, format: .xml, options: 0)
             .write(to: fixture.bundleDirectory.appendingPathComponent("Contents/Info.plist"))
         let launcher = PreparationRejectingLauncher()
-        let runtime = OSAtlasLlamaRuntime(launcher: launcher)
+        let runtime = OSAtlasLlamaRuntime(launcher: launcher, transportMaker: PreparationTransport(),
+            portProvider: PreparationPort(), tokenProvider: PreparationToken(), readinessAttempts: 1,
+            readinessDelay: .zero, resourceInspector: PreparationResources())
         let loader = OSAtlasVisualExecutorLoader(resolver: .init(manifest: fixture.manifest),
             bundle: try XCTUnwrap(Bundle(url: fixture.bundleDirectory)), runtime: runtime,
             faraJournalDirectory: fixture.root.appendingPathComponent("journal"))
@@ -36,7 +64,9 @@ final class OSAtlasRuntimeInstallationTests: XCTestCase {
         do {
             _ = try await loader.load(receipt: fixture.receipt, progress: { _ in })
             XCTFail("Setup must actually attempt model activation")
-        } catch { }
+        } catch {
+            XCTAssertEqual(error as? OSAtlasLlamaRuntimeError, .serverFailedToStart)
+        }
         let setupLaunches = await launcher.calls
         XCTAssertEqual(setupLaunches, preparationLaunches + 1)
         await loader.deactivate()
