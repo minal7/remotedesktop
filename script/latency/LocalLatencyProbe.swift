@@ -371,6 +371,8 @@ func summary(_ values: [Double]) -> [String: Any] {
     return ["count": s.count, "mean_ms": s.reduce(0,+) / Double(s.count), "min_ms": s[0], "p50_ms": q(0.5), "p95_ms": q(0.95), "p99_ms": q(0.99), "max_ms": s.last!]
 }
 
+private let f3PacerFieldTrial = "WebRTC-ProbingScreenshareBwe/2.5,2875,80,40,-60,3/"
+
 @MainActor final class Runner: NSObject, NSApplicationDelegate {
     var windows: [NSWindow] = []
     var timer: Timer?
@@ -393,7 +395,7 @@ func summary(_ values: [Double]) -> [String: Any] {
     }
     func run() async throws {
         let environment = ProcessInfo.processInfo.environment
-        if let fix = environment["LATENCY_PAIR_FIX"], ["F2", "F3"].contains(fix) {
+        if let fix = environment["LATENCY_PAIR_FIX"], ["F2", "F3", "F3Pacer"].contains(fix) {
             let count = max(4, Int(environment["LATENCY_PAIRS"] ?? "4") ?? 4)
             let prefix = output
             let baseline = LatencyLabConfiguration.current
@@ -410,7 +412,7 @@ func summary(_ values: [Double]) -> [String: Any] {
                     }
                     records = Measurements()
                     sendDelegate = PeerDelegate(); receiveDelegate = PeerDelegate()
-                    try await runTrial()
+                    try await runTrial(f3Pacer: fix == "F3Pacer" && enabled)
                     paths.append(output)
                 }
             }
@@ -424,8 +426,9 @@ func summary(_ values: [Double]) -> [String: Any] {
         }
         NSApp.terminate(nil)
     }
-    func runTrial() async throws {
+    func runTrial(f3Pacer: Bool = false) async throws {
         let lab = LatencyLabConfiguration.current
+        let configuredTrial: Any = f3Pacer ? (f3PacerFieldTrial as Any) : NSNull()
         guard CGPreflightScreenCaptureAccess() else { throw NSError(domain: "Screen recording permission is required for the standalone latency probe", code: 1) }
         guard let screen = NSScreen.screens.first(where: {
             ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value == CGMainDisplayID()
@@ -456,7 +459,14 @@ func summary(_ values: [Double]) -> [String: Any] {
             _ = f.audioDeviceModule.setEngineAvailability(LKRTCAudioEngineAvailability(isInputAvailable: false, isOutputAvailable: false))
             return f
         }
-        let sf = factory(), rf = factory(); senderFactory = sf; receiverFactory = rf
+        func makeSenderFactory() -> LKRTCPeerConnectionFactory {
+            // Factory initialization snapshots the global trial. Restore it
+            // synchronously before creating the independent receiver factory.
+            LKRTCPeerConnectionFactory.configureFieldTrials(f3Pacer ? f3PacerFieldTrial : nil)
+            defer { LKRTCPeerConnectionFactory.configureFieldTrials(nil) }
+            return factory()
+        }
+        let sf = makeSenderFactory(), rf = factory(); senderFactory = sf; receiverFactory = rf
         let config = LKRTCConfiguration(); config.sdpSemantics = .unifiedPlan; config.iceServers = []
         let constraints = LKRTCMediaConstraints(mandatoryConstraints: nil, optionalConstraints: nil)
         let send = sf.peerConnection(with: config, constraints: constraints, delegate: sendDelegate)!
@@ -512,6 +522,12 @@ func summary(_ values: [Double]) -> [String: Any] {
             traceURL: URL(fileURLWithPath: output + ".sender.jsonl"))
         let receiverTrace = LatencyStatsCollector(side: "loopback_receiver", enabled: true,
             traceURL: URL(fileURLWithPath: output + ".receiver.jsonl"))
+        for (collector, side) in [(senderTrace, "loopback_sender"), (receiverTrace, "loopback_receiver")] {
+            collector.trace(["type": "lab_configuration", "component": "f3_pacer_trial", "side": side, "time": now(),
+                             "scope": "sender_factory_only", "receiver_factory": "stock",
+                             "configured": f3Pacer, "field_trial": configuredTrial,
+                             "effective": "unverified"])
+        }
         let polling = Task { @MainActor in
             var appliedPath: LatencyLabSenderPolicy.Path?
             while !Task.isCancelled {
@@ -594,7 +610,11 @@ func summary(_ values: [Double]) -> [String: Any] {
             let renderDelay = ids.compactMap { id -> Double? in guard let d = records.displayed[id], let s = records.decoded[id] else { return nil }; return (d-s)*1000 }
             return ["kind": "local_software_compositor_to_compositor_proxy_not_optical_glass_to_glass", "date_utc": ISO8601DateFormatter().string(from: Date()), "duration_s": duration, "warmup_after_first_decoded_frame_s": 5, "video_size": records.dimensions, "screen_points": [w,h], "capture_fps_limit": DesktopVideoQuality.targetFramesPerSecond, "observer_fps_limit": observer.observerFPS, "bitrate_cap_bps": DesktopVideoQuality.maximumBitrateBps, "audio": false, "network": "two WebRTC peers on the same Mac, host ICE candidates, no STUN/TURN", "source_marker_count": ids.count, "viewer_marker_count": displayDelay.count, "decoded_marker_count": decodeDelay.count, "compositor_to_compositor": summary(displayDelay), "capture_pts_to_decode_callback": summary(decodeDelay), "decode_callback_to_viewer_compositor": summary(renderDelay), "capture_pts_to_capture_callback": summary(records.captureOverhead), "observer_displaytime_minus_pts": summary(records.observerTimestampOffsets), "observer_complete_frame_intervals": summary(records.observerIntervals), "invalid_source_observations": records.invalidSource, "invalid_viewer_observations": records.invalidMirror, "samples": samples, "text_ssim": textSSIM as Any? ?? NSNull(), "stats_at_first_frame": statsAtFirstFrame, "stats_at_one_second": statsAtOneSecond, "stats_at_two_seconds": statsAtTwoSeconds, "stats_before": statsBefore, "stats_after": statsAfter]
         }
-        result["lab_configuration"] = lab.traceValues
+        var settings = lab.traceValues
+        settings["f3Pacer"] = f3Pacer
+        result["lab_configuration"] = settings
+        result["sender_field_trial"] = configuredTrial
+        result["sender_field_trial_effective"] = "unverified"
         result["measurement_start_s"] = records.withLock { records.start }
         result["measurement_end_s"] = records.withLock { records.end }
         result["native_text_ssim"] = nativeTextSSIM as Any? ?? NSNull()

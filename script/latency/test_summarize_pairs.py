@@ -3,7 +3,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from summarize_pairs import summarize
+from summarize_pairs import F3_PACER_TRIAL, summarize
 
 
 class PairedSummaryTests(unittest.TestCase):
@@ -46,6 +46,54 @@ class PairedSummaryTests(unittest.TestCase):
         self.assertTrue(result['runs'][-1]['wifi_spike'])
         self.assertEqual(result['runs'][-1]['rtt_ms_p95'], 200)
         self.assertEqual(result['runs'][0]['marker_coverage'], [298, 300])
+
+    def testPacerPairsRequireOnlyTrialChangeAndMatchingSenderEvidence(self):
+        manifest = self.manifest()
+        manifest['fix'] = 'F3Pacer'
+        for index, name in enumerate(manifest['runs']):
+            path = Path(name)
+            run = json.loads(path.read_text())
+            enabled = index % 2 == 1
+            run['lab_configuration']['f2Encoder'] = False
+            run['lab_configuration']['f3Sender'] = False
+            run['lab_configuration']['f3Pacer'] = enabled
+            run['sender_field_trial'] = F3_PACER_TRIAL if enabled else None
+            run['sender_field_trial_effective'] = 'unverified'
+            path.write_text(json.dumps(run))
+            sender = Path(run['sender_trace'])
+            with sender.open('a') as trace:
+                trace.write(json.dumps({'type': 'lab_configuration', 'component': 'f3_pacer_trial',
+                    'side': 'loopback_sender', 'configured': enabled,
+                    'field_trial': F3_PACER_TRIAL if enabled else None, 'effective': 'unverified'}) + '\n')
+        self.assertEqual(summarize(manifest)['pairs'], 4)
+
+        b = Path(manifest['runs'][1])
+        changed = json.loads(b.read_text())
+        changed['lab_configuration']['f3Sender'] = True
+        b.write_text(json.dumps(changed))
+        with self.assertRaises(ValueError):
+            summarize(manifest)
+        changed['lab_configuration']['f3Sender'] = False
+        changed['sender_field_trial'] = None
+        b.write_text(json.dumps(changed))
+        with self.assertRaises(ValueError):
+            summarize(manifest)
+        changed['sender_field_trial'] = F3_PACER_TRIAL
+        b.write_text(json.dumps(changed))
+        sender = Path(changed['sender_trace'])
+        lines = sender.read_text().splitlines()
+        event = json.loads(lines[-1]); event['field_trial'] = None
+        lines[-1] = json.dumps(event); sender.write_text('\n'.join(lines) + '\n')
+        with self.assertRaises(ValueError):
+            summarize(manifest)
+        event['field_trial'] = F3_PACER_TRIAL
+        lines[-1] = json.dumps(event); sender.write_text('\n'.join(lines) + '\n')
+        for name in manifest['runs'][2:4]:
+            path = Path(name); run = json.loads(path.read_text())
+            run['lab_configuration']['f1Playout'] = True
+            path.write_text(json.dumps(run))
+        with self.assertRaises(ValueError):
+            summarize(manifest)
 
     def testMissingSharpnessIsUnknownRatherThanAFreePass(self):
         manifest = self.manifest()

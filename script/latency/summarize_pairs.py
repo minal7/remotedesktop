@@ -6,6 +6,8 @@ import math
 from pathlib import Path
 from statistics import median
 
+F3_PACER_TRIAL = 'WebRTC-ProbingScreenshareBwe/2.5,2875,80,40,-60,3/'
+
 
 def quantile(values, fraction):
     values = sorted(v for v in values if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v))
@@ -15,11 +17,16 @@ def quantile(values, fraction):
 def run_summary(path):
     run = json.loads(Path(path).read_text())
     start, end = run['measurement_start_s'], run['measurement_end_s']
-    traces = []
-    for key in ('sender_trace', 'receiver_trace'):
-        traces += [json.loads(line) for line in Path(run[key]).read_text().splitlines() if line.strip()]
+    sender_trace = [json.loads(line) for line in Path(run['sender_trace']).read_text().splitlines() if line.strip()]
+    receiver_trace = [json.loads(line) for line in Path(run['receiver_trace']).read_text().splitlines() if line.strip()]
+    traces = sender_trace + receiver_trace
     samples = [e for e in traces if e.get('type') == 'stats' and start <= e.get('time', -1) <= end]
+    pacer_events = [event for event in sender_trace if event.get('type') == 'lab_configuration'
+                    and event.get('component') == 'f3_pacer_trial' and event.get('side') == 'loopback_sender']
     result = {'path': str(path), 'settings': run['lab_configuration'], 'duration_s': end - start,
+              'sender_field_trial': run.get('sender_field_trial'),
+              'sender_field_trial_effective': run.get('sender_field_trial_effective'),
+              'sender_pacer_events': pacer_events,
               'native_text_ssim': run.get('native_text_ssim'), 'video_size': run['video_size'],
               'marker_coverage': [run['viewer_marker_count'], run['source_marker_count']]}
     for key in ('encodeMs', 'packetSendMs', 'jitterBufferMs', 'jitterBufferTargetMs', 'decodeMs'):
@@ -55,8 +62,9 @@ def summarize(manifest):
     runs = [run_summary(path) for path in manifest['runs']]
     if len(runs) < 8 or len(runs) % 2:
         raise ValueError('At least four complete interleaved A/B pairs are required.')
-    fix_key = {'F2': 'f2Encoder', 'F3': 'f3Sender'}[manifest['fix']]
+    fix_key = {'F2': 'f2Encoder', 'F3': 'f3Sender', 'F3Pacer': 'f3Pacer'}[manifest['fix']]
     paired = []
+    fixed_settings = None
     metrics = [key for key in runs[0] if key.endswith(('_p50', '_p95'))]
     metrics += ['freezes_per_minute', 'native_text_ssim']
     for index in range(0, len(runs), 2):
@@ -64,8 +72,18 @@ def summarize(manifest):
         if min(a['duration_s'], b['duration_s']) < 29.9:
             raise ValueError('A trial is shorter than 30 seconds.')
         sa, sb = dict(a['settings']), dict(b['settings'])
-        if sa.pop(fix_key) is not False or sb.pop(fix_key) is not True or sa != sb:
+        if sa.pop(fix_key, None) is not False or sb.pop(fix_key, None) is not True or sa != sb:
             raise ValueError('Each pair must change exactly the selected toggle from off to on.')
+        if fixed_settings is not None and sa != fixed_settings:
+            raise ValueError('All other settings must remain fixed across pairs.')
+        fixed_settings = sa
+        if manifest['fix'] == 'F3Pacer':
+            for run, expected in ((a, None), (b, F3_PACER_TRIAL)):
+                events = run['sender_pacer_events']
+                if (run['sender_field_trial'] != expected or run['sender_field_trial_effective'] != 'unverified'
+                    or len(events) != 1 or events[0].get('configured') is not (expected is not None)
+                    or events[0].get('field_trial') != expected or events[0].get('effective') != 'unverified'):
+                    raise ValueError('F3Pacer metadata and sender trace must agree on the configured trial.')
         differences = {key: b[key] - a[key] if a.get(key) is not None and b.get(key) is not None else None
                        for key in metrics}
         paired.append({'pair': index // 2 + 1, 'B_minus_A': differences})
