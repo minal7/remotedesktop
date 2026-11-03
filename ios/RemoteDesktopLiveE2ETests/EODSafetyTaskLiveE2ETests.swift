@@ -34,6 +34,11 @@ final class EODSafetyTaskLiveE2ETests: XCTestCase {
         guard !app.buttons["computer-use-stop-task"].exists,
               !app.buttons["computer-use-resume-ai"].exists,
               !app.buttons["computer-use-approval-deny"].exists else {
+            if app.buttons["computer-use-approval-deny"].exists {
+                attachDiagnostics(named: "prior-approval-\(identifier)") {
+                    self.approvalDetails(in: app)
+                }
+            }
             throw fail("An earlier task needs attention; no request was sent.")
         }
         let assistants = app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", "AI: "))
@@ -53,19 +58,27 @@ final class EODSafetyTaskLiveE2ETests: XCTestCase {
         let outcomes = ["Task completed": "completed", "Unable to complete": "failed",
                         "User intervention required": "handoff"]
         while ProcessInfo.processInfo.systemUptime - started < 300 {
-            try requireNoPrompt(in: app)
+            try requireNoPrompt(in: app, context: identifier)
             if app.buttons["computer-use-approval-deny"].exists {
                 // Keep the request visible. This test never grants or denies it.
+                let elapsed = ProcessInfo.processInfo.systemUptime - started
+                attachDiagnostics(named: "approval-\(identifier)") {
+                    self.approvalDetails(in: app)
+                }
                 emit("TERMINAL", ["case": identifier, "outcome": "pending_approval",
-                    "elapsed": ProcessInfo.processInfo.systemUptime - started, "answer": "",
+                    "elapsed": elapsed, "answer": "",
                     "needs_human": true])
                 return
             }
             if users.count > userCount, assistants.count > assistantCount,
                let value = status.value as? String, let outcome = outcomes[value] {
+                let elapsed = ProcessInfo.processInfo.systemUptime - started
+                attachDiagnostics(named: "terminal-\(identifier)") {
+                    "outcome=\(value)\n" + self.approvalDetails(in: app)
+                }
                 XCTAssertEqual(users.count, userCount + 1, "The task must be sent exactly once.")
                 emit("TERMINAL", ["case": identifier, "outcome": outcome,
-                    "elapsed": ProcessInfo.processInfo.systemUptime - started,
+                    "elapsed": elapsed,
                     "answer": assistants.element(boundBy: assistants.count - 1).label,
                     "needs_human": outcome == "handoff"])
                 return
@@ -73,7 +86,7 @@ final class EODSafetyTaskLiveE2ETests: XCTestCase {
             RunLoop.current.run(until: Date().addingTimeInterval(0.25))
         }
         // Stop only this submitted task; do not dismiss or approve any prompt.
-        try requireNoPrompt(in: app)
+        try requireNoPrompt(in: app, context: identifier)
         let stop = app.buttons["computer-use-stop-task"]
         if stop.exists && stop.isHittable { stop.tap() }
         emit("TERMINAL", ["case": identifier, "outcome": "timeout", "answer": "",
@@ -81,10 +94,45 @@ final class EODSafetyTaskLiveE2ETests: XCTestCase {
         throw fail("No terminal outcome within 300 seconds; inspect the host before continuing.")
     }
 
-    private func requireNoPrompt(in app: XCUIApplication) throws {
-        if XCUIApplication(bundleIdentifier: "com.apple.springboard").alerts.count > 0 || app.alerts.count > 0 {
+    private func requireNoPrompt(in app: XCUIApplication, context: String = "pre-task") throws {
+        let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
+        let springboardCount = springboard.alerts.count
+        let appCount = app.alerts.count
+        if springboardCount > 0 || appCount > 0 {
+            attachDiagnostics(named: "alert-\(context)") {
+                var details = "springboard.alerts.count=\(springboardCount)\napp.alerts.count=\(appCount)"
+                for index in 0..<springboardCount {
+                    details += "\nspringboard.alerts[\(index)]:\n\(springboard.alerts.element(boundBy: index).debugDescription)"
+                }
+                for index in 0..<appCount {
+                    details += "\napp.alerts[\(index)]:\n\(app.alerts.element(boundBy: index).debugDescription)"
+                }
+                return details + "\n" + self.approvalDetails(in: app)
+            }
             throw fail("Unexpected system/application prompt; no prompt was dismissed.")
         }
+    }
+
+    private func approvalDetails(in app: XCUIApplication) -> String {
+        let identifiers = ["computer-use-status", "computer-use-approval-outcome", "computer-use-approval-deny"]
+        return identifiers.map { identifier in
+            let element = app.descendants(matching: .any)[identifier]
+            return element.exists
+                ? "\(identifier):\n\(element.debugDescription)"
+                : "\(identifier): not present"
+        }.joined(separator: "\n")
+    }
+
+    private func attachDiagnostics(named name: String, details: () -> String) {
+        let timestamp = ISO8601DateFormatter().string(from: Date())
+        let screenshot = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+        screenshot.name = "\(name)-screenshot-\(timestamp)"
+        screenshot.lifetime = .keepAlways
+        add(screenshot)
+        let text = XCTAttachment(string: "timestamp_utc=\(timestamp)\n\(details())")
+        text.name = "\(name)-accessibility-\(timestamp)"
+        text.lifetime = .keepAlways
+        add(text)
     }
 
     private func wait(seconds: TimeInterval, app: XCUIApplication, until predicate: () -> Bool) throws -> Bool {
