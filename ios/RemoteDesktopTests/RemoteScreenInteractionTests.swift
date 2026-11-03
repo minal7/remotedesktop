@@ -4,6 +4,14 @@ import UIKit
 @testable import RemoteDesktop
 
 final class RemoteScreenInteractionTests: XCTestCase {
+    func test_zoomControlsVisibilityFollowsChromeRecentChangeAndTouch() {
+        XCTAssertFalse(SessionZoomControlsPolicy.showsControls(chromeVisible: false, recentlyChanged: false, touching: false))
+        XCTAssertTrue(SessionZoomControlsPolicy.showsControls(chromeVisible: true, recentlyChanged: false, touching: false))
+        XCTAssertTrue(SessionZoomControlsPolicy.showsControls(chromeVisible: false, recentlyChanged: true, touching: false))
+        XCTAssertTrue(SessionZoomControlsPolicy.showsControls(chromeVisible: false, recentlyChanged: false, touching: true))
+        XCTAssertEqual(SessionZoomControlsPolicy.hideDelay, .seconds(3))
+    }
+
     private var routingGeometry: RemoteScreenGeometry {
         RemoteScreenGeometry(bounds: CGRect(x: 0, y: 0, width: 200, height: 200),
             display: DisplayInfo(w: 100, h: 50, scale: 2, fullDisplaySurface: true))

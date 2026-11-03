@@ -52,6 +52,7 @@ final class RemoteScreenZoomController: ObservableObject {
     }
 
     @Published private(set) var scale: CGFloat = 1
+    @Published private(set) var interactionRevision = 0
     @Published var moveScreenEnabled = false {
         didSet {
             guard oldValue != moveScreenEnabled else { return }
@@ -67,6 +68,8 @@ final class RemoteScreenZoomController: ObservableObject {
     func zoomIn() { commandHandler?(.increase) }
     func zoomOut() { commandHandler?(.decrease) }
     func reset() { commandHandler?(.reset) }
+
+    fileprivate func notePinchInteraction() { interactionRevision &+= 1 }
 
     fileprivate func report(scale: CGFloat) {
         guard abs(self.scale - scale) > 0.005 else { return }
@@ -696,6 +699,7 @@ final class RemoteScreenUIView: UIView, UIPointerInteractionDelegate, UIGestureR
     @objc private func onPinch(_ gesture: UIPinchGestureRecognizer) {
         switch gesture.state {
         case .began:
+            if zoomController?.captureView === self { zoomController?.notePinchInteraction() }
             cancelActiveTouch()
             pinchStartScale = zoomScale
             pinchAnchor = contentPoint(from: gesture.location(in: self))
@@ -710,6 +714,7 @@ final class RemoteScreenUIView: UIView, UIPointerInteractionDelegate, UIGestureR
             clampZoomOffset()
             applyZoomTransform()
         case .ended, .cancelled, .failed:
+            if zoomController?.captureView === self { zoomController?.notePinchInteraction() }
             if zoomScale < 1.04 { resetZoom(animated: true) }
         default:
             break

@@ -18,6 +18,9 @@ struct SessionView: View {
     @State private var restoreSoftKeyboardAfterHardwareDisconnect = false
     @State private var chromeRevealed = false
     @State private var hideTask: Task<Void, Never>?
+    @State private var zoomRecentlyChanged = false
+    @State private var zoomHideTask: Task<Void, Never>?
+    @GestureState private var touchingZoomControls = false
     #if DEBUG
     @State private var showsVideoStatistics = false
     @State private var videoStatistics = "Waiting for video stats…"
@@ -56,6 +59,11 @@ struct SessionView: View {
     private var specialKeysIdleOpacity: Double {
         // Keep the composited controls above SwiftUI's low-opacity hit-test edge.
         0.56
+    }
+
+    private var zoomControlsVisible: Bool {
+        SessionZoomControlsPolicy.showsControls(chromeVisible: shouldShowChrome,
+            recentlyChanged: zoomRecentlyChanged, touching: touchingZoomControls)
     }
 
     var body: some View {
@@ -107,11 +115,33 @@ struct SessionView: View {
             inputDock
                 .disabled(!session.hasInteractiveRemoteScreen)
 
-            // Keep zoom and two-finger mode controls in the same predictable
-            // top-left location on iPhone and iPad.
+            // Keep the controls in a safe-area-aware top-left location.
             VStack {
                 HStack {
-                    RemoteScreenZoomControls(zoom: zoom)
+                    ZStack(alignment: .leading) {
+                        RemoteScreenZoomControls(zoom: zoom)
+                            .opacity(zoomControlsVisible ? 1 : 0)
+                            .allowsHitTesting(zoomControlsVisible)
+                            .accessibilityHidden(!zoomControlsVisible)
+                            .simultaneousGesture(
+                                DragGesture(minimumDistance: 0)
+                                    .updating($touchingZoomControls) { _, touching, _ in
+                                        touching = true
+                                    }
+                            )
+                        if !zoomControlsVisible && zoom.isZoomed {
+                            Button(action: zoom.reset) {
+                                Text("\(Int((zoom.scale * 100).rounded()))%")
+                                    .font(.caption.monospacedDigit().weight(.semibold))
+                                    .frame(minWidth: 44, minHeight: 44)
+                                    .background(.regularMaterial, in: Capsule())
+                            }
+                            .buttonStyle(.plain)
+                            .opacity(specialKeysIdleOpacity)
+                            .accessibilityLabel("Fit screen")
+                            .accessibilityValue("\(Int((zoom.scale * 100).rounded())) percent")
+                        }
+                    }
                     Spacer()
                 }
                 .padding(.leading, 12)
@@ -168,6 +198,7 @@ struct SessionView: View {
         .persistentSystemOverlays(.hidden)
         .animation(.easeInOut(duration: 0.25), value: shouldShowChrome)
         .animation(.easeInOut(duration: 0.25), value: zoom.isZoomed)
+        .animation(.easeInOut(duration: 0.35), value: zoomControlsVisible)
         .animation(.smooth(duration: 0.32), value: accessories.hasHardwareKeyboard)
         .animation(.smooth(duration: 0.32), value: accessories.hasIndirectPointer)
         .onAppear {
@@ -179,8 +210,14 @@ struct SessionView: View {
         .onChange(of: accessories.hasHardwareKeyboard) { _, connected in
             handleHardwareKeyboardChange(connected)
         }
+        .onChange(of: zoom.scale) { _, _ in showZoomControlsTemporarily() }
+        .onChange(of: zoom.interactionRevision) { _, _ in showZoomControlsTemporarily() }
+        .onChange(of: touchingZoomControls) { _, touching in
+            if !touching { showZoomControlsTemporarily() }
+        }
         .onDisappear {
             hideTask?.cancel()
+            zoomHideTask?.cancel()
             specialKeysIdleTask?.cancel()
         }
     }
@@ -244,6 +281,16 @@ struct SessionView: View {
     }
 
     // MARK: - Chrome reveal / auto-hide
+
+    private func showZoomControlsTemporarily() {
+        zoomRecentlyChanged = true
+        zoomHideTask?.cancel()
+        zoomHideTask = Task { @MainActor in
+            try? await Task.sleep(for: SessionZoomControlsPolicy.hideDelay)
+            guard !Task.isCancelled else { return }
+            zoomRecentlyChanged = false
+        }
+    }
 
     private func revealChrome() {
         chromeRevealed = true
@@ -552,6 +599,14 @@ enum SessionChromePolicy {
             return true
         }
         return false
+    }
+}
+
+enum SessionZoomControlsPolicy {
+    static let hideDelay: Duration = .seconds(3)
+
+    static func showsControls(chromeVisible: Bool, recentlyChanged: Bool, touching: Bool) -> Bool {
+        chromeVisible || recentlyChanged || touching
     }
 }
 
