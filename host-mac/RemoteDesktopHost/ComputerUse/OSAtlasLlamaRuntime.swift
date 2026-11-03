@@ -935,11 +935,11 @@ enum OSAtlasLlamaRuntimeError: Error, LocalizedError, Equatable {
         case .inputContextTooLarge:
             return "The current task and screenshot exceed the local model's context limit, so no further action was performed. Any earlier completed steps remain on the Mac."
         case .insufficientPhysicalMemory:
-            return "This Mac does not have enough physical memory for the local AI model."
+            return "This Mac does not have enough physical memory for the local AI model. Any earlier completed steps remain on the Mac."
         case .insufficientAvailableMemory:
             return "There is not enough available memory for AI Computer Use. Close some apps and try again. Any earlier completed steps remain on the Mac."
         case .resourceInspectionFailed:
-            return "The Mac could not verify that enough memory is available for AI Computer Use. Try again."
+            return "The Mac could not verify that enough memory is available for AI Computer Use. Try again. Any earlier completed steps remain on the Mac."
         }
     }
 }
