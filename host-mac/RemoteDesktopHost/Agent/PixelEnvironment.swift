@@ -199,6 +199,7 @@ final class PixelEnvironment: AgentEnvironment {
     func execute(_ resolved: AgentResolvedAction) async throws -> AgentExecutionResult {
         try checkScope(resolved.frame.scope)
         let startWindow = await frontWindowIdentity()
+        try checkActive()
         if let snapshot = snapshots[resolved.frame.scope.identity] { lastSnapshot = snapshot }
         let bindings = resolved.hostBinding as? PixelResolvedTargets
         var detail: String

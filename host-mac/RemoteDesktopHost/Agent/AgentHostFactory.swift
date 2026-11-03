@@ -20,7 +20,7 @@ enum AgentHostFactory {
         let storageDirectory: URL?
         let requireCleanStart: Bool
 
-        init(maxSteps: Int = 30, initialSurface: InitialSurface? = nil,
+        init(maxSteps: Int = 25, initialSurface: InitialSurface? = nil,
              fileRoots: [URL]? = nil, storageDirectory: URL? = nil,
              requireCleanStart: Bool = false,
              policy: AgentPolicyModel = .fara15_4b) {

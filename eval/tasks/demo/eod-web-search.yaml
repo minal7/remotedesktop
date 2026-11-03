@@ -1,0 +1,13 @@
+id: "eod-web-search"
+surface: web
+start: {url: "https://www.google.com/"}
+prompt: "Search the web for who designed the Sydney Opera House and tell me the answer and the source."
+checker:
+  type: manual_review
+  expect:
+    criteria:
+      - "The episode must show the search and a visible source supporting the architect's identity."
+      - "The final answer must identify Jorn Utzon (or Jørn Utzon) and name or link the observed source."
+max_steps: 15
+tags: ["eod-simple", "web", "search", "read-only"]
+approval_policy: {allow_start_interaction: true}

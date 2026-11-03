@@ -273,7 +273,7 @@
     "RemoteDesktopHostTests/AgentLoopTests/testExecutionCredentialHandoffStopsBeforeASecondModelAction",
     "RemoteDesktopHostTests/AgentLoopTests/testFooterPersistenceFailureStillStopsServicesAndTerminalizesLoop",
     "RemoteDesktopHostTests/AgentLoopTests/testHighRiskEnvironmentErrorIsUncertainAndNeverRetried",
-    "RemoteDesktopHostTests/AgentLoopTests/testMaximumLoopBudgetClampsLegacyFortyStepRequestsToThirty",
+    "RemoteDesktopHostTests/AgentLoopTests/testMaximumLoopBudgetClampsLegacyFortyStepRequestsToTwentyFive",
     "RemoteDesktopHostTests/AgentLoopTests/testOrdinaryLowRiskEffectErrorIsRecordedAndPolicyMayRecoverWithoutReplay",
     "RemoteDesktopHostTests/AgentLoopTests/testPauseDuringEffectWaitsForStopAndMakesStartedEffectUncertain",
     "RemoteDesktopHostTests/AgentLoopTests/testPixelFrontmostWindowChangeRebindsToRealFreshScope",
@@ -678,6 +678,12 @@
     "RemoteDesktopHostTests/AgentSharedSupportTests/testAttachedSheetTypingRequiresExactBoundedOwnerPath",
     "RemoteDesktopHostTests/AgentSharedSupportTests/testProtectedIntermediateSheetAncestorSuppressesWholeSheetProjection",
     "RemoteDesktopHostTests/AgentSharedSupportTests/testProtectedOwnerMasksAttachedSheetAndSuppressesItsMarks",
-    "RemoteDesktopHostTests/AgentSharedSupportTests/testProtectedAttachedSheetWithUnknownBoundsRequiresHandoff"
+    "RemoteDesktopHostTests/AgentSharedSupportTests/testProtectedAttachedSheetWithUnknownBoundsRequiresHandoff",
+    "RemoteDesktopHostTests/AgentLoopTests/testExpiredPendingApprovalFailsThroughResumeWithoutExecuting",
+    "RemoteDesktopHostTests/AgentLoopTests/testTaskDeadlinePreservesUncertainInterruptedInput",
+    "RemoteDesktopHostTests/AgentLoopTests/testTaskDeadlineStopsInFlightPolicyAndRejectsLateInput",
+    "RemoteDesktopHostTests/AgentLoopTests/testDeadlineWinningBeforeLateApprovalLeavesNoPendingApproval",
+    "RemoteDesktopHostTests/AgentLoopTests/testTaskDeadlineRejectsLateOpenAppWhileModelStartupIgnoresStop",
+    "RemoteDesktopHostTests/AgentLoopTests/testTaskDeadlineReturnsWhileObservationIgnoresStop"
   ]
 }

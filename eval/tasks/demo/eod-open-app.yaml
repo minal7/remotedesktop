@@ -1,0 +1,14 @@
+id: "eod-open-app"
+surface: app
+start: {app: "TextEdit"}
+setup: {new_untitled: true}
+prompt: "Open Calculator."
+checker:
+  type: manual_review
+  expect:
+    criteria:
+      - "The episode must show an open_app action followed by an observed Calculator window."
+      - "The final state must honestly report that Calculator is open; no unrelated app or file changes."
+max_steps: 8
+tags: ["eod-simple", "native", "open-app"]
+approval_policy: {allow_start_interaction: true}

@@ -36,34 +36,41 @@ final class AgentLoop {
     private var progressNeedsSafeFallback = false
     private var deniedApprovalFingerprints: Set<String> = []
     private var taskDeclineCount = 0
+    private let taskTimeLimit: Duration
+    private var taskDeadline: ContinuousClock.Instant?
+    private var deadlineWatchdog: Task<Void, Never>?
+    private var deadlineExpired = false
+    private var inFlightInput: (step: Int, fingerprint: String)?
+    private let timeoutReason = "Couldn't finish within five minutes. Try a shorter task or take over."
 
-    init(taskID: String, prompt: String, maxSteps: Int = 30, environment: AgentEnvironment,
+    init(taskID: String, prompt: String, maxSteps: Int = 25, environment: AgentEnvironment,
          policy: AgentPolicy, gate: AgentActionGate, recorder: AgentRecording,
-         journal: AgentEffectJournaling) throws {
-        guard !taskID.isEmpty, !prompt.isEmpty, (1...40).contains(maxSteps) else {
+         journal: AgentEffectJournaling, taskTimeLimit: Duration = .seconds(300)) throws {
+        guard !taskID.isEmpty, !prompt.isEmpty, (1...40).contains(maxSteps),
+              taskTimeLimit > .zero, taskTimeLimit <= .seconds(300) else {
             throw AgentLoopError.invalidConfiguration
         }
-        self.taskID = taskID; taskText = prompt; self.maxSteps = min(maxSteps, 30)
+        self.taskID = taskID; taskText = prompt; self.maxSteps = min(maxSteps, 25)
         self.environment = environment; self.policy = policy; self.gate = gate
-        self.recorder = recorder; self.journal = journal
+        self.recorder = recorder; self.journal = journal; self.taskTimeLimit = taskTimeLimit
     }
 
     func run() async throws -> AgentLoopResult {
         if let terminalResult { return terminalResult }
         if let pendingStep { return .pendingApproval(pendingStep.approval) }
         if let pendingQuestion { return .askUser(pendingQuestion) }
-        return try await guarded { try await runSteps() }
+        return try await guarded { [self] in try await runSteps() }
     }
 
     func resume(approvalID: UUID, approved: Bool) async throws -> AgentLoopResult {
         guard let pending = pendingStep, pending.approval.id == approvalID else { throw AgentLoopError.noMatchingApproval }
-        return try await guarded { try await continueApproval(pending, approved: approved) }
+        return try await guarded { [self] in try await continueApproval(pending, approved: approved) }
     }
 
     func resume(answer: String) async throws -> AgentLoopResult {
         guard let question = pendingQuestion else { throw AgentLoopError.noPendingQuestion }
-        return try await guarded {
-            try await activate(); pendingQuestion = nil
+        return try await guarded { [self] in
+            try await activate(); try checkBoundary(); pendingQuestion = nil
             taskText += "\nAccepted clarification: " + answer; corrections.append(answer)
             history.append(.init(action: .askUser(question: question.question, choices: question.choices),
                                  result: "User clarification: \(answer)"))
@@ -71,16 +78,60 @@ final class AgentLoop {
         }
     }
 
-    private func guarded(_ body: () async throws -> AgentLoopResult) async throws -> AgentLoopResult {
+    private func guarded(_ body: @escaping @MainActor () async throws -> AgentLoopResult) async throws -> AgentLoopResult {
         guard !isRunning else { throw AgentLoopError.alreadyRunning }
         isRunning = true; defer { completeRunCall() }
+        let deadline = taskDeadline ?? (ContinuousClock.now + taskTimeLimit)
+        taskDeadline = deadline
+        let race = LoopResultRace()
+        // These tasks deliberately do not form a task group: a noncooperative
+        // capture or model startup must not keep the caller waiting at timeout.
+        let worker = Task { @MainActor [self] in
+            do { race.resolve(.success(try await runGuardedBody(body))) }
+            catch { race.resolve(.failure(error)) }
+        }
+        deadlineWatchdog = Task { @MainActor [weak self] in
+            do { try await ContinuousClock().sleep(until: deadline) }
+            catch { return }
+            guard let self, self.isRunning, !race.isResolved else { return }
+            self.deadlineExpired = true
+            worker.cancel()
+            let interruptedInput = self.inFlightInput
+            do {
+                if !self.didFinish, let interruptedInput {
+                    do { try self.journal.markUncertain(step: interruptedInput.step, fingerprint: interruptedInput.fingerprint) }
+                    catch { self.corrections.append("Could not durably mark the interrupted input uncertain: \(error)") }
+                }
+                let reason = interruptedInput == nil ? self.timeoutReason
+                    : "An interrupted input attempt may have taken effect. Take over to check it."
+                let result = try self.finishRecord(.failed(reason: reason),
+                    outcome: interruptedInput == nil ? "failed" : "uncertain")
+                Task { @MainActor in await self.stopServices() }
+                race.resolve(.success(result))
+            } catch {
+                Task { @MainActor in await self.stopServices() }
+                race.resolve(.failure(error))
+            }
+        }
         return try await withTaskCancellationHandler {
-            do { return try await body() }
+            try await race.wait()
+        } onCancel: {
+            worker.cancel()
+            Task { @MainActor [weak self] in await self?.signalCancellation() }
+        }
+    }
+
+    private func runGuardedBody(_ body: @MainActor () async throws -> AgentLoopResult) async throws -> AgentLoopResult {
+            do { try checkDeadline(); return try await body() }
+            catch LoopDeadline.exceeded {
+                return try await finish(.failed(reason: timeoutReason), outcome: "failed")
+            }
             catch AgentPolicyTermination.authorizationRevoked {
                 corrections.append("Local authorization ended; the task stopped before using its stale result.")
                 return try await finish(.cancelled, outcome: "cancelled")
             }
             catch is CancellationError {
+                if deadlineExpired { return try await finish(.failed(reason: timeoutReason), outcome: "failed") }
                 if pauseRequested && !cancelRequested { return .paused }
                 return try await finish(.cancelled, outcome: "cancelled")
             } catch LoopPause.requested { return .paused }
@@ -93,7 +144,6 @@ final class AgentLoop {
                 if case .recordingFailed = error { await stopAfterRecordingFailure(error); throw error }
                 return try await finish(.failed(reason: String(describing: error)), outcome: "failed")
             } catch { return try await finish(.failed(reason: String(describing: error)), outcome: "failed") }
-        } onCancel: { Task { @MainActor [weak self] in await self?.signalCancellation() } }
     }
 
     private func continueApproval(_ pending: PendingStep, approved: Bool) async throws -> AgentLoopResult {
@@ -126,8 +176,9 @@ final class AgentLoop {
         try await activate(); try checkBoundary()
         let frame = try await freshFrame(transition: pending.resolved.action)
         let rebound: AgentResolvedAction
-        do { rebound = try await environment.rebind(pending.resolved, in: frame) }
+        do { rebound = try await environment.rebind(pending.resolved, in: frame); try checkBoundary() }
         catch {
+            try checkBoundary()
             gate.cancelPendingApproval(pending.approval.id); pendingStep = nil
             try record(frame.observation, raw: "", action: pending.resolved.action,
                        gate: rejected("Approval target changed: \(error)", scope: frame.scope),
@@ -190,6 +241,7 @@ final class AgentLoop {
             try checkBoundary()
             let start = Date(), observeStart = Date()
             let frame = try await freshFrame()
+            try checkBoundary()
             let observeMS = ms(observeStart)
             let policyStart = Date()
             let output: AgentPolicyOutput
@@ -241,6 +293,7 @@ final class AgentLoop {
                     observeMS: observeMS, policyMS: policyMS, note: output.resultLineNote) { return result }
                 continue
             }
+            try checkBoundary()
             let action = resolved.action
             let gateStart = Date()
             let evaluation: AgentGateEvaluation
@@ -346,9 +399,12 @@ final class AgentLoop {
             do { try journal.assertMayContinue(); try journal.begin(step: stepIndex, fingerprint: fingerprint) }
             catch { throw AgentLoopError.journalFailed("Could not begin action: \(error)") }
         }
+        if begins { inFlightInput = (stepIndex, fingerprint) }
+        defer { inFlightInput = nil }
         let result: AgentExecutionResult
         do { try checkBoundary(); result = try await environment.execute(resolved); try checkBoundary() }
         catch let error as AgentEnvironmentError {
+            if didFinish { return terminalResult }
             if case .systemHandoff(let reason) = error {
                 if begins { try journal.verify(step: stepIndex, fingerprint: fingerprint) }
                 try record(observation, raw: raw, action: action, gate: gate,
@@ -370,7 +426,8 @@ final class AgentLoop {
             return try await recoverAttempt(error, observation, raw, action, gate, start,
                                             observeMS, policyMS, gateMS, executionStart, fingerprint, begins, note)
         } catch {
-            if error is CancellationError || error is LoopPause || cancelRequested || Task.isCancelled {
+            if didFinish { return terminalResult }
+            if error is CancellationError || error is LoopPause || error is LoopDeadline || cancelRequested || Task.isCancelled {
                 if begins { try journal.markUncertain(step: stepIndex, fingerprint: fingerprint) }
                 try record(observation, raw: raw, action: action, gate: gate,
                            execution: .init(status: .error, result: noted("Interrupted input attempt: \(error)", note)),
@@ -457,6 +514,7 @@ final class AgentLoop {
             return try await finish(.failed(reason: "High-risk action outcome is uncertain."), outcome: "uncertain")
         }
         if begins && environment.followsFrontmostSurface { try await Task.sleep(for: .milliseconds(300)) }
+        try checkBoundary()
         if begins { try journal.verify(step: stepIndex, fingerprint: fingerprint) }
         try record(observation, raw: raw, action: action, gate: gate,
                    execution: .init(status: .error, result: noted("Attempted; environment error: \(error)", note)),
@@ -489,6 +547,7 @@ final class AgentLoop {
         let context = AgentObservationContext(task: taskText, history: history,
             budget: .init(step: stepIndex, maxSteps: maxSteps))
         let frame = try await environment.observe(context)
+        try checkBoundary()
         let matches: Bool
         switch (frame.scope.kind, frame.observation.surface) {
         case (.web, .web), (.app, .app): matches = true
@@ -512,14 +571,24 @@ final class AgentLoop {
         guard let boundScope else { throw AgentLoopError.invalidConfiguration }; return boundScope
     }
 
+    private func checkDeadline() throws {
+        if deadlineExpired || taskDeadline.map({ ContinuousClock.now >= $0 }) == true {
+            deadlineExpired = true
+            throw LoopDeadline.exceeded
+        }
+    }
+
     private func checkBoundary() throws {
+        if didFinish { throw CancellationError() }
+        try checkDeadline()
         if cancelRequested || Task.isCancelled { throw CancellationError() }
         if pauseRequested { throw LoopPause.requested }
     }
 
     private func activate() async throws {
         guard pauseRequested else { return }
-        try await environment.resume(); try await policy.resume(); pauseRequested = false
+        try await environment.resume(); try checkDeadline()
+        try await policy.resume(); try checkDeadline(); pauseRequested = false
     }
 
     private func isInput(_ action: AgentAction) -> Bool {
@@ -536,6 +605,7 @@ final class AgentLoop {
     private func record(_ observation: AgentObservation, raw: String, action: AgentAction?, gate: AgentGateResult,
                         execution: AgentExecutionResult, start: Date, observeMS: Int = 0,
                         policyMS: Int = 0, gateMS: Int = 0, executionMS: Int = 0) throws {
+        if didFinish { throw CancellationError() }
         let step = AgentEpisodeStep(episodeID: taskID, step: stepIndex, observation: observation,
             promptVersion: policy.promptVersion, rawModelOutput: raw, action: action, gate: gate,
             execution: execution, timings: .init(observationMS: observeMS, policyMS: policyMS,
@@ -550,13 +620,26 @@ final class AgentLoop {
     }
 
     private func finish(_ result: AgentLoopResult, outcome: String) async throws -> AgentLoopResult {
+        let retained = try finishRecord(result, outcome: outcome)
+        await stopServices()
+        return retained
+    }
+
+    private func finishRecord(_ result: AgentLoopResult, outcome: String) throws -> AgentLoopResult {
         guard !didFinish else { return terminalResult ?? result }
         if let pendingStep { gateCancel(pendingStep.approval.id) }
         pendingStep = nil; pendingQuestion = nil
         footerAttempted = true
+        // Set the fence before any asynchronous teardown. Both the timeout and
+        // late worker may arrive here, but only one may write a terminal footer.
+        didFinish = true
+        terminalResult = result
         do { try recorder.finish(.init(episodeID: taskID, outcome: outcome, approvals: approvals, corrections: corrections)) }
-        catch { terminalResult = .failed(reason: "Could not durably finish episode: \(error)"); await stopServices(); didFinish = true; throw AgentLoopError.recordingFailed(String(describing: error)) }
-        await stopServices(); didFinish = true; terminalResult = result; return result
+        catch {
+            terminalResult = .failed(reason: "Could not durably finish episode: \(error)")
+            throw AgentLoopError.recordingFailed(String(describing: error))
+        }
+        return result
     }
 
     private func gateCancel(_ id: UUID) { gate.cancelPendingApproval(id) }
@@ -577,6 +660,9 @@ final class AgentLoop {
     }
     private func signalCancellation() async { cancelRequested = true; await stopServices() }
     private func completeRunCall() {
+        // Approval, clarification and takeover already show a needs-you state.
+        // Keep that state intact; a later Resume checks the original deadline.
+        deadlineWatchdog?.cancel(); deadlineWatchdog = nil
         isRunning = false; let waiters = completionWaiters; completionWaiters.removeAll(); waiters.forEach { $0.resume() }
     }
     private func waitForRunCall() async {
@@ -585,5 +671,28 @@ final class AgentLoop {
     private func ms(_ start: Date) -> Int { max(0, Int(Date().timeIntervalSince(start) * 1_000)) }
 }
 
+private enum LoopDeadline: Error { case exceeded }
 private enum LoopPause: Error { case requested }
 private enum LoopBoundary: Error { case handoff(String) }
+
+@MainActor
+private final class LoopResultRace {
+    private var result: Result<AgentLoopResult, Error>?
+    private var continuation: CheckedContinuation<AgentLoopResult, Error>?
+
+    var isResolved: Bool { result != nil }
+
+    func resolve(_ result: Result<AgentLoopResult, Error>) {
+        guard self.result == nil else { return }
+        self.result = result
+        continuation?.resume(with: result)
+        continuation = nil
+    }
+
+    func wait() async throws -> AgentLoopResult {
+        try await withCheckedThrowingContinuation { continuation in
+            if let result { continuation.resume(with: result) }
+            else { self.continuation = continuation }
+        }
+    }
+}

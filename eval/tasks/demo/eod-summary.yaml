@@ -1,0 +1,13 @@
+id: "eod-summary"
+surface: web
+start: {url: "https://example.org/"}
+prompt: "Open https://www.iana.org/domains/reserved and summarise what it says about example domains."
+checker:
+  type: manual_review
+  expect:
+    criteria:
+      - "The episode must show the requested IANA page opened, rather than answer from memory."
+      - "The answer must accurately summarise the observed purpose and use of example domains, without unsupported details."
+max_steps: 15
+tags: ["eod-simple", "web", "open-url", "summary", "read-only"]
+approval_policy: {allow_start_interaction: true}

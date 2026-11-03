@@ -579,10 +579,133 @@ final class AgentLoopTests: XCTestCase {
         XCTAssertEqual(policy.stopCount, 1)
     }
 
-    func testMaximumLoopBudgetClampsLegacyFortyStepRequestsToThirty() throws {
+    func testMaximumLoopBudgetClampsLegacyFortyStepRequestsToTwentyFive() throws {
         let loop = try makeLoop(environment: TestEnvironment(frames: [webFrame()]),
             policy: TestPolicy([]), recorder: TestRecorder(), journal: TestJournal(), maxSteps: 40)
-        XCTAssertEqual(loop.maxSteps, 30)
+        XCTAssertEqual(loop.maxSteps, 25)
+    }
+
+    func testTaskDeadlineStopsInFlightPolicyAndRejectsLateInput() async throws {
+        let environment = TestEnvironment(frames: [webFrame(elements: [button(id: 1, name: "Continue")])])
+        let policy = LateOutputPolicy(.click(target: .element(id: 1), button: nil, count: nil))
+        let recorder = TestRecorder()
+        let loop = try makeLoop(environment: environment, policy: policy, recorder: recorder,
+            journal: TestJournal(), trustedWeb: true, taskTimeLimit: .milliseconds(30))
+
+        guard case .failed(let reason) = try await loop.run() else {
+            return XCTFail("The task deadline must end an in-flight proposal")
+        }
+        XCTAssertTrue(reason.contains("five minutes"))
+        XCTAssertTrue(loop.didFinish)
+        XCTAssertTrue(environment.executed.isEmpty)
+        XCTAssertEqual(policy.stopCount, 1)
+        XCTAssertEqual(recorder.finishCount, 1)
+    }
+
+    func testTaskDeadlineReturnsWhileObservationIgnoresStop() async throws {
+        let environment = TestEnvironment(frames: [webFrame()], blockObservation: true)
+        let recorder = TestRecorder()
+        let loop = try makeLoop(environment: environment,
+            policy: TestPolicy([.action(.done(answer: "Late answer"))]), recorder: recorder,
+            journal: TestJournal(), trustedWeb: true, taskTimeLimit: .milliseconds(30))
+        // Release eventually even if the deadline regresses, so this test fails
+        // promptly instead of hanging the entire release suite.
+        let fallback = Task { @MainActor in
+            try? await Task.sleep(for: .seconds(1))
+            environment.releaseObservation()
+        }
+        let started = ContinuousClock.now
+        let result = try await loop.run()
+        let elapsed = started.duration(to: .now)
+        fallback.cancel()
+        environment.releaseObservation()
+        for _ in 0..<10 { await Task.yield() }
+        guard case .failed = result else { return XCTFail("A stalled observation must time out") }
+        XCTAssertLessThan(elapsed, .milliseconds(500))
+        XCTAssertTrue(environment.executed.isEmpty)
+        XCTAssertTrue(recorder.steps.isEmpty, "The late observation must not append after the terminal footer")
+        XCTAssertEqual(recorder.finishCount, 1)
+    }
+
+    func testTaskDeadlineRejectsLateOpenAppWhileModelStartupIgnoresStop() async throws {
+        let environment = TestEnvironment(frames: [webFrame(elements: [button(id: 1, name: "Continue")])])
+        let policy = LateOutputPolicy(.openApp(name: "Generic Utility"), releasesOnStop: false)
+        let recorder = TestRecorder()
+        let loop = try makeLoop(environment: environment, policy: policy, recorder: recorder,
+            journal: TestJournal(), trustedWeb: true, taskTimeLimit: .milliseconds(30))
+        let fallback = Task { @MainActor in
+            try? await Task.sleep(for: .seconds(1))
+            policy.releaseOutput()
+        }
+        let started = ContinuousClock.now
+        let result = try await loop.run()
+        let elapsed = started.duration(to: .now)
+        fallback.cancel()
+        policy.releaseOutput()
+        for _ in 0..<10 { await Task.yield() }
+        guard case .failed = result else { return XCTFail("A stalled model startup must time out") }
+        XCTAssertLessThan(elapsed, .milliseconds(500))
+        XCTAssertTrue(environment.executed.isEmpty)
+        XCTAssertTrue(recorder.steps.isEmpty, "The late model result must not append after the terminal footer")
+        XCTAssertEqual(recorder.finishCount, 1)
+    }
+
+    func testDeadlineWinningBeforeLateApprovalLeavesNoPendingApproval() async throws {
+        let environment = TestEnvironment(frames: [webFrame(elements: [button(id: 1, name: "Submit")])])
+        let policy = LateOutputPolicy(.click(target: .element(id: 1), button: nil, count: nil), releasesOnStop: false)
+        let recorder = TestRecorder()
+        let loop = try makeLoop(environment: environment, policy: policy, recorder: recorder,
+            journal: TestJournal(), taskTimeLimit: .milliseconds(30))
+        let fallback = Task { @MainActor in
+            try? await Task.sleep(for: .seconds(1))
+            policy.releaseOutput()
+        }
+        let result = try await loop.run()
+        fallback.cancel()
+        policy.releaseOutput()
+        for _ in 0..<10 { await Task.yield() }
+        guard case .failed = result else { return XCTFail("The deadline must win before the late approval") }
+        XCTAssertNil(loop.pendingStep)
+        XCTAssertTrue(environment.executed.isEmpty)
+        XCTAssertTrue(recorder.steps.isEmpty)
+        XCTAssertEqual(recorder.finishCount, 1)
+    }
+
+    func testExpiredPendingApprovalFailsThroughResumeWithoutExecuting() async throws {
+        let frame = webFrame(elements: [button(id: 1, name: "Submit")])
+        let environment = TestEnvironment(frames: [frame])
+        let policy = TestPolicy([.action(.click(target: .element(id: 1), button: nil, count: nil))])
+        let recorder = TestRecorder()
+        let loop = try makeLoop(environment: environment, policy: policy, recorder: recorder,
+            journal: TestJournal(), taskTimeLimit: .milliseconds(30))
+        guard case .pendingApproval(let approval) = try await loop.run() else {
+            return XCTFail("Expected an approval")
+        }
+        try await Task.sleep(for: .milliseconds(50))
+        XCTAssertFalse(loop.didFinish, "Do not silently expire a phone approval outside its normal result path")
+        guard case .failed = try await loop.resume(approvalID: approval.id, approved: true) else {
+            return XCTFail("Resume must publish the elapsed deadline before the approved action")
+        }
+        XCTAssertTrue(environment.executed.isEmpty)
+        XCTAssertEqual(recorder.finishCount, 1)
+    }
+
+    func testTaskDeadlinePreservesUncertainInterruptedInput() async throws {
+        let environment = TestEnvironment(frames: [webFrame(elements: [button(id: 1, name: "Continue")])],
+            blockExecution: true)
+        let policy = TestPolicy([.action(.click(target: .element(id: 1), button: nil, count: nil))])
+        let journal = TestJournal()
+        let recorder = TestRecorder()
+        let loop = try makeLoop(environment: environment, policy: policy, recorder: recorder,
+            journal: journal, trustedWeb: true, taskTimeLimit: .milliseconds(30))
+
+        guard case .failed = try await loop.run() else {
+            return XCTFail("A timed-out input must terminate")
+        }
+        XCTAssertEqual(journal.uncertain.count, 1)
+        XCTAssertEqual(recorder.footer?.outcome, "uncertain")
+        XCTAssertEqual(environment.executed.count, 1)
+        XCTAssertEqual(recorder.finishCount, 1)
     }
 
     func testSameFingerprintRepeatConsumesSecondTaskDeclineAndBlocks() async throws {
@@ -653,13 +776,14 @@ final class AgentLoopTests: XCTestCase {
 
     private func makeLoop(environment: TestEnvironment, policy: any AgentPolicy, recorder: TestRecorder,
                           journal: TestJournal, trustedWeb: Bool = false,
-                          appIdentity: String? = nil, maxSteps: Int = 40) throws -> AgentLoop {
+                          appIdentity: String? = nil, maxSteps: Int = 40,
+                          taskTimeLimit: Duration = .seconds(300)) throws -> AgentLoop {
         let store = TestTrustStore(trustedWeb: trustedWeb)
         let allowPolicy = TestAllowPolicy(appIdentity: appIdentity)
         return try AgentLoop(taskID: "task-1", prompt: "Complete a generic task", maxSteps: maxSteps,
                              environment: environment,
                              policy: policy, gate: AgentActionGate(trustStore: store, allowPolicy: allowPolicy),
-                             recorder: recorder, journal: journal)
+                             recorder: recorder, journal: journal, taskTimeLimit: taskTimeLimit)
     }
 
     private func webFrame(scope: AgentScope = AgentScope(taskID: "task-1", kind: .web, identity: "tab-1"),
@@ -705,11 +829,13 @@ private final class TestPolicy: AgentPolicy {
 private final class LateOutputPolicy: AgentPolicy {
     let promptVersion = "late-output-test"
     private let output: AgentPolicyOutput
+    private let releasesOnStop: Bool
     private var continuation: CheckedContinuation<AgentPolicyOutput, Never>?
     private(set) var proposalStarted = false
     private(set) var stopCount = 0
 
-    init(_ action: AgentAction) {
+    init(_ action: AgentAction, releasesOnStop: Bool = true) {
+        self.releasesOnStop = releasesOnStop
         output = .init(rawOutput: "late action", action: action, rejectionReason: nil)
     }
 
@@ -720,6 +846,10 @@ private final class LateOutputPolicy: AgentPolicy {
 
     func stop() async {
         stopCount += 1
+        if releasesOnStop { releaseOutput() }
+    }
+
+    func releaseOutput() {
         continuation?.resume(returning: output)
         continuation = nil
     }
@@ -731,6 +861,8 @@ private final class TestEnvironment: AgentEnvironment {
     private let executeError: Error?
     private let executionResult: AgentExecutionResult?
     private let blockExecution: Bool
+    private let blockObservation: Bool
+    private var observationContinuation: CheckedContinuation<Void, Never>?
     var followsFrontmostSurface: Bool
     private var continuation: CheckedContinuation<AgentExecutionResult, Error>?
     private var observeIndex = 0
@@ -743,14 +875,21 @@ private final class TestEnvironment: AgentEnvironment {
     private(set) var lastContext: AgentObservationContext?
 
     init(frames: [AgentFrame], executeError: Error? = nil, executionResult: AgentExecutionResult? = nil,
-         blockExecution: Bool = false,
+         blockExecution: Bool = false, blockObservation: Bool = false,
          followsFrontmostSurface: Bool = false) {
         self.frames = frames; self.executeError = executeError; self.executionResult = executionResult
         self.blockExecution = blockExecution
+        self.blockObservation = blockObservation
         self.followsFrontmostSurface = followsFrontmostSurface
     }
 
+    func releaseObservation() {
+        observationContinuation?.resume()
+        observationContinuation = nil
+    }
+
     func observe(_ context: AgentObservationContext) async throws -> AgentFrame {
+        if blockObservation { await withCheckedContinuation { observationContinuation = $0 } }
         lastContext = context
         let source = frames[min(observeIndex, frames.count - 1)]
         observeIndex += 1; observedScopes.append(source.scope)
