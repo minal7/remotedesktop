@@ -686,6 +686,10 @@
     "RemoteDesktopHostTests/AgentLoopTests/testTaskDeadlineStopsInFlightPolicyAndRejectsLateInput",
     "RemoteDesktopHostTests/AgentLoopTests/testDeadlineWinningBeforeLateApprovalLeavesNoPendingApproval",
     "RemoteDesktopHostTests/AgentLoopTests/testTaskDeadlineRejectsLateOpenAppWhileModelStartupIgnoresStop",
-    "RemoteDesktopHostTests/AgentLoopTests/testTaskDeadlineReturnsWhileObservationIgnoresStop"
+    "RemoteDesktopHostTests/AgentLoopTests/testTaskDeadlineReturnsWhileObservationIgnoresStop",
+    "RemoteDesktopHostTests/AgentHostServicesTests/testDirectOpenOnlyAcceptsWholePromptAndOneExactReviewedInstalledName",
+    "RemoteDesktopHostTests/AgentLoopTests/testDirectOpenUsesApprovalAndFinishesWithoutModel",
+    "RemoteDesktopHostTests/AgentLoopTests/testDirectOpenStopDuringApprovalNeverOpensOrCallsModel",
+    "RemoteDesktopHostTests/AgentLoopTests/testDirectOpenFailedForegroundCheckDoesNotReportSuccessOrInvokeModel"
   ]
 }
