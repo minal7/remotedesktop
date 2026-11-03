@@ -100,15 +100,18 @@ enum PixelTargetSnapping {
         // Bounded rays refine observed hits; this is not an exhaustive pixel-level proof.
         let directions: [(CGFloat, CGFloat)] = [(1, 0), (-1, 0), (0, 1), (0, -1),
             (1, 1), (1, -1), (-1, 1), (-1, -1)]
-        let points = [0.15, 0.30, 0.45].flatMap { fraction in
-            directions.map { dx, dy in
+        let fractions: [CGFloat] = [0.15, 0.30, 0.45]
+        let rayPoints: [CGPoint] = fractions.flatMap { fraction in
+            directions.map { dx, dy -> CGPoint in
                 CGPoint(x: origin.x + rect.width * fraction * dx,
                         y: origin.y + rect.height * fraction * dy)
             }
-        }.filter { rect.contains($0) }.sorted {
-            let left = ($0.x - origin.x) * ($0.x - origin.x) + ($0.y - origin.y) * ($0.y - origin.y)
-            let right = ($1.x - origin.x) * ($1.x - origin.x) + ($1.y - origin.y) * ($1.y - origin.y)
-            return left == right ? ($0.y, $0.x) < ($1.y, $1.x) : left < right
+        }
+        let containedPoints: [CGPoint] = rayPoints.filter { rect.contains($0) }
+        let points: [CGPoint] = containedPoints.sorted { first, second in
+            let left: CGFloat = (first.x - origin.x) * (first.x - origin.x) + (first.y - origin.y) * (first.y - origin.y)
+            let right: CGFloat = (second.x - origin.x) * (second.x - origin.x) + (second.y - origin.y) * (second.y - origin.y)
+            return left == right ? (first.y, first.x) < (second.y, second.x) : left < right
         }
         var best: CGPoint?
         var bestDistance = CGFloat.infinity
