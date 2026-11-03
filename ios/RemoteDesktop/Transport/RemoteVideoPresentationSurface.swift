@@ -33,6 +33,7 @@ final class RemoteVideoPresentationSurface: NSObject, RTCVideoRenderer {
     private var deadline: Task<Void, Never>?
     private var deadlineID: UUID?
     private var failedAttempts = 0
+    private var failedRetryFrameID: UUID?
     private var layoutChangeCount = 0
     private var lastLayoutWasContinuous = false
     private var lastLayoutHadPendingFrame = false
@@ -111,7 +112,9 @@ final class RemoteVideoPresentationSurface: NSObject, RTCVideoRenderer {
         producer.replaceContext()
         let context = producer.contextID
         mailbox.replaceContext(next == nil ? nil : context,
-                               preservingLatestFrom: continuous ? previousContext : nil)
+                               preservingLatestFrom: continuous ? previousContext : nil,
+                               excludingFrameID: failedRetryFrameID)
+        failedRetryFrameID = nil
         presentation.begin(context: context)
         layoutChangeCount = min(layoutChangeCount + 1, 17)
         lastLayoutWasContinuous = continuous
@@ -140,7 +143,7 @@ final class RemoteVideoPresentationSurface: NSObject, RTCVideoRenderer {
             guard let drawable else { self.retryLater(context); return }
             guard let entry = self.mailbox.takeLatest(context: context) else { return }
             let admission = self.producer.submit(frame: entry.frame, frameID: entry.id, drawable: drawable, contentMode: layout.mode) { [weak self] frame, result in
-                self?.received(result, frame: frame, context: context)
+                self?.received(result, frame: frame, entry: entry, context: context)
             }
             guard self.isCurrent(context) else { return }
             switch admission {
@@ -155,14 +158,15 @@ final class RemoteVideoPresentationSurface: NSObject, RTCVideoRenderer {
         if !admitted { phase = .idle; retryLater(context) }
     }
 
-    private func received(_ result: RemoteVideoPresentationLedger.Result, frame: UUID, context: UUID) {
+    private func received(_ result: RemoteVideoPresentationLedger.Result, frame: UUID,
+                          entry: RemoteVideoLatestFrameMailbox<RTCVideoFrame>.Entry, context: UUID) {
         guard isCurrent(context), phase == .submitted(frame) else { return }
         phase = .idle
         // Observe a current failure before refreshing geometry. Otherwise a
         // layout discovered by this callback could transfer the failed image
         // and suppress the failure as belonging to the replaced context.
         switch result {
-        case .skipped, .failed: mailbox.discard(frame: frame, context: context)
+        case .skipped, .failed: failedRetryFrameID = frame
         case .expired:
             fail(context, message: "The remote screen stopped refreshing. Reconnect to try again.", category: .presentationExpired)
             return
@@ -172,13 +176,14 @@ final class RemoteVideoPresentationSurface: NSObject, RTCVideoRenderer {
         guard isCurrent(context), layout != nil else { return }
         switch result {
         case .presented(let time), .rendered(let time):
-            cancelWaits(); failedAttempts = 0
+            cancelWaits(); failedAttempts = 0; failedRetryFrameID = nil
             if case .presented = result { presentation.present(context: context, frame: frame, time: time) }
             else { presentation.render(context: context, frame: frame, time: time) }
             if isCurrent(context) { requestNext() }
         case .skipped, .failed:
-            // A known failed image is not a layout redraw candidate. A newer
-            // decode may recover; committed drawables are never reused.
+            // Retry the exact latest frame on a fresh drawable. A newer
+            // decode wins; failed images never cross a layout context.
+            mailbox.restoreUnlessNewer(entry)
             retryLater(context)
         case .expired:
             break // Handled before layout refresh.

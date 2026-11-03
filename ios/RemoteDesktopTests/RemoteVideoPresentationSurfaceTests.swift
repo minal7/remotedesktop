@@ -233,6 +233,30 @@ final class RemoteVideoPresentationSurfaceTests: XCTestCase {
         XCTAssertNil(mailbox.takeLatest(context: fourth))
     }
 
+    func test_failedPresentationRetriesLatestOnlyWithinItsContext() throws {
+        let mailbox = RemoteVideoLatestFrameMailbox<SurfaceMailboxFrame>()
+        let first = UUID(), second = UUID(), third = UUID()
+        mailbox.replaceContext(first)
+        mailbox.offer(SurfaceMailboxFrame(1))
+        let failed = try XCTUnwrap(mailbox.takeLatest(context: first))
+        mailbox.restoreUnlessNewer(failed)
+        XCTAssertEqual(mailbox.takeLatest(context: first)?.id, failed.id,
+                       "A transient failure can retry the same decoded frame")
+        mailbox.restoreUnlessNewer(failed)
+        mailbox.replaceContext(second, preservingLatestFrom: first, excludingFrameID: failed.id)
+        XCTAssertNil(mailbox.takeLatest(context: second), "A failed frame cannot cross layout contexts")
+        mailbox.restoreUnlessNewer(failed)
+        XCTAssertNil(mailbox.takeLatest(context: second), "An old retry cannot revive a replaced context")
+
+        mailbox.offer(SurfaceMailboxFrame(2))
+        let older = try XCTUnwrap(mailbox.takeLatest(context: second))
+        mailbox.offer(SurfaceMailboxFrame(3))
+        mailbox.restoreUnlessNewer(older)
+        mailbox.replaceContext(third, preservingLatestFrom: second, excludingFrameID: older.id)
+        let newer = try XCTUnwrap(mailbox.takeLatest(context: third))
+        XCTAssertEqual(newer.frame.value, 3, "A newer decode must win and remain eligible for redraw")
+    }
+
     func test_frameMailboxLateUncommittedRestoreCannotRegressAConsumedNewerDecode() throws {
         let mailbox = RemoteVideoLatestFrameMailbox<SurfaceMailboxFrame>(), context = UUID(), next = UUID()
         mailbox.replaceContext(context); mailbox.offer(SurfaceMailboxFrame(1))

@@ -30,10 +30,11 @@ final class RemoteVideoLatestFrameMailbox<Frame: AnyObject>: @unchecked Sendable
     /// Preservation requires the exact previous context. The surface supplies
     /// it only for a continuous, eligible layout in the same native window.
     /// Nil/foreign contexts, hiding and retirement cannot transfer an image.
-    func replaceContext(_ context: UUID?, preservingLatestFrom previous: UUID? = nil) {
+    func replaceContext(_ context: UUID?, preservingLatestFrom previous: UUID? = nil,
+                        excludingFrameID: UUID? = nil) {
         lock.lock()
         let old = latest
-        if let context, let previous, self.context == previous, let old {
+        if let context, let previous, self.context == previous, let old, old.id != excludingFrameID {
             latest = Entry(context: context, id: old.id, frame: old.frame)
         } else { latest = nil }
         self.context = context; pending = latest != nil; wake = nil
@@ -73,8 +74,8 @@ final class RemoteVideoLatestFrameMailbox<Frame: AnyObject>: @unchecked Sendable
         return latest
     }
 
-    /// Only for an uncommitted admission failure. The caller owns its retry;
-    /// restoring an older entry must never replace a newly received frame.
+    /// The caller owns its bounded retry; an older entry never replaces a
+    /// newly received frame or crosses a context boundary.
     func restoreUnlessNewer(_ entry: Entry) {
         lock.lock(); defer { lock.unlock() }
         guard context == entry.context, latest?.id == entry.id, !pending else { return }
