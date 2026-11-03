@@ -387,7 +387,7 @@ class BuildAndRunContractTests(unittest.TestCase):
         self.assertNotIn("xcodebuild", completed.stdout + completed.stderr)
 
 
-    def test_memory_beta_condition_is_release_scoped_in_specs_and_projects(self) -> None:
+    def test_memory_beta_condition_is_absent_in_specs_and_projects(self) -> None:
         projects = (
             (REPO_ROOT / "host-mac/project.yml",
              REPO_ROOT / "host-mac/RemoteDesktopHost.xcodeproj/project.pbxproj",
@@ -409,7 +409,7 @@ class BuildAndRunContractTests(unittest.TestCase):
         macro = "MEMORY_V1_SHIPPING_BETA"
         for spec_path, project_path, app_name, test_name, expected_test_settings in projects:
             with self.subTest(project=str(project_path)):
-                self.assertEqual(spec_path.read_text(encoding="utf-8").count(macro), 2)
+                self.assertNotIn(macro, spec_path.read_text(encoding="utf-8"))
                 converted = subprocess.run(
                     ["/usr/bin/plutil", "-convert", "xml1", "-o", "-", str(project_path)],
                     check=True, capture_output=True,
@@ -431,10 +431,9 @@ class BuildAndRunContractTests(unittest.TestCase):
 
                 for name in (app_name, test_name):
                     configs = configurations(targets[name])
-                    self.assertIn(macro, str(configs["Release"].get(
-                        "SWIFT_ACTIVE_COMPILATION_CONDITIONS", "")))
-                    self.assertNotIn(macro, str(configs["Debug"].get(
-                        "SWIFT_ACTIVE_COMPILATION_CONDITIONS", "")))
+                    for settings in configs.values():
+                        self.assertNotIn(macro, str(settings.get(
+                            "SWIFT_ACTIVE_COMPILATION_CONDITIONS", "")))
                 test_configs = configurations(targets[test_name])
                 for config_name, settings in test_configs.items():
                     for key, expected in expected_test_settings.items():
