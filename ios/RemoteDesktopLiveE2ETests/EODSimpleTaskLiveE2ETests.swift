@@ -84,15 +84,23 @@ final class EODSimpleTaskLiveE2ETests: XCTestCase {
             throw fail("The request could not be sent.")
         }
         print("EOD_BEGIN task=\(task.rawValue) run=\(run) host=\(hostLabel) marker=\(suffix) prompt=\(prompt)")
+        let sentAt = ProcessInfo.processInfo.systemUptime
         send.tap()
         let started = Date()
         let status = app.descendants(matching: .any)["computer-use-status"]
         let deadline = Date().addingTimeInterval(300)
         var outcome = ""
+        var terminalAt: TimeInterval?
         var approvedFirstUse = false
+        var approvalSeenAt: TimeInterval?
+        var approvedAt: TimeInterval?
         repeat {
             try requireNoSystemPrompt(in: app, context: suffix)
             if app.buttons["computer-use-approval-deny"].exists {
+                if approvalSeenAt == nil {
+                    approvalSeenAt = ProcessInfo.processInfo.systemUptime
+                    print("EOD_APPROVAL_SEEN task=\(task.rawValue) run=\(run) timestamp_utc=\(ISO8601DateFormatter().string(from: Date())) after_send_s=\(approvalSeenAt! - sentAt)")
+                }
                 let allowedApp: String?
                 switch task {
                 case .openApp: allowedApp = "Calculator"
@@ -117,6 +125,7 @@ final class EODSimpleTaskLiveE2ETests: XCTestCase {
                     }
                     approvedFirstUse = true
                     print("EOD_APPROVE_FIRST_USE task=\(task.rawValue) app=\(allowedApp) timestamp_utc=\(ISO8601DateFormatter().string(from: Date()))")
+                    approvedAt = ProcessInfo.processInfo.systemUptime
                     approve.tap()
                     guard wait(seconds: 10, until: { !card.exists }) else {
                         Self.needsHuman = true
@@ -147,6 +156,7 @@ final class EODSimpleTaskLiveE2ETests: XCTestCase {
                let value = status.value as? String,
                ["Task completed", "Unable to complete", "User intervention required"].contains(value) {
                 outcome = value
+                terminalAt = ProcessInfo.processInfo.systemUptime
                 break
             }
             RunLoop.current.run(until: Date().addingTimeInterval(0.5))
@@ -166,6 +176,13 @@ final class EODSimpleTaskLiveE2ETests: XCTestCase {
         print("EOD_TERMINAL task=\(task.rawValue) run=\(run) elapsed=\(Date().timeIntervalSince(started)) outcome=\(outcome) answer=\(answer)")
         XCTAssertEqual(userMessages.count, priorUserCount + 1, "A request must be sent exactly once.")
         XCTAssertEqual(outcome, "Task completed", "This attempt did not complete; retain its failure or needs-you result.")
+        if task == .openApp || task == .openNotes || task == .openTextEdit {
+            let elapsed = (terminalAt ?? ProcessInfo.processInfo.systemUptime) - (approvedAt ?? sentAt)
+            let limit: TimeInterval = approvedAt == nil ? 10 : 15
+            let approval = approvedAt == nil ? "not_observed" : "approved"
+            print("EOD_OPEN_APP_TIMING task=\(task.rawValue) run=\(run) approval=\(approval) timestamp_utc=\(ISO8601DateFormatter().string(from: Date())) elapsed_s=\(elapsed) limit_s=\(limit)")
+            XCTAssertLessThanOrEqual(elapsed, limit, "Open-app completion exceeded its timing bar.")
+        }
         print("EOD_REVIEW_REQUIRED task=\(task.rawValue) run=\(run) marker=\(suffix): check only this task's host episode and created artifact before assigning PASS.")
     }
 
@@ -269,6 +286,7 @@ final class EODSimpleTaskLiveE2ETests: XCTestCase {
     func test06OpenAppRun5() throws { try perform(.openApp, run: 5) }
     func test06OpenNotesRun1() throws { try perform(.openNotes, run: 1) }
     func test06OpenNotesRun2() throws { try perform(.openNotes, run: 2) }
+    func test06OpenNotesRun3() throws { try perform(.openNotes, run: 3) }
     func test06OpenTextEditRun1() throws { try perform(.openTextEdit, run: 1) }
     func test06OpenTextEditRun2() throws { try perform(.openTextEdit, run: 2) }
     func test07SearchRun1() throws { try perform(.search, run: 1) }
