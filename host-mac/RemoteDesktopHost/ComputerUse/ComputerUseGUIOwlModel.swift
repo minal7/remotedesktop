@@ -131,8 +131,10 @@ enum ComputerUseGUIOwlModel {
         bytes += controls?.utf8.count ?? 0
         guard bytes<=65_536 else { throw invalid }
         let firstImage = max(0,input.history.count-2)
-        let previous = (0..<firstImage).map { i in
-            "Step\(i+1): " + input.history[i].response + "\nObserved before action: " + observations[i] + "\nObserved outcome: " + outcomes[i]
+        let previous: [String] = (0..<firstImage).map { i in
+            let action: String = "Step\(i+1): " + input.history[i].response
+            let before: String = action + "\nObserved before action: " + observations[i]
+            return before + "\nObserved outcome: " + outcomes[i]
         }
         var messages:[[String:Any]]=[
             ["role":"system","content":[["type":"text","text":try input.surface == .desktop ? desktopSystemPrompt() : officialSystemPrompt]]]]

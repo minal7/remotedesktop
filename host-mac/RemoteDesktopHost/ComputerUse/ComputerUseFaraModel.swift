@@ -468,8 +468,13 @@ enum ComputerUseFaraModel {
                 messages.append(["role": "assistant", "content": response])
             }
         }
-        guard input.history.reduce(input.goal.utf8.count + (input.currentURL?.absoluteString.utf8.count ?? 0) + readingBytes,
-            { $0 + $1.response.utf8.count + ($1.currentURL?.absoluteString.utf8.count ?? 0) }) <= 65_536 else {
+        let initialBytes: Int = input.goal.utf8.count + (input.currentURL?.absoluteString.utf8.count ?? 0) + readingBytes
+        let totalBytes: Int = input.history.reduce(initialBytes) { total, step in
+            let responseBytes: Int = step.response.utf8.count
+            let urlBytes: Int = step.currentURL?.absoluteString.utf8.count ?? 0
+            return total + responseBytes + urlBytes
+        }
+        guard totalBytes <= 65_536 else {
             throw OSAtlasLlamaRuntimeError.invalidResponse
         }
         var request = URLRequest(url: endpoint.baseURL.appendingPathComponent("v1/chat/completions"))
