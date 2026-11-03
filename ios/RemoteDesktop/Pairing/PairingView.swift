@@ -6,6 +6,7 @@ struct PairingView: View {
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @StateObject private var discovery = LocalHostDiscovery()
     @State private var aiHelpMessage: String?
+    @State private var discoveryAttempt = UUID()
     private let localCredentialStore = LocalComputerUseCredentialStore()
 
     var body: some View {
@@ -97,8 +98,7 @@ struct PairingView: View {
             sectionHeader(
                 title: "Available devices",
                 count: discovery.hosts.isEmpty ? nil : discovery.hosts.count,
-                isLoading: discovery.hosts.isEmpty
-                    && discovery.accountPairingStatus == nil
+                isLoading: false
             )
 
             if discovery.hosts.isEmpty {
@@ -147,29 +147,18 @@ struct PairingView: View {
     }
 
     private var searchingDevicesState: some View {
-        HStack(alignment: .center, spacing: 14) {
-            ProgressView()
-                .controlSize(.regular)
-                .frame(width: 34, height: 34)
-
-            VStack(alignment: .leading, spacing: 3) {
-                Text("Searching for hosts")
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(.primary)
-                Text("Open Remote Desktop Host on a Mac signed into the same Apple Account.")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-
-            Spacer(minLength: 0)
-        }
-        .padding(16)
-        .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-        .overlay {
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .strokeBorder(Color.primary.opacity(0.06), lineWidth: 1)
-        }
+        ConnectionWaitNotice(
+            title: "Searching for hosts…",
+            recovery: "Can't find your computer. Open the host app, use the same Apple Account, and check that both devices are on the same Wi-Fi.",
+            retry: {
+                discovery.stop()
+                discovery.start()
+                discoveryAttempt = UUID()
+            })
+            .id(discoveryAttempt)
+            .frame(maxWidth: .infinity)
+            .padding(16)
+            .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
     }
 
     private func cloudAccountActionState(

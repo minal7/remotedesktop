@@ -45,6 +45,52 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
     var onFirstVideoFrame: (@MainActor () -> Void)?
     var onDisconnect: (@MainActor (String) -> Void)?
 
+    #if DEBUG
+    private struct DebugVideoSample: Sendable {
+        let id: String
+        let bytes: Double
+        let frames: Double
+        let width: Int
+        let height: Int
+        let rttMilliseconds: Double?
+    }
+    private var previousDebugVideoSample: (sample: DebugVideoSample, time: TimeInterval)?
+
+    func debugVideoStatistics() async -> String {
+        guard let peer = peerConnection, !isClosing else { return "Video unavailable" }
+        let sample: DebugVideoSample? = await withCheckedContinuation { continuation in
+            peer.statistics { report in
+                guard let video = report.statistics.values.first(where: {
+                    $0.type == "inbound-rtp" && (($0.values["kind"] as? String) == "video"
+                        || ($0.values["mediaType"] as? String) == "video")
+                }) else { continuation.resume(returning: nil); return }
+                let selectedPairID = report.statistics.values.first(where: { $0.type == "transport" })?
+                    .values["selectedCandidatePairId"] as? String
+                let pair = selectedPairID.flatMap { report.statistics[$0] }
+                let rtt = (pair?.values["currentRoundTripTime"] as? NSNumber)?.doubleValue
+                continuation.resume(returning: DebugVideoSample(
+                    id: video.id,
+                    bytes: (video.values["bytesReceived"] as? NSNumber)?.doubleValue ?? 0,
+                    frames: (video.values["framesDecoded"] as? NSNumber)?.doubleValue ?? 0,
+                    width: (video.values["frameWidth"] as? NSNumber)?.intValue ?? 0,
+                    height: (video.values["frameHeight"] as? NSNumber)?.intValue ?? 0,
+                    rttMilliseconds: rtt.map { $0 * 1_000 }))
+            }
+        }
+        guard peerConnection === peer, !isClosing, let sample else { return "Waiting for video stats…" }
+        let now = ProcessInfo.processInfo.systemUptime
+        defer { previousDebugVideoSample = (sample, now) }
+        let rtt = sample.rttMilliseconds.map { String(format: "%.0f ms", $0) } ?? "—"
+        guard let previous = previousDebugVideoSample, previous.sample.id == sample.id,
+              now > previous.time else { return "\(sample.width)×\(sample.height) · RTT \(rtt)" }
+        let seconds = now - previous.time
+        let fps = max(0, sample.frames - previous.sample.frames) / seconds
+        let mbps = max(0, sample.bytes - previous.sample.bytes) * 8 / seconds / 1_000_000
+        return String(format: "%.0f fps · %.1f Mbps · %d×%d · RTT %@", fps, mbps,
+                      sample.width, sample.height, rtt)
+    }
+    #endif
+
     private let log = Logger(subsystem: "com.threadmark.remotedesktop", category: "webrtc")
     private let factory: RTCPeerConnectionFactory
     private let signalingFactory: (String, String?) -> any SignalingChannel
@@ -232,6 +278,9 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
 
     private func close(reason: String, notifyRemote: Bool) {
         isClosing = true
+        #if DEBUG
+        previousDebugVideoSample = nil
+        #endif
         if notifyRemote {
             send(.bye(reason: reason), seq: 0, ts: UInt64(DispatchTime.now().uptimeNanoseconds / 1_000))
         }
@@ -529,7 +578,7 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
             await MainActor.run {
                 guard let self, !self.isClosing, self.connectedOnce else { return }
                 self.connectionRecoveryTask = nil
-                self.finishDisconnect(reason: "The peer connection did not recover.")
+                self.finishDisconnect(reason: "Can’t reconnect to your computer. Keep the host app open and check that both devices are on the same Wi-Fi.")
             }
         }
     }
@@ -693,7 +742,7 @@ extension WebRTCTransport: RTCPeerConnectionDelegate {
                 if !connectedOnce {
                     finishDisconnect(reason: "Can't reach your computer — try putting both devices on the same Wi-Fi.")
                 } else {
-                    finishDisconnect(reason: "The peer connection failed.")
+                    finishDisconnect(reason: "The connection to your computer was lost. Check your Wi-Fi and try again.")
                 }
             case .disconnected:
                 invalidateInputPresentation()
@@ -706,7 +755,7 @@ extension WebRTCTransport: RTCPeerConnectionDelegate {
                 guard connectedOnce else { return }
                 scheduleConnectionRecoveryTimeout()
             case .closed:
-                finishDisconnect(reason: "The peer connection closed.")
+                finishDisconnect(reason: "Your computer ended the connection. Open the host app and try again.")
             default:
                 break
             }

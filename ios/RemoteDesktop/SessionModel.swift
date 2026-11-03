@@ -732,6 +732,13 @@ final class SessionModel: ObservableObject, VideoRendererTarget {
         remoteInputGeneration = UUID()
     }
 
+    #if DEBUG
+    func debugVideoStatistics() async -> String {
+        guard let video = transport as? WebRTCTransport else { return "Video unavailable" }
+        return await video.debugVideoStatistics()
+    }
+    #endif
+
     func disconnect() {
         invalidateAccountRevalidation(clearBinding: true)
         releaseRemoteInputSources()
