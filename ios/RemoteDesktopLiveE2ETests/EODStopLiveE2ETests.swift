@@ -56,18 +56,20 @@ final class EODStopLiveE2ETests: XCTestCase {
         let card = app.descendants(matching: .any)["computer-use-approval-card"]
         let progress = app.descendants(matching: .any)["computer-use-progress-history"]
         let stop = app.buttons["computer-use-stop-task"]
+        var observedExactUserMessage = false
         let ready = try wait(seconds: 60, app: app) {
-            guard userMessages.count == priorUsers + 1 else { return false }
+            if userMessages.count == priorUsers + 1 { observedExactUserMessage = true }
+            guard observedExactUserMessage else { return false }
             switch scenario {
-            case .approval: return card.exists
+            case .approval: return card.exists && self.isExactFirstUseApproval(in: app, appName: appName)
             case .running: return progress.exists && !card.exists && stop.exists && stop.isHittable
             }
         }
         capture(app, label: "\(scenario.rawValue)-before-stop")
         guard ready else { throw fail("The intended running or approval state was not observed; no Stop was sent.") }
         try requireNoRealAlert(app, label: "before-stop")
-        guard userMessages.count == priorUsers + 1,
-              (scenario == .approval ? card.exists : !card.exists && progress.exists),
+        guard observedExactUserMessage,
+              (scenario == .approval ? card.exists && isExactFirstUseApproval(in: app, appName: appName) : !card.exists && progress.exists),
               stop.exists && stop.isHittable else {
             throw fail("The intended state or its Stop control changed; no Stop was sent.")
         }
@@ -93,6 +95,18 @@ final class EODStopLiveE2ETests: XCTestCase {
         // The host episode must be matched independently by its task prompt and
         // recorded timing. A timestamp alone cannot establish task identity.
         #endif
+    }
+
+    private func isExactFirstUseApproval(in app: XCUIApplication, appName: String) -> Bool {
+        let reason = app.staticTexts["computer-use-approval-reason"]
+        let action = app.descendants(matching: .any)["computer-use-approval-action"]
+        guard reason.exists, reason.label == "This is the first use of an untrusted app or site.", action.exists else { return false }
+        let label = action.label
+        guard let start = label.firstIndex(of: "{"),
+              let end = label.lastIndex(of: "}"), start <= end,
+              let data = String(label[start...end]).data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: String] else { return false }
+        return Set(object.keys) == ["type", "name"] && object["type"] == "open_app" && object["name"] == appName
     }
 
     private func requireNoRealAlert(_ app: XCUIApplication, label: String) throws {
