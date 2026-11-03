@@ -299,6 +299,9 @@ struct CapturedVideoFrame {
     let imageBuffer: CVPixelBuffer
     let metadata: CaptureVideoFrameMetadata
     let placement: CaptureVideoPlacement
+    #if DEBUG
+    var latencyDisplaySize: (width: Int, height: Int)? = nil
+    #endif
 
     /// A complete native sample can arrive just before its WindowServer
     /// display time. Wait on the serial capture queue until that time instead
@@ -1074,7 +1077,7 @@ extension ScreenCapture: SCStreamDelegate, SCStreamOutput {
                     return
                 case .complete: break
                 }
-                guard let frame = CapturedVideoFrame(sampleBuffer: sampleBuffer),
+                guard var frame = CapturedVideoFrame(sampleBuffer: sampleBuffer),
                       frame.metadata.width == native.configuration.width,
                       frame.metadata.height == native.configuration.height,
                       frame.placement.coversFullDisplaySurface(width: frame.metadata.width,
@@ -1082,6 +1085,11 @@ extension ScreenCapture: SCStreamDelegate, SCStreamOutput {
                     reportVideoUnavailable(attempt, observedAtHostTime: observedAt, callbacks: callbacks)
                     return
                 }
+                #if DEBUG
+                if LatencyStatsCollector.enabled, native.display.state.displayID == CGMainDisplayID() {
+                    frame.latencyDisplaySize = (native.display.state.width, native.display.state.height)
+                }
+                #endif
                 guard videoAvailability.permits(frame.metadata), videoFrameOrder.admit(frame.metadata) else { return }
                 videoAvailability.recordDeliveredFrame(from: attempt)
                 if loggedFirstVideoAttempt != attempt {

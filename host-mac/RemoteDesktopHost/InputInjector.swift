@@ -171,6 +171,7 @@ final class InputInjector: @unchecked Sendable {
     @discardableResult
     func applyDirectInput(_ message: ControlMessage, session: DirectInputSession,
                           afterTextGrapheme: (() -> Void)? = nil,
+                          onPost: ((TimeInterval) -> Void)? = nil,
                           interruptAutomation: () -> Bool) -> Bool {
         switch message {
         case .pointer, .scroll, .key, .text: break
@@ -187,10 +188,16 @@ final class InputInjector: @unchecked Sendable {
         let interrupted = interruptAutomation()
         if interrupted || !heldInputIsDirect { releaseHeldAutomationInputLocked() }
         heldInputIsDirect = true
+        #if DEBUG
+        if let onPost { Thread.current.threadDictionary["RemoteDesktopLatencyPost"] = onPost }
+        #endif
         lock.unlock()
         defer {
             lock.lock()
             directInputTransactions -= 1
+            #if DEBUG
+            if onPost != nil { Thread.current.threadDictionary.removeObject(forKey: "RemoteDesktopLatencyPost") }
+            #endif
             lock.unlock()
         }
         if case .text(let text) = mapped {
@@ -680,6 +687,11 @@ final class InputInjector: @unchecked Sendable {
             .eventSourceUserData,
             value: Self.syntheticEventTag)
         eventPoster(event)
+        #if DEBUG
+        if LatencyStatsCollector.enabled {
+            (Thread.current.threadDictionary["RemoteDesktopLatencyPost"] as? (TimeInterval) -> Void)?(uptime())
+        }
+        #endif
     }
 
     static func isSynthetic(_ event: NSEvent) -> Bool {

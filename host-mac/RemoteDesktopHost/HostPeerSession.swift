@@ -317,6 +317,11 @@ final class HostPeerSession: NSObject {
     private let videoTrack: RTCVideoTrack
     private let videoCapturer: RTCVideoCapturer
 
+    #if DEBUG
+    private var lastCaptureMarker: Int?
+    #endif
+    private let latencyStats = LatencyStatsCollector(side: "host")
+    private var latencyTimer: DispatchSourceTimer?
     private var peerConnection: RTCPeerConnection?
     private var dataChannel: RTCDataChannel?
     private var videoSender: RTCRtpSender?
@@ -434,10 +439,45 @@ final class HostPeerSession: NSObject {
             ],
             ts: Date().timeIntervalSince1970))
         flushBufferedLocalICEAfterAnswer()
+        startLatencyPolling(peerConnection)
 
         // Capture discovery/start and first-frame delivery have their own
         // bounded worker. Keep signaling free to deliver ICE and disconnects.
         try requestCaptureStartup()
+    }
+
+    private func startLatencyPolling(_ connection: RTCPeerConnection) {
+        guard LatencyStatsCollector.enabled, latencyTimer == nil else { return }
+        let timer = DispatchSource.makeTimerSource(queue: DispatchQueue(label: "host.latency.stats"))
+        timer.schedule(deadline: .now(), repeating: 1)
+        var count = 0
+        #if DEBUG
+        var cpuSampler = LatencyProcessCPUSampler()
+        #endif
+        timer.setEventHandler { [weak self, weak connection] in
+            guard let self, let connection, !self.isEnded else { return }
+            #if DEBUG
+            let time = ProcessInfo.processInfo.systemUptime
+            if let cpu = cpuSampler.sample(at: time) {
+                self.latencyStats.trace(["type": "resource", "time": time,
+                                         "processCPUPercent": cpu])
+            }
+            #endif
+            count += 1
+            if LatencyStatsCollector.resourcesOnly && count % 10 != 1 { return }
+            let shouldLog = count % 5 == 0
+            connection.statistics { report in
+                let items = report.statistics.values.map {
+                    LatencyStatsReport(id: $0.id, type: $0.type, values: $0.values)
+                }
+                self.latencyStats.ingest(items, at: ProcessInfo.processInfo.systemUptime)
+                if shouldLog {
+                    self.log.info("latency stats: \(String(describing: self.latencyStats.snapshot()), privacy: .public)")
+                }
+            }
+        }
+        latencyTimer = timer
+        timer.resume()
     }
 
     func addRemoteIce(_ payload: [String: String]) {
@@ -462,6 +502,8 @@ final class HostPeerSession: NSObject {
         }) {
             self.closeStateLock.lock()
             self.ended = true
+            self.latencyTimer?.cancel()
+            self.latencyTimer = nil
             let restartTask = self.captureRestartTask
             self.captureRestartTask = nil
             self.captureRestartID = nil
@@ -938,6 +980,23 @@ final class HostPeerSession: NSObject {
     }
 
     private func pushVideoFrame(_ captured: CapturedVideoFrame) {
+        if LatencyStatsCollector.enabled {
+            let display = CMTimeGetSeconds(CMClockMakeHostTimeFromSystemUnits(captured.metadata.displayTimeHostTicks))
+            let now = CMTimeGetSeconds(CMClockGetTime(CMClockGetHostTimeClock()))
+            if display.isFinite, now >= display {
+                latencyStats.trace(["type": "capture", "time": now, "sampleAgeMs": (now - display) * 1000])
+                #if DEBUG
+                if let size = captured.latencyDisplaySize,
+                   let marker = LatencyMarkerSampler.sample(pixelBuffer: captured.imageBuffer,
+                       cropX: 0, cropY: 0, cropWidth: captured.metadata.width, cropHeight: captured.metadata.height,
+                       screenWidth: Double(size.width), screenHeight: Double(size.height)), marker != lastCaptureMarker {
+                    lastCaptureMarker = marker
+                    latencyStats.trace(["type": "capture_marker", "marker_id": marker,
+                                        "sampleDisplayTime": display, "pushTime": now])
+                }
+                #endif
+            }
+        }
         let imageBuffer = captured.imageBuffer
         let normalizedSize = CaptureSizing.normalized(
             width: CVPixelBufferGetWidth(imageBuffer),
@@ -1241,9 +1300,25 @@ extension HostPeerSession: RTCDataChannelDelegate {
     }
 
     func dataChannel(_ dataChannel: RTCDataChannel, didReceiveMessageWith buffer: RTCDataBuffer) {
-        guard inputAuthorization.ownsChannel(ObjectIdentifier(dataChannel)),
-              dataChannel.readyState == .open,
-              let packet = ControlPacket.decode(buffer.data) else {
+        #if DEBUG
+        let receiveTime = LatencyStatsCollector.enabled ? ProcessInfo.processInfo.systemUptime : nil
+        #endif
+        guard inputAuthorization.ownsChannel(ObjectIdentifier(dataChannel)), dataChannel.readyState == .open else { return }
+        #if DEBUG
+        if let receiveTime,
+           inputAuthorization.inputSession(for: ObjectIdentifier(dataChannel)) != nil,
+           let object = (try? JSONSerialization.jsonObject(with: buffer.data)) as? [String: Any],
+           object["type"] as? String == "latencyPing",
+           let id = object["id"] as? Int, let t0 = object["t0"] as? Double, t0.isFinite {
+            let pong: [String: Any] = ["type": "latencyPong", "id": id, "t0": t0,
+                                      "t1": receiveTime, "t2": ProcessInfo.processInfo.systemUptime]
+            if let data = try? JSONSerialization.data(withJSONObject: pong) {
+                dataChannel.sendData(RTCDataBuffer(data: data, isBinary: false))
+            }
+            return
+        }
+        #endif
+        guard let packet = ControlPacket.decode(buffer.data) else {
             return
         }
         let message = packet.message
@@ -1273,7 +1348,20 @@ extension HostPeerSession: RTCDataChannelDelegate {
                 log.warning("dropping remote input without a current authorized input session")
                 return
             }
-            if !injector.applyDirectInput(message, session: session, interruptAutomation: onUserInput) {
+            #if DEBUG
+            let clientTime = LatencyStatsCollector.enabled ? ((try? JSONSerialization.jsonObject(with: buffer.data)) as? [String: Any])?["ts"] as? NSNumber : nil
+            let onPost: ((TimeInterval) -> Void)? = clientTime.flatMap { timestamp in
+                guard let receiveTime else { return nil }
+                return { [latencyStats] postTime in
+                    latencyStats.trace(["type": "input", "receiveTime": receiveTime,
+                                        "postTime": postTime, "clientTime": timestamp.doubleValue / 1_000_000])
+                }
+            }
+            #else
+            let onPost: ((TimeInterval) -> Void)? = nil
+            #endif
+            let applied = injector.applyDirectInput(message, session: session, onPost: onPost, interruptAutomation: onUserInput)
+            if !applied {
                 if let display = injector.takeDisplayInvalidation(for: session),
                    let (owner, _) = try? captureStartParameters() {
                     // Preserve a layout loss observed at posting even if the
