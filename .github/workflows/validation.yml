@@ -54,6 +54,10 @@ jobs:
         working-directory: host-windows
         run: cargo test --locked --all-targets
 
+      - name: Build Windows host Release without signing
+        working-directory: host-windows
+        run: cargo build --release --locked
+
   apple:
     name: macOS computer-use and iOS
     runs-on: macos-15
