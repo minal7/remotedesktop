@@ -22,12 +22,18 @@ struct RemoteScreenView: UIViewRepresentable {
     @EnvironmentObject private var session: SessionModel
     @ObservedObject var accessories: AccessoryMonitor
     @ObservedObject var zoom: RemoteScreenZoomController
+    #if DEBUG
+    var onLatencyGesture: (() -> Void)? = nil
+    #endif
 
     func makeUIView(context: Context) -> RemoteScreenUIView {
         let v = RemoteScreenUIView()
         v.bindSession(session)
         v.bindZoomController(zoom)
         v.accessories = accessories
+        #if DEBUG
+        v.onLatencyGesture = onLatencyGesture
+        #endif
         return v
     }
 
@@ -35,6 +41,9 @@ struct RemoteScreenView: UIViewRepresentable {
         uiView.bindSession(session)
         uiView.bindZoomController(zoom)
         uiView.accessories = accessories
+        #if DEBUG
+        uiView.onLatencyGesture = onLatencyGesture
+        #endif
         uiView.applyDisplay(session.display)
     }
 
@@ -138,6 +147,12 @@ struct RemoteScreenZoomControls: View {
 }
 
 final class RemoteScreenUIView: UIView, UIPointerInteractionDelegate, UIGestureRecognizerDelegate {
+    #if DEBUG
+    var onLatencyGesture: (() -> Void)?
+    @objc private func latencyTapped(_ gesture: UITapGestureRecognizer) {
+        if gesture.state == .recognized { onLatencyGesture?() }
+    }
+    #endif
     private(set) weak var session: SessionModel?
     weak var accessories: AccessoryMonitor?
 
@@ -183,6 +198,14 @@ final class RemoteScreenUIView: UIView, UIPointerInteractionDelegate, UIGestureR
 
     override init(frame: CGRect) {
         super.init(frame: frame)
+        #if DEBUG
+        let latencyTap = UITapGestureRecognizer(target: self, action: #selector(latencyTapped(_:)))
+        latencyTap.numberOfTouchesRequired = 3
+        latencyTap.numberOfTapsRequired = 3
+        latencyTap.cancelsTouchesInView = false
+        latencyTap.delegate = self
+        addGestureRecognizer(latencyTap)
+        #endif
         rendererBinding.attach(videoView)
         videoView.isHidden = true
         backgroundColor = .black

@@ -14,6 +14,9 @@ final class RemoteVideoPresentationSurface: NSObject, RTCVideoRenderer {
     private let producer: RemoteVideoPresentationProducer
     private let log = Logger(subsystem: "com.threadmark.remotedesktop", category: "video-presentation")
     nonisolated private let mailbox = RemoteVideoLatestFrameMailbox<RTCVideoFrame>()
+    #if DEBUG
+    private var submittedLatency: (frame: UUID, sample: RemoteVideoLatencyProbe.FrameSample)?
+    #endif
     private var active = true
     private var contentMode: RemoteVideoPresentationProducer.ContentMode = .fill
     private var viewport = CGRect.zero
@@ -73,7 +76,17 @@ final class RemoteVideoPresentationSurface: NSObject, RTCVideoRenderer {
     }
 
     nonisolated func renderFrame(_ frame: RTCVideoFrame?) {
-        if let frame { mailbox.offer(frame) }
+        if let frame {
+            #if DEBUG
+            if LatencyStatsCollector.enabled {
+                let decodedTime = CACurrentMediaTime()
+                let sample = RemoteVideoLatencyProbe.shared.capture(frame, decodedAt: decodedTime)
+                mailbox.offer(frame, latency: sample)
+            } else { mailbox.offer(frame) }
+            #else
+            mailbox.offer(frame)
+            #endif
+        }
     }
 
     func configure(mode: RemoteVideoPresentationProducer.ContentMode, viewport: CGRect) {
@@ -86,6 +99,9 @@ final class RemoteVideoPresentationSurface: NSObject, RTCVideoRenderer {
         presentation.retire()
         guard active else { return }
         active = false; layout = nil; layoutWindow = nil; phase = .idle
+        #if DEBUG
+        submittedLatency = nil
+        #endif
         cancelWaits(); mailbox.replaceContext(nil); producer.retire()
         view.onGeometryChange = nil; view.isHidden = true
     }
@@ -105,6 +121,9 @@ final class RemoteVideoPresentationSurface: NSObject, RTCVideoRenderer {
         let previousContext = producer.contextID
         let continuous = layout != nil && next != nil && layoutWindow === nextWindow
         layout = next; layoutWindow = nextWindow; phase = .idle
+        #if DEBUG
+        submittedLatency = nil
+        #endif
         // A pan/resize does not create another source image requirement or
         // replenish a failing surface's time/attempt budget. Hidden/windowless
         // or changed-window transitions cannot carry the retained image.
@@ -142,12 +161,25 @@ final class RemoteVideoPresentationSurface: NSObject, RTCVideoRenderer {
             guard self.isCurrent(context), self.layout == layout else { return }
             guard let drawable else { self.retryLater(context); return }
             guard let entry = self.mailbox.takeLatest(context: context) else { return }
+            #if DEBUG
+            let latency = entry.latency
+            if let latency { self.producer.onLatencySubmit = { latency.submittedTime = CACurrentMediaTime() } }
+            else { self.producer.onLatencySubmit = nil }
+            #endif
             let admission = self.producer.submit(frame: entry.frame, frameID: entry.id, drawable: drawable, contentMode: layout.mode) { [weak self] frame, result in
                 self?.received(result, frame: frame, entry: entry, context: context)
             }
+            #if DEBUG
+            self.producer.onLatencySubmit = nil
+            #endif
             guard self.isCurrent(context) else { return }
             switch admission {
-            case .submitted: self.phase = .submitted(entry.id)
+            case .submitted:
+                self.phase = .submitted(entry.id)
+                #if DEBUG
+                if let latency { self.submittedLatency = (entry.id, latency) }
+                else { self.submittedLatency = nil }
+                #endif
             case .busy, .unavailable, .preparationFailed, .encodingFailed:
                 self.mailbox.restoreUnlessNewer(entry)
                 self.retryLater(context)
@@ -176,6 +208,12 @@ final class RemoteVideoPresentationSurface: NSObject, RTCVideoRenderer {
         guard isCurrent(context), layout != nil else { return }
         switch result {
         case .presented(let time), .rendered(let time):
+            #if DEBUG
+            if case .presented = result, let latency = submittedLatency, latency.frame == frame {
+                RemoteVideoLatencyProbe.shared.presented(latency.sample, time: time)
+            }
+            submittedLatency = nil
+            #endif
             cancelWaits(); failedAttempts = 0; failedRetryFrameID = nil
             if case .presented = result { presentation.present(context: context, frame: frame, time: time) }
             else { presentation.render(context: context, frame: frame, time: time) }
@@ -239,6 +277,9 @@ final class RemoteVideoPresentationSurface: NSObject, RTCVideoRenderer {
         guard isCurrent(context) else { return }
         log.notice("presentation failed category=\(category.rawValue, privacy: .public) phase=\(self.phaseCategory, privacy: .public) pending=\(self.mailbox.hasPending(context: context), privacy: .public) attempts=\(self.failedAttempts, privacy: .public) layoutChanges=\(self.layoutChangeCount, privacy: .public) lastLayoutContinuous=\(self.lastLayoutWasContinuous, privacy: .public) lastLayoutPending=\(self.lastLayoutHadPendingFrame, privacy: .public)")
         active = false; layout = nil; layoutWindow = nil; phase = .idle
+        #if DEBUG
+        submittedLatency = nil
+        #endif
         cancelWaits(); mailbox.replaceContext(nil); producer.retire()
         view.onGeometryChange = nil; view.isHidden = true
         presentation.fail(context: context, message: message)

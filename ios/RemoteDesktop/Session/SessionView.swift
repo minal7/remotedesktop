@@ -69,8 +69,13 @@ struct SessionView: View {
     var body: some View {
         ZStack(alignment: .top) {
             // ── Remote screen ──────────────────────────────────
+            #if DEBUG
+            RemoteScreenView(accessories: accessories, zoom: zoom, onLatencyGesture: { showsVideoStatistics.toggle() })
+                .ignoresSafeArea()
+            #else
             RemoteScreenView(accessories: accessories, zoom: zoom)
                 .ignoresSafeArea()
+            #endif
 
             if !session.hasInteractiveRemoteScreen {
                 ZStack {
@@ -180,6 +185,25 @@ struct SessionView: View {
                     .padding(.top, 64)
                     .padding(.horizontal, 10)
                     .allowsHitTesting(false)
+            }
+        }
+        .task {
+            let arguments = ProcessInfo.processInfo.arguments
+            guard LatencyStatsCollector.enabled,
+                  let scenario = arguments.firstIndex(of: "LatencyProbeScenario"),
+                  arguments.indices.contains(scenario + 1), arguments[scenario + 1] == "C" else { return }
+            var step = 0
+            while !Task.isCancelled {
+                if RemoteVideoLatencyProbe.shared.hasRecentMarker(),
+                   let display = session.display, display.fullDisplaySurface,
+                   display.w > 100, display.h > 430, session.hasInteractiveRemoteScreen {
+                    // Stay in the synthetic window's blank strip, above its counter cells.
+                    let width = max(1, Int(floor(Double(display.w) * 0.42)) - 32)
+                    let x = 36 + (step % (width * 2) < width ? step % width : width - 1 - step % width)
+                    session.send(.pointer(x: x, y: 345, buttons: 0))
+                    step += 8
+                }
+                do { try await Task.sleep(for: .milliseconds(16)) } catch { return }
             }
         }
         .task(id: showsVideoStatistics) {
@@ -369,9 +393,6 @@ struct SessionView: View {
                 .frame(height: 0.5)
         }
         .accessibilityIdentifier("sessionStatusStrip")
-        #if DEBUG
-        .onLongPressGesture(minimumDuration: 1) { showsVideoStatistics.toggle() }
-        #endif
     }
 
     // MARK: - Input dock (orientation-aware)

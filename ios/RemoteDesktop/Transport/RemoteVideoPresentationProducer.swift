@@ -26,6 +26,9 @@ final class RemoteVideoPresentationProducer {
     private let colorSpace: CGColorSpace
     private let budget = RemoteVideoPresentationBudget.shared
     private(set) var contextID = UUID()
+    #if DEBUG
+    var onLatencySubmit: (() -> Void)?
+    #endif
     private var active = true
     private var lastDrawableID: Int?
     private var lastReceiptTime: TimeInterval = 0
@@ -159,6 +162,9 @@ final class RemoteVideoPresentationProducer {
         }
         #endif
         command.present(drawable)
+        #if DEBUG
+        onLatencySubmit?()
+        #endif
         command.commit()
         return .submitted(ticket)
     }

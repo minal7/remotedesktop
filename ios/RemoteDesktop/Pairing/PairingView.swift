@@ -7,6 +7,9 @@ struct PairingView: View {
     @StateObject private var discovery = LocalHostDiscovery()
     @State private var aiHelpMessage: String?
     @State private var discoveryAttempt = UUID()
+    #if DEBUG
+    @State private var latencyProbeConnected = false
+    #endif
     private let localCredentialStore = LocalComputerUseCredentialStore()
 
     var body: some View {
@@ -38,9 +41,17 @@ struct PairingView: View {
             )
                 .ignoresSafeArea()
         }
-        .onAppear { discovery.start() }
+        .onAppear {
+            discovery.start()
+            #if DEBUG
+            connectLatencyProbeHost(in: discovery.hosts)
+            #endif
+        }
         .onChange(of: discovery.hosts) { _, hosts in
             computerUseSetup.reconcile(hosts: hosts)
+            #if DEBUG
+            connectLatencyProbeHost(in: hosts)
+            #endif
         }
         .onDisappear { discovery.stop() }
         .alert(
@@ -649,6 +660,23 @@ struct PairingView: View {
         }
         .font(.footnote.weight(.medium))
     }
+
+    #if DEBUG
+    private func connectLatencyProbeHost(in hosts: [LocalHostAdvertisement]) {
+        let args = ProcessInfo.processInfo.arguments
+        guard LatencyStatsCollector.enabled, !latencyProbeConnected,
+              let index = args.firstIndex(of: "LatencyProbeHostID"),
+              args.indices.contains(index + 1), let requested = UUID(uuidString: args[index + 1]) else { return }
+        let matches = hosts.filter { host in
+            guard host.hasAuthenticatedCloudMatch, host.accountBinding != nil,
+                  let sender = host.senderID, let id = UUID(uuidString: sender) else { return false }
+            return id == requested
+        }
+        guard matches.count == 1 else { return }
+        latencyProbeConnected = true
+        connect(to: matches[0], experience: .remoteControl)
+    }
+    #endif
 
     private func connect(to host: LocalHostAdvertisement, experience: SessionModel.Experience) {
         session.connect(

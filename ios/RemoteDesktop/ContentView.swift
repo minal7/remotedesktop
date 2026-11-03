@@ -5,6 +5,20 @@ struct ContentView: View {
 
     var body: some View {
         Group {
+            #if DEBUG
+            if ProcessInfo.processInfo.arguments.contains("LatencyLocalClock") {
+                LocalUnixClockView()
+            } else {
+                sessionContent
+            }
+            #else
+            sessionContent
+            #endif
+        }
+    }
+
+    private var sessionContent: some View {
+        Group {
             switch session.state {
             case .idle:
                 PairingView()

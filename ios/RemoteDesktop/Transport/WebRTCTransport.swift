@@ -82,6 +82,12 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
         let height: Int
         let rttMilliseconds: Double?
     }
+    private var latencyTask: Task<Void, Never>?
+    private var latencyCollector: LatencyStatsCollector?
+    private var peerLatencyCollector: LatencyStatsCollector?
+    private var latencyPings: [Int: Double] = [:]
+    private var latencySamples: [(rtt: Double, offset: Double)] = []
+    private var latencyPingID = 0
     private var previousDebugVideoSample: (sample: DebugVideoSample, time: TimeInterval)?
 
     func debugVideoStatistics() async -> String {
@@ -114,8 +120,18 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
         let seconds = now - previous.time
         let fps = max(0, sample.frames - previous.sample.frames) / seconds
         let mbps = max(0, sample.bytes - previous.sample.bytes) * 8 / seconds / 1_000_000
-        return String(format: "%.0f fps · %.1f Mbps · %d×%d · RTT %@", fps, mbps,
-                      sample.width, sample.height, rtt)
+        var text = String(format: "%.0f fps · %.1f Mbps · %d×%d · RTT %@", fps, mbps,
+                          sample.width, sample.height, rtt)
+        if LatencyStatsCollector.enabled {
+            let stats = RemoteVideoLatencyProbe.shared.collector.snapshot()
+            for (key, label) in [("jitterBufferMs", "Jitter"), ("decodeMs", "Decode"), ("processingMs", "Processing")] {
+                if let value = stats[key] { text += String(format: "\n%@: %.1f ms", label, value) }
+            }
+            if let (p50, p95) = RemoteVideoLatencyProbe.shared.renderPercentiles() {
+                text += String(format: "\nRender p50/p95: %.1f / %.1f ms", p50, p95)
+            }
+        }
+        return text
     }
     #endif
 
@@ -211,6 +227,15 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
         remoteCandidateCounts = .init()
         diagnosticStateEvents = 0
         diagnosticConnectionID = UUID().uuidString
+        #if DEBUG
+        if LatencyStatsCollector.enabled {
+            latencyTask?.cancel(); latencyTask = nil
+            latencyPings.removeAll(); latencySamples.removeAll()
+            peerLatencyCollector = nil
+            RemoteVideoLatencyProbe.shared.reset()
+            latencyCollector = RemoteVideoLatencyProbe.shared.collector
+        }
+        #endif
         isClosing = false
         didReportDisconnect = false
         connectedOnce = false
@@ -233,6 +258,9 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
         log.info("ICE id=\(self.diagnosticConnectionID, privacy: .public) stage=configuration turn_config_complete=\(iceConfig.hasCompleteTURNConfiguration, privacy: .public)")
         let peerConnection = try makePeerConnection(iceConfig: iceConfig)
         self.peerConnection = peerConnection
+        #if DEBUG
+        peerLatencyCollector = latencyCollector
+        #endif
         if mediaPolicy.receivesHostAudio {
             addReceiveOnlyTransceiver(of: .audio, on: peerConnection)
         }
@@ -260,6 +288,14 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
             ts: Date().timeIntervalSince1970))
         log.info("ICE id=\(self.diagnosticConnectionID, privacy: .public) stage=offer_sent")
 
+        #if DEBUG
+        if LatencyStatsCollector.enabled {
+            latencyTask?.cancel()
+            if let collector = latencyCollector {
+                latencyTask = Task { [weak self, collector] in await self?.latencyLoop(collector: collector) }
+            }
+        }
+        #endif
         pollTask?.cancel()
         pollTask = Task { [weak self] in
             await self?.pollLoop()
@@ -335,9 +371,16 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
     }
 
     private func close(reason: String, notifyRemote: Bool) {
+        #if DEBUG
+        (peerLatencyCollector ?? latencyCollector)?.trace(["type": "transport_close", "time": ProcessInfo.processInfo.systemUptime,
+                                 "origin": notifyRemote ? "requested_disconnect" : "transport_disconnect",
+                                 "notifyRemote": notifyRemote])
+        #endif
         isClosing = true
         #if DEBUG
         previousDebugVideoSample = nil
+        latencyTask?.cancel(); latencyTask = nil
+        latencyPings.removeAll(); latencySamples.removeAll()
         #endif
         if notifyRemote {
             send(.bye(reason: reason), seq: 0, ts: UInt64(DispatchTime.now().uptimeNanoseconds / 1_000))
@@ -471,6 +514,90 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
         log.info(
             "client remote audio gain=\(gain, privacy: .public) systemVolume=\(self.systemOutputVolume, privacy: .public)")
     }
+
+    #if DEBUG
+    private func latencyLoop(collector: LatencyStatsCollector) async {
+        let batteryLease = LatencyBatteryMonitoringLease.shared.acquire()
+        var cycle = 0
+        let center = NotificationCenter.default
+        let lifecycleNames: [(Notification.Name, String)] = [
+            (UIApplication.willResignActiveNotification, "willResignActive"),
+            (UIApplication.didEnterBackgroundNotification, "didEnterBackground"),
+            (UIApplication.willEnterForegroundNotification, "willEnterForeground"),
+            (UIApplication.didBecomeActiveNotification, "didBecomeActive"),
+            (UIApplication.willTerminateNotification, "willTerminate")
+        ]
+        // Asynchronous events may not survive suspension or termination; absence is inconclusive.
+        let lifecycleObservers = lifecycleNames.map { name, event in
+            center.addObserver(forName: name, object: nil, queue: nil) { _ in
+                collector.trace(["type": "app_lifecycle", "event": event,
+                                 "time": ProcessInfo.processInfo.systemUptime])
+            }
+        }
+        collector.trace(["type": "latency_loop_start", "time": ProcessInfo.processInfo.systemUptime])
+        defer {
+            for observer in lifecycleObservers { center.removeObserver(observer) }
+            collector.trace(["type": "latency_loop_exit", "time": ProcessInfo.processInfo.systemUptime,
+                             "cancelled": Task.isCancelled, "isClosing": isClosing, "cycle": cycle])
+            LatencyBatteryMonitoringLease.shared.release(batteryLease)
+        }
+        while !Task.isCancelled, !isClosing {
+            if (!LatencyStatsCollector.resourcesOnly || cycle % 10 == 0), let peer = peerConnection {
+                peer.statistics { report in
+                    let reports = report.statistics.values.map { LatencyStatsReport(id: $0.id, type: $0.type, values: $0.values) }
+                    collector.ingest(reports, at: ProcessInfo.processInfo.systemUptime)
+                }
+            }
+            let resource: [String: Any] = ["type": "resource", "time": ProcessInfo.processInfo.systemUptime,
+                                           "thermalState": ProcessInfo.processInfo.thermalState.rawValue,
+                                           "batteryState": UIDevice.current.batteryState.rawValue,
+                                           "batteryLevel": Double(UIDevice.current.batteryLevel),
+                                           "appState": UIApplication.shared.applicationState.rawValue]
+            collector.trace(resource)
+            if cycle % 10 == 0, directInputState.isReady, dataChannel?.readyState == .open {
+                latencyPings.removeAll(); latencySamples.removeAll()
+                for _ in 0..<50 {
+                    guard !Task.isCancelled, let channel = dataChannel, channel.readyState == .open else { break }
+                    latencyPingID += 1
+                    let id = latencyPingID, t0 = ProcessInfo.processInfo.systemUptime
+                    latencyPings[id] = t0
+                    if let data = try? JSONSerialization.data(withJSONObject: ["type": "latencyPing", "id": id, "t0": t0]) {
+                        _ = channel.sendData(RTCDataBuffer(data: data, isBinary: false))
+                    }
+                    do { try await Task.sleep(for: .milliseconds(20)) } catch { return }
+                }
+            } else {
+                do { try await Task.sleep(for: .seconds(1)) } catch { return }
+            }
+            cycle += 1
+        }
+    }
+
+    private func receiveLatencyPong(_ data: Data, receivedAt t3: Double) -> Bool {
+        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              object["type"] as? String == "latencyPong" else { return false }
+        guard LatencyStatsCollector.enabled, let id = object["id"] as? Int,
+              let t0 = latencyPings.removeValue(forKey: id),
+              let echoed = (object["t0"] as? NSNumber)?.doubleValue, echoed == t0,
+              let t1 = (object["t1"] as? NSNumber)?.doubleValue,
+              let t2 = (object["t2"] as? NSNumber)?.doubleValue,
+              t2 >= t1, t3 >= t0 else { return true }
+        let rtt = (t3 - t0) - (t2 - t1)
+        guard rtt >= 0 else { return true }
+        latencySamples.append((rtt, ((t1 - t0) + (t2 - t3)) / 2))
+        if latencySamples.count == 50 { publishLatencyClock() }
+        return true
+    }
+
+    private func publishLatencyClock() {
+        guard let estimate = LatencyClockEstimate.calculate(latencySamples),
+              let collector = peerLatencyCollector else { return }
+        collector.trace(["type": "clock", "time": ProcessInfo.processInfo.systemUptime, "offset": estimate.offset, "uncertainty": estimate.uncertainty, "rtt": estimate.rtt, "samples": latencySamples.count])
+        if RemoteVideoLatencyProbe.shared.collector === collector {
+            RemoteVideoLatencyProbe.shared.markClockReady()
+        }
+    }
+    #endif
 
     private func pollLoop() async {
         while !Task.isCancelled {
@@ -799,6 +926,11 @@ extension WebRTCTransport: RTCPeerConnectionDelegate {
     nonisolated func peerConnection(_ peerConnection: RTCPeerConnection, didChange stateChanged: RTCConnectionState) {
         Task { @MainActor [weak self] in
             guard let self, self.peerConnection === peerConnection else { return }
+            #if DEBUG
+            let collector = self.peerLatencyCollector
+            collector?.trace(["type": "peer_state", "time": ProcessInfo.processInfo.systemUptime,
+                              "state": String(describing: stateChanged)])
+            #endif
             log.info("peer connection state → \(String(describing: stateChanged), privacy: .public)")
             guard !isClosing else { return }
             switch stateChanged {
@@ -911,6 +1043,11 @@ extension WebRTCTransport: RTCDataChannelDelegate {
     nonisolated func dataChannelDidChangeState(_ dataChannel: RTCDataChannel) {
         Task { @MainActor [weak self] in
             guard let self, !self.isClosing, self.dataChannel === dataChannel else { return }
+            #if DEBUG
+            let collector = self.peerLatencyCollector
+            collector?.trace(["type": "data_channel_state", "time": ProcessInfo.processInfo.systemUptime,
+                              "state": String(describing: dataChannel.readyState)])
+            #endif
             if dataChannel.readyState == .closing || dataChannel.readyState == .closed {
                 self.finishDisconnect(reason: "The input channel closed.", category: .dataChannel)
                 return
@@ -920,9 +1057,15 @@ extension WebRTCTransport: RTCDataChannelDelegate {
     }
 
     nonisolated func dataChannel(_ dataChannel: RTCDataChannel, didReceiveMessageWith buffer: RTCDataBuffer) {
+        #if DEBUG
+        let latencyReceivedAt = LatencyStatsCollector.enabled ? ProcessInfo.processInfo.systemUptime : nil
+        #endif
         Task { @MainActor [weak self] in
             guard let self, !self.isClosing, self.dataChannel === dataChannel,
                   dataChannel.readyState == .open else { return }
+            #if DEBUG
+            if let latencyReceivedAt, self.receiveLatencyPong(buffer.data, receivedAt: latencyReceivedAt) { return }
+            #endif
             switch HostMessage.decode(buffer.data) {
             case .helloAck(let hello):
                 switch directInputState.accept(version: hello.inputSessions, acknowledgement: hello.inputSession,
@@ -962,6 +1105,9 @@ extension WebRTCTransport: RTCDataChannelDelegate {
                     }
                     guard !isClosing, self.dataChannel === dataChannel,
                           currentDisplay == display, inputPresentation.matches(display.inputSession) else { return }
+                    #if DEBUG
+                    if LatencyStatsCollector.enabled { RemoteVideoLatencyProbe.shared.setDisplay(display) }
+                    #endif
                     onDisplay?(display)
                 }
             case .bye(let reason):

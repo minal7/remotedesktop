@@ -8,7 +8,12 @@ import Foundation
 /// rendering runs while the lock is held.
 final class RemoteVideoLatestFrameMailbox<Frame: AnyObject>: @unchecked Sendable {
     struct Wake: Equatable, Sendable { let context: UUID; let id: UUID }
-    struct Entry: @unchecked Sendable { let context: UUID; let id: UUID; let frame: Frame }
+    struct Entry: @unchecked Sendable {
+        let context: UUID; let id: UUID; let frame: Frame
+        #if DEBUG
+        let latency: RemoteVideoLatencyProbe.FrameSample?
+        #endif
+    }
     private let lock = NSLock()
     private var context: UUID?
     private var latest: Entry?
@@ -35,7 +40,11 @@ final class RemoteVideoLatestFrameMailbox<Frame: AnyObject>: @unchecked Sendable
         lock.lock()
         let old = latest
         if let context, let previous, self.context == previous, let old, old.id != excludingFrameID {
+            #if DEBUG
+            latest = Entry(context: context, id: old.id, frame: old.frame, latency: old.latency)
+            #else
             latest = Entry(context: context, id: old.id, frame: old.frame)
+            #endif
         } else { latest = nil }
         self.context = context; pending = latest != nil; wake = nil
         lock.unlock()
@@ -43,6 +52,9 @@ final class RemoteVideoLatestFrameMailbox<Frame: AnyObject>: @unchecked Sendable
     }
 
     func offer(_ frame: Frame) {
+        #if DEBUG
+        offer(frame, latency: nil)
+        #else
         lock.lock()
         guard let context else { lock.unlock(); return }
         let old = latest
@@ -55,7 +67,25 @@ final class RemoteVideoLatestFrameMailbox<Frame: AnyObject>: @unchecked Sendable
         lock.unlock()
         withExtendedLifetime(old) {}
         if let (wake, notify) = notification { notify(wake) }
+        #endif
     }
+
+    #if DEBUG
+    func offer(_ frame: Frame, latency: RemoteVideoLatencyProbe.FrameSample?) {
+        lock.lock()
+        guard let context else { lock.unlock(); return }
+        let old = latest
+        latest = Entry(context: context, id: UUID(), frame: frame, latency: latency); pending = true
+        let notification: (Wake, @Sendable (Wake) -> Void)?
+        if wake == nil, let notify {
+            let next = Wake(context: context, id: UUID()); wake = next
+            notification = (next, notify)
+        } else { notification = nil }
+        lock.unlock()
+        withExtendedLifetime(old) {}
+        if let (wake, notify) = notification { notify(wake) }
+    }
+    #endif
 
     func accepts(_ wake: Wake) -> Bool {
         lock.lock(); defer { lock.unlock() }
