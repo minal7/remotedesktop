@@ -11,7 +11,9 @@ final class EODReleaseUIReviewTests: XCTestCase {
         let app = XCUIApplication()
         XCUIDevice.shared.orientation = .portrait
         defer { XCUIDevice.shared.orientation = .portrait }
-        app.launch()
+        if app.state == .notRunning { app.launch() }
+        else if app.state != .runningForeground { app.activate() }
+        XCTAssertTrue(app.wait(for: .runningForeground, timeout: 10))
         try requireNoAlerts(app)
         let hosts = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Remote control "))
         XCTAssertTrue(hosts.firstMatch.waitForExistence(timeout: 45))
