@@ -6,12 +6,14 @@ import json
 import re
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
-from jsonschema import Draft202012Validator
+from jsonschema import Draft202012Validator, FormatChecker
 from referencing import Registry
 from referencing.exceptions import Unresolvable
 
 from .contracts import (
+    _validator,
     compact_json,
     validate_action,
     validate_episode,
@@ -70,6 +72,18 @@ def step_record() -> dict:
 
 
 class ContractTests(unittest.TestCase):
+    def test_missing_required_format_support_fails_closed(self) -> None:
+        for missing in ("uri", "date-time"):
+            supported = {name: checker for name, checker in FormatChecker.checkers.items()
+                         if name != missing}
+            with self.subTest(missing=missing), patch.object(FormatChecker, "checkers", supported):
+                _validator.cache_clear()
+                try:
+                    with self.assertRaisesRegex(RuntimeError, "missing format support for " + missing):
+                        validate_action({"type": "done", "answer": "Completed."})
+                finally:
+                    _validator.cache_clear()
+
     def test_shared_cross_language_corpus(self) -> None:
         corpus_path = Path(__file__).resolve().parents[2] / "AcceptanceFixtures" / "agent-contracts.json"
         corpus = json.loads(corpus_path.read_text(encoding="utf-8"))

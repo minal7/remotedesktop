@@ -29,6 +29,15 @@ def _validator(name: str) -> Any:
             "Agent contract validation requires the 'jsonschema' package"
         ) from error
 
+    format_checker = FormatChecker()
+    missing_formats = {"uri", "date-time"} - format_checker.checkers.keys()
+    if missing_formats:
+        raise RuntimeError(
+            "Agent contract validation is missing format support for "
+            + ", ".join(sorted(missing_formats))
+            + "; install host-mac/scripts/agent/requirements.txt"
+        )
+
     schema_path = SCHEMA_DIR / f"{name}.schema.json"
     try:
         with schema_path.open(encoding="utf-8") as stream:
@@ -48,7 +57,7 @@ def _validator(name: str) -> Any:
         (uri, Resource.from_contents(document)) for uri, document in documents.items()
     )
     return Draft202012Validator(
-        schema, registry=registry, format_checker=FormatChecker()
+        schema, registry=registry, format_checker=format_checker
     )
 
 
