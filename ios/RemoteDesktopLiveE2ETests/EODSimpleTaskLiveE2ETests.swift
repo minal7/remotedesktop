@@ -88,10 +88,13 @@ final class EODSimpleTaskLiveE2ETests: XCTestCase {
         let deadline = Date().addingTimeInterval(300)
         var outcome = ""
         repeat {
-            try requireNoSystemPrompt(in: app)
+            try requireNoSystemPrompt(in: app, context: suffix)
             guard !app.buttons["computer-use-approval-deny"].exists else {
                 // Leave the approval visible. This test never grants or denies it.
                 Self.needsHuman = true
+                attachDiagnostics(
+                    named: "approval-\(suffix)",
+                    details: { self.approvalDetails(in: app) })
                 throw fail("EOD_NEEDS_USER task=\(task.rawValue) run=\(run): approval requested; no action selected.")
             }
             if userMessages.count > priorUserCount,
@@ -112,18 +115,55 @@ final class EODSimpleTaskLiveE2ETests: XCTestCase {
         }
         let answer = assistantMessages.count > priorAssistantCount
             ? assistantMessages.element(boundBy: assistantMessages.count - 1).label : ""
+        attachDiagnostics(
+            named: "terminal-\(suffix)",
+            details: { "outcome=\(outcome)\n" + self.approvalDetails(in: app) })
         print("EOD_TERMINAL task=\(task.rawValue) run=\(run) elapsed=\(Date().timeIntervalSince(started)) outcome=\(outcome) answer=\(answer)")
         XCTAssertEqual(userMessages.count, priorUserCount + 1, "A request must be sent exactly once.")
         XCTAssertEqual(outcome, "Task completed", "This attempt did not complete; retain its failure or needs-you result.")
         print("EOD_REVIEW_REQUIRED task=\(task.rawValue) run=\(run) marker=\(suffix): check only this task's host episode and created artifact before assigning PASS.")
     }
 
-    private func requireNoSystemPrompt(in app: XCUIApplication) throws {
+    private func requireNoSystemPrompt(in app: XCUIApplication, context: String = "pre-task") throws {
         let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
-        if springboard.alerts.count > 0 || app.alerts.count > 0 {
+        let springboardCount = springboard.alerts.count
+        let appCount = app.alerts.count
+        if springboardCount > 0 || appCount > 0 {
             Self.needsHuman = true
+            attachDiagnostics(named: "alert-\(context)") {
+                var details = "springboard.alerts.count=\(springboardCount)\napp.alerts.count=\(appCount)"
+                for index in 0..<springboardCount {
+                    details += "\nspringboard.alerts[\(index)]:\n\(springboard.alerts.element(boundBy: index).debugDescription)"
+                }
+                for index in 0..<appCount {
+                    details += "\napp.alerts[\(index)]:\n\(app.alerts.element(boundBy: index).debugDescription)"
+                }
+                return details + "\n" + self.approvalDetails(in: app)
+            }
             throw fail("EOD_NEEDS_USER: a system or application alert is visible. No alert was dismissed.")
         }
+    }
+
+    private func approvalDetails(in app: XCUIApplication) -> String {
+        let identifiers = ["computer-use-status", "computer-use-approval-outcome", "computer-use-approval-deny"]
+        return identifiers.map { identifier in
+            let element = app.descendants(matching: .any)[identifier]
+            return element.exists
+                ? "\(identifier):\n\(element.debugDescription)"
+                : "\(identifier): not present"
+        }.joined(separator: "\n")
+    }
+
+    private func attachDiagnostics(named name: String, details: () -> String) {
+        let timestamp = ISO8601DateFormatter().string(from: Date())
+        let screenshot = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+        screenshot.name = "\(name)-screenshot-\(timestamp)"
+        screenshot.lifetime = .keepAlways
+        add(screenshot)
+        let text = XCTAttachment(string: "timestamp_utc=\(timestamp)\n\(details())")
+        text.name = "\(name)-accessibility-\(timestamp)"
+        text.lifetime = .keepAlways
+        add(text)
     }
 
     private func wait(seconds: TimeInterval, until predicate: () -> Bool) -> Bool {
