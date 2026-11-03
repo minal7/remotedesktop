@@ -732,29 +732,42 @@ struct ComputerUseView: View {
             ? AnyLayout(VStackLayout(spacing: 10))
             : AnyLayout(HStackLayout(spacing: 10))
 
-        return layout {
+        return VStack(spacing: 10) {
+            layout {
+                Button(role: .destructive) {
+                    model.respondToApproval(request, approved: false)
+                } label: {
+                    Text("Deny")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.bordered)
+                .accessibilityHint("Denies this action without making the proposed change")
+                .accessibilityIdentifier("computer-use-approval-deny")
+                .disabled(!model.isConnected)
+
+                Button {
+                    model.respondToApproval(request, approved: true)
+                } label: {
+                    Label(request.confirmLabel ?? "Approve once", systemImage: "checkmark")
+                        .lineLimit(2)
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .accessibilityHint("Approves only the exact action shown above")
+                .accessibilityIdentifier("computer-use-approval-approve")
+                .disabled(!model.isConnected)
+            }
+
             Button(role: .destructive) {
-                model.respondToApproval(request, approved: false)
+                model.stopCurrentTask()
             } label: {
-                Text("Deny")
+                Label("Stop task", systemImage: "stop.fill")
                     .frame(maxWidth: .infinity)
             }
             .buttonStyle(.bordered)
-            .accessibilityHint("Denies this action without making the proposed change")
-            .accessibilityIdentifier("computer-use-approval-deny")
-            .disabled(!model.isConnected)
-
-            Button {
-                model.respondToApproval(request, approved: true)
-            } label: {
-                Label(request.confirmLabel ?? "Approve once", systemImage: "checkmark")
-                    .lineLimit(2)
-                    .frame(maxWidth: .infinity)
-            }
-            .buttonStyle(.borderedProminent)
-            .accessibilityHint("Approves only the exact action shown above")
-            .accessibilityIdentifier("computer-use-approval-approve")
-            .disabled(!model.isConnected)
+            .accessibilityHint("Stops the current task without approving this action")
+            .accessibilityIdentifier("computer-use-stop-task")
+            .disabled(!model.isConnected || model.isCancellationPending)
         }
     }
 

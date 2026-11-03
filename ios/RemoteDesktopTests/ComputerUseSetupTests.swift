@@ -2125,6 +2125,45 @@ final class ComputerUseSetupTests: XCTestCase {
         XCTAssertEqual(model.state, .working)
     }
 
+    func test_stopDuringApprovalSendsCancelAndRejectsLateApproval() async throws {
+        let hostID = "HOST-\(UUID().uuidString)"
+        let store = InMemoryComputerUsePendingPromptStore()
+        let channel = FakeComputerUseSessionChannel()
+        let model = ComputerUseSessionModel(hostName: "Studio Mac", pairingCode: "123456",
+            hostID: hostID, sessionID: "session-1", pendingStore: store, channel: channel)
+        defer { model.stop() }
+        model.start()
+        model.sendPrompt("Open Calculator")
+        let sentPrompt = await waitForSentMessage(kind: .prompt, channel: channel)
+        let prompt = try XCTUnwrap(sentPrompt)
+        let approval = ComputerUseApprovalRequest(requestID: "stop-approval", taskID: prompt.id,
+            message: "Approve opening?", confirmLabel: "Approve once", appliedControlRevision: 0)
+        try await channel.enqueueHostEnvelope(kind: .approvalRequest, body: approval.encodedBody())
+        await waitUntil { model.state == .approvalRequired(approval) }
+
+        model.stopCurrentTask()
+        let sentCancel = await waitForSentMessage(kind: .cancel, channel: channel)
+        let cancel = try XCTUnwrap(sentCancel)
+        XCTAssertEqual(try ComputerUseControlRequest.decodeBody(cancel.body),
+            ComputerUseControlRequest(taskID: prompt.id, revision: 1, observedHostControlEpoch: 0))
+        XCTAssertTrue(model.isCancellationPending)
+        XCTAssertEqual(model.state, .working)
+        let previous = await channel.acknowledgedEnvelopeCount()
+        try await channel.enqueueHostEnvelope(kind: .approvalRequest, body: approval.encodedBody())
+        await waitUntilAsync { await channel.acknowledgedEnvelopeCount() > previous }
+        XCTAssertEqual(model.state, .working)
+        model.respondToApproval(approval, approved: true)
+        let responses = await channel.sendAttemptCount(kind: .approvalResponse)
+        XCTAssertEqual(responses, 0, "Stop must not approve or deny the pending action")
+
+        let stoppedText = "Stopped. You're in control of the Mac."
+        try await channel.enqueueHostEnvelope(kind: .assistant,
+            body: ComputerUseTaskUpdate(taskID: prompt.id, text: stoppedText,
+                appliedControlRevision: 1).encodedBody())
+        await waitUntil { !model.hasActivePrompt }
+        XCTAssertTrue(model.messages.contains { $0.text == stoppedText })
+    }
+
     func test_staleApprovalRequestCannotOverridePendingCancel() async throws {
         let hostID = "HOST-\(UUID().uuidString)"
         let store = InMemoryComputerUsePendingPromptStore()
