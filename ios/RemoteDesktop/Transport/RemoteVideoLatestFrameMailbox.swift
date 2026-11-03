@@ -18,6 +18,9 @@ final class RemoteVideoLatestFrameMailbox<Frame: AnyObject>: @unchecked Sendable
     private var context: UUID?
     private var latest: Entry?
     private var pending = false
+    #if DEBUG
+    private var failedFrameID: UUID?
+    #endif
     private var wake: Wake?
     private var notify: (@Sendable (Wake) -> Void)?
 
@@ -39,7 +42,13 @@ final class RemoteVideoLatestFrameMailbox<Frame: AnyObject>: @unchecked Sendable
                         excludingFrameID: UUID? = nil) {
         lock.lock()
         let old = latest
-        if let context, let previous, self.context == previous, let old, old.id != excludingFrameID {
+        #if DEBUG
+        let failed = failedFrameID
+        failedFrameID = nil
+        #else
+        let failed: UUID? = nil
+        #endif
+        if let context, let previous, self.context == previous, let old, old.id != excludingFrameID, old.id != failed {
             #if DEBUG
             latest = Entry(context: context, id: old.id, frame: old.frame, latency: old.latency)
             #else
@@ -75,6 +84,7 @@ final class RemoteVideoLatestFrameMailbox<Frame: AnyObject>: @unchecked Sendable
         lock.lock()
         guard let context else { lock.unlock(); return }
         let old = latest
+        failedFrameID = nil
         latest = Entry(context: context, id: UUID(), frame: frame, latency: latency); pending = true
         let notification: (Wake, @Sendable (Wake) -> Void)?
         if wake == nil, let notify {
@@ -112,6 +122,25 @@ final class RemoteVideoLatestFrameMailbox<Frame: AnyObject>: @unchecked Sendable
         pending = true
         wake = Wake(context: entry.context, id: UUID())
     }
+
+    #if DEBUG
+    /// F4 can retry a failed committed image in its current context, but a
+    /// later layout change must never carry that known-failed image forward.
+    func restoreFailed(frame: UUID, context: UUID) {
+        lock.lock(); defer { lock.unlock() }
+        guard self.context == context, latest?.id == frame else { return }
+        failedFrameID = frame
+        if !pending {
+            pending = true
+            wake = Wake(context: context, id: UUID())
+        }
+    }
+
+    func clearFailed(frame: UUID, context: UUID) {
+        lock.lock(); defer { lock.unlock() }
+        if self.context == context, failedFrameID == frame { failedFrameID = nil }
+    }
+    #endif
 
     /// A failed/skipped committed presentation cannot be retried by rotating
     /// layout. Discard that image, while preserving any newer decode.

@@ -109,6 +109,14 @@ final class RemoteVideoPresentationProducer {
                 }
                 onResult(frameID, result)
             }) else { return .busy }
+        #if DEBUG
+        guard let gpuPermit = RemoteVideoGPUAdmission.shared.acquire() else {
+            budget.abandonUncommitted(ticket)
+            return .busy
+        }
+        var gpuCommitted = false
+        defer { if !gpuCommitted { gpuPermit.release() } }
+        #endif
         let prepared: RemoteVideoFrameImage
         switch RemoteVideoFrameImage.prepare(frame) {
         case .ready(let value): prepared = value
@@ -147,6 +155,9 @@ final class RemoteVideoPresentationProducer {
         // the actual GPU completion, independently of observer/view lifetime.
         let resources = FrameResources(frame: frame, prepared: prepared, image: output, task: renderTask, context: imageContext)
         command.addCompletedHandler { command in
+            #if DEBUG
+            gpuPermit.release()
+            #endif
             withExtendedLifetime(resources) {
                 let succeeded = command.status == .completed
                 let completionTime = CACurrentMediaTime()
@@ -166,6 +177,9 @@ final class RemoteVideoPresentationProducer {
         onLatencySubmit?()
         #endif
         command.commit()
+        #if DEBUG
+        gpuCommitted = true
+        #endif
         return .submitted(ticket)
     }
 

@@ -14,6 +14,7 @@ struct RemoteVideoFrameImage {
     }
     let image: CIImage
     let pixelBuffer: CVPixelBuffer
+    let geometry: RemoteVideoPixelGeometry
 
     static func prepare(_ frame: RTCVideoFrame) -> Preparation {
         if let native = frame.buffer as? RTCCVPixelBuffer {
@@ -101,7 +102,7 @@ struct RemoteVideoFrameImage {
         default: break
         }
         return .init(image: image.transformed(by: CGAffineTransform(translationX: -image.extent.minX, y: -image.extent.minY)),
-                     pixelBuffer: pixelBuffer)
+                     pixelBuffer: pixelBuffer, geometry: geometry)
     }
 }
 

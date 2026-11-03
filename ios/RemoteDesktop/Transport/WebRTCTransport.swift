@@ -89,6 +89,28 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
     private var latencySamples: [(rtt: Double, offset: Double)] = []
     private var latencyPingID = 0
     private var previousDebugVideoSample: (sample: DebugVideoSample, time: TimeInterval)?
+    private enum F1State {
+        case idle, requested(String), restarting(String), active(String), unavailable
+    }
+    private var f1State: F1State = .idle
+    private var f1Configuration = LatencyLabConfiguration.current
+    private var f1WaitingToSendOffer = false
+    private var f1PendingLocalICE: [RTCIceCandidate] = []
+    private var f1RetiredPeer: RTCPeerConnection?
+    private var f1RetiredChannel: RTCDataChannel?
+    private var f1RetiredFactory: RTCPeerConnectionFactory?
+    private var f1ICEConfig: ICEConfig?
+    private var f1RequestTimeout: Task<Void, Never>?
+    private var f1RestartTask: Task<Void, Never>?
+    private var f1FactoryConfigured = false
+    private var f1ApplyToReplacement = false
+    private var f2ApplyToReplacement = false
+    private var f3ApplyToReplacement = false
+    private var labApplied = LatencyLabSelection(f1MaximumDelayMs: nil, f2: false, f3: false, f4: false)
+    private var labPending: LatencyLabSelection?
+    private var labLastHello: HostHello?
+    private var labActiveNonce: String?
+    private var labObserver: NSObjectProtocol?
 
     func debugVideoStatistics() async -> String {
         guard let peer = peerConnection, !isClosing else { return "Video unavailable" }
@@ -136,7 +158,7 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
     #endif
 
     private let log = Logger(subsystem: "com.threadmark.remotedesktop", category: "webrtc")
-    private let factory: RTCPeerConnectionFactory
+    private var factory: RTCPeerConnectionFactory
     private let signalingFactory: (String, String?) -> any SignalingChannel
     private let iceConfigProvider: @Sendable () async -> ICEConfig
     private let mediaPolicy: MediaPolicy
@@ -208,6 +230,13 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
             self.iceConfigProvider = { await fetcher.get() }
         }
         super.init()
+        #if DEBUG
+        labObserver = NotificationCenter.default.addObserver(
+            forName: .latencyLabConfigurationDidChange, object: nil, queue: nil
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in self?.reconcileLabConfiguration() }
+        }
+        #endif
         if mediaPolicy.receivesHostAudio {
             let audioSession = RTCAudioSession.sharedInstance()
             systemOutputVolume = audioSession.outputVolume
@@ -217,6 +246,9 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
     }
 
     deinit {
+        #if DEBUG
+        if let labObserver { NotificationCenter.default.removeObserver(labObserver) }
+        #endif
         if mediaPolicy.receivesHostAudio {
             RTCAudioSession.sharedInstance().remove(self)
         }
@@ -228,6 +260,15 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
         diagnosticStateEvents = 0
         diagnosticConnectionID = UUID().uuidString
         #if DEBUG
+        if f1FactoryConfigured {
+            // A reused transport must not carry a previous host's trial into
+            // the next host's initial, capability-unknown connection.
+            factory = RTCPeerConnectionFactory(
+                audioDeviceModuleType: .platformDefault, bypassVoiceProcessing: true,
+                encoderFactory: DesktopVideoEncoderFactory(), decoderFactory: DesktopVideoDecoderFactory(),
+                audioProcessingModule: nil)
+            f1FactoryConfigured = false
+        }
         if LatencyStatsCollector.enabled {
             latencyTask?.cancel(); latencyTask = nil
             latencyPings.removeAll(); latencySamples.removeAll()
@@ -235,6 +276,21 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
             RemoteVideoLatencyProbe.shared.reset()
             latencyCollector = RemoteVideoLatencyProbe.shared.collector
         }
+        f1Configuration = LatencyLabConfiguration.current
+        f1State = .idle
+        f1WaitingToSendOffer = false
+        f1PendingLocalICE.removeAll()
+        f1RetiredPeer = nil; f1RetiredChannel = nil; f1RetiredFactory = nil
+        f1ICEConfig = nil
+        f1RequestTimeout?.cancel(); f1RequestTimeout = nil
+        f1RestartTask?.cancel(); f1RestartTask = nil
+        f1ApplyToReplacement = false; f2ApplyToReplacement = false
+        f3ApplyToReplacement = false; labPending = nil; labLastHello = nil; labActiveNonce = nil
+        labApplied = LatencyLabSelection(f1MaximumDelayMs: nil, f2: false, f3: false, f4: f1Configuration.f4Renderer)
+        latencyCollector?.trace(["type": "f1_playout", "time": ProcessInfo.processInfo.systemUptime,
+                                 "requested": f1Configuration.f1Playout,
+                                 "maximumDelayMs": f1Configuration.f1MaximumDelayMs,
+                                 "configured": false, "effective": "unverified", "stage": "initial"])
         #endif
         isClosing = false
         didReportDisconnect = false
@@ -256,6 +312,9 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
 
         let iceConfig = await iceConfigProvider()
         log.info("ICE id=\(self.diagnosticConnectionID, privacy: .public) stage=configuration turn_config_complete=\(iceConfig.hasCompleteTURNConfiguration, privacy: .public)")
+        #if DEBUG
+        f1ICEConfig = iceConfig
+        #endif
         let peerConnection = try makePeerConnection(iceConfig: iceConfig)
         self.peerConnection = peerConnection
         #if DEBUG
@@ -381,6 +440,12 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
         previousDebugVideoSample = nil
         latencyTask?.cancel(); latencyTask = nil
         latencyPings.removeAll(); latencySamples.removeAll()
+        f1RetiredChannel?.close(); f1RetiredPeer?.close()
+        f1RetiredChannel = nil; f1RetiredPeer = nil; f1RetiredFactory = nil
+        f1WaitingToSendOffer = false; f1PendingLocalICE.removeAll()
+        f1RequestTimeout?.cancel(); f1RequestTimeout = nil
+        f1RestartTask?.cancel(); f1RestartTask = nil
+        labLastHello = nil; labPending = nil; labActiveNonce = nil
         #endif
         if notifyRemote {
             send(.bye(reason: reason), seq: 0, ts: UInt64(DispatchTime.now().uptimeNanoseconds / 1_000))
@@ -516,6 +581,173 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
     }
 
     #if DEBUG
+    private func reconcileLabConfiguration() {
+        latencyCollector?.trace(["type": "lab_configuration", "time": ProcessInfo.processInfo.systemUptime,
+                                 "side": "client", "source": "runtime", "settings": LatencyLabConfiguration.current.traceValues])
+        guard !isClosing, answerApplied, mediaPolicy == .remoteSession, let hello = labLastHello,
+              let channel = dataChannel, channel.readyState == .open, directInputState.isReady else { return }
+        switch f1State {
+        case .requested, .restarting: return // Reconcile again after the replacement hello.
+        case .idle, .active, .unavailable: break
+        }
+        startF1IfSupported(hello, channel: channel)
+    }
+
+    private func startF1IfSupported(_ hello: HostHello, channel: RTCDataChannel) {
+        guard answerApplied, mediaPolicy == .remoteSession else { return }
+        switch f1State {
+        case .requested, .restarting: return
+        case .idle, .active, .unavailable: break
+        }
+        f1Configuration = LatencyLabConfiguration.current
+        let desired = LatencyF1Policy.selection(configuration: f1Configuration, hello: hello)
+        latencyCollector?.trace(["type": "lab_configuration", "time": ProcessInfo.processInfo.systemUptime,
+            "side": "client", "source": "negotiation", "settings": f1Configuration.traceValues,
+            "hostF1Capability": hello.latencyF1Playout, "hostF2Capability": hello.latencyF2Encoder,
+            "hostF3Capability": hello.latencyF3Sender, "f1Configured": labApplied.f1MaximumDelayMs != nil,
+            "f2RequestedToHost": labApplied.f2, "f3RequestedToHost": labApplied.f3,
+            "f4Selected": labApplied.f4, "effective": "unverified"])
+        guard desired != labApplied else { return }
+        guard hello.latencyF1Playout == 1 else {
+            f1State = .unavailable
+            latencyCollector?.trace(["type": "f1_playout", "time": ProcessInfo.processInfo.systemUptime,
+                                     "requested": f1Configuration.f1Playout, "configured": false, "effective": "unverified",
+                                     "f4Requested": desired.f4,
+                                     "stage": desired.f4 != labApplied.f4 ? "f4_requires_capable_host" : "host_unsupported"])
+            return
+        }
+        f1ApplyToReplacement = desired.f1MaximumDelayMs != nil
+        f2ApplyToReplacement = desired.f2; f3ApplyToReplacement = desired.f3
+        labPending = desired
+        let nonce = UUID().uuidString
+        guard let request = try? JSONSerialization.data(withJSONObject: ["type": "latencyF1RestartRequest", "nonce": nonce]),
+              channel.sendData(RTCDataBuffer(data: request, isBinary: false)) else {
+            f1State = .unavailable
+            return
+        }
+        f1State = .requested(nonce)
+        f1RequestTimeout?.cancel()
+        f1RequestTimeout = Task { @MainActor [weak self] in
+            do { try await Task.sleep(for: .seconds(10)) } catch { return }
+            guard let self, case .requested(let current) = self.f1State, current == nonce else { return }
+            self.f1State = .unavailable; self.f1RequestTimeout = nil
+            self.latencyCollector?.trace(["type": "f1_playout", "time": ProcessInfo.processInfo.systemUptime,
+                "requested": self.f1Configuration.f1Playout, "configured": false, "effective": "unverified", "stage": "handoff_timeout"])
+            if LatencyLabConfiguration.current != self.f1Configuration { self.reconcileLabConfiguration() }
+        }
+        latencyCollector?.trace(["type": "f1_playout", "time": ProcessInfo.processInfo.systemUptime,
+                                 "requested": f1Configuration.f1Playout, "configured": false, "effective": "unverified",
+                                 "maximumDelayMs": f1Configuration.f1MaximumDelayMs,
+                                 "f2Requested": desired.f2, "stage": "host_confirmed"])
+    }
+
+    private func consumeF1Ready(_ data: Data) -> Bool {
+        guard let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              object["type"] as? String == "latencyF1RestartReady" else { return false }
+        guard let nonce = object["nonce"] as? String, case .requested(let expected) = f1State,
+              nonce == expected, directInputState.isReady else { return true }
+        f1RequestTimeout?.cancel(); f1RequestTimeout = nil
+        f1State = .restarting(nonce)
+        f1RestartTask = Task { @MainActor [weak self] in await self?.restartForF1(nonce) }
+        return true
+    }
+
+    private func restartForF1(_ nonce: String) async {
+        guard !isClosing, case .restarting(let expected) = f1State, expected == nonce,
+              let signaling, let iceConfig = f1ICEConfig,
+              directInputState.isReady, let oldPeer = peerConnection,
+              let oldChannel = dataChannel, oldChannel.readyState == .open else {
+            if case .restarting(let current) = f1State, current == nonce { f1State = .unavailable }
+            return
+        }
+        let oldFactory = factory
+        // The bundled factory copies this process-global string into its own
+        // environment during initialization. Do not suspend before restoring it.
+        let replacementFactory: RTCPeerConnectionFactory
+        if LatencyF1Policy.needsNewFactory(currentMaximumMs: labApplied.f1MaximumDelayMs,
+                                           desiredMaximumMs: labPending?.f1MaximumDelayMs) {
+            if f1ApplyToReplacement {
+                RTCPeerConnectionFactory.configureFieldTrials("WebRTC-ForcePlayoutDelay/min_ms:0,max_ms:\(f1Configuration.f1MaximumDelayMs)/")
+            } else {
+                RTCPeerConnectionFactory.configureFieldTrials(nil)
+            }
+            replacementFactory = RTCPeerConnectionFactory(
+                audioDeviceModuleType: .platformDefault, bypassVoiceProcessing: true,
+                encoderFactory: DesktopVideoEncoderFactory(), decoderFactory: DesktopVideoDecoderFactory(),
+                audioProcessingModule: nil)
+            RTCPeerConnectionFactory.configureFieldTrials(nil)
+        } else {
+            replacementFactory = oldFactory
+        }
+        factory = replacementFactory
+        f1FactoryConfigured = f1ApplyToReplacement
+        do {
+            guard !isClosing, case .restarting(let current) = f1State, current == nonce else { return }
+            let replacement = try makePeerConnection(iceConfig: iceConfig)
+            f1RetiredPeer = oldPeer; f1RetiredChannel = oldChannel; f1RetiredFactory = oldFactory
+            invalidateInputPresentation()
+            guard !isClosing, case .restarting(let current) = f1State, current == nonce else {
+                replacement.close()
+                return
+            }
+            remoteAudioTrack?.isEnabled = false
+            remoteAudioTrack = nil; remoteVideoTrack = nil; appliedRemoteAudioGain = nil
+            inputHandshakeDeadlineTask?.cancel(); inputHandshakeDeadlineTask = nil
+            directInputState = DirectInputClientState(); connectedOnce = false
+            answerApplied = false; pendingRemoteICECandidates.removeAll()
+            peerConnection = replacement
+            labActiveNonce = nonce
+            iceDeadlineTask?.cancel()
+            iceDeadlineTask = Task { [weak self, iceConnectTimeout] in
+                try? await Task.sleep(for: iceConnectTimeout)
+                guard !Task.isCancelled, let self, !self.isClosing, self.peerConnection === replacement,
+                      !self.connectedOnce else { return }
+                self.finishDisconnect(reason: "The latency experiment could not reconnect.", category: .peerConnection)
+            }
+            if mediaPolicy.receivesHostAudio { addReceiveOnlyTransceiver(of: .audio, on: replacement) }
+            addReceiveOnlyTransceiver(of: .video, on: replacement)
+            let config = RTCDataChannelConfiguration(); config.isOrdered = true; config.isNegotiated = false
+            guard let channel = replacement.dataChannel(forLabel: "control", configuration: config) else {
+                throw TransportError.negotiationFailed("The latency experiment could not create its control channel.")
+            }
+            channel.delegate = self; dataChannel = channel
+            f1WaitingToSendOffer = true; f1PendingLocalICE.removeAll()
+            let offer = try await createOffer(on: replacement)
+            guard !isClosing, peerConnection === replacement else { return }
+            try await setLocalDescription(offer, on: replacement)
+            guard !isClosing, peerConnection === replacement else { return }
+            var payload = ["client": UIDevice.current.name, "sdp": offer.sdp, "sdpType": "offer",
+                           "latencyF1Restart": nonce]
+            if f2ApplyToReplacement { payload["latencyF2Encoder"] = "1" }
+            if f3ApplyToReplacement { payload["latencyF3Sender"] = "1" }
+            try await signaling.send(SignalingEnvelope(role: .client, kind: .offer,
+                payload: payload, ts: Date().timeIntervalSince1970))
+            guard !isClosing, peerConnection === replacement else { return }
+            f1WaitingToSendOffer = false
+            let pending = f1PendingLocalICE; f1PendingLocalICE.removeAll()
+            for candidate in pending {
+                guard !Task.isCancelled, !isClosing, peerConnection === replacement else { return }
+                await sendF1ICE(candidate, nonce: nonce, signaling: signaling)
+            }
+            latencyCollector?.trace(["type": "f1_playout", "time": ProcessInfo.processInfo.systemUptime,
+                                     "requested": f1Configuration.f1Playout, "configured": f1ApplyToReplacement, "effective": "unverified",
+                                     "maximumDelayMs": f1Configuration.f1MaximumDelayMs, "stage": "replacement_offer"])
+        } catch {
+            guard !Task.isCancelled, !isClosing, case .restarting(let current) = f1State,
+                  current == nonce else { return }
+            finishDisconnect(reason: "The latency experiment could not reconnect.", category: .peerConnection)
+        }
+    }
+
+    private func sendF1ICE(_ candidate: RTCIceCandidate, nonce: String, signaling: any SignalingChannel) async {
+        do {
+            try await signaling.send(SignalingEnvelope(role: .client, kind: .ice,
+                payload: ["candidate": candidate.sdp, "sdpMid": candidate.sdpMid ?? "",
+                          "sdpMLineIndex": "\(candidate.sdpMLineIndex)", "latencyF1Restart": nonce],
+                ts: Date().timeIntervalSince1970))
+        } catch { log.error("failed to send F1 ICE candidate") }
+    }
+
     private func latencyLoop(collector: LatencyStatsCollector) async {
         let batteryLease = LatencyBatteryMonitoringLease.shared.acquire()
         var cycle = 0
@@ -607,27 +839,72 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
 
             do {
                 let envelopes = try await signaling.poll()
+                #if DEBUG
+                guard !Task.isCancelled, self.signaling === signaling, !isClosing else { return }
+                #endif
                 for envelope in envelopes {
                     switch envelope.kind {
                     case .answer:
+                        #if DEBUG
+                        let answerNonce = labActiveNonce
+                        guard LatencyF1Policy.acceptsSignaling(activeNonce: answerNonce,
+                            messageNonce: envelope.payload["latencyF1Restart"]) else { continue }
+                        guard let answeringPeer = peerConnection else { continue }
+                        #endif
                         guard !answerApplied,
                               let sdp = envelope.payload["sdp"] else {
                             continue
                         }
-                        try await setRemoteDescription(
-                            RTCSessionDescription(type: .answer, sdp: sdp),
-                            on: peerConnection)
+                        do {
+                            try await setRemoteDescription(
+                                RTCSessionDescription(type: .answer, sdp: sdp),
+                                on: peerConnection)
+                        } catch {
+                            #if DEBUG
+                            guard !isClosing, self.peerConnection === answeringPeer else { continue }
+                            #endif
+                            throw error
+                        }
+                        #if DEBUG
+                        guard !isClosing, self.peerConnection === answeringPeer else { continue }
+                        guard labActiveNonce == answerNonce else { continue }
+                        #endif
                         answerApplied = true
                         log.info("ICE id=\(self.diagnosticConnectionID, privacy: .public) stage=answer_applied")
                         loggedPendingRemoteICE = false
                         try await flushPendingRemoteICECandidates()
+                        #if DEBUG
+                        guard !isClosing, self.peerConnection === answeringPeer else { continue }
+                        if answerNonce != nil {
+                            f1RetiredChannel?.close(); f1RetiredPeer?.close()
+                            f1RetiredChannel = nil; f1RetiredPeer = nil; f1RetiredFactory = nil
+                        }
+                        if labLastHello != nil { reconcileLabConfiguration() }
+                        #endif
                     case .ice:
+                        #if DEBUG
+                        guard LatencyF1Policy.acceptsSignaling(activeNonce: labActiveNonce,
+                            messageNonce: envelope.payload["latencyF1Restart"]) else { continue }
+                        #endif
                         guard let candidate = iceCandidate(from: envelope.payload) else {
                             continue
                         }
                         remoteCandidateCounts.record(candidate.sdp)
-                        try await handleRemoteICECandidate(candidate)
+                        #if DEBUG
+                        let icePeer = peerConnection
+                        #endif
+                        do { try await handleRemoteICECandidate(candidate) }
+                        catch {
+                            #if DEBUG
+                            guard !isClosing, peerConnection === icePeer else { continue }
+                            #endif
+                            throw error
+                        }
                     case .bye:
+                        #if DEBUG
+                        guard LatencyF1Policy.acceptsSignaling(activeNonce: labActiveNonce,
+                            messageNonce: envelope.payload["latencyF1Restart"]) else { continue }
+                        #endif
                         finishDisconnect(reason: envelope.payload["reason"] ?? "Disconnected", category: .remoteBye)
                         return
                     case .offer:
@@ -802,8 +1079,20 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
         }
         let pendingCandidates = pendingRemoteICECandidates
         pendingRemoteICECandidates.removeAll()
+        #if DEBUG
+        guard let expectedPeer = peerConnection else { return }
+        #endif
         for candidate in pendingCandidates {
-            try await addRemoteICECandidate(candidate)
+            #if DEBUG
+            guard !isClosing, peerConnection === expectedPeer else { return }
+            #endif
+            do { try await addRemoteICECandidate(candidate) }
+            catch {
+                #if DEBUG
+                guard !isClosing, peerConnection === expectedPeer else { return }
+                #endif
+                throw error
+            }
         }
     }
 
@@ -971,6 +1260,14 @@ extension WebRTCTransport: RTCPeerConnectionDelegate {
                 return
             }
             if self.peerConnection === peerConnection { self.localCandidateCounts.record(candidate.sdp) }
+            #if DEBUG
+            guard !self.isClosing, self.peerConnection === peerConnection else { return }
+            if let nonce = self.labActiveNonce {
+                if self.f1WaitingToSendOffer { self.f1PendingLocalICE.append(candidate); return }
+                await self.sendF1ICE(candidate, nonce: nonce, signaling: signaling)
+                return
+            }
+            #endif
             do {
                 try await signaling.send(SignalingEnvelope(
                     role: .client,
@@ -1006,6 +1303,9 @@ extension WebRTCTransport: RTCPeerConnectionDelegate {
             guard let self, let track = stream.videoTracks.first else {
                 return
             }
+            #if DEBUG
+            guard self.peerConnection === peerConnection else { return }
+            #endif
             self.adoptRemoteVideoTrack(track)
         }
     }
@@ -1015,6 +1315,9 @@ extension WebRTCTransport: RTCPeerConnectionDelegate {
             guard let self, let track = receiver.track else {
                 return
             }
+            #if DEBUG
+            guard self.peerConnection === peerConnection else { return }
+            #endif
             self.log.info("received track via receiver kind=\(track.kind, privacy: .public) id=\(track.trackId, privacy: .public)")
             if let videoTrack = track as? RTCVideoTrack {
                 self.adoptRemoteVideoTrack(videoTrack)
@@ -1029,6 +1332,9 @@ extension WebRTCTransport: RTCPeerConnectionDelegate {
             guard let self, let track = transceiver.receiver.track else {
                 return
             }
+            #if DEBUG
+            guard self.peerConnection === peerConnection else { return }
+            #endif
             self.log.info("transceiver started receiving kind=\(track.kind, privacy: .public) id=\(track.trackId, privacy: .public)")
             if let videoTrack = track as? RTCVideoTrack {
                 self.adoptRemoteVideoTrack(videoTrack)
@@ -1064,10 +1370,21 @@ extension WebRTCTransport: RTCDataChannelDelegate {
             guard let self, !self.isClosing, self.dataChannel === dataChannel,
                   dataChannel.readyState == .open else { return }
             #if DEBUG
+            if self.consumeF1Ready(buffer.data) { return }
             if let latencyReceivedAt, self.receiveLatencyPong(buffer.data, receivedAt: latencyReceivedAt) { return }
             #endif
             switch HostMessage.decode(buffer.data) {
             case .helloAck(let hello):
+                #if DEBUG
+                if case .restarting = self.f1State {
+                    guard hello.latencyF1Playout == 1,
+                          (!self.f2ApplyToReplacement || hello.latencyF2Encoder == 1),
+                          (!self.f3ApplyToReplacement || hello.latencyF3Sender == 1) else {
+                        self.finishDisconnect(reason: "The latency experiment is no longer supported by the host.", category: .input)
+                        return
+                    }
+                }
+                #endif
                 switch directInputState.accept(version: hello.inputSessions, acknowledgement: hello.inputSession,
                                                inputInvalidation: hello.inputInvalidation) {
                 case .ignored: return
@@ -1076,6 +1393,16 @@ extension WebRTCTransport: RTCDataChannelDelegate {
                     return
                 case .accepted: break
                 }
+                #if DEBUG
+                if case .restarting(let nonce) = self.f1State {
+                    self.f1State = .active(nonce)
+                    if let pending = self.labPending { self.labApplied = pending }
+                    self.labPending = nil
+                    self.latencyCollector?.trace(["type": "f1_playout", "time": ProcessInfo.processInfo.systemUptime,
+                        "requested": self.f1Configuration.f1Playout, "configured": self.f1ApplyToReplacement, "effective": "unverified", "stage": "replacement_hello",
+                        "maximumDelayMs": self.f1Configuration.f1MaximumDelayMs])
+                }
+                #endif
                 inputHandshakeDeadlineTask?.cancel()
                 inputHandshakeDeadlineTask = nil
                 if inputPresentation.matches(hello.inputSession) { return }
@@ -1083,7 +1410,13 @@ extension WebRTCTransport: RTCDataChannelDelegate {
                 guard !isClosing, self.dataChannel === dataChannel, directInputState.isReady else { return }
                 inputPresentation.begin(hello.inputSession)
                 log.info("host acknowledged the WebRTC control channel")
+                #if DEBUG
+                self.labLastHello = hello
+                #endif
                 onHostHello?(hello)
+                #if DEBUG
+                if !isClosing, self.dataChannel === dataChannel { self.startF1IfSupported(hello, channel: dataChannel) }
+                #endif
             case .inputUnavailable(let scope):
                 switch directInputState.invalidate(scope) {
                 case .ignored: return

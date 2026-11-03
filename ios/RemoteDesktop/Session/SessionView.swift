@@ -23,6 +23,7 @@ struct SessionView: View {
     @GestureState private var touchingZoomControls = false
     #if DEBUG
     @State private var showsVideoStatistics = false
+    @State private var showsLatencyLabSettings = false
     @State private var videoStatistics = "Waiting for video stats…"
     #endif
 
@@ -70,7 +71,7 @@ struct SessionView: View {
         ZStack(alignment: .top) {
             // ── Remote screen ──────────────────────────────────
             #if DEBUG
-            RemoteScreenView(accessories: accessories, zoom: zoom, onLatencyGesture: { showsVideoStatistics.toggle() })
+            RemoteScreenView(accessories: accessories, zoom: zoom, allowF4Renderer: true, onLatencyGesture: { showsVideoStatistics.toggle() })
                 .ignoresSafeArea()
             #else
             RemoteScreenView(accessories: accessories, zoom: zoom)
@@ -177,16 +178,21 @@ struct SessionView: View {
         #if DEBUG
         .overlay(alignment: .topTrailing) {
             if showsVideoStatistics {
-                Text(videoStatistics)
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(.white)
+                VStack(alignment: .trailing, spacing: 8) {
+                    Text(videoStatistics)
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.white)
+                        .allowsHitTesting(false)
+                    Button("Latency lab") { showsLatencyLabSettings = true }
+                        .buttonStyle(.borderedProminent)
+                }
                     .padding(8)
                     .background(.black.opacity(0.8), in: RoundedRectangle(cornerRadius: 8))
                     .padding(.top, 64)
                     .padding(.horizontal, 10)
-                    .allowsHitTesting(false)
             }
         }
+        .sheet(isPresented: $showsLatencyLabSettings) { LatencyLabSettingsView() }
         .task {
             let arguments = ProcessInfo.processInfo.arguments
             guard LatencyStatsCollector.enabled,

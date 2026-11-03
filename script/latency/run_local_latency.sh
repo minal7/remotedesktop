@@ -30,12 +30,16 @@ APP="$LATENCY_BUILD/LocalLatencyProbe.app"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Frameworks"
 ln -sfn "$WEBRTC_FRAMEWORK_DIR/LiveKitWebRTC.framework" "$APP/Contents/Frameworks/LiveKitWebRTC.framework"
 cp "$ROOT/script/latency/LocalLatencyProbe.swift" "$LATENCY_BUILD/main.swift"
-xcrun swiftc -O -swift-version 5 -F "$WEBRTC_FRAMEWORK_DIR" -framework LiveKitWebRTC \
+xcrun swiftc -O -DDEBUG -swift-version 5 -F "$WEBRTC_FRAMEWORK_DIR" -framework LiveKitWebRTC \
   -Xlinker -rpath -Xlinker "$WEBRTC_FRAMEWORK_DIR" \
   "$ROOT/host-mac/RemoteDesktopHost/WebRTCAliases.swift" \
   "$ROOT/host-mac/RemoteDesktopHost/WireFormat.swift" \
   "$ROOT/host-mac/RemoteDesktopHost/HostConfig.swift" \
   "$ROOT/protocol/Swift/DesktopVideoQuality.swift" \
+  "$ROOT/host-mac/RemoteDesktopHost/DesktopLowLatencyH264Encoder.swift" \
+  "$ROOT/protocol/Swift/LatencyLabConfiguration.swift" \
+  "$ROOT/protocol/Swift/LatencyLabSenderPolicy.swift" \
+  "$ROOT/protocol/Swift/LatencyStatsCollector.swift" \
   "$ROOT/protocol/Swift/DirectInputSessionProtocol.swift" \
   "$ROOT/host-mac/RemoteDesktopHost/HostRuntimeContext.swift" \
   "$ROOT/host-mac/RemoteDesktopHost/ScreenCapture.swift" \
@@ -50,6 +54,10 @@ codesign --force --sign - "$APP"
 export LATENCY_SECONDS="${LATENCY_SECONDS:-60}"
 "$APP/Contents/MacOS/LocalLatencyProbe" "$@" > "$LATENCY_BUILD/run.log" 2> "$LATENCY_BUILD/run.err"
 cat "$LATENCY_BUILD/run.log"
+if [[ -n "${LATENCY_PAIR_FIX:-}" ]]; then
+  python3 "$ROOT/script/latency/summarize_pairs.py" "$LATENCY_OUTPUT" --output "$LATENCY_OUTPUT.summary.json"
+  exit 0
+fi
 python3 - "$LATENCY_OUTPUT" <<'PYVERIFY'
 import json, sys
 from pathlib import Path

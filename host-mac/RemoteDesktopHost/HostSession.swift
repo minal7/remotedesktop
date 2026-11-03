@@ -3,6 +3,19 @@ import Combine
 import Foundation
 import os
 
+#if DEBUG
+struct LatencyF1RestartTicket {
+    let nonce: String
+    let senderID: String
+    let generation: UInt64
+    let expires: TimeInterval
+
+    func matches(nonce: String, senderID: String, generation: UInt64, now: TimeInterval) -> Bool {
+        self.nonce == nonce && self.senderID == senderID && self.generation == generation && now <= expires
+    }
+}
+#endif
+
 private final class TaskMemoryOwnerIdentityBox: @unchecked Sendable {
     private let lock = NSLock()
     private var value: String?
@@ -71,6 +84,11 @@ final class HostSession: ObservableObject {
     private var signalingTask: Task<Void, Never>?
     private var peerSession: HostPeerSession?
     private var activeWebRTCPeer: ActiveWebRTCPeer?
+    #if DEBUG
+    private var latencyF1Restart: LatencyF1RestartTicket?
+    private var latencyF1ActiveNonce: String?
+    private var latencyF1EarlyICE: [[String: String]] = []
+    #endif
     private var nextWebRTCPeerGeneration: UInt64 = 0
     private var pendingPeerCaptureTeardown: Task<Void, Never>?
     private let advertiser = BonjourAdvertiser()
@@ -566,6 +584,9 @@ final class HostSession: ObservableObject {
         let stoppedPeerSession = peerSession
         peerSession = nil
         activeWebRTCPeer = nil
+        #if DEBUG
+        latencyF1Restart = nil; latencyF1ActiveNonce = nil; latencyF1EarlyICE.removeAll()
+        #endif
         disconnecting = true
         advertiser.stop()
         resetPendingRemoteICE()
@@ -965,6 +986,33 @@ final class HostSession: ObservableObject {
                         log.warning("ignored offer from a second signaling sender")
                         continue
                     }
+                    #if DEBUG
+                    if let nonce = env.payload["latencyF1Restart"] {
+                        guard let pending = latencyF1Restart,
+                              let sdp = env.payload["sdp"], !sdp.isEmpty,
+                              let owner = activeWebRTCPeer,
+                              pending.matches(nonce: nonce, senderID: offerSenderID, generation: owner.generation,
+                                              now: ProcessInfo.processInfo.systemUptime),
+                              owner.senderID == offerSenderID, owner.classification == .primaryRemoteControl,
+                              let oldPeer = peerSession, !oldPeer.isEnded else { continue }
+                        guard computerUse.endWebRTCPeer(senderID: owner.senderID, generation: owner.generation,
+                                                       classification: owner.classification) else { continue }
+                        latencyF1Restart = nil
+                        latencyF1ActiveNonce = nonce
+                        peerSession = nil
+                        activeWebRTCPeer = nil
+                        resetPendingRemoteICE()
+                        let teardown = oldPeer.close(reason: "latency-f1-restart")
+                        await teardown.value
+                        guard !Task.isCancelled else { return }
+                    } else if latencyF1ActiveNonce != nil, peerSession != nil {
+                        // A delayed offer from the retired generation must not
+                        // renegotiate the replacement peer.
+                        continue
+                    } else if peerSession == nil {
+                        latencyF1Restart = nil; latencyF1ActiveNonce = nil; latencyF1EarlyICE.removeAll()
+                    }
+                    #endif
                     let clientName = env.payload["client"] ?? "iOS client"
                     if let sdp = env.payload["sdp"] {
                         if peerSession == nil {
@@ -972,6 +1020,12 @@ final class HostSession: ObservableObject {
                             // replacement generation cannot install callbacks
                             // until the previous peer's stop has completed.
                             await pendingPeerCaptureTeardown?.value
+                            #if DEBUG
+                            if let nonce = env.payload["latencyF1Restart"] {
+                                guard !Task.isCancelled, latencyF1ActiveNonce == nonce,
+                                      peerSession == nil, activeWebRTCPeer == nil else { continue }
+                            }
+                            #endif
                             guard computerUse.classifyWebRTCPeer(
                                 senderID: offerSenderID)
                                     == offeredClassification else {
@@ -996,6 +1050,16 @@ final class HostSession: ObservableObject {
                                 senderID: offerSenderID,
                                 generation: generation,
                                 classification: offeredClassification)
+                            #if DEBUG
+                            let labNonce = env.payload["latencyF1Restart"] == latencyF1ActiveNonce
+                                ? env.payload["latencyF1Restart"] : nil
+                            let labF2 = labNonce != nil && env.payload["latencyF2Encoder"] == "1"
+                            let labF3 = labNonce != nil && env.payload["latencyF3Sender"] == "1"
+                            #else
+                            let labNonce: String? = nil
+                            let labF2 = false
+                            let labF3 = false
+                            #endif
                             let computerUse = computerUse
                             peerSession = HostPeerSession(
                                 signaling: client,
@@ -1032,6 +1096,24 @@ final class HostSession: ObservableObject {
                                             epoch: epoch)
                                     }
                                 },
+                                latencyF1Nonce: labNonce,
+                                latencyF2Enabled: labF2,
+                                latencyF3Enabled: labF3,
+                                onLatencyF1RestartRequest: { [weak self] nonce, ready in
+                                    #if DEBUG
+                                    Task { @MainActor [weak self] in
+                                        guard let self, let owner = self.activeWebRTCPeer,
+                                              owner.senderID == offerSenderID, owner.generation == generation,
+                                              owner.classification == .primaryRemoteControl,
+                                              self.peerSession != nil else { return }
+                                        self.latencyF1Restart = LatencyF1RestartTicket(
+                                            nonce: nonce, senderID: offerSenderID, generation: generation,
+                                            expires: ProcessInfo.processInfo.systemUptime + 30)
+                                        self.latencyF1EarlyICE.removeAll()
+                                        ready()
+                                    }
+                                    #endif
+                                },
                                 onEnded: { [weak self] reason in
                                     Task { @MainActor in
                                         self?.handlePeerEnded(
@@ -1051,6 +1133,13 @@ final class HostSession: ObservableObject {
                             guard !Task.isCancelled, peerSession === offeredPeer,
                                   activeWebRTCPeer?.generation == offeredOwner.generation,
                                   !offeredPeer.isEnded else { continue }
+                            #if DEBUG
+                            if let nonce = env.payload["latencyF1Restart"], nonce == latencyF1ActiveNonce {
+                                let early = latencyF1EarlyICE
+                                latencyF1EarlyICE.removeAll()
+                                for payload in early { offeredPeer.addRemoteIce(payload) }
+                            }
+                            #endif
                             flushPendingRemoteICEIfPossible()
                             if Self.shouldWithdrawAdvertisement(
                                 afterAcceptedPeer: offeredOwner.classification) {
@@ -1113,6 +1202,20 @@ final class HostSession: ObservableObject {
                         }
                     }
                 case .ice:
+                    #if DEBUG
+                    if let nonce = env.payload["latencyF1Restart"] {
+                        if let pending = latencyF1Restart, pending.nonce == nonce,
+                           pending.senderID == env.senderID,
+                           pending.expires >= ProcessInfo.processInfo.systemUptime {
+                            if latencyF1EarlyICE.count < 64 { latencyF1EarlyICE.append(env.payload) }
+                            continue
+                        }
+                        guard nonce == latencyF1ActiveNonce, let sender = env.senderID,
+                              let owner = activeWebRTCPeer, owner.senderID == sender else { continue }
+                    } else if latencyF1ActiveNonce != nil {
+                        continue
+                    }
+                    #endif
                     if let peerSession {
                         peerSession.addRemoteIce(env.payload)
                     } else {
@@ -1122,6 +1225,12 @@ final class HostSession: ObservableObject {
                     // Host doesn't receive answers.
                     log.warning("unexpected answer from client")
                 case .bye:
+                    #if DEBUG
+                    if let nonce = latencyF1ActiveNonce {
+                        guard env.payload["latencyF1Restart"] == nonce, let sender = env.senderID,
+                              let owner = activeWebRTCPeer, owner.senderID == sender else { continue }
+                    }
+                    #endif
                     let reason = env.payload["reason"] ?? "user"
                     if let activeWebRTCPeer,
                        activeWebRTCPeer.classification

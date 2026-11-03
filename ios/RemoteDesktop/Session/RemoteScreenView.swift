@@ -23,11 +23,15 @@ struct RemoteScreenView: UIViewRepresentable {
     @ObservedObject var accessories: AccessoryMonitor
     @ObservedObject var zoom: RemoteScreenZoomController
     #if DEBUG
+    var allowF4Renderer = false
     var onLatencyGesture: (() -> Void)? = nil
     #endif
 
     func makeUIView(context: Context) -> RemoteScreenUIView {
         let v = RemoteScreenUIView()
+        #if DEBUG
+        v.allowF4Renderer = allowF4Renderer
+        #endif
         v.bindSession(session)
         v.bindZoomController(zoom)
         v.accessories = accessories
@@ -148,6 +152,10 @@ struct RemoteScreenZoomControls: View {
 
 final class RemoteScreenUIView: UIView, UIPointerInteractionDelegate, UIGestureRecognizerDelegate {
     #if DEBUG
+    var allowF4Renderer: Bool {
+        get { videoView.allowF4Renderer }
+        set { videoView.allowF4Renderer = newValue }
+    }
     var onLatencyGesture: (() -> Void)?
     @objc private func latencyTapped(_ gesture: UITapGestureRecognizer) {
         if gesture.state == .recognized { onLatencyGesture?() }
@@ -898,9 +906,18 @@ final class RemoteScreenUIView: UIView, UIPointerInteractionDelegate, UIGestureR
 /// The container survives transport recovery; its driver and Metal layer are
 /// fresh for every attachment. Removed attachments cannot present into a successor.
 private final class RemoteVideoSurfaceView: UIView, RemoteVideoSurface {
+    #if DEBUG
+    var allowF4Renderer = false
+    #endif
     private var viewport: CGRect?
     private lazy var lifetime = RemoteVideoSurfaceLifetime<RemoteVideoPresentationSurface>(
-        make: { RemoteVideoPresentationSurface.make() },
+        make: { [weak self] in
+            #if DEBUG
+            return RemoteVideoPresentationSurface.make(allowF4: self?.allowF4Renderer == true)
+            #else
+            return RemoteVideoPresentationSurface.make()
+            #endif
+        },
         install: { [weak self] renderer, display in
             guard let self else { return }
             renderer.view.backgroundColor = UIColor(white: 0.05, alpha: 1)

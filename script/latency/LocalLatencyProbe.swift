@@ -20,6 +20,10 @@ final class Measurements: @unchecked Sendable {
     var collectText = false
     var sourceText: LumaPatch?
     var decodedText: LumaPatch?
+    var nativeText: LumaPatch?
+    var collectNativeText = false
+    var nativeTextWidth = 0
+    var nativeTextHeight = 0
     var dimensions = ""
     var adaptedSize = ""
     var receivedFrames = 0
@@ -62,7 +66,7 @@ struct MarkerGeometry: Sendable {
         return low
     }
     func read(_ buffer: CVPixelBuffer, mirror: Bool) -> Int? {
-        CVPixelBufferLockBaseAddress(buffer, .readOnly)
+        guard CVPixelBufferLockBaseAddress(buffer, .readOnly) == kCVReturnSuccess else { return nil }
         defer { CVPixelBufferUnlockBaseAddress(buffer, .readOnly) }
         let w = CVPixelBufferGetWidth(buffer), h = CVPixelBufferGetHeight(buffer)
         if CVPixelBufferIsPlanar(buffer) {
@@ -82,6 +86,10 @@ struct LumaPatch {
     let width: Int
     let height: Int
     let values: [Double]
+    var originX = 0
+    var originY = 0
+    var canvasWidth = 0
+    var canvasHeight = 0
 
     static func read(width: Int, height: Int, geometry: MarkerGeometry,
                      limitedRange: Bool, pixel: (Int, Int) -> UInt8) -> Self {
@@ -96,13 +104,24 @@ struct LumaPatch {
             let luma = Double(pixel(x, y))
             return limitedRange ? min(255, max(0, (luma - 16) * 255 / 219)) : luma
         } }
-        return Self(width: x1 - x0, height: y1 - y0, values: values)
+        return Self(width: x1 - x0, height: y1 - y0, values: values,
+                    originX: x0, originY: y0, canvasWidth: width, canvasHeight: height)
     }
 
     static func read(_ buffer: CVPixelBuffer, geometry: MarkerGeometry) -> Self? {
-        guard CVPixelBufferIsPlanar(buffer) else { return nil }
-        CVPixelBufferLockBaseAddress(buffer, .readOnly)
+        guard CVPixelBufferLockBaseAddress(buffer, .readOnly) == kCVReturnSuccess else { return nil }
         defer { CVPixelBufferUnlockBaseAddress(buffer, .readOnly) }
+        if !CVPixelBufferIsPlanar(buffer) {
+            guard CVPixelBufferGetPixelFormatType(buffer) == kCVPixelFormatType_32BGRA,
+                  let base = CVPixelBufferGetBaseAddress(buffer) else { return nil }
+            let pixels = base.assumingMemoryBound(to: UInt8.self)
+            let stride = CVPixelBufferGetBytesPerRow(buffer)
+            return read(width: CVPixelBufferGetWidth(buffer), height: CVPixelBufferGetHeight(buffer),
+                        geometry: geometry, limitedRange: false) { x, y in
+                let p = pixels + y * stride + x * 4
+                return UInt8(min(255, max(0, (0.2126 * Double(p[2]) + 0.7152 * Double(p[1]) + 0.0722 * Double(p[0])).rounded())))
+            }
+        }
         guard let base = CVPixelBufferGetBaseAddressOfPlane(buffer, 0) else { return nil }
         let p = base.assumingMemoryBound(to: UInt8.self)
         let stride = CVPixelBufferGetBytesPerRowOfPlane(buffer, 0)
@@ -111,6 +130,33 @@ struct LumaPatch {
                     limitedRange: CVPixelBufferGetPixelFormatType(buffer) == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange) {
             x, y in p[y * stride + x]
         }
+    }
+
+    /// Fixed native viewport comparison. Pixel centers use their original
+    /// screen coordinates; there is no best-fit alignment or scale search.
+    func resampled(to reference: Self) -> Self? {
+        guard width > 1, height > 1, canvasWidth > 0, canvasHeight > 0,
+              reference.width > 1, reference.height > 1,
+              reference.canvasWidth > 0, reference.canvasHeight > 0 else { return nil }
+        var result = reference
+        var samples = [Double](); samples.reserveCapacity(reference.values.count)
+        for y in 0..<reference.height {
+            let py = min(Double(height - 1), max(0,
+                (Double(reference.originY + y) + 0.5) * Double(canvasHeight) / Double(reference.canvasHeight) - 0.5 - Double(originY)))
+            let y0 = Int(py), y1 = min(height - 1, y0 + 1), fy = py - Double(y0)
+            for x in 0..<reference.width {
+                let px = min(Double(width - 1), max(0,
+                    (Double(reference.originX + x) + 0.5) * Double(canvasWidth) / Double(reference.canvasWidth) - 0.5 - Double(originX)))
+                let x0 = Int(px), x1 = min(width - 1, x0 + 1), fx = px - Double(x0)
+                let top = values[y0 * width + x0] * (1 - fx) + values[y0 * width + x1] * fx
+                let bottom = values[y1 * width + x0] * (1 - fx) + values[y1 * width + x1] * fx
+                samples.append(top * (1 - fy) + bottom * fy)
+            }
+        }
+        result = Self(width: reference.width, height: reference.height, values: samples,
+                      originX: reference.originX, originY: reference.originY,
+                      canvasWidth: reference.canvasWidth, canvasHeight: reference.canvasHeight)
+        return result
     }
 
     // Mean local SSIM over 8x8 synthetic-text blocks, with no alignment search.
@@ -176,22 +222,28 @@ final class DecoderProbe: NSObject, LKRTCVideoRenderer {
     func renderFrame(_ frame: LKRTCVideoFrame?) {
         let t = now()
         guard let frame else { return }
+        records.withLock {
+            records.receivedFrames += 1
+            records.dimensions = "\(frame.width)x\(frame.height)"
+        }
+        guard frame.rotation == ._0 else { return }
         let id: Int?
         let text: LumaPatch?
         if let native = frame.buffer as? LKRTCCVPixelBuffer {
+            guard native.cropX == 0, native.cropY == 0,
+                  Int(native.cropWidth) == CVPixelBufferGetWidth(native.pixelBuffer),
+                  Int(native.cropHeight) == CVPixelBufferGetHeight(native.pixelBuffer) else { return }
             id = geometry.read(native.pixelBuffer, mirror: false)
             text = records.withLock { records.collectText } ? LumaPatch.read(native.pixelBuffer, geometry: geometry) : nil
         } else {
             let buffer = frame.buffer.toI420()
             id = geometry.read(width: Int(buffer.width), height: Int(buffer.height), mirror: false) { x, y in buffer.dataY[y * Int(buffer.strideY) + x] }
-            text = records.withLock { records.collectText } ? LumaPatch.read(
-                width: Int(buffer.width), height: Int(buffer.height), geometry: geometry,
-                limitedRange: true) { x, y in buffer.dataY[y * Int(buffer.strideY) + x] } : nil
+            // This buffer exposes no reliable range metadata; it cannot prove
+            // the native-reference sharpness gate.
+            text = nil
         }
         records.withLock {
             records.decodedText = text
-            records.receivedFrames += 1
-            records.dimensions = "\(frame.width)x\(frame.height)"
             if let id, records.decoded[id] == nil { records.decoded[id] = t }
         }
     }
@@ -216,6 +268,20 @@ final class DisplayProbe: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked
         try s.addStreamOutput(self, type: .screen, sampleHandlerQueue: DispatchQueue(label: "latency.displayprobe", qos: .userInteractive))
         try await s.startCapture(); stream = s
     }
+    func collectNativeText() async throws {
+        guard let stream, let mode = CGDisplayCopyDisplayMode(CGMainDisplayID()) else { return }
+        let config = SCStreamConfiguration()
+        config.width = mode.pixelWidth; config.height = mode.pixelHeight
+        config.pixelFormat = kCVPixelFormatType_32BGRA
+        config.minimumFrameInterval = CMTime(value: 1, timescale: observerFPS)
+        config.queueDepth = 3; config.showsCursor = false; config.capturesAudio = false
+        records.withLock {
+            records.collectNativeText = true
+            records.nativeTextWidth = config.width
+            records.nativeTextHeight = config.height
+        }
+        try await stream.updateConfiguration(config)
+    }
     func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
         guard type == .screen, sampleBuffer.isValid,
               let attachments = CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, createIfNecessary: false) as? [[SCStreamFrameInfo: Any]],
@@ -227,7 +293,14 @@ final class DisplayProbe: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked
         let pts = CMTimeGetSeconds(CMSampleBufferGetPresentationTimeStamp(sampleBuffer))
         let source = geometry.read(buffer, mirror: false)
         let mirror = geometry.read(buffer, mirror: true)
+        let needsNative = records.withLock {
+            records.collectNativeText && source != nil
+                && CVPixelBufferGetWidth(buffer) == records.nativeTextWidth
+                && CVPixelBufferGetHeight(buffer) == records.nativeTextHeight
+        }
+        let native = needsNative ? LumaPatch.read(buffer, geometry: geometry) : nil
         records.withLock {
+            if let native { records.nativeText = native }
             if t >= records.start && t <= records.end {
                 records.observationFrames += 1
                 records.observerTimestampOffsets.append((t - pts) * 1000)
@@ -282,8 +355,12 @@ func setDescription(_ p: LKRTCPeerConnection, _ s: LKRTCSessionDescription, loca
 func stats(_ p: LKRTCPeerConnection) async -> [[String: Any]] {
     await withCheckedContinuation { c in
         p.statistics { report in
-            let allowed = Set(["inbound-rtp", "outbound-rtp", "remote-inbound-rtp", "candidate-pair", "codec", "transport"])
-            c.resume(returning: report.statistics.values.filter { allowed.contains($0.type) }.map { ["id": $0.id, "type": $0.type, "values": $0.values] })
+            let allowed = Set(["inbound-rtp", "outbound-rtp", "remote-inbound-rtp", "candidate-pair", "local-candidate", "remote-candidate", "codec", "transport"])
+            c.resume(returning: report.statistics.values.filter { allowed.contains($0.type) }.map { value in
+                let fields: [String: Any] = ["local-candidate", "remote-candidate"].contains(value.type)
+                    ? ["candidateType": value.values["candidateType"] as? String ?? "unknown"] : value.values
+                return ["id": value.id, "type": value.type, "values": fields]
+            })
         }
     }
 }
@@ -297,7 +374,7 @@ func summary(_ values: [Double]) -> [String: Any] {
 @MainActor final class Runner: NSObject, NSApplicationDelegate {
     var windows: [NSWindow] = []
     var timer: Timer?
-    let records = Measurements()
+    var records = Measurements()
     let capture = ScreenCapture()
     var observer: DisplayProbe?
     var sink: DecoderProbe?
@@ -305,17 +382,55 @@ func summary(_ values: [Double]) -> [String: Any] {
     var receiverFactory: LKRTCPeerConnectionFactory?
     var sender: LKRTCPeerConnection?
     var receiver: LKRTCPeerConnection?
-    let sendDelegate = PeerDelegate(), receiveDelegate = PeerDelegate()
+    var sendDelegate = PeerDelegate(), receiveDelegate = PeerDelegate()
     var videoSource: LKRTCVideoSource?
     var capturer: LKRTCVideoCapturer?
-    let output = ProcessInfo.processInfo.environment["LATENCY_OUTPUT"] ?? "/tmp/local-latency.json"
-    let duration = Double(ProcessInfo.processInfo.environment["LATENCY_SECONDS"] ?? "60") ?? 60
+    var output = ProcessInfo.processInfo.environment["LATENCY_OUTPUT"] ?? "/tmp/local-latency.json"
+    let duration = ProcessInfo.processInfo.environment["LATENCY_PAIR_FIX"] != nil
+        ? 30.0 : (Double(ProcessInfo.processInfo.environment["LATENCY_SECONDS"] ?? "60") ?? 60)
     func applicationDidFinishLaunching(_ notification: Notification) {
         Task { do { try await run() } catch { print("ERROR \(error)"); try? Data("\(error)".utf8).write(to: URL(fileURLWithPath: output + ".error")); NSApp.terminate(nil) } }
     }
     func run() async throws {
+        let environment = ProcessInfo.processInfo.environment
+        if let fix = environment["LATENCY_PAIR_FIX"], ["F2", "F3"].contains(fix) {
+            let count = max(4, Int(environment["LATENCY_PAIRS"] ?? "4") ?? 4)
+            let prefix = output
+            let baseline = LatencyLabConfiguration.current
+            var paths: [String] = []
+            for pair in 1...count {
+                for enabled in [false, true] {
+                    var selected = baseline
+                    if fix == "F2" { selected.f2Encoder = enabled }
+                    if fix == "F3" { selected.f3Sender = enabled }
+                    LatencyLabConfiguration.setRuntime(selected)
+                    output = prefix + ".\(pair)-\(enabled ? "B" : "A").json"
+                    guard !FileManager.default.fileExists(atPath: output) else {
+                        throw NSError(domain: "Refusing to overwrite a paired result", code: 1)
+                    }
+                    records = Measurements()
+                    sendDelegate = PeerDelegate(); receiveDelegate = PeerDelegate()
+                    try await runTrial()
+                    paths.append(output)
+                }
+            }
+            let manifest: [String: Any] = ["fix": fix, "pairs": count, "runs": paths,
+                "session": "one app invocation, identical scenario, fresh peer connections per trial",
+                "duration_s": duration]
+            try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
+                .write(to: URL(fileURLWithPath: prefix))
+        } else {
+            try await runTrial()
+        }
+        NSApp.terminate(nil)
+    }
+    func runTrial() async throws {
+        let lab = LatencyLabConfiguration.current
         guard CGPreflightScreenCaptureAccess() else { throw NSError(domain: "Screen recording permission is required for the standalone latency probe", code: 1) }
-        let screen = NSScreen.main!, w = screen.frame.width, h = screen.frame.height
+        guard let screen = NSScreen.screens.first(where: {
+            ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value == CGMainDisplayID()
+        }) else { throw NSError(domain: "Main display is unavailable", code: 1) }
+        let w = screen.frame.width, h = screen.frame.height
         let cell = floor(w * 0.42 / 32)
         let sourceFrame = NSRect(x: 20, y: h - 430, width: cell * 32 + 32, height: 330)
         let mirrorWidth = floor(w * 0.46), mirrorHeight = mirrorWidth * h / w
@@ -337,7 +452,7 @@ func summary(_ values: [Double]) -> [String: Any] {
         }
         LKRTCInitializeSSL()
         func factory() -> LKRTCPeerConnectionFactory {
-            let f = LKRTCPeerConnectionFactory(audioDeviceModuleType: .audioEngine, bypassVoiceProcessing: true, encoderFactory: DesktopVideoEncoderFactory(), decoderFactory: DesktopVideoDecoderFactory(), audioProcessingModule: nil)
+            let f = LKRTCPeerConnectionFactory(audioDeviceModuleType: .audioEngine, bypassVoiceProcessing: true, encoderFactory: DesktopVideoEncoderFactory(f2Enabled: lab.f2Encoder), decoderFactory: DesktopVideoDecoderFactory(), audioProcessingModule: nil)
             _ = f.audioDeviceModule.setEngineAvailability(LKRTCAudioEngineAvailability(isInputAvailable: false, isOutputAvailable: false))
             return f
         }
@@ -360,12 +475,14 @@ func summary(_ values: [Double]) -> [String: Any] {
         let videoSender = send.add(track, streamIds: ["screen"])!
         let answer = try await describe(send, offer: false)
         try await setDescription(send, answer, local: true); try await setDescription(receive, answer, local: false)
+        let capturePolicy = DesktopVideoQuality.capturePolicy(
+            negotiatedCodecs: videoSender.parameters.codecs, f2Requested: lab.f2Encoder)
         let parameters = videoSender.parameters
-        for encoding in parameters.encodings { encoding.maxBitrateBps = NSNumber(value: DesktopVideoQuality.maximumBitrateBps); encoding.maxFramerate = NSNumber(value: DesktopVideoQuality.targetFramesPerSecond); encoding.scaleResolutionDownBy = 1 }
+        for encoding in parameters.encodings { encoding.maxBitrateBps = NSNumber(value: DesktopVideoQuality.maximumBitrateBps); encoding.maxFramerate = NSNumber(value: capturePolicy.framesPerSecond); encoding.scaleResolutionDownBy = 1 }
         parameters.degradationPreference = NSNumber(value: DesktopVideoQuality.sharpnessPolicy.degradationPreference.rawValue)
         videoSender.parameters = parameters
         _ = send.setBweMinBitrateBps(nil, currentBitrateBps: nil, maxBitrateBps: NSNumber(value: DesktopVideoQuality.maximumBitrateBps))
-        let macroblocks = DesktopVideoQuality.maximumMacroblocksPerFrame(negotiatedCodecs: videoSender.parameters.codecs)
+        let macroblocks = capturePolicy.maximumMacroblocksPerFrame
         print("CONFIG screen=\(w)x\(h) macroblocks=\(macroblocks) codecs=\(videoSender.parameters.codecs.map { $0.name })")
         let records = self.records
         let owner = capture.beginSession(callbacks: .init(onVideoFrame: { frame, _ in
@@ -377,7 +494,7 @@ func summary(_ values: [Double]) -> [String: Any] {
             let needsAdaptation = records.withLock { () -> Bool in
                 guard size != records.adaptedSize else { return false }; records.adaptedSize = size; return true
             }
-            if needsAdaptation { source.adaptOutputFormat(toWidth: Int32(width), height: Int32(height), fps: Int32(DesktopVideoQuality.targetFramesPerSecond)) }
+            if needsAdaptation { source.adaptOutputFormat(toWidth: Int32(width), height: Int32(height), fps: capturePolicy.framesPerSecond) }
             let sourceText = records.withLock { records.collectText } ? LumaPatch.read(buffer, geometry: geometry) : nil
             records.withLock {
                 records.sourceText = sourceText
@@ -389,7 +506,44 @@ func summary(_ values: [Double]) -> [String: Any] {
             onStopped: { _, error in print("CAPTURE ERROR \(error)") }))
         let observer = DisplayProbe(records, geometry); self.observer = observer
         try await observer.start()
-        try await capture.start(for: owner, audioEnabled: false, maximumMacroblocksPerFrame: macroblocks)
+        try await capture.start(for: owner, audioEnabled: false, maximumMacroblocksPerFrame: macroblocks,
+                                framesPerSecond: capturePolicy.framesPerSecond)
+        let senderTrace = LatencyStatsCollector(side: "loopback_sender", enabled: true,
+            traceURL: URL(fileURLWithPath: output + ".sender.jsonl"))
+        let receiverTrace = LatencyStatsCollector(side: "loopback_receiver", enabled: true,
+            traceURL: URL(fileURLWithPath: output + ".receiver.jsonl"))
+        let polling = Task { @MainActor in
+            var appliedPath: LatencyLabSenderPolicy.Path?
+            while !Task.isCancelled {
+                for (peer, collector) in [(send, senderTrace), (receive, receiverTrace)] {
+                    let records = await stats(peer)
+                    let reports = records.compactMap { value -> LatencyStatsReport? in
+                        guard let id = value["id"] as? String, let type = value["type"] as? String,
+                              let values = value["values"] as? [String: Any] else { return nil }
+                        return LatencyStatsReport(id: id, type: type, values: values)
+                    }
+                    if peer === send, lab.f3Sender,
+                       let path = LatencyLabSenderPolicy.selectedPath(in: reports), appliedPath != path,
+                       send.setBweMinBitrateBps(NSNumber(value: path.minimumBitrate),
+                           currentBitrateBps: NSNumber(value: path.startingBitrate),
+                           maxBitrateBps: NSNumber(value: path.maximumBitrate)) {
+                        let parameters = videoSender.parameters
+                        for encoding in parameters.encodings {
+                            encoding.networkPriority = path.isLAN ? .high : .low
+                            encoding.bitratePriority = path.isLAN ? 2 : 1
+                        }
+                        videoSender.parameters = parameters
+                        appliedPath = path
+                        collector.trace(["type": "f3_path_applied", "time": now(),
+                            "localType": path.localType, "remoteType": path.remoteType,
+                            "startingBitrate": path.startingBitrate])
+                    }
+                    collector.ingest(reports, at: now())
+                }
+                do { try await Task.sleep(for: .seconds(1)) } catch { break }
+            }
+        }
+        defer { polling.cancel(); senderTrace.flush(); receiverTrace.flush() }
         let connectionDeadline = now() + 20
         while records.withLock({ records.receivedFrames == 0 }) {
             guard now() < connectionDeadline else { throw NSError(domain: "No decoded frame within 20 seconds", code: 1) }
@@ -410,15 +564,23 @@ func summary(_ values: [Double]) -> [String: Any] {
         records.withLock { records.collectText = true }
         try await Task.sleep(for: .seconds(1))
         timer?.invalidate(); timer = nil
+        try await observer.collectNativeText()
         // Only the synthetic text crop is retained in memory. Two seconds after
         // the pattern stops, compare the final decoded text to the scaled source.
         try await Task.sleep(for: .seconds(2))
         let textSSIM = records.withLock { records.sourceText.flatMap { source in
             records.decodedText.flatMap { source.ssim(comparedTo: $0) }
         } }
+        let nativeTextSSIM = records.withLock { records.nativeText.flatMap { native in
+            records.decodedText.flatMap { $0.resampled(to: native) }
+                .flatMap { native.ssim(comparedTo: $0) }
+        } }
+        polling.cancel()
+        await polling.value
+        senderTrace.flush(); receiverTrace.flush()
         await capture.stop(); try await observer.stream?.stopCapture()
         send.close(); receive.close()
-        let result: [String: Any] = records.withLock {
+        var result: [String: Any] = records.withLock {
             let ids = records.sourceSeen.keys.filter { $0 >= records.firstID && $0 <= lastID && records.sourceSeen[$0]! >= records.start && records.sourceSeen[$0]! <= records.end }.sorted()
             let samples: [[String: Any]] = ids.map { id in
                 var row: [String: Any] = ["marker_id": id, "source_compositor_s": records.sourceSeen[id]!]
@@ -432,11 +594,22 @@ func summary(_ values: [Double]) -> [String: Any] {
             let renderDelay = ids.compactMap { id -> Double? in guard let d = records.displayed[id], let s = records.decoded[id] else { return nil }; return (d-s)*1000 }
             return ["kind": "local_software_compositor_to_compositor_proxy_not_optical_glass_to_glass", "date_utc": ISO8601DateFormatter().string(from: Date()), "duration_s": duration, "warmup_after_first_decoded_frame_s": 5, "video_size": records.dimensions, "screen_points": [w,h], "capture_fps_limit": DesktopVideoQuality.targetFramesPerSecond, "observer_fps_limit": observer.observerFPS, "bitrate_cap_bps": DesktopVideoQuality.maximumBitrateBps, "audio": false, "network": "two WebRTC peers on the same Mac, host ICE candidates, no STUN/TURN", "source_marker_count": ids.count, "viewer_marker_count": displayDelay.count, "decoded_marker_count": decodeDelay.count, "compositor_to_compositor": summary(displayDelay), "capture_pts_to_decode_callback": summary(decodeDelay), "decode_callback_to_viewer_compositor": summary(renderDelay), "capture_pts_to_capture_callback": summary(records.captureOverhead), "observer_displaytime_minus_pts": summary(records.observerTimestampOffsets), "observer_complete_frame_intervals": summary(records.observerIntervals), "invalid_source_observations": records.invalidSource, "invalid_viewer_observations": records.invalidMirror, "samples": samples, "text_ssim": textSSIM as Any? ?? NSNull(), "stats_at_first_frame": statsAtFirstFrame, "stats_at_one_second": statsAtOneSecond, "stats_at_two_seconds": statsAtTwoSeconds, "stats_before": statsBefore, "stats_after": statsAfter]
         }
+        result["lab_configuration"] = lab.traceValues
+        result["measurement_start_s"] = records.withLock { records.start }
+        result["measurement_end_s"] = records.withLock { records.end }
+        result["native_text_ssim"] = nativeTextSSIM as Any? ?? NSNull()
+        result["native_text_reference"] = "Independent native-resolution synthetic text, fixed screen coordinates, bilinear reconstructed decode; sampled after timing window"
+        result["capture_fps_limit"] = Int(capturePolicy.framesPerSecond)
+        result["sender_trace"] = output + ".sender.jsonl"
+        result["receiver_trace"] = output + ".receiver.jsonl"
         let data = try JSONSerialization.data(withJSONObject: result, options: [.prettyPrinted, .sortedKeys])
         try data.write(to: URL(fileURLWithPath: output))
         print("RESULT \(output)")
         print("SUMMARY \(result.filter { ["compositor_to_compositor", "capture_pts_to_decode_callback", "decode_callback_to_viewer_compositor", "observer_complete_frame_intervals", "video_size", "source_marker_count", "viewer_marker_count"].contains($0.key) })")
-        windows.forEach { $0.close() }; NSApp.terminate(nil)
+        windows.forEach { $0.close() }; windows.removeAll()
+        self.sender = nil; self.receiver = nil; self.sink = nil; self.observer = nil
+        videoSource = nil; self.capturer = nil
+        senderFactory = nil; receiverFactory = nil
     }
 }
 

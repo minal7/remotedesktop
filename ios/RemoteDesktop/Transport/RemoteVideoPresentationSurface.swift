@@ -17,6 +17,12 @@ final class RemoteVideoPresentationSurface: NSObject, RTCVideoRenderer {
     #if DEBUG
     private var submittedLatency: (frame: UUID, sample: RemoteVideoLatencyProbe.FrameSample)?
     #endif
+    #if DEBUG
+    private var f4: RemoteVideoF4Renderer?
+    private var f4EventSerial: UInt64 = 0
+    private var highRefreshLink: CADisplayLink?
+    private let highRefreshTarget = RemoteVideoHighRefreshTarget()
+    #endif
     private var active = true
     private var contentMode: RemoteVideoPresentationProducer.ContentMode = .fill
     private var viewport = CGRect.zero
@@ -50,18 +56,30 @@ final class RemoteVideoPresentationSurface: NSObject, RTCVideoRenderer {
         }
     }
 
-    static func make() -> RemoteVideoPresentationSurface? {
+    static func make(allowF4: Bool = false) -> RemoteVideoPresentationSurface? {
         let view = RemoteVideoMetalView(frame: .zero)
         guard let producer = RemoteVideoPresentationProducer(layer: view.metalLayer) else { return nil }
-        return RemoteVideoPresentationSurface(view: view, producer: producer)
+        return RemoteVideoPresentationSurface(view: view, producer: producer, allowF4: allowF4)
     }
 
-    private init(view: RemoteVideoMetalView, producer: RemoteVideoPresentationProducer) {
+    private init?(view: RemoteVideoMetalView, producer: RemoteVideoPresentationProducer, allowF4: Bool) {
         self.view = view; self.producer = producer
         presentation = RemoteVideoSurfacePresentation(context: producer.contextID)
         super.init()
         view.isUserInteractionEnabled = false
         view.onGeometryChange = { [weak self] in self?.refreshLayout() }
+        #if DEBUG
+        if allowF4 && LatencyLabConfiguration.current.f4Renderer {
+            guard let renderer = RemoteVideoF4Renderer(layer: view.metalLayer, mailbox: mailbox, notify: { [weak self] serial, event in
+                Task { @MainActor [weak self] in self?.receiveF4(event, serial: serial) }
+            }) else { return nil }
+            f4 = renderer
+        }
+        if let f4 {
+            mailbox.setWakeHandler { [weak f4] _ in f4?.wake() }
+            return
+        }
+        #endif
         mailbox.setWakeHandler { [weak self] wake in
             Task { @MainActor [weak self] in
                 guard let self, self.mailbox.accepts(wake) else { return }
@@ -100,6 +118,7 @@ final class RemoteVideoPresentationSurface: NSObject, RTCVideoRenderer {
         guard active else { return }
         active = false; layout = nil; layoutWindow = nil; phase = .idle
         #if DEBUG
+        stopHighRefresh(); f4?.retire()
         submittedLatency = nil
         #endif
         cancelWaits(); mailbox.replaceContext(nil); producer.retire()
@@ -117,6 +136,9 @@ final class RemoteVideoPresentationSurface: NSObject, RTCVideoRenderer {
                           viewport: viewport, size: size, mode: contentMode)
             nextWindow = window
         } else { next = nil; nextWindow = nil }
+        #if DEBUG
+        updateHighRefresh(streaming: next != nil)
+        #endif
         guard layout != next || layoutWindow !== nextWindow else { return }
         let previousContext = producer.contextID
         let continuous = layout != nil && next != nil && layoutWindow === nextWindow
@@ -141,10 +163,62 @@ final class RemoteVideoPresentationSurface: NSObject, RTCVideoRenderer {
         if layoutChangeCount <= 16 {
             log.notice("layout changed visible=\(next != nil, privacy: .public) continuous=\(continuous, privacy: .public) pending=\(self.lastLayoutHadPendingFrame, privacy: .public)")
         }
+        #if DEBUG
+        if let f4 {
+            f4.configure(next.map { .init(context: context, size: $0.size, mode: $0.mode) }, preservingRecovery: continuous)
+            return
+        }
+        #endif
         guard isCurrent(context), layout != nil else { return }
         ensureDeadline(context)
         requestNext()
     }
+
+    #if DEBUG
+    private func receiveF4(_ event: RemoteVideoF4Renderer.Event, serial: UInt64) {
+        guard serial > f4EventSerial else { return }
+        f4EventSerial = serial
+        switch event {
+        case let .ready(context, frame, time, presented):
+            guard isCurrent(context) else { return }
+            if presented { presentation.present(context: context, frame: frame, time: time) }
+            else { presentation.render(context: context, frame: frame, time: time) }
+        case let .waiting(context):
+            guard isCurrent(context) else { return }
+            presentation.wait(context: context)
+        case let .failed(context, message, reason):
+            let category: FailureCategory
+            switch reason {
+            case .unsupportedFrame: category = .unsupportedFrame
+            case .presentationExpired: category = .presentationExpired
+            case .retryExhausted: category = .retryExhausted
+            case .deadline: category = .deadline
+            }
+            fail(context, message: message, category: category)
+        }
+    }
+
+    private func updateHighRefresh(streaming: Bool) {
+        guard streaming, f4 != nil, let screen = view.window?.screen else {
+            stopHighRefresh(); return
+        }
+        let maximum = Float(max(1, min(120, screen.maximumFramesPerSecond)))
+        let range = CAFrameRateRange(minimum: min(80, maximum), maximum: maximum, preferred: maximum)
+        if let highRefreshLink {
+            highRefreshLink.preferredFrameRateRange = range
+            return
+        }
+        let link = CADisplayLink(target: highRefreshTarget, selector: #selector(RemoteVideoHighRefreshTarget.tick))
+        link.preferredFrameRateRange = range
+        link.add(to: .main, forMode: .common)
+        highRefreshLink = link
+    }
+
+    private func stopHighRefresh() {
+        highRefreshLink?.invalidate()
+        highRefreshLink = nil
+    }
+    #endif
 
     private func isCurrent(_ context: UUID) -> Bool { active && producer.contextID == context }
 
@@ -278,6 +352,7 @@ final class RemoteVideoPresentationSurface: NSObject, RTCVideoRenderer {
         log.notice("presentation failed category=\(category.rawValue, privacy: .public) phase=\(self.phaseCategory, privacy: .public) pending=\(self.mailbox.hasPending(context: context), privacy: .public) attempts=\(self.failedAttempts, privacy: .public) layoutChanges=\(self.layoutChangeCount, privacy: .public) lastLayoutContinuous=\(self.lastLayoutWasContinuous, privacy: .public) lastLayoutPending=\(self.lastLayoutHadPendingFrame, privacy: .public)")
         active = false; layout = nil; layoutWindow = nil; phase = .idle
         #if DEBUG
+        stopHighRefresh(); f4?.retire()
         submittedLatency = nil
         #endif
         cancelWaits(); mailbox.replaceContext(nil); producer.retire()
@@ -285,6 +360,13 @@ final class RemoteVideoPresentationSurface: NSObject, RTCVideoRenderer {
         presentation.fail(context: context, message: message)
     }
 }
+
+#if DEBUG
+/// This display link requests the screen refresh rate; frames are still presented on arrival.
+private final class RemoteVideoHighRefreshTarget: NSObject {
+    @objc func tick() {}
+}
+#endif
 
 @MainActor
 final class RemoteVideoMetalView: UIView {

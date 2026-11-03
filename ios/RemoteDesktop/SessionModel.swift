@@ -4,6 +4,13 @@ import Foundation
 import LiveKitWebRTC
 import UIKit
 
+private func latencyLabRequestedFramesPerSecond(for hello: HostHello) -> Int {
+    #if DEBUG
+    if LatencyLabConfiguration.current.f2Encoder, hello.latencyF2Encoder == 1 { return 60 }
+    #endif
+    return DesktopVideoQuality.targetFramesPerSecond
+}
+
 /// Status of the optional screen/input companion for an authenticated local
 /// AI session. The TLS prompt/result channel is intentionally not represented
 /// here: it is authoritative and can remain ready in every one of these
@@ -1067,7 +1074,7 @@ final class SessionModel: ObservableObject, VideoRendererTarget {
             self.state = .connected
             if isInitialHandshake { self.computerUseSession?.start() }
             self.send(.qos(
-                targetFps: DesktopVideoQuality.targetFramesPerSecond,
+                targetFps: latencyLabRequestedFramesPerSecond(for: h),
                 maxBitrateKbps: DesktopVideoQuality.maximumBitrateKbps,
                 prefer: "sharpness"))
         }

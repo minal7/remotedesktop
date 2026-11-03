@@ -24,6 +24,47 @@ enum DesktopVideoQuality {
     static let softwareCodecMaximumMacroblocksPerFrame = 8_704
     static let maximumEncodedDimension = 3_840
 
+    struct CapturePolicy: Equatable {
+        let framesPerSecond: Int32
+        let maximumMacroblocksPerFrame: Int
+        let lowLatencyEncoder: Bool
+    }
+
+    static func supportsExperimentalEncoder(name: String, profileLevelID: String?, packetizationMode: String?) -> Bool {
+        name.caseInsensitiveCompare("H264") == .orderedSame &&
+            profileLevelID?.lowercased() == "640c33" && packetizationMode == "1"
+    }
+
+    /// The experimental path is deliberately limited to the explicitly
+    /// negotiated profile/rate combination; legacy and software peers retain
+    /// their original resolution and frame rate.
+    static func capturePolicy(negotiatedCodecs: [LKRTCRtpCodecParameters], f2Requested: Bool) -> CapturePolicy {
+        let current = maximumMacroblocksPerFrame(negotiatedCodecs: negotiatedCodecs)
+        let codec = negotiatedCodecs.first(where: {
+            ["H264", "VP8", "VP9", "AV1"].contains($0.name.uppercased())
+        })
+        let mode = codec?.parameters["packetization-mode"]
+        return capturePolicy(name: codec?.name, profileLevelID: codec?.parameters["profile-level-id"] as? String,
+                             packetizationMode: (mode as? String) ?? (mode as? NSNumber)?.stringValue,
+                             currentLimit: current, f2Requested: f2Requested)
+    }
+
+    static func capturePolicy(name: String?, profileLevelID: String?, packetizationMode: String?,
+                              currentLimit: Int, f2Requested: Bool) -> CapturePolicy {
+        #if DEBUG && os(macOS)
+        guard f2Requested, let name, supportsExperimentalEncoder(name: name,
+              profileLevelID: profileLevelID, packetizationMode: packetizationMode) else {
+            return CapturePolicy(framesPerSecond: Int32(targetFramesPerSecond),
+                                 maximumMacroblocksPerFrame: currentLimit, lowLatencyEncoder: false)
+        }
+        return CapturePolicy(framesPerSecond: 60, maximumMacroblocksPerFrame: min(currentLimit, 983_040 / 60),
+                             lowLatencyEncoder: true)
+        #else
+        return CapturePolicy(framesPerSecond: Int32(targetFramesPerSecond),
+                             maximumMacroblocksPerFrame: currentLimit, lowLatencyEncoder: false)
+        #endif
+    }
+
     struct SenderPolicy: Equatable {
         let maximumFramesPerSecond: Int
         let maximumBitrateBps: Int
@@ -152,11 +193,29 @@ enum DesktopVideoQuality {
 
 final class DesktopVideoEncoderFactory: NSObject, LKRTCVideoEncoderFactory {
     private let base = LKRTCDefaultVideoEncoderFactory()
+    private let f2Enabled: Bool
+
+    init(f2Enabled: Bool = false) {
+        #if DEBUG && os(macOS)
+        self.f2Enabled = f2Enabled
+        #else
+        self.f2Enabled = false
+        #endif
+        super.init()
+    }
 
     func createEncoder(
         _ info: LKRTCVideoCodecInfo
     ) -> (any LKRTCVideoEncoder)? {
-        base.createEncoder(info)
+        #if DEBUG && os(macOS)
+        if f2Enabled, DesktopVideoQuality.supportsExperimentalEncoder(
+            name: info.name, profileLevelID: info.parameters["profile-level-id"],
+            packetizationMode: info.parameters["packetization-mode"]),
+           let fallback = base.createEncoder(info) {
+            return DesktopLowLatencyH264Encoder(fallback: fallback)
+        }
+        #endif
+        return base.createEncoder(info)
     }
 
     func supportedCodecs() -> [LKRTCVideoCodecInfo] {

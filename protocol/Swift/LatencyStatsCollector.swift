@@ -41,7 +41,11 @@ struct LatencyStatsReport {
 final class LatencyStatsCollector: @unchecked Sendable {
     static var enabled: Bool {
         #if DEBUG
+        let lab = LatencyLabConfiguration.current
         return ProcessInfo.processInfo.arguments.contains("LatencyProbe")
+            || ProcessInfo.processInfo.arguments.contains("LatencyLab")
+            || ProcessInfo.processInfo.environment["LATENCY_LAB"] == "1"
+            || lab.f1Playout || lab.f2Encoder || lab.f3Sender || lab.f4Renderer
         #else
         return false
         #endif
@@ -82,6 +86,11 @@ final class LatencyStatsCollector: @unchecked Sendable {
         url = nil
         #endif
         #if DEBUG
+        if enabled {
+            trace(["type": "lab_configuration", "side": side,
+                   "time": ProcessInfo.processInfo.systemUptime,
+                   "settings": LatencyLabConfiguration.current.traceValues])
+        }
         if enabled && Self.resourcesOnly {
             trace(["type": "resource_mode", "side": side, "time": ProcessInfo.processInfo.systemUptime,
                    "resourceCadenceSeconds": 1, "statsCadenceSeconds": 10])
@@ -96,9 +105,10 @@ final class LatencyStatsCollector: @unchecked Sendable {
         let pairs = [("totalEncodeTime", "framesEncoded", "encodeMs"),
                      ("totalPacketSendDelay", "packetsSent", "packetSendMs"),
                      ("jitterBufferDelay", "jitterBufferEmittedCount", "jitterBufferMs"),
+                     ("jitterBufferTargetDelay", "jitterBufferEmittedCount", "jitterBufferTargetMs"),
                      ("totalDecodeTime", "framesDecoded", "decodeMs"),
                      ("totalProcessingDelay", "framesDecoded", "processingMs")]
-        let relevant = Set(["framesEncoded", "totalEncodeTime", "totalPacketSendDelay", "packetsSent", "targetBitrate", "qualityLimitationReason", "frameWidth", "frameHeight", "framesPerSecond", "jitterBufferDelay", "jitterBufferEmittedCount", "totalDecodeTime", "totalProcessingDelay", "framesDecoded", "framesDropped", "freezeCount", "jitter", "packetsLost", "nackCount", "pliCount", "currentRoundTripTime", "availableOutgoingBitrate", "localCandidateType", "remoteCandidateType"])
+        let relevant = Set(["encoderImplementation", "codecId", "framesEncoded", "totalEncodeTime", "totalPacketSendDelay", "packetsSent", "targetBitrate", "qualityLimitationReason", "frameWidth", "frameHeight", "framesPerSecond", "jitterBufferDelay", "jitterBufferTargetDelay", "jitterBufferEmittedCount", "totalDecodeTime", "totalProcessingDelay", "framesDecoded", "framesDropped", "freezeCount", "totalFreezesDuration", "keyFramesEncoded", "keyFramesDecoded", "jitter", "packetsLost", "nackCount", "pliCount", "currentRoundTripTime", "availableOutgoingBitrate", "localCandidateType", "remoteCandidateType"])
         var next: [String: [String: Double]] = [:]
         var weighted: [String: (Double, Double)] = [:]
         var perID: [String: [String: Any]] = [:]
@@ -123,10 +133,38 @@ final class LatencyStatsCollector: @unchecked Sendable {
                     reportValues[key] = number.doubleValue
                 } else if let string = value as? String { reportValues[key] = string }
             }
-            for key in ["framesEncoded", "packetsSent", "jitterBufferEmittedCount", "framesDecoded", "framesDropped", "freezeCount", "packetsLost", "nackCount", "pliCount"] {
+            if let codecID = report.values["codecId"] as? String,
+               let codec = byID[codecID], codec.type == "codec" {
+                for key in ["mimeType", "sdpFmtpLine"] {
+                    if let value = codec.values[key] as? String {
+                        reportValues["codec_" + key] = value
+                    }
+                }
+            }
+            for key in ["framesEncoded", "packetsSent", "jitterBufferEmittedCount", "framesDecoded", "framesDropped", "freezeCount", "totalFreezesDuration", "keyFramesEncoded", "keyFramesDecoded", "packetsLost", "nackCount", "pliCount"] {
                 if let current = numbers[key], let old = previous[report.id]?[key], current >= old {
                     reportValues[key + "Delta"] = current - old
+                    if ["freezeCount", "keyFramesEncoded", "pliCount"].contains(key), current > old {
+                        writeLocked(["type": "stream_event", "side": side, "time": time,
+                                     "event": key, "delta": current - old,
+                                     "timing": "observed_at_stats_poll"])
+                    }
                 }
+            }
+            for metric in ["targetBitrate", "availableOutgoingBitrate"] {
+                if let current = numbers[metric], let old = previous[report.id]?[metric],
+                   old > 0, current < old * 0.75 {
+                    writeLocked(["type": "stream_event", "side": side, "time": time,
+                                 "event": "bandwidth_estimate_drop", "metric": metric,
+                                 "beforeBps": old, "afterBps": current,
+                                 "timing": "observed_at_stats_poll"])
+                }
+            }
+            if let current = numbers["currentRoundTripTime"], current > 0.150,
+               (previous[report.id]?["currentRoundTripTime"] ?? 0) <= 0.150 {
+                writeLocked(["type": "stream_event", "side": side, "time": time,
+                             "event": "rtt_spike", "rttMs": current * 1000,
+                             "timing": "observed_at_stats_poll"])
             }
             for (total, count, result) in pairs {
                 if let old = previous[report.id], let t = numbers[total], let c = numbers[count],
@@ -157,7 +195,7 @@ final class LatencyStatsCollector: @unchecked Sendable {
     func trace(_ fields: [String: Any]) {
         guard active else { return }
         if Self.resourcesOnly, let type = fields["type"] as? String,
-           !["resource_mode", "resource", "clock", "collector_reset", "latency_loop_start",
+           !["lab_configuration", "f1_playout", "resource_mode", "resource", "clock", "collector_reset", "latency_loop_start",
              "latency_loop_exit", "transport_close", "peer_state", "data_channel_state",
              "app_lifecycle"].contains(type) { return }
         lock.lock(); defer { lock.unlock() }; writeLocked(fields)

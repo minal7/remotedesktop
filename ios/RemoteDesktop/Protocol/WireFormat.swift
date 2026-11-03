@@ -77,6 +77,11 @@ struct HostHello: Equatable {
     let inputSessions: Int
     let inputSession: DirectInputAcknowledgement?
     let inputInvalidation: Int
+    #if DEBUG
+    var latencyF1Playout: Int = 0
+    var latencyF2Encoder: Int = 0
+    var latencyF3Sender: Int = 0
+    #endif
 
     init(
         app: String,
@@ -151,7 +156,16 @@ enum HostMessage: Equatable {
                 }
                 inputSession = value
             }
-            return .helloAck(HostHello(
+            #if DEBUG
+            // Only a numeric version 1 enables this lab-only capability.
+            let rawF1 = caps?["latencyF1Playout"] as? NSNumber
+            let supportsF1 = rawF1 != nil && CFGetTypeID(rawF1!) != CFBooleanGetTypeID() && rawF1!.doubleValue == 1
+            let rawF2 = caps?["latencyF2Encoder"] as? NSNumber
+            let supportsF2 = rawF2 != nil && CFGetTypeID(rawF2!) != CFBooleanGetTypeID() && rawF2!.doubleValue == 1
+            let rawF3 = caps?["latencyF3Sender"] as? NSNumber
+            let supportsF3 = rawF3 != nil && CFGetTypeID(rawF3!) != CFBooleanGetTypeID() && rawF3!.doubleValue == 1
+            #endif
+            var hello = HostHello(
                 app: host?["app"] as? String ?? "RemoteDesktop-Host",
                 version: host?["version"] as? String ?? "0.1.0",
                 hostname: host?["hostname"] as? String ?? "Mac",
@@ -162,7 +176,13 @@ enum HostMessage: Equatable {
                     caps?["orderedComputerUseControls"]),
                 inputSessions: inputSessions,
                 inputSession: inputSession,
-                inputInvalidation: inputInvalidation))
+                inputInvalidation: inputInvalidation)
+            #if DEBUG
+            hello.latencyF1Playout = supportsF1 ? 1 : 0
+            hello.latencyF2Encoder = supportsF2 ? 1 : 0
+            hello.latencyF3Sender = supportsF3 ? 1 : 0
+            #endif
+            return .helloAck(hello)
         case "input_unavailable":
             guard let metadata = obj["inputSession"],
                   let scope = DirectInputWire.decode(metadata, as: DirectInputAcknowledgement.self), scope.isValid else {

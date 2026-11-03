@@ -109,6 +109,13 @@ enum ControlMessage: Equatable {
 }
 
 enum HostMessageEncoder {
+    #if DEBUG
+    static func latencyCapabilities(_ configuration: LatencyLabConfiguration) -> [String: Int] {
+        ["latencyF1Playout": 1, "latencyF2Encoder": configuration.f2Encoder ? 1 : 0,
+         "latencyF3Sender": configuration.f3Sender ? 1 : 0]
+    }
+    #endif
+
     static func helloAck(
         proto: Int,
         hostname: String,
@@ -143,6 +150,12 @@ enum HostMessageEncoder {
                 "inputInvalidation": inputInvalidation,
             ],
         ]
+        #if DEBUG
+        if var caps = obj["caps"] as? [String: Any] {
+            for (key, value) in latencyCapabilities(.current) { caps[key] = value }
+            obj["caps"] = caps
+        }
+        #endif
         if let inputSession { obj["inputSession"] = DirectInputWire.object(inputSession) }
         return (try? JSONSerialization.data(withJSONObject: obj)) ?? Data()
     }

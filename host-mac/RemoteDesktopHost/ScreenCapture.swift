@@ -942,16 +942,18 @@ final class ScreenCapture: NSObject, @unchecked Sendable {
     enum CaptureError: Error { case noDisplay, invalidDisplayGeometry, displayChanged, outputStopped }
 
     /// Picks the display containing the menu bar and starts capturing
-    /// at up to 30 fps, adding system audio only when enabled. Throws if ScreenCaptureKit
+    /// at the requested rate, adding system audio only when enabled. Throws if ScreenCaptureKit
     /// can't start (typically: missing TCC approval).
     func start(
         for owner: CaptureOwnerLease,
         audioEnabled: Bool,
-        maximumMacroblocksPerFrame: Int
+        maximumMacroblocksPerFrame: Int,
+        framesPerSecond: Int32 = CaptureSizing.targetFramesPerSecond
     ) async throws {
         let task = try lifecycle.start(for: owner, prepare: { [self] in
             try await makeStream(audioEnabled: audioEnabled,
-                                 maximumMacroblocksPerFrame: maximumMacroblocksPerFrame)
+                                 maximumMacroblocksPerFrame: maximumMacroblocksPerFrame,
+                                 framesPerSecond: framesPerSecond)
         }, startStream: { native in
             guard native.display.matches(CaptureDisplayState.read(native.display.state.displayID)) else {
                 throw CaptureError.displayChanged
@@ -962,7 +964,7 @@ final class ScreenCapture: NSObject, @unchecked Sendable {
         guard lifecycle.isRunning(for: owner) else { throw CancellationError() }
     }
 
-    private func makeStream(audioEnabled: Bool, maximumMacroblocksPerFrame: Int) async throws -> NativeStream {
+    private func makeStream(audioEnabled: Bool, maximumMacroblocksPerFrame: Int, framesPerSecond: Int32) async throws -> NativeStream {
         let fence = CaptureDisplayChangeMonitor.shared.fence
         guard let configuration = fence.current else { throw CaptureError.invalidDisplayGeometry }
         let content = try await SCShareableContent.excludingDesktopWindows(
@@ -993,7 +995,7 @@ final class ScreenCapture: NSObject, @unchecked Sendable {
         let config = Self.streamConfiguration(
             width: captureSize.width,
             height: captureSize.height,
-            audioEnabled: audioEnabled)
+            audioEnabled: audioEnabled, framesPerSecond: framesPerSecond)
 
         let s = SCStream(filter: filter, configuration: config, delegate: self)
         try s.addStreamOutput(self, type: .screen, sampleHandlerQueue: videoQueue)
@@ -1002,7 +1004,7 @@ final class ScreenCapture: NSObject, @unchecked Sendable {
         }
 
         log.info(
-            "capture configured points=\(display.width, privacy: .public)x\(display.height, privacy: .public) backing=\(sourceSize.width, privacy: .public)x\(sourceSize.height, privacy: .public) output=\(captureSize.width, privacy: .public)x\(captureSize.height, privacy: .public) macroblockLimit=\(maximumMacroblocksPerFrame, privacy: .public) fps=\(CaptureSizing.targetFramesPerSecond, privacy: .public) audio=\(audioEnabled, privacy: .public)")
+            "capture configured points=\(display.width, privacy: .public)x\(display.height, privacy: .public) backing=\(sourceSize.width, privacy: .public)x\(sourceSize.height, privacy: .public) output=\(captureSize.width, privacy: .public)x\(captureSize.height, privacy: .public) macroblockLimit=\(maximumMacroblocksPerFrame, privacy: .public) fps=\(framesPerSecond, privacy: .public) audio=\(audioEnabled, privacy: .public)")
         return NativeStream(stream: s, filter: filter, configuration: config, display: geometry)
     }
 
@@ -1017,7 +1019,8 @@ extension ScreenCapture {
     static func streamConfiguration(
         width: Int,
         height: Int,
-        audioEnabled: Bool
+        audioEnabled: Bool,
+        framesPerSecond: Int32 = CaptureSizing.targetFramesPerSecond
     ) -> SCStreamConfiguration {
         let config = SCStreamConfiguration()
         config.width = width
@@ -1031,7 +1034,7 @@ extension ScreenCapture {
         config.pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarFullRange
         config.minimumFrameInterval = CMTime(
             value: 1,
-            timescale: CaptureSizing.targetFramesPerSecond)
+            timescale: framesPerSecond)
         config.queueDepth = DesktopVideoQuality.captureQueueDepth
         config.showsCursor = true
         config.capturesAudio = audioEnabled

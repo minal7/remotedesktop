@@ -32,6 +32,14 @@ targets:
     dependencies:
       - package: LiveKitWebRTC
         product: LiveKitWebRTC
+    postBuildScripts:
+      - name: Enable high refresh for latency lab
+        script: |
+          if [ "$CONFIGURATION" = "Debug" ]; then
+            /usr/libexec/PlistBuddy -c 'Set :CADisableMinimumFrameDurationOnPhone true' "$TARGET_BUILD_DIR/$INFOPLIST_PATH" 2>/dev/null || \
+              /usr/libexec/PlistBuddy -c 'Add :CADisableMinimumFrameDurationOnPhone bool true' "$TARGET_BUILD_DIR/$INFOPLIST_PATH"
+          fi
+        basedOnDependencyAnalysis: false
     entitlements:
       path: RemoteDesktop/RemoteDesktop.entitlements
       properties:
@@ -90,6 +98,10 @@ targets:
         # officially distributed macOS host.
         ICLOUD_CONTAINER_ENVIRONMENT: Development
       configs:
+        Debug:
+          # This Debug-only script updates the processed plist after Xcode's
+          # plist phase; Release retains the normal script sandbox setting.
+          ENABLE_USER_SCRIPT_SANDBOXING: NO
         Release:
           ICLOUD_CONTAINER_ENVIRONMENT: Production
 

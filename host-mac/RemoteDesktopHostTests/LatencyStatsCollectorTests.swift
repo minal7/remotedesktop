@@ -44,6 +44,22 @@ final class LatencyStatsCollectorTests: XCTestCase {
         XCTAssertNil(collector.snapshot()["framesEncoded"])
     }
 
+    func testJitterTargetAndActualDelayUseEmittedFrameDeltas() {
+        let collector = LatencyStatsCollector(side: "test", enabled: true)
+        func sample(_ count: Int, _ target: Double, _ actual: Double) {
+            collector.ingest([LatencyStatsReport(id: "in", type: "inbound-rtp", values: [
+                "kind": "video", "jitterBufferEmittedCount": count,
+                "jitterBufferTargetDelay": target, "jitterBufferDelay": actual])], at: Double(count))
+        }
+        sample(100, 10, 12)
+        XCTAssertNil(collector.snapshot()["jitterBufferTargetMs"])
+        sample(120, 10.1, 12.2)
+        XCTAssertEqual(collector.snapshot()["jitterBufferTargetMs"] ?? -1, 5, accuracy: 0.0001)
+        XCTAssertEqual(collector.snapshot()["jitterBufferMs"] ?? -1, 10, accuracy: 0.0001)
+        sample(1, 0.01, 0.01)
+        XCTAssertNil(collector.snapshot()["jitterBufferTargetMs"])
+    }
+
     func testOneMinuteOf60FPSFrameRecordsFits() throws {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: url) }

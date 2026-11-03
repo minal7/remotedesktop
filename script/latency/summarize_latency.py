@@ -315,7 +315,7 @@ def device_summary(host_path, client_path, telemetry_path=None, metadata=None):
             client_stats.append(event)
     required_stages = {
         'host_stages': ('encodeMs', 'packetSendMs'),
-        'client_stages': ('jitterBufferMs', 'decodeMs', 'processingMs'),
+        'client_stages': ('jitterBufferMs', 'jitterBufferTargetMs', 'decodeMs', 'processingMs'),
     }
     stage_records = {
         'host_stages': [r for r in host_stats if host_start <= r['time'] <= host_end],
@@ -329,7 +329,7 @@ def device_summary(host_path, client_path, telemetry_path=None, metadata=None):
             values = [v for v in values if isinstance(v, (int, float)) and not isinstance(v, bool)
                       and math.isfinite(v) and v >= 0]
             result[output_key][key] = summary(values)
-            if not values:
+            if not values and key != 'jitterBufferTargetMs':
                 missing_stages.append(f'{output_key}.{key}')
     result['stage_statistics_note'] = ('Each sample is one recorded approximately one-second WebRTC interval average; '
                                        'client samples require a recent clock estimate and are counted once.')

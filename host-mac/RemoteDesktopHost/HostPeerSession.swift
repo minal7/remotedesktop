@@ -305,6 +305,8 @@ final class HostPeerSession: NSObject {
     private let onUserInput: @Sendable () -> Bool
     private let inputAuthorization: HostPeerInputAuthorization
     private let onEnded: @Sendable (String) -> Void
+    private let latencyF2Enabled: Bool
+    private let latencyF3Enabled: Bool
     private let log = Logger(subsystem: "com.threadmark.remotedesktop.host", category: "webrtc")
     private let signalingStateQueue = DispatchQueue(label: "com.threadmark.remotedesktop.host.webrtc.signaling")
     private let closeStateLock = NSRecursiveLock()
@@ -319,6 +321,10 @@ final class HostPeerSession: NSObject {
 
     #if DEBUG
     private var lastCaptureMarker: Int?
+    private let latencyF1Nonce: String?
+    private let onLatencyF1RestartRequest: (@Sendable (String, @escaping @Sendable () -> Void) -> Void)?
+    private var f3AppliedPath: LatencyLabSenderPolicy.Path?
+    private var f3OriginalPriorities: [(LKRTCPriority, Double)]?
     #endif
     private let latencyStats = LatencyStatsCollector(side: "host")
     private var latencyTimer: DispatchSourceTimer?
@@ -329,6 +335,7 @@ final class HostPeerSession: NSObject {
     private var adaptedVideoHeight: Int?
     private var captureMaximumMacroblocksPerFrame =
         DesktopVideoQuality.fallbackH264MaximumMacroblocksPerFrame
+    private var captureFramesPerSecond = Int32(DesktopVideoQuality.targetFramesPerSecond)
     private var captureOwner: CaptureOwnerLease?
     private var audioRecordingStarted = false
     private var localMediaConfigured = false
@@ -369,6 +376,10 @@ final class HostPeerSession: NSObject {
         onUserInput: @escaping @Sendable () -> Bool,
         onPeerAuthorizationChanged:
             @escaping @Sendable (PeerAuthorization) -> Void,
+        latencyF1Nonce: String? = nil,
+        latencyF2Enabled: Bool = false,
+        latencyF3Enabled: Bool = false,
+        onLatencyF1RestartRequest: (@Sendable (String, @escaping @Sendable () -> Void) -> Void)? = nil,
         onEnded: @escaping @Sendable (String) -> Void
     ) {
         RTCInitializeSSL()
@@ -383,10 +394,21 @@ final class HostPeerSession: NSObject {
                 authorized: state.authorized, orderedComputerUseControls: state.orderedComputerUseControls))
         }
         self.onEnded = onEnded
+        #if DEBUG
+        self.onLatencyF1RestartRequest = onLatencyF1RestartRequest
+        self.latencyF1Nonce = latencyF1Nonce
+        let enableF2 = latencyF2Enabled && LatencyLabConfiguration.current.f2Encoder
+        let enableF3 = latencyF3Enabled && LatencyLabConfiguration.current.f3Sender
+        #else
+        let enableF2 = false
+        let enableF3 = false
+        #endif
+        self.latencyF2Enabled = enableF2
+        self.latencyF3Enabled = enableF3
         self.factory = RTCPeerConnectionFactory(
             audioDeviceModuleType: .audioEngine,
             bypassVoiceProcessing: true,
-            encoderFactory: DesktopVideoEncoderFactory(),
+            encoderFactory: DesktopVideoEncoderFactory(f2Enabled: enableF2),
             decoderFactory: DesktopVideoDecoderFactory(),
             audioProcessingModule: nil)
         let voiceProcessingStatus = factory.audioDeviceModule.setVoiceProcessingEnabled(false)
@@ -426,17 +448,25 @@ final class HostPeerSession: NSObject {
         try configureLocalMedia(on: peerConnection)
         let answer = try await createAnswer(on: peerConnection)
         try await setLocalDescription(answer, on: peerConnection)
-        setCaptureMacroblockLimit(DesktopVideoQuality.maximumMacroblocksPerFrame(
-            negotiatedCodecs: videoSender?.parameters.codecs ?? []))
+        let capturePolicy = DesktopVideoQuality.capturePolicy(
+            negotiatedCodecs: videoSender?.parameters.codecs ?? [], f2Requested: latencyF2Enabled)
+        try setCaptureMacroblockLimit(capturePolicy.maximumMacroblocksPerFrame,
+                                     framesPerSecond: capturePolicy.framesPerSecond)
+        #if DEBUG
+        latencyStats.trace(["type": "f2_capture_policy", "time": ProcessInfo.processInfo.systemUptime,
+                           "authorized": latencyF2Enabled, "framesPerSecond": capturePolicy.framesPerSecond,
+                           "macroblocks": capturePolicy.maximumMacroblocksPerFrame,
+                           "lowLatencyRequested": capturePolicy.lowLatencyEncoder])
+        #endif
         applyVideoSenderPolicy(DesktopVideoQuality.sharpnessPolicy)
         startAudioRecordingIfNeeded()
         try await signaling.send(SignalingEnvelope(
             role: .host,
             kind: .answer,
-            payload: [
+            payload: latencySignalingPayload([
                 "sdp": answer.sdp,
                 "sdpType": "answer",
-            ],
+            ]),
             ts: Date().timeIntervalSince1970))
         flushBufferedLocalICEAfterAnswer()
         startLatencyPolling(peerConnection)
@@ -470,6 +500,9 @@ final class HostPeerSession: NSObject {
                 let items = report.statistics.values.map {
                     LatencyStatsReport(id: $0.id, type: $0.type, values: $0.values)
                 }
+                #if DEBUG
+                self.applyLatencySenderPolicy(items, connection: connection)
+                #endif
                 self.latencyStats.ingest(items, at: ProcessInfo.processInfo.systemUptime)
                 if shouldLog {
                     self.log.info("latency stats: \(String(describing: self.latencyStats.snapshot()), privacy: .public)")
@@ -479,6 +512,38 @@ final class HostPeerSession: NSObject {
         latencyTimer = timer
         timer.resume()
     }
+
+    #if DEBUG
+    private func applyLatencySenderPolicy(_ reports: [LatencyStatsReport], connection: RTCPeerConnection) {
+        guard latencyF3Enabled, let path = LatencyLabSenderPolicy.selectedPath(in: reports) else { return }
+        closeStateLock.lock(); defer { closeStateLock.unlock() }
+        guard !ended, peerConnection === connection, let videoSender, f3AppliedPath != path else { return }
+        // Nil preserves the previous minimum. Explicit zero is needed when a
+        // connection leaves the LAN, so its former 2.5 Mbps floor is removed.
+        guard connection.setBweMinBitrateBps(NSNumber(value: path.minimumBitrate),
+            currentBitrateBps: NSNumber(value: path.startingBitrate),
+            maxBitrateBps: NSNumber(value: path.maximumBitrate)) else { return }
+        let parameters = videoSender.parameters
+        if f3OriginalPriorities == nil {
+            f3OriginalPriorities = parameters.encodings.map { ($0.networkPriority, $0.bitratePriority) }
+        }
+        for (index, encoding) in parameters.encodings.enumerated() {
+            if path.isLAN {
+                encoding.networkPriority = .high
+                encoding.bitratePriority = 2
+            } else if let prior = f3OriginalPriorities, prior.indices.contains(index) {
+                encoding.networkPriority = prior[index].0
+                encoding.bitratePriority = prior[index].1
+            }
+        }
+        videoSender.parameters = parameters
+        f3AppliedPath = path
+        latencyStats.trace(["type": "f3_path_applied", "time": ProcessInfo.processInfo.systemUptime,
+                           "localType": path.localType, "remoteType": path.remoteType,
+                           "minimumBitrate": path.minimumBitrate, "startingBitrate": path.startingBitrate,
+                           "maximumBitrate": path.maximumBitrate, "highPriority": path.isLAN])
+    }
+    #endif
 
     func addRemoteIce(_ payload: [String: String]) {
         guard let peerConnection,
@@ -662,11 +727,26 @@ final class HostPeerSession: NSObject {
         return (captureOwner, captureMaximumMacroblocksPerFrame)
     }
 
-    private func setCaptureMacroblockLimit(_ limit: Int) {
+    private func setCaptureMacroblockLimit(_ limit: Int, framesPerSecond: Int32) throws {
         closeStateLock.lock()
         defer { closeStateLock.unlock() }
         guard !ended else { return }
+        #if DEBUG
+        // Lab handoffs create a fresh peer/capture owner. A subsequent codec
+        // renegotiation must not claim new constraints on an existing stream.
+        if latencyF2Enabled, captureStartupRequested,
+           captureMaximumMacroblocksPerFrame != limit || captureFramesPerSecond != framesPerSecond {
+            throw NSError(domain: "LatencyLab", code: 1,
+                          userInfo: [NSLocalizedDescriptionKey: "The latency capture policy changed. Reconnect to continue."])
+        }
+        #endif
         captureMaximumMacroblocksPerFrame = limit
+        captureFramesPerSecond = framesPerSecond
+    }
+
+    private var captureFrameRate: Int32 {
+        closeStateLock.lock(); defer { closeStateLock.unlock() }
+        return captureFramesPerSecond
     }
 
     var isEnded: Bool {
@@ -690,12 +770,14 @@ final class HostPeerSession: NSObject {
     private func startCapture() async throws {
         let (owner, limit) = try captureStartParameters()
         try await capture.start(for: owner, audioEnabled: audioEnabled,
-                                maximumMacroblocksPerFrame: limit)
+                                maximumMacroblocksPerFrame: limit,
+                                framesPerSecond: captureFrameRate)
         refreshCaptureInputAvailability()
     }
 
     private func applyVideoSenderPolicy(
-        _ policy: DesktopVideoQuality.SenderPolicy
+        _ policy: DesktopVideoQuality.SenderPolicy,
+        requestedFramesPerSecond: Int? = nil
     ) {
         guard let videoSender else {
             log.warning("couldn't apply desktop video quality policy: missing sender")
@@ -707,9 +789,12 @@ final class HostPeerSession: NSObject {
             log.warning("couldn't apply desktop video quality policy: missing encoding")
             return
         }
+        let effectiveFramesPerSecond = latencyF2Enabled && captureFrameRate == 60
+            ? (requestedFramesPerSecond.map { $0 > 0 ? min(60, max(10, $0)) : 60 } ?? 60)
+            : policy.maximumFramesPerSecond
         for encoding in encodings {
             encoding.maxBitrateBps = NSNumber(value: policy.maximumBitrateBps)
-            encoding.maxFramerate = NSNumber(value: policy.maximumFramesPerSecond)
+            encoding.maxFramerate = NSNumber(value: effectiveFramesPerSecond)
             encoding.scaleResolutionDownBy = 1
         }
         parameters.encodings = encodings
@@ -723,7 +808,7 @@ final class HostPeerSession: NSObject {
             maxBitrateBps: NSNumber(value: policy.maximumBitrateBps)) ?? false
         let captureLimit = (try? captureStartParameters().1) ?? 0
         log.info(
-            "desktop video quality captureMacroblocks=\(captureLimit, privacy: .public) maxBitrate=\(policy.maximumBitrateBps, privacy: .public) maxFps=\(policy.maximumFramesPerSecond, privacy: .public) degradation=\(policy.degradationPreference.rawValue, privacy: .public) bweUpdated=\(bweUpdated, privacy: .public)")
+            "desktop video quality captureMacroblocks=\(captureLimit, privacy: .public) maxBitrate=\(policy.maximumBitrateBps, privacy: .public) maxFps=\(effectiveFramesPerSecond, privacy: .public) degradation=\(policy.degradationPreference.rawValue, privacy: .public) bweUpdated=\(bweUpdated, privacy: .public)")
     }
 
     private func handleCaptureStopped(_ receipt: CaptureStopReceipt, error: Error) {
@@ -1006,7 +1091,7 @@ final class HostPeerSession: NSObject {
             videoSource.adaptOutputFormat(
                 toWidth: Int32(normalizedSize.width),
                 height: Int32(normalizedSize.height),
-                fps: CaptureSizing.targetFramesPerSecond)
+                fps: captureFrameRate)
             adaptedVideoWidth = normalizedSize.width
             adaptedVideoHeight = normalizedSize.height
         }
@@ -1156,17 +1241,29 @@ final class HostPeerSession: NSObject {
     private func sendLocalICE(_ payload: [String: String]) {
         let signaling = self.signaling
         let log = self.log
+        let taggedPayload = latencySignalingPayload(payload)
         Task {
             do {
                 try await signaling.send(SignalingEnvelope(
                     role: .host,
                     kind: .ice,
-                    payload: payload,
+                    payload: taggedPayload,
                     ts: Date().timeIntervalSince1970))
             } catch {
                 log.error("failed to send local ICE candidate: \(String(describing: error), privacy: .public)")
             }
         }
+    }
+
+    private func latencySignalingPayload(_ payload: [String: String]) -> [String: String] {
+        #if DEBUG
+        guard let latencyF1Nonce else { return payload }
+        var tagged = payload
+        tagged["latencyF1Restart"] = latencyF1Nonce
+        return tagged
+        #else
+        return payload
+        #endif
     }
 
     private func createAnswer(on peerConnection: RTCPeerConnection) async throws -> RTCSessionDescription {
@@ -1260,6 +1357,16 @@ extension HostPeerSession: RTCPeerConnectionDelegate {
         guard !isEnded, self.peerConnection === peerConnection else { return }
         switch stateChanged {
         case .connected:
+            #if DEBUG
+            if latencyF3Enabled {
+                peerConnection.statistics { [weak self, weak peerConnection] report in
+                    guard let self, let peerConnection else { return }
+                    self.applyLatencySenderPolicy(report.statistics.values.map {
+                        LatencyStatsReport(id: $0.id, type: $0.type, values: $0.values)
+                    }, connection: peerConnection)
+                }
+            }
+            #endif
             inputAuthorization.connectionChanged(connected: true)
             // Hello and the transport-state callback can arrive in either
             // order. Publish readiness only once both have authorized input.
@@ -1305,6 +1412,22 @@ extension HostPeerSession: RTCDataChannelDelegate {
         #endif
         guard inputAuthorization.ownsChannel(ObjectIdentifier(dataChannel)), dataChannel.readyState == .open else { return }
         #if DEBUG
+        if inputAuthorization.inputSession(for: ObjectIdentifier(dataChannel)) != nil,
+           let object = (try? JSONSerialization.jsonObject(with: buffer.data)) as? [String: Any],
+           object["type"] as? String == "latencyF1RestartRequest" {
+            guard let nonce = object["nonce"] as? String, nonce.count == 36,
+                  UUID(uuidString: nonce) != nil, let onLatencyF1RestartRequest else { return }
+            onLatencyF1RestartRequest(nonce) { [weak self, weak dataChannel] in
+                guard let self, let dataChannel, !self.isEnded,
+                      self.dataChannel === dataChannel, dataChannel.readyState == .open,
+                      self.inputAuthorization.ownsChannel(ObjectIdentifier(dataChannel)),
+                      self.inputAuthorization.inputSession(for: ObjectIdentifier(dataChannel)) != nil,
+                      let data = try? JSONSerialization.data(withJSONObject: [
+                        "type": "latencyF1RestartReady", "nonce": nonce]) else { return }
+                _ = dataChannel.sendData(RTCDataBuffer(data: data, isBinary: false))
+            }
+            return
+        }
         if let receiveTime,
            inputAuthorization.inputSession(for: ObjectIdentifier(dataChannel)) != nil,
            let object = (try? JSONSerialization.jsonObject(with: buffer.data)) as? [String: Any],
@@ -1377,7 +1500,7 @@ extension HostPeerSession: RTCDataChannelDelegate {
             applyVideoSenderPolicy(DesktopVideoQuality.senderPolicy(
                 targetFramesPerSecond: targetFps,
                 maximumBitrateKbps: maxBitrateKbps,
-                preference: prefer))
+                preference: prefer), requestedFramesPerSecond: targetFps)
         }
     }
 }

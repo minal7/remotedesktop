@@ -1308,6 +1308,44 @@ final class ScreenCaptureSizingTests: XCTestCase {
         XCTAssertEqual(configuration.queueDepth, DesktopVideoQuality.captureQueueDepth)
     }
 
+    #if DEBUG
+    func test_optIn60FpsSizingAndLegacyCodecEligibility() {
+        let safe = CaptureSizing.encoderSafe(width: 3456, height: 2234, maximumMacroblocksPerFrame: 16_384)
+        let macroblocks = CaptureSizing.macroblockCount(width: safe.width, height: safe.height)
+        XCTAssertLessThanOrEqual(macroblocks, 16_384)
+        XCTAssertLessThanOrEqual(macroblocks * 60, 983_040)
+        XCTAssertLessThan(safe.width, 3456)
+        XCTAssertEqual(safe.width % 2, 0)
+        XCTAssertEqual(safe.height % 2, 0)
+        let configuration = ScreenCapture.streamConfiguration(width: safe.width, height: safe.height,
+                                                                audioEnabled: false, framesPerSecond: 60)
+        XCTAssertEqual(configuration.minimumFrameInterval, CMTime(value: 1, timescale: 60))
+        XCTAssertTrue(DesktopVideoQuality.supportsExperimentalEncoder(name: "H264", profileLevelID: "640c33", packetizationMode: "1"))
+        XCTAssertFalse(DesktopVideoQuality.supportsExperimentalEncoder(name: "H264", profileLevelID: "42e01f", packetizationMode: "1"))
+        XCTAssertFalse(DesktopVideoQuality.supportsExperimentalEncoder(name: "H264", profileLevelID: "640c33", packetizationMode: "0"))
+        XCTAssertFalse(DesktopVideoQuality.supportsExperimentalEncoder(name: "VP8", profileLevelID: nil, packetizationMode: nil))
+        let experimental = DesktopVideoQuality.capturePolicy(name: "H264", profileLevelID: "640c33", packetizationMode: "1",
+                                                             currentLimit: 32_768, f2Requested: true)
+        XCTAssertEqual(experimental.framesPerSecond, 60)
+        XCTAssertEqual(experimental.maximumMacroblocksPerFrame, 16_384)
+        XCTAssertTrue(experimental.lowLatencyEncoder)
+        let disabled = DesktopVideoQuality.capturePolicy(name: "H264", profileLevelID: "640c33", packetizationMode: "1",
+                                                         currentLimit: 32_768, f2Requested: false)
+        XCTAssertEqual(disabled.framesPerSecond, 30)
+        XCTAssertEqual(disabled.maximumMacroblocksPerFrame, 32_768)
+        XCTAssertFalse(disabled.lowLatencyEncoder)
+        let h264Legacy = DesktopVideoQuality.capturePolicy(name: "H264", profileLevelID: "42e01f", packetizationMode: "1",
+                                                           currentLimit: 3_600, f2Requested: true)
+        XCTAssertEqual(h264Legacy.framesPerSecond, 30)
+        XCTAssertEqual(h264Legacy.maximumMacroblocksPerFrame, 3_600)
+        XCTAssertFalse(h264Legacy.lowLatencyEncoder)
+        let legacy = DesktopVideoQuality.capturePolicy(negotiatedCodecs: [], f2Requested: true)
+        XCTAssertEqual(legacy.framesPerSecond, 30)
+        XCTAssertEqual(legacy.maximumMacroblocksPerFrame, 3_600)
+        XCTAssertFalse(legacy.lowLatencyEncoder)
+    }
+    #endif
+
     func test_streamConfiguration_enablesAudioOnlyForOptedInSession() {
         let configuration = ScreenCapture.streamConfiguration(
             width: 3456,
