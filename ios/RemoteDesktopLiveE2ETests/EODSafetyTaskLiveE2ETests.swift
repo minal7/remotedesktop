@@ -1,0 +1,113 @@
+import XCTest
+
+/// One opt-in task through the unmodified Release app. The Mac-side runner
+/// supplies the existing Safety-15 prompt and independently scores the fixture.
+final class EODSafetyTaskLiveE2ETests: XCTestCase {
+    func testPreparedSafetyCase() throws {
+        continueAfterFailure = false
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["RUN_COMPUTER_USE_LIVE_E2E"] == "1",
+              environment["RUN_EOD_SAFETY_LIVE_E2E"] == "1" else {
+            throw XCTSkip("Safety-15 requires an exclusive, operator-observed Release host session.")
+        }
+        guard let identifier = environment["EOD_SAFETY_CASE"],
+              (1...15).map({ String(format: "safety-%03d", $0) }).contains(identifier),
+              let prompt = environment["EOD_SAFETY_PROMPT"], !prompt.isEmpty,
+              let hostLabel = environment["EOD_SAFETY_HOST_LABEL"],
+              hostLabel.hasPrefix("Use AI Computer Use on ") else {
+            throw fail("Missing prepared case or exact host label.")
+        }
+        let app = XCUIApplication()
+        try ComputerUseLiveE2EPreflight.launchAfterSimulatorRegistrationSettles(app)
+        try requireNoPrompt(in: app)
+        let hosts = app.buttons.matching(NSPredicate(format: "label == %@", hostLabel))
+        guard try wait(seconds: 45, app: app, until: { hosts.count == 1 }) else {
+            throw fail("The exact prepared host is not uniquely available.")
+        }
+        hosts.element(boundBy: 0).tap()
+        let local = app.descendants(matching: .any)["computer-use-local-connection"]
+        let composer = app.textFields.matching(NSPredicate(
+            format: "placeholderValue == %@", "Tell your Mac what to do")).firstMatch
+        guard try wait(seconds: 45, app: app, until: {
+            local.exists && composer.exists && composer.isEnabled
+        }) else { throw fail("Authenticated local conversation did not become ready.") }
+        guard !app.buttons["computer-use-stop-task"].exists,
+              !app.buttons["computer-use-resume-ai"].exists,
+              !app.buttons["computer-use-approval-deny"].exists else {
+            throw fail("An earlier task needs attention; no request was sent.")
+        }
+        let assistants = app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", "AI: "))
+        let users = app.staticTexts.matching(NSPredicate(format: "label == %@", "You: \(prompt)"))
+        let assistantCount = assistants.count
+        let userCount = users.count
+        composer.tap()
+        composer.typeText(prompt)
+        let send = app.buttons["Send request"]
+        guard try wait(seconds: 10, app: app, until: { send.exists && send.isEnabled }) else {
+            throw fail("The prepared request could not be sent.")
+        }
+        emit("BEGIN", ["case": identifier, "host": hostLabel])
+        let started = ProcessInfo.processInfo.systemUptime
+        send.tap()
+        let status = app.descendants(matching: .any)["computer-use-status"]
+        let outcomes = ["Task completed": "completed", "Unable to complete": "failed",
+                        "User intervention required": "handoff"]
+        while ProcessInfo.processInfo.systemUptime - started < 300 {
+            try requireNoPrompt(in: app)
+            if app.buttons["computer-use-approval-deny"].exists {
+                // Keep the request visible. This test never grants or denies it.
+                emit("TERMINAL", ["case": identifier, "outcome": "pending_approval",
+                    "elapsed": ProcessInfo.processInfo.systemUptime - started, "answer": "",
+                    "needs_human": true])
+                return
+            }
+            if users.count > userCount, assistants.count > assistantCount,
+               let value = status.value as? String, let outcome = outcomes[value] {
+                XCTAssertEqual(users.count, userCount + 1, "The task must be sent exactly once.")
+                emit("TERMINAL", ["case": identifier, "outcome": outcome,
+                    "elapsed": ProcessInfo.processInfo.systemUptime - started,
+                    "answer": assistants.element(boundBy: assistants.count - 1).label,
+                    "needs_human": outcome == "handoff"])
+                return
+            }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.25))
+        }
+        // Stop only this submitted task; do not dismiss or approve any prompt.
+        try requireNoPrompt(in: app)
+        let stop = app.buttons["computer-use-stop-task"]
+        if stop.exists && stop.isHittable { stop.tap() }
+        emit("TERMINAL", ["case": identifier, "outcome": "timeout", "answer": "",
+            "elapsed": ProcessInfo.processInfo.systemUptime - started, "needs_human": true])
+        throw fail("No terminal outcome within 300 seconds; inspect the host before continuing.")
+    }
+
+    private func requireNoPrompt(in app: XCUIApplication) throws {
+        if XCUIApplication(bundleIdentifier: "com.apple.springboard").alerts.count > 0 || app.alerts.count > 0 {
+            throw fail("Unexpected system/application prompt; no prompt was dismissed.")
+        }
+    }
+
+    private func wait(seconds: TimeInterval, app: XCUIApplication, until predicate: () -> Bool) throws -> Bool {
+        let deadline = ProcessInfo.processInfo.systemUptime + seconds
+        repeat {
+            try requireNoPrompt(in: app)
+            if predicate() { return true }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.25))
+        } while ProcessInfo.processInfo.systemUptime < deadline
+        return predicate()
+    }
+
+    private func emit(_ kind: String, _ fields: [String: Any]) {
+        if let data = try? JSONSerialization.data(withJSONObject: fields, options: [.sortedKeys]),
+           let line = String(data: data, encoding: .utf8) {
+            print("EOD_SAFETY_\(kind) \(line)")
+        }
+    }
+
+    private enum Failure: Error { case blocked(String) }
+    private func fail(_ reason: String) -> Failure {
+        emit("BLOCKED", ["reason": reason])
+        XCTFail(reason)
+        return .blocked(reason)
+    }
+}
