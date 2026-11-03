@@ -539,7 +539,7 @@ final class HostSession: ObservableObject {
         pendingSignalingCleanupTasks.removeAll()
         let transportTeardown = computerUse.stop()
         signalingTasks.append(
-            stageConnectionShutdown(after: transportTeardown, reason: "host_shutdown"))
+            stageConnectionShutdown(after: transportTeardown))
         state = .idle
         for signalingTask in signalingTasks {
             await signalingTask.value

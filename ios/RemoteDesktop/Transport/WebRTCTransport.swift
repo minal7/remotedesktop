@@ -24,12 +24,7 @@ enum RemoteAudioSessionPolicy {
 }
 
 @MainActor
-protocol RemoteSessionRecoveryTransport: Transport {
-    var canReconnectAfterDisconnect: Bool { get }
-}
-
-@MainActor
-final class WebRTCTransport: NSObject, VideoRenderingTransport, RemoteSessionRecoveryTransport {
+final class WebRTCTransport: NSObject, VideoRenderingTransport {
     enum MediaPolicy: Equatable {
         /// Ordinary remote-control sessions retain host-system-audio playback.
         case remoteSession
@@ -49,7 +44,6 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport, RemoteSessionRec
     var onVideoFrameUnavailable: (@MainActor () -> Void)?
     var onFirstVideoFrame: (@MainActor () -> Void)?
     var onDisconnect: (@MainActor (String) -> Void)?
-    private(set) var canReconnectAfterDisconnect = false
 
     #if DEBUG
     private struct DebugVideoSample: Sendable {
@@ -181,7 +175,6 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport, RemoteSessionRec
     }
 
     func connect(pairingCode: String, expectedHostID: String?) async throws {
-        canReconnectAfterDisconnect = false
         isClosing = false
         didReportDisconnect = false
         connectedOnce = false
@@ -198,10 +191,8 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport, RemoteSessionRec
         let signaling = signalingFactory(pairingCode, expectedHostID)
         self.signaling = signaling
         try await signaling.claim()
-        try requireActiveConnection()
 
         let iceConfig = await iceConfigProvider()
-        try requireActiveConnection()
         let peerConnection = try makePeerConnection(iceConfig: iceConfig)
         self.peerConnection = peerConnection
         if mediaPolicy.receivesHostAudio {
@@ -219,9 +210,7 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport, RemoteSessionRec
         self.dataChannel = dataChannel
 
         let offer = try await createOffer(on: peerConnection)
-        try requireActiveConnection()
         try await setLocalDescription(offer, on: peerConnection)
-        try requireActiveConnection()
         try await signaling.send(SignalingEnvelope(
             role: .client,
             kind: .offer,
@@ -231,7 +220,6 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport, RemoteSessionRec
                 "sdpType": "offer",
             ],
             ts: Date().timeIntervalSince1970))
-        try requireActiveConnection()
 
         pollTask?.cancel()
         pollTask = Task { [weak self] in
@@ -280,25 +268,12 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport, RemoteSessionRec
         close(reason: reason, notifyRemote: true)
     }
 
-    private func requireActiveConnection() throws {
-        try Task.checkCancellation()
-        guard !isClosing else { throw CancellationError() }
-    }
-
-    private func finishDisconnect(reason: String, recoverable: Bool = false) {
+    private func finishDisconnect(reason: String) {
         guard !didReportDisconnect else { return }
         didReportDisconnect = true
-        canReconnectAfterDisconnect = recoverable
         let callback = onDisconnect
         close(reason: reason, notifyRemote: false)
         callback?(reason)
-    }
-
-    private func receivedBye(reason: String) {
-        // Only application shutdown promises that an otherwise trusted host
-        // may return. Explicit Stop Listening and every security/protocol bye
-        // remain terminal when received.
-        finishDisconnect(reason: reason, recoverable: reason == "host_shutdown")
     }
 
     private func close(reason: String, notifyRemote: Bool) {
@@ -466,7 +441,7 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport, RemoteSessionRec
                         }
                         try await handleRemoteICECandidate(candidate)
                     case .bye:
-                        receivedBye(reason: envelope.payload["reason"] ?? "Disconnected")
+                        finishDisconnect(reason: envelope.payload["reason"] ?? "Disconnected")
                         return
                     case .offer:
                         continue
@@ -603,7 +578,7 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport, RemoteSessionRec
             await MainActor.run {
                 guard let self, !self.isClosing, self.connectedOnce else { return }
                 self.connectionRecoveryTask = nil
-                self.finishDisconnect(reason: "Can’t reconnect to your computer. Keep the host app open and check that both devices are on the same Wi-Fi.", recoverable: true)
+                self.finishDisconnect(reason: "Can’t reconnect to your computer. Keep the host app open and check that both devices are on the same Wi-Fi.")
             }
         }
     }
@@ -767,7 +742,7 @@ extension WebRTCTransport: RTCPeerConnectionDelegate {
                 if !connectedOnce {
                     finishDisconnect(reason: "Can't reach your computer — try putting both devices on the same Wi-Fi.")
                 } else {
-                    finishDisconnect(reason: "The connection to your computer was lost. Check your Wi-Fi and try again.", recoverable: true)
+                    finishDisconnect(reason: "The connection to your computer was lost. Check your Wi-Fi and try again.")
                 }
             case .disconnected:
                 invalidateInputPresentation()
@@ -780,7 +755,7 @@ extension WebRTCTransport: RTCPeerConnectionDelegate {
                 guard connectedOnce else { return }
                 scheduleConnectionRecoveryTimeout()
             case .closed:
-                finishDisconnect(reason: "Your computer ended the connection. Open the host app and try again.", recoverable: connectedOnce)
+                finishDisconnect(reason: "Your computer ended the connection. Open the host app and try again.")
             default:
                 break
             }
@@ -865,7 +840,7 @@ extension WebRTCTransport: RTCDataChannelDelegate {
         Task { @MainActor [weak self] in
             guard let self, !self.isClosing, self.dataChannel === dataChannel else { return }
             if dataChannel.readyState == .closing || dataChannel.readyState == .closed {
-                self.finishDisconnect(reason: "The input channel closed.", recoverable: self.connectedOnce)
+                self.finishDisconnect(reason: "The input channel closed.")
                 return
             }
             self.sendHelloIfPossible()
@@ -918,7 +893,7 @@ extension WebRTCTransport: RTCDataChannelDelegate {
                     onDisplay?(display)
                 }
             case .bye(let reason):
-                receivedBye(reason: reason)
+                finishDisconnect(reason: reason)
             case nil:
                 break
             }
