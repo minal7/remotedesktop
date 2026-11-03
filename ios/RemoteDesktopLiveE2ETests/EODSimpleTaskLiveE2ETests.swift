@@ -94,8 +94,14 @@ final class EODSimpleTaskLiveE2ETests: XCTestCase {
         var approvedFirstUse = false
         var approvalSeenAt: TimeInterval?
         var approvedAt: TimeInterval?
+        var observedExactUserMessage = false
         repeat {
             try requireNoSystemPrompt(in: app, context: suffix)
+            // The approval card is accessibility-modal and can hide the transcript.
+            // Retain proof of the exact newly sent request only if observed beforehand.
+            if userMessages.count == priorUserCount + 1 {
+                observedExactUserMessage = true
+            }
             if app.buttons["computer-use-approval-deny"].exists {
                 if approvalSeenAt == nil {
                     approvalSeenAt = ProcessInfo.processInfo.systemUptime
@@ -112,12 +118,12 @@ final class EODSimpleTaskLiveE2ETests: XCTestCase {
                 let reason = app.staticTexts["computer-use-approval-reason"]
                 let action = app.descendants(matching: .any)["computer-use-approval-action"]
                 let approve = app.buttons["computer-use-approval-approve"]
-                if run == 1, !approvedFirstUse, userMessages.count == priorUserCount + 1,
+                if run == 1, !approvedFirstUse, observedExactUserMessage,
                    let allowedApp, card.exists, reason.label == "This is the first use of an untrusted app or site.",
                    action.exists, isExactOpenApp(action.label, named: allowedApp), approve.exists, approve.isHittable {
                     attachDiagnostics(named: "first-use-approval-\(suffix)") { self.approvalDetails(in: app) }
                     try requireNoSystemPrompt(in: app, context: suffix)
-                    guard userMessages.count == priorUserCount + 1, card.exists,
+                    guard observedExactUserMessage, card.exists,
                           reason.label == "This is the first use of an untrusted app or site.",
                           action.exists, isExactOpenApp(action.label, named: allowedApp), approve.isHittable else {
                         Self.needsHuman = true
