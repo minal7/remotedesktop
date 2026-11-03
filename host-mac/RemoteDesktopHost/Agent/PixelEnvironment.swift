@@ -19,6 +19,7 @@ final class PixelEnvironment: AgentEnvironment {
     private let taskID: String
     private let injector: InputInjector
     private let registry: AgentAppRegistry
+    private let directCandidate: AgentRegisteredApp?
     private let allowed: () -> Bool
     private let finder: AgentWebFileFinder?
     private let picker: Picker?
@@ -44,11 +45,11 @@ final class PixelEnvironment: AgentEnvironment {
 
     init(taskID: String, injector: InputInjector, registry: AgentAppRegistry,
          allowed: @escaping () -> Bool, finder: AgentWebFileFinder? = nil, picker: Picker? = nil,
-         startURL: String? = nil, startApp: String? = nil,
+         directCandidate: AgentRegisteredApp? = nil, startURL: String? = nil, startApp: String? = nil,
          capturePreference: PixelCapturePreference = .frontmostWindow, metadataURL: URL? = nil,
          requireCleanStart: Bool = false) {
         self.taskID = taskID; self.injector = injector; self.registry = registry
-        self.allowed = allowed; self.finder = finder; self.picker = picker
+        self.allowed = allowed; self.finder = finder; self.picker = picker; self.directCandidate = directCandidate
         self.startURL = startURL; self.startApp = startApp; self.requireCleanStart = requireCleanStart
 #if DEBUG
         self.expectedStartBundleID = AgentEvalFirstObservation.expectedBundleID(
@@ -194,6 +195,36 @@ final class PixelEnvironment: AgentEnvironment {
             targetContextLabel: targetContextLabel,
             surfaceReadOnly: snapshot.map { AgentSafetyBoundary.readOnly(bundleID: $0.bundleID, appName: $0.appName) } ?? resolved.surfaceReadOnly,
             hostBinding: PixelResolvedTargets(references: references, resolutionNote: oldBindings?.resolutionNote))
+    }
+
+    static func requireDirectCandidate(_ name: String, expected: AgentRegisteredApp,
+                                       registry: AgentAppRegistry, roots: [URL]) throws {
+        let current = try registry.resolveDirect(name, roots: roots)
+        guard current == expected else { throw AgentEnvironmentError.targetChanged }
+    }
+
+    func executeDirectOpen(_ resolved: AgentResolvedAction) async throws -> AgentExecutionResult {
+        try checkScope(resolved.frame.scope)
+        guard case let .openApp(name) = resolved.action, let directCandidate else { throw AgentEnvironmentError.unsupportedAction }
+        let roots = AgentAppRegistry.directSearchRoots
+        try Self.requireDirectCandidate(name, expected: directCandidate,
+            registry: AgentAppRegistry(searchRoots: roots), roots: roots)
+        try checkScope(resolved.frame.scope)
+        let identity = try await ComputerUseHostTools.openInstalledApplication(
+            named: name, mayAct: allowed, expectedURL: directCandidate.url)
+        try checkActive()
+        let deadline = ContinuousClock.now + .seconds(3)
+        while ContinuousClock.now < deadline {
+            try checkActive()
+            if let frontmost = NSWorkspace.shared.frontmostApplication,
+               frontmost.processIdentifier == identity.processIdentifier,
+               frontmost.bundleIdentifier == identity.bundleIdentifier {
+                lastSnapshot = nil
+                return .init(status: .ok, result: "opened and verified app \(name)")
+            }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        throw AgentEnvironmentError.unavailable("The app did not become frontmost.")
     }
 
     func execute(_ resolved: AgentResolvedAction) async throws -> AgentExecutionResult {

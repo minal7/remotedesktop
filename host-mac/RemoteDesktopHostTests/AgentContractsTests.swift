@@ -95,8 +95,16 @@ final class AgentContractsTests: XCTestCase {
                                     rawModelOutput: "{bad json", action: nil, gate: .init(decision: .rejected, reason: "malformed"),
                                     execution: .init(status: .notExecuted, result: "no effect"),
                                     timings: .init(observationMS: 1, policyMS: 2, gateMS: 3, executionMS: 0, recordMS: 1, totalMS: 7))
+        let direct = AgentEpisodeStep(episodeID: "episode-1", step: 1, observation: observation, promptVersion: "direct-open-v1",
+                                      rawModelOutput: "", action: .openApp(name: "Utility"),
+                                      gate: .init(decision: .allowed, reason: "approved"),
+                                      execution: .init(status: .ok, result: "opened"),
+                                      timings: .init(observationMS: 1, policyMS: 0, gateMS: 0, executionMS: 1, recordMS: 0, totalMS: 2),
+                                      source: "direct")
+        let directBytes = try JSONEncoder().encode(AgentEpisodeRecord.step(direct))
+        XCTAssertTrue(String(decoding: directBytes, as: UTF8.self).contains(#""source":"direct""#))
         let footer = AgentEpisodeFooter(episodeID: "episode-1", outcome: "failed", approvals: [], corrections: ["Use the correct tab"], checkerVerdict: "not_run")
-        for record in [AgentEpisodeRecord.step(step), .footer(footer)] {
+        for record in [AgentEpisodeRecord.step(step), .step(direct), .footer(footer)] {
             let bytes = try JSONEncoder().encode(record)
             XCTAssertEqual(try decode(AgentEpisodeRecord.self, data: bytes), record)
         }

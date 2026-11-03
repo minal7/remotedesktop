@@ -47,6 +47,46 @@ final class AgentAppRegistry {
         return AgentRegisteredApp(bundleID: app.bundleID, url: app.url.standardizedFileURL)
     }
 
+    /// Direct execution accepts names, not paths, URLs, or bundle identifiers.
+    /// Resolve uniquely within the requested application roots.
+    func resolveDirect(_ name: String, roots: [URL]) throws -> AgentRegisteredApp {
+        let query = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty, !query.contains("/"), !query.contains("\\"),
+              query.rangeOfCharacter(from: .controlCharacters) == nil else { throw Failure.invalidName }
+        let allowedRoots = roots.map { $0.resolvingSymlinksInPath().standardizedFileURL.path + "/" }
+        let matches = records.filter { record in
+            let path = record.url.resolvingSymlinksInPath().standardizedFileURL.path
+            guard allowedRoots.contains(where: { path.hasPrefix($0) }) else { return false }
+            let bundleName = (Bundle(url: record.url)?.infoDictionary?["CFBundleName"] as? String)
+                ?? record.url.deletingPathExtension().lastPathComponent
+            return [record.displayName, bundleName].contains {
+                $0.trimmingCharacters(in: .whitespacesAndNewlines).caseInsensitiveCompare(query) == .orderedSame
+            }
+        }
+        guard !matches.isEmpty else { throw Failure.notFound }
+        guard matches.count == 1 else { throw Failure.ambiguous }
+        let match = matches[0]
+        guard !match.bundleID.isEmpty, match.url.isFileURL,
+              match.url.pathExtension.caseInsensitiveCompare("app") == .orderedSame else { throw Failure.invalidApp }
+        return AgentRegisteredApp(bundleID: match.bundleID, url: match.url.resolvingSymlinksInPath().standardizedFileURL)
+    }
+
+    static var directSearchRoots: [URL] { [
+        URL(fileURLWithPath: "/Applications", isDirectory: true),
+        URL(fileURLWithPath: "/System/Applications", isDirectory: true),
+        FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Applications", isDirectory: true),
+    ] }
+
+    static func directOpenName(_ prompt: String) -> String? {
+        guard prompt.rangeOfCharacter(from: .controlCharacters) == nil else { return nil }
+        let pattern = #"\A\s*(?:please\s+)?(?:open|launch)\s+([\p{L}\p{N}][\p{L}\p{N} &'’+\-]*?)(?:\s+app)?\.?\s*\z"#
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]),
+              let match = regex.firstMatch(in: prompt, range: NSRange(prompt.startIndex..., in: prompt)),
+              let range = Range(match.range(at: 1), in: prompt) else { return nil }
+        let name = String(prompt[range]).trimmingCharacters(in: .whitespacesAndNewlines)
+        return name.isEmpty ? nil : name
+    }
+
     func open(_ app: AgentRegisteredApp) async throws {
         guard records.contains(where: {
             Self.normalized($0.bundleID) == Self.normalized(app.bundleID)

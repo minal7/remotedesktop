@@ -59,7 +59,13 @@ enum AgentHostFactory {
         })
         let support = TrajectoryRecorder.defaultRoot.deletingLastPathComponent()
         let trust = try persistentTrustStore()
+        let directRoots = AgentAppRegistry.directSearchRoots
+        let directRegistry = registry
         let taskExecutor = AgentTaskExecutor { taskID, prompt in
+            let direct = directOpenCandidate(prompt, registry: directRegistry, roots: directRoots) { name in
+                let candidate = try ComputerUseHostTools.resolveReviewedApplication(named: name)
+                return (candidate.url, candidate.bundleIdentifier)
+            }
             let pixelMetadata = configuration.storageDirectory?.appendingPathComponent("pixel-metadata.json")
             let files = AgentFileCatalog(authorizedRoots: configuration.fileRoots)
             let picker = AgentNativeFilePicker(catalog: files, injector: injector, mayAct: mayAct)
@@ -73,7 +79,7 @@ enum AgentHostFactory {
             case nil: (startURL, startApp) = (nil, nil)
             }
             let pixel = PixelEnvironment(taskID: taskID, injector: injector, registry: registry,
-                allowed: mayAct, finder: finder, picker: { try await picker.select($0) },
+                allowed: mayAct, finder: finder, picker: { try await picker.select($0) }, directCandidate: direct?.app,
                 startURL: startURL, startApp: startApp,
                 capturePreference: configuration.policy.capturePreference, metadataURL: pixelMetadata,
                 requireCleanStart: configuration.requireCleanStart)
@@ -91,13 +97,24 @@ enum AgentHostFactory {
                 taskID: taskID, slot: taskMemoryContextSlot, base: basePolicy,
                 memoryDisclosureAuthority: memoryDisclosureAuthority)
             return try AgentLoop(taskID: taskID, prompt: prompt, maxSteps: configuration.maxSteps,
-                environment: pixel,
+                directOpenName: direct?.name, environment: pixel,
                 policy: policy,
                 gate: AgentActionGate(trustStore: trust, allowPolicy: HostAgentAllowPolicy(registry: registry),
                     memoryDisclosureAuthority: memoryDisclosureAuthority),
                 recorder: recorder, journal: journal)
         }
         return ComputerUseCapabilityExecutor(agentAdapter: AgentCapabilityAdapter(executor: taskExecutor))
+    }
+
+    static func directOpenCandidate(_ prompt: String, registry: AgentAppRegistry, roots: [URL],
+                                    reviewedResolver: (String) throws -> (URL, String)) -> (name: String, app: AgentRegisteredApp)? {
+        guard let name = AgentAppRegistry.directOpenName(prompt),
+              let app = try? registry.resolveDirect(name, roots: roots),
+              let reviewed = try? reviewedResolver(name),
+              app.bundleID == reviewed.1,
+              app.url == reviewed.0.resolvingSymlinksInPath().standardizedFileURL else { return nil }
+        let canonicalName = ComputerUseApplicationIdentity.reviewedApplicationName(forBundleIdentifier: app.bundleID) ?? name
+        return (canonicalName, app)
     }
 
     static func persistentTrustStore() throws -> PersistentAgentTrustStore {

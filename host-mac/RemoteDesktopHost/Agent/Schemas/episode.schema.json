@@ -142,6 +142,9 @@
         "raw_model_output": {
           "type": "string"
         },
+        "source": {
+          "const": "direct"
+        },
         "action": {
           "oneOf": [
             {

@@ -53,6 +53,41 @@ final class AgentHostServicesTests: XCTestCase {
         }
     }
 
+    func testDirectOpenOnlyAcceptsWholePromptAndOneExactReviewedInstalledName() throws {
+        let root = try makePrivateDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let first = try makeApp(name: "Utility Fixture", bundleID: "org.example.utility", under: root)
+        let registry = AgentAppRegistry(searchRoots: [root])
+        let reviewed: (String) throws -> (URL, String) = { _ in (first, "org.example.utility") }
+        let result = AgentHostFactory.directOpenCandidate("Please LAUNCH utility fixture app.",
+            registry: registry, roots: [root], reviewedResolver: reviewed)
+        XCTAssertEqual(result?.app.bundleID, "org.example.utility")
+        for prompt in ["Open Utility Fixture and add 2+2", "Open https://example.test", "Open ../Utility Fixture",
+                       "Open Utility Fixture.txt", "Open missing fixture", "Can you open Utility Fixture?"] {
+            XCTAssertNil(AgentHostFactory.directOpenCandidate(prompt,
+                registry: registry, roots: [root], reviewedResolver: reviewed), prompt)
+        }
+        XCTAssertNil(AgentHostFactory.directOpenCandidate("Open Utility Fixture", registry: registry,
+            roots: [root], reviewedResolver: { _ in throw AgentAppRegistry.Failure.notFound }))
+        XCTAssertNil(AgentHostFactory.directOpenCandidate("Open Utility Fixture", registry: registry,
+            roots: [root], reviewedResolver: { _ in (first, "org.example.different") }))
+        let expected = try registry.resolveDirect("Utility Fixture", roots: [root])
+        XCTAssertNoThrow(try PixelEnvironment.requireDirectCandidate("Utility Fixture", expected: expected,
+            registry: registry, roots: [root]))
+        let changed = AgentAppRegistry(records: [.init(displayName: "Utility Fixture",
+            bundleID: "org.example.different", url: first)])
+        XCTAssertThrowsError(try PixelEnvironment.requireDirectCandidate("Utility Fixture", expected: expected,
+            registry: changed, roots: [root]))
+        XCTAssertNil(AgentHostFactory.directOpenCandidate("Open org.example.utility", registry: registry,
+            roots: [root], reviewedResolver: reviewed), "A bundle ID is not an app name")
+        _ = try makeApp(name: "Utility Fixture", bundleID: "org.example.second", under: root.appendingPathComponent("nested"))
+        let ambiguous = AgentAppRegistry(searchRoots: [root])
+        XCTAssertNil(AgentHostFactory.directOpenCandidate("Open Utility Fixture", registry: ambiguous,
+            roots: [root], reviewedResolver: reviewed))
+        XCTAssertNil(AgentHostFactory.directOpenCandidate("Open Utility Fixture", registry: registry,
+            roots: [root.appendingPathComponent("other")], reviewedResolver: reviewed))
+    }
+
     func testDefaultAppSearchRootsIncludeSystemComponentBundles() {
         XCTAssertTrue(AgentAppRegistry.defaultSearchRoots.contains {
             $0.standardizedFileURL.path == "/System/Library/CoreServices"

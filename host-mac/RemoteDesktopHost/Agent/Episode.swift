@@ -114,6 +114,7 @@ public struct AgentEpisodeStep: Equatable, Codable {
     public let step: Int
     public let observation: AgentObservation
     public let promptVersion: String
+    public let source: String?
     public let rawModelOutput: String
     public let action: AgentAction?
     public let gate: AgentGateResult
@@ -122,8 +123,9 @@ public struct AgentEpisodeStep: Equatable, Codable {
 
     public init(episodeID: String, step: Int, observation: AgentObservation, promptVersion: String,
                 rawModelOutput: String, action: AgentAction?, gate: AgentGateResult,
-                execution: AgentExecutionResult, timings: AgentTimings) {
+                execution: AgentExecutionResult, timings: AgentTimings, source: String? = nil) {
         self.episodeID = episodeID; self.step = step; self.observation = observation; self.promptVersion = promptVersion
+        self.source = source
         self.rawModelOutput = rawModelOutput; self.action = action; self.gate = gate; self.execution = execution; self.timings = timings
     }
 
@@ -131,17 +133,19 @@ public struct AgentEpisodeStep: Equatable, Codable {
         try AgentContractValidation.requireNonEmpty(episodeID, "episode_id")
         try AgentContractValidation.require(step >= 0, "step must be nonnegative")
         try AgentContractValidation.requireNonEmpty(promptVersion, "prompt_version")
+        try AgentContractValidation.require(source == nil || source == "direct", "invalid source")
         try observation.validate(); try action?.validate(); try timings.validate()
     }
 
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: AgentCodingKey.self)
-        try container.requireKeys(["type", "episode_id", "step", "observation", "prompt_version", "raw_model_output", "action", "gate", "execution", "timings"])
+        try container.requireKeys(["type", "episode_id", "step", "observation", "prompt_version", "raw_model_output", "action", "gate", "execution", "timings"], optional: ["source"])
         let recordType = try container.decodeRequired(String.self, "type")
         try AgentContractValidation.require(recordType == "step", "episode record type must be step")
         episodeID = try container.decodeRequired(String.self, "episode_id"); step = try container.decodeRequired(Int.self, "step")
         observation = try container.decodeRequired(AgentObservation.self, "observation")
         promptVersion = try container.decodeRequired(String.self, "prompt_version"); rawModelOutput = try container.decodeRequired(String.self, "raw_model_output")
+        source = try container.decodeOptionalValue(String.self, "source")
         action = try container.decodeNullable(AgentAction.self, "action"); gate = try container.decodeRequired(AgentGateResult.self, "gate")
         execution = try container.decodeRequired(AgentExecutionResult.self, "execution"); timings = try container.decodeRequired(AgentTimings.self, "timings")
         try validate()
@@ -153,6 +157,7 @@ public struct AgentEpisodeStep: Equatable, Codable {
         try container.encodeRequired("step", "type"); try container.encodeRequired(episodeID, "episode_id"); try container.encodeRequired(step, "step")
         try container.encodeRequired(observation, "observation"); try container.encodeRequired(promptVersion, "prompt_version")
         try container.encodeRequired(rawModelOutput, "raw_model_output"); try container.encodeNullable(action, "action")
+        try container.encodeIfPresent(source, forKey: AgentCodingKey("source"))
         try container.encodeRequired(gate, "gate"); try container.encodeRequired(execution, "execution"); try container.encodeRequired(timings, "timings")
     }
 }

@@ -93,6 +93,10 @@ struct ComputerUseApplicationIdentity: Equatable, Hashable, Sendable {
     /// executor will actually launch and attest.
     static let reviewedApplications: [ReviewedApplication] = [
         .init(
+            canonicalName: "Calculator",
+            aliases: ["Calculator"],
+            bundleIdentifiers: ["com.apple.calculator"]),
+        .init(
             canonicalName: "Notes",
             aliases: ["Notes", "Apple Notes"],
             bundleIdentifiers: ["com.apple.Notes"]),
@@ -1520,10 +1524,9 @@ final class ComputerUseHostTools {
         return identity
     }
 
-    private static func openInstalledApplication(
-        named name: String,
-        mayAct: () -> Bool
-    ) async throws -> ComputerUseApplicationIdentity {
+    static func resolveReviewedApplication(
+        named name: String
+    ) throws -> (url: URL, bundleIdentifier: String, code: ComputerUseReviewedApplicationCodeVerifier.StaticIdentity) {
         // Resolve only through the host-owned alias -> bundle-ID registry.
         // A localized application name is attacker-controlled, and the modern
         // Launch Services API intentionally has no trustworthy name resolver.
@@ -1562,6 +1565,22 @@ final class ComputerUseHostTools {
             throw ToolError.applicationUnavailable
         }
 
+        return (applicationURL, resolvedBundleIdentifier, reviewedStaticIdentity)
+    }
+
+    static func openInstalledApplication(
+        named name: String,
+        mayAct: () -> Bool,
+        expectedURL: URL? = nil
+    ) async throws -> ComputerUseApplicationIdentity {
+        let resolved = try resolveReviewedApplication(named: name)
+        if let expectedURL,
+           resolved.url != expectedURL.resolvingSymlinksInPath().standardizedFileURL {
+            throw ToolError.applicationUnavailable
+        }
+        let applicationURL = resolved.url
+        let resolvedBundleIdentifier = resolved.bundleIdentifier
+        let reviewedStaticIdentity = resolved.code
         let configuration = NSWorkspace.OpenConfiguration()
         configuration.activates = true
         return try await ComputerUseApplicationOpenOperation.run { complete in

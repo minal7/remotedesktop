@@ -64,6 +64,8 @@ protocol AgentEnvironment: AnyObject {
     func rebind(_ resolved: AgentResolvedAction, in frame: AgentFrame) async throws -> AgentResolvedAction
     /// Recheck the resolved scope at the final input boundary, including cancellation.
     func execute(_ resolved: AgentResolvedAction) async throws -> AgentExecutionResult
+    /// Uses the reviewed app opener and verifies the foreground process.
+    func executeDirectOpen(_ resolved: AgentResolvedAction) async throws -> AgentExecutionResult
     func suspend() async
     func resume() async throws
     func stop() async
@@ -71,6 +73,9 @@ protocol AgentEnvironment: AnyObject {
 
 extension AgentEnvironment {
     var followsFrontmostSurface: Bool { false }
+    func executeDirectOpen(_ resolved: AgentResolvedAction) async throws -> AgentExecutionResult {
+        throw AgentEnvironmentError.unsupportedAction
+    }
     func rebind(_ resolved: AgentResolvedAction, in frame: AgentFrame) async throws -> AgentResolvedAction {
         try await resolve(resolved.action, in: frame)
     }

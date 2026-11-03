@@ -22,6 +22,54 @@ final class AgentLoopTests: XCTestCase {
         XCTAssertEqual(policy.stopCount, 1)
     }
 
+    func testDirectOpenUsesApprovalAndFinishesWithoutModel() async throws {
+        let environment = TestEnvironment(frames: [webFrame(), webFrame()])
+        let policy = TestPolicy([]), recorder = TestRecorder(), journal = TestJournal()
+        let loop = try makeLoop(environment: environment, policy: policy, recorder: recorder,
+                                journal: journal, appIdentity: "com.apple.calculator", directOpenName: "Calculator")
+        guard case .pendingApproval(let approval) = try await loop.run() else { return XCTFail("First use needs approval") }
+        XCTAssertTrue(environment.executed.isEmpty)
+        XCTAssertTrue(policy.observations.isEmpty)
+        XCTAssertEqual(recorder.steps.first?.source, "direct")
+        XCTAssertEqual(recorder.steps.first?.promptVersion, "direct-open-v1")
+        XCTAssertEqual(recorder.steps.first?.rawModelOutput, "")
+        let result = try await loop.resume(approvalID: approval.id, approved: true)
+        XCTAssertEqual(result, .completed(answer: "Opened Calculator."))
+        XCTAssertTrue(policy.observations.isEmpty)
+        XCTAssertEqual(environment.executed.map(\.action), [.openApp(name: "Calculator")])
+        XCTAssertEqual(journal.begun.count, 1)
+        XCTAssertEqual(journal.verified.count, 1)
+        XCTAssertTrue(recorder.steps.allSatisfy { $0.source == "direct" })
+    }
+
+    func testDirectOpenStopDuringApprovalNeverOpensOrCallsModel() async throws {
+        let environment = TestEnvironment(frames: [webFrame()])
+        let policy = TestPolicy([]), recorder = TestRecorder()
+        let loop = try makeLoop(environment: environment, policy: policy, recorder: recorder,
+                                journal: TestJournal(), appIdentity: "com.apple.calculator", directOpenName: "Calculator")
+        guard case .pendingApproval(let approval) = try await loop.run() else { return XCTFail("First use needs approval") }
+        let stopped = try await loop.cancel()
+        XCTAssertEqual(stopped, .cancelled)
+        do { _ = try await loop.resume(approvalID: approval.id, approved: true); XCTFail("Stopped approval must not execute") }
+        catch AgentLoopError.noMatchingApproval {}
+        XCTAssertTrue(environment.executed.isEmpty)
+        XCTAssertTrue(policy.observations.isEmpty)
+        XCTAssertEqual(recorder.footer?.outcome, "cancelled")
+    }
+
+    func testDirectOpenFailedForegroundCheckDoesNotReportSuccessOrInvokeModel() async throws {
+        let environment = TestEnvironment(frames: [webFrame(), webFrame()],
+            executeError: AgentEnvironmentError.unavailable("not frontmost"))
+        let policy = TestPolicy([]), recorder = TestRecorder()
+        let loop = try makeLoop(environment: environment, policy: policy, recorder: recorder,
+                                journal: TestJournal(), appIdentity: "com.apple.calculator", directOpenName: "Calculator")
+        guard case .pendingApproval(let approval) = try await loop.run() else { return XCTFail("First use needs approval") }
+        let result = try await loop.resume(approvalID: approval.id, approved: true)
+        XCTAssertEqual(result, .failed(reason: "Could not open Calculator."))
+        XCTAssertTrue(policy.observations.isEmpty)
+        XCTAssertEqual(recorder.footer?.outcome, "failed")
+    }
+
     func testThreeMalformedOutputsAskTheUserAndKeepRejectionHistory() async throws {
         let environment = TestEnvironment(frames: [webFrame(), webFrame(), webFrame(), webFrame()])
         let policy = TestPolicy([.malformed("not JSON"), .malformed("still malformed"),
@@ -816,11 +864,11 @@ final class AgentLoopTests: XCTestCase {
     private func makeLoop(environment: TestEnvironment, policy: any AgentPolicy, recorder: TestRecorder,
                           journal: TestJournal, trustedWeb: Bool = false,
                           appIdentity: String? = nil, maxSteps: Int = 40,
-                          taskTimeLimit: Duration = .seconds(300)) throws -> AgentLoop {
+                          directOpenName: String? = nil, taskTimeLimit: Duration = .seconds(300)) throws -> AgentLoop {
         let store = TestTrustStore(trustedWeb: trustedWeb)
         let allowPolicy = TestAllowPolicy(appIdentity: appIdentity)
         return try AgentLoop(taskID: "task-1", prompt: "Complete a generic task", maxSteps: maxSteps,
-                             environment: environment,
+                             directOpenName: directOpenName, environment: environment,
                              policy: policy, gate: AgentActionGate(trustStore: store, allowPolicy: allowPolicy),
                              recorder: recorder, journal: journal, taskTimeLimit: taskTimeLimit)
     }
@@ -948,6 +996,10 @@ private final class TestEnvironment: AgentEnvironment {
             return AgentResolvedAction(action: action, frame: frame, targets: [element])
         }
         return AgentResolvedAction(action: action, frame: frame, targets: [])
+    }
+
+    func executeDirectOpen(_ resolved: AgentResolvedAction) async throws -> AgentExecutionResult {
+        try await execute(resolved)
     }
 
     func execute(_ resolved: AgentResolvedAction) async throws -> AgentExecutionResult {

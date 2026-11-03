@@ -127,6 +127,13 @@ def swift_string_lines(source: str) -> dict[int, str]:
 def approved_catalog_value(path: str, line: str, term: str) -> bool:
     if path != "host-mac/RemoteDesktopHost/ComputerUse/HostComputerUseManager.swift":
         return False
+    if term == "calculator":
+        # Only the reviewed Apple-signed catalog identity, never routing text.
+        return line.strip() in {
+            'canonicalName: "Calculator",',
+            'aliases: ["Calculator"],',
+            'bundleIdentifiers: ["com.apple.calculator"]),',
+        }
     if term not in {"finder", "textedit"}:
         return False
     return bool(re.match(r"\s*(?:canonicalName|aliases|bundleIdentifiers)\s*:", line))
@@ -178,6 +185,12 @@ let inFlight = true
                      catalog, {1, 2})
     if got != [(2, "gmail")]:
         raise SystemExit(f"catalog exception self-test failed: {got}")
+    path = "host-mac/RemoteDesktopHost/ComputerUse/HostComputerUseManager.swift"
+    assert approved_catalog_value(path, 'canonicalName: "Calculator",', "calculator")
+    assert approved_catalog_value(path, 'aliases: ["Calculator"],', "calculator")
+    assert approved_catalog_value(path, 'bundleIdentifiers: ["com.apple.calculator"]),', "calculator")
+    assert not approved_catalog_value(path, 'let route = "Calculator"', "calculator")
+    assert not approved_catalog_value(path, 'aliases: ["Calculator", "Other"],', "calculator")
     path = "host-mac/RemoteDesktopHost/ComputerUse/ComputerUseFaraModel.swift"
     source = Path(path).read_text(encoding="utf-8")
     literals = swift_string_lines(source)

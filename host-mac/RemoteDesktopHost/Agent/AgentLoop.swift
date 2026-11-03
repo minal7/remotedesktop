@@ -9,6 +9,7 @@ final class AgentLoop {
     struct PendingStep { let resolved: AgentResolvedAction; let approval: AgentApprovalRequest; let note: String? }
     let taskID: String
     let maxSteps: Int
+    private let directOpenName: String?
     let environment: AgentEnvironment
     let policy: AgentPolicy
     let gate: AgentActionGate
@@ -43,14 +44,14 @@ final class AgentLoop {
     private var inFlightInput: (step: Int, fingerprint: String)?
     private let timeoutReason = "Couldn't finish within five minutes. Try a shorter task or take over."
 
-    init(taskID: String, prompt: String, maxSteps: Int = 25, environment: AgentEnvironment,
+    init(taskID: String, prompt: String, maxSteps: Int = 25, directOpenName: String? = nil, environment: AgentEnvironment,
          policy: AgentPolicy, gate: AgentActionGate, recorder: AgentRecording,
          journal: AgentEffectJournaling, taskTimeLimit: Duration = .seconds(300)) throws {
         guard !taskID.isEmpty, !prompt.isEmpty, (1...40).contains(maxSteps),
               taskTimeLimit > .zero, taskTimeLimit <= .seconds(300) else {
             throw AgentLoopError.invalidConfiguration
         }
-        self.taskID = taskID; taskText = prompt; self.maxSteps = min(maxSteps, 25)
+        self.taskID = taskID; taskText = prompt; self.maxSteps = min(maxSteps, 25); self.directOpenName = directOpenName
         self.environment = environment; self.policy = policy; self.gate = gate
         self.recorder = recorder; self.journal = journal; self.taskTimeLimit = taskTimeLimit
     }
@@ -167,6 +168,9 @@ final class AgentLoop {
             corrections.append("Approval declined by the owner.")
             history.append(.init(action: pending.resolved.action, result: noted("rejected: user declined", pending.note)))
             stepIndex += 1; rejectionStreak += 1
+            if directOpenName != nil {
+                return try await finish(.failed(reason: "App opening was declined."), outcome: "blocked: declined")
+            }
             if taskDeclineCount >= 2 {
                 return try await finish(.failed(reason: "BLOCKED: declined"), outcome: "blocked: declined")
             }
@@ -186,6 +190,9 @@ final class AgentLoop {
                        start: continuationStart)
             history.append(.init(action: pending.resolved.action, result: noted("rejected: approval target changed", pending.note)))
             stepIndex += 1; rejectionStreak += 1
+            if directOpenName != nil {
+                return try await finish(.failed(reason: "The approved app action changed. Try again."), outcome: "failed")
+            }
             if let question = askAfterRejections() { return question }
             return try await runSteps()
         }
@@ -200,6 +207,9 @@ final class AgentLoop {
             let rejection = approved ? "rejected: \(decision.result.reason)" : "rejected: user declined"
             history.append(.init(action: pending.resolved.action, result: noted(rejection, pending.note)))
             stepIndex += 1; rejectionStreak += 1
+            if directOpenName != nil {
+                return try await finish(.failed(reason: "The app action could not be approved."), outcome: "failed")
+            }
             if let question = askAfterRejections() { return question }
             return try await runSteps()
         }
@@ -216,6 +226,7 @@ final class AgentLoop {
         approvals.append(pending.approval.fingerprint)
         if let terminal = try await execute(frame.observation, "", rebound, decision.result, continuationStart,
                                              note: pending.note) { return terminal }
+        if let direct = try await finishDirectIfNeeded(rebound.action) { return direct }
         return try await runSteps()
     }
 
@@ -245,7 +256,13 @@ final class AgentLoop {
             let observeMS = ms(observeStart)
             let policyStart = Date()
             let output: AgentPolicyOutput
-            do { output = try await policy.propose(frame.observation) }
+            do {
+                if let directOpenName, stepIndex == 0 {
+                    output = AgentPolicyOutput(rawOutput: "", action: .openApp(name: directOpenName), rejectionReason: nil)
+                } else {
+                    output = try await policy.propose(frame.observation)
+                }
+            }
             catch is CancellationError { throw CancellationError() }
             catch AgentPolicyTermination.authorizationRevoked {
                 throw AgentPolicyTermination.authorizationRevoked
@@ -298,12 +315,14 @@ final class AgentLoop {
                 if let result = try recordRejection(frame, raw: output.rawOutput, action: proposedAction,
                     reason: "Target resolution rejected: \(error)", start: start,
                     observeMS: observeMS, policyMS: policyMS, note: output.resultLineNote) { return result }
+                if directOpenName != nil { return try await finish(.failed(reason: "The app action could not be resolved."), outcome: "failed") }
                 continue
             }
             catch {
                 if let result = try recordRejection(frame, raw: output.rawOutput, action: proposedAction,
                     reason: "Target resolution rejected: \(error)", start: start,
                     observeMS: observeMS, policyMS: policyMS, note: output.resultLineNote) { return result }
+                if directOpenName != nil { return try await finish(.failed(reason: "The app action could not be resolved."), outcome: "failed") }
                 continue
             }
             try checkBoundary()
@@ -316,6 +335,7 @@ final class AgentLoop {
                     reason: "Gate rejected action: \(error)", start: start,
                     observeMS: observeMS, policyMS: policyMS, gateMS: ms(gateStart),
                     note: output.resultLineNote) { return result }
+                if directOpenName != nil { return try await finish(.failed(reason: "The app action could not be approved."), outcome: "failed") }
                 continue
             }
             let gateMS = ms(gateStart)
@@ -354,6 +374,7 @@ final class AgentLoop {
                 if evaluation.result.reason.localizedCaseInsensitiveContains("credential") {
                     return .handoff(reason: evaluation.result.reason)
                 }
+                if directOpenName != nil { return try await finish(.failed(reason: evaluation.result.reason), outcome: "failed") }
                 continue
             }
             rejectionStreak = 0
@@ -361,6 +382,7 @@ final class AgentLoop {
                                               policyMS, gateMS) { return result }
             if let terminal = try await execute(frame.observation, output.rawOutput, resolved,
                 evaluation.result, start, observeMS, policyMS, gateMS, note: output.resultLineNote) { return terminal }
+            if let direct = try await finishDirectIfNeeded(resolved.action) { return direct }
         }
         return try await finish(.failed(reason: "The task reached its \(maxSteps)-step limit."), outcome: "failed")
     }
@@ -415,7 +437,13 @@ final class AgentLoop {
         if begins { inFlightInput = (stepIndex, fingerprint) }
         defer { inFlightInput = nil }
         let result: AgentExecutionResult
-        do { try checkBoundary(); result = try await environment.execute(resolved); try checkBoundary() }
+        do {
+            try checkBoundary()
+            if directOpenName != nil, case .openApp = resolved.action {
+                result = try await environment.executeDirectOpen(resolved)
+            } else { result = try await environment.execute(resolved) }
+            try checkBoundary()
+        }
         catch let error as AgentEnvironmentError {
             if didFinish { return terminalResult }
             if case .systemHandoff(let reason) = error {
@@ -487,6 +515,14 @@ final class AgentLoop {
         history.append(.init(action: action, result: noted(result.status == .ok ? "ok: \(result.result)" : "Attempted: \(result.result)", note)))
         stepIndex += 1
         return nil
+    }
+
+    private func finishDirectIfNeeded(_ action: AgentAction) async throws -> AgentLoopResult? {
+        guard let name = directOpenName, case .openApp = action else { return nil }
+        guard history.last?.result.hasPrefix("ok:") == true else {
+            return try await finish(.failed(reason: "Could not open \(name)."), outcome: "failed")
+        }
+        return try await finish(.completed(answer: "Opened \(name)."), outcome: "success")
     }
 
     private func control(_ frame: AgentFrame, _ output: AgentPolicyOutput, _ gate: AgentGateResult,
@@ -620,9 +656,10 @@ final class AgentLoop {
                         policyMS: Int = 0, gateMS: Int = 0, executionMS: Int = 0) throws {
         if didFinish { throw CancellationError() }
         let step = AgentEpisodeStep(episodeID: taskID, step: stepIndex, observation: observation,
-            promptVersion: policy.promptVersion, rawModelOutput: raw, action: action, gate: gate,
+            promptVersion: directOpenName == nil ? policy.promptVersion : "direct-open-v1", rawModelOutput: raw, action: action, gate: gate,
             execution: execution, timings: .init(observationMS: observeMS, policyMS: policyMS,
-                gateMS: gateMS, executionMS: executionMS, recordMS: 0, totalMS: ms(start)))
+                gateMS: gateMS, executionMS: executionMS, recordMS: 0, totalMS: ms(start)),
+            source: directOpenName == nil ? nil : "direct")
         do { try recorder.record(step) }
         catch {
             let failure = AgentLoopError.recordingFailed("Could not durably record step \(stepIndex): \(error)")
