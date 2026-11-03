@@ -2,6 +2,7 @@ import AppKit
 import ApplicationServices
 import Foundation
 import ImageIO
+import OSLog
 import ScreenCaptureKit
 import UniformTypeIdentifiers
 
@@ -13,6 +14,11 @@ struct PixelEnvironmentReadiness {
 
 @MainActor
 final class PixelEnvironment: AgentEnvironment {
+    private static let observationLog = Logger(subsystem: "com.threadmark.remotedesktop.host", category: "agent-observation")
+    private func observationPhase(_ phase: String, since start: TimeInterval) {
+        let elapsedMS = Int((ProcessInfo.processInfo.systemUptime - start) * 1_000)
+        Self.observationLog.notice("phase=\(phase, privacy: .public) elapsed_ms=\(elapsedMS, privacy: .public)")
+    }
     typealias Picker = @MainActor ([String]) async throws -> String
     private enum PasteResult: Equatable { case matches, unchanged, unavailable }
     var followsFrontmostSurface: Bool { true }
@@ -89,20 +95,25 @@ final class PixelEnvironment: AgentEnvironment {
     }
 
     func observe(_ context: AgentObservationContext) async throws -> AgentFrame {
+        let phaseStart = ProcessInfo.processInfo.systemUptime
+        observationPhase("observe_begin", since: phaseStart)
         try checkActive()
 #if DEBUG
         let validateStart = AgentEvalFirstObservation.requiresStartValidation(
             configured: requireCleanStart, isInitialObservation: !didStart)
 #endif
         if !didStart { try await startIfNeeded(); didStart = true }
+        observationPhase("startup_done", since: phaseStart)
         voiceOverlayEscapeSent = false
         voiceOverlayDetectedDuringCapture = false
         try await dismissSystemVoiceOverlayBeforeObservation()
+        observationPhase("voice_overlay_done", since: phaseStart)
 #if DEBUG
         let snapshot = try await (validateStart ? captureEvaluationStart() : captureSnapshotForObservation())
 #else
         let snapshot = try await captureSnapshotForObservation()
 #endif
+        observationPhase("snapshot_done", since: phaseStart)
         try checkActive()
 #if DEBUG
         if validateStart, firstObservation == nil {
@@ -128,6 +139,7 @@ final class PixelEnvironment: AgentEnvironment {
             screenshot: snapshot.screenshot.base64EncodedString(), elements: snapshot.elements,
             focus: snapshot.focus, history: observationHistory(context.history), budget: context.budget)
         try observation.validate()
+        observationPhase("observe_done", since: phaseStart)
         voiceOverlayHistoryNotePending = false
         let kind: AgentScope.Kind
         if case .web = surface { kind = .web } else { kind = .app }
@@ -307,6 +319,8 @@ final class PixelEnvironment: AgentEnvironment {
     }
 
     func captureSnapshot() async throws -> Snapshot {
+        let phaseStart = ProcessInfo.processInfo.systemUptime
+        observationPhase("capture_begin", since: phaseStart)
         try checkActive()
         let app = NSWorkspace.shared.frontmostApplication
         guard !AgentSafetyBoundary.blocksAutomation(bundleID: app?.bundleIdentifier, appName: app?.localizedName) else {
@@ -314,6 +328,7 @@ final class PixelEnvironment: AgentEnvironment {
         }
         let appRoot = app.map { AXUIElementCreateApplication($0.processIdentifier) }
         let content = try await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: true)
+        observationPhase("shareable_content_done", since: phaseStart)
         let blockedWindows = content.windows.filter { window in
             AgentSafetyBoundary.blocksAutomation(bundleID: window.owningApplication?.bundleIdentifier,
                 appName: window.owningApplication?.applicationName)
@@ -382,11 +397,13 @@ final class PixelEnvironment: AgentEnvironment {
                 bounds: target.frame, number: target.windowID, title: target.title ?? "")
         }
         let marks: PixelElementMarks?
+        observationPhase("window_selection_done", since: phaseStart)
         if AXIsProcessTrusted(), let app, let appRoot {
             marks = ElementMarks.readCapture(window: axWindow, focusedWindowElement: selectedAXWindow,
                 focusedBounds: axWindow == nil ? nil : focusedBounds, appRoot: appRoot, application: app,
                 selectedBounds: target?.frame ?? display.frame)
         } else { marks = nil }
+        observationPhase("accessibility_done", since: phaseStart)
         if marks?.requiresProtectedRegionHandoff == true {
             throw AgentEnvironmentError.systemHandoff(
                 "A protected window surface could not be verified safely. Inspect the Mac and tap Resume.")
@@ -406,6 +423,7 @@ final class PixelEnvironment: AgentEnvironment {
         } else {
             image = try await capture(display, excluding: blockedWindows); captureBounds = display.frame; identity = "display:\(display.displayID)"
         }
+        observationPhase("screen_capture_done", since: phaseStart)
         var screenshotBounds = captureBounds
         if windowCapture, let resized = PixelGeometry.resize(image, width: 1280), let target {
             image = resized; screenshotBounds = target.frame; actualCropMode = .frontmostWindow
@@ -431,8 +449,10 @@ final class PixelEnvironment: AgentEnvironment {
         } }
         let secureRects = (marks?.secureScreenRects ?? []).compactMap { PixelGeometry.imageRect($0, captureBounds: screenshotBounds, imageSize: pixelSize) }
         let png = try encode(image, masking: secureRects)
+        observationPhase("redacted_encoding_done", since: phaseStart)
         let handoffReason = try await SystemBarriers.handoffReason(
             screenshot: png, elements: elements, focus: focus)
+        observationPhase("barrier_check_done", since: phaseStart)
         try checkActive()
         if let reason = handoffReason {
             throw AgentEnvironmentError.systemHandoff(reason)
