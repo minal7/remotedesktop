@@ -1,0 +1,129 @@
+{
+  "schemaVersion": 1,
+  "scope": "Known regression cases for contract v2. Proposal-only verification does not execute their desktop faults.",
+  "source": "Ten non-fault v1 cases, the known N12 rejection, and explicit quoted-target/quoted-value role regressions.",
+  "status": "Regression data. Not held-out qualification.",
+  "cases": [
+    {
+      "id": "N01",
+      "prompt": "Set both Origin and Destination to San Francisco.",
+      "expected": {
+        "origin": "San Francisco",
+        "destination": "San Francisco"
+      }
+    },
+    {
+      "id": "N02",
+      "prompt": "Please replace the Origin with Tokyo and the Destination with Kyoto.",
+      "initial": {
+        "origin": "old origin",
+        "destination": "old destination"
+      },
+      "expected": {
+        "origin": "Tokyo",
+        "destination": "Kyoto"
+      }
+    },
+    {
+      "id": "N03",
+      "prompt": "Append \" — confirmed\" to Origin. Leave Destination alone.",
+      "initial": {
+        "origin": "Tokyo",
+        "destination": "Kyoto"
+      },
+      "expected": {
+        "origin": "Tokyo — confirmed",
+        "destination": "Kyoto"
+      }
+    },
+    {
+      "id": "N04",
+      "prompt": "Put \"  東京 é 😀\n  \" in Destination exactly as written.",
+      "expected": {
+        "origin": "",
+        "destination": "  東京 é 😀\n  "
+      }
+    },
+    {
+      "id": "N05",
+      "prompt": "Replace Origin with \"Seattle\", then append \" / Tacoma\" to it.",
+      "initial": {
+        "origin": "old"
+      },
+      "expected": {
+        "origin": "Seattle / Tacoma",
+        "destination": ""
+      }
+    },
+    {
+      "id": "N06",
+      "prompt": "Fill Origin with Boston, and send the form.",
+      "expectedOutcome": "unsupportedWithoutEffects"
+    },
+    {
+      "id": "N07",
+      "prompt": "Write a poem in Destination.",
+      "expectedOutcome": "unsupportedWithoutEffects"
+    },
+    {
+      "id": "N08",
+      "prompt": "Change City to Portland.",
+      "expectedOutcome": "clarificationWithoutEffects",
+      "note": "No field named City; do not choose between Origin and Destination."
+    },
+    {
+      "id": "N13",
+      "prompt": "Put the following exact quoted text in Origin: PAYLOAD",
+      "payloadRecipe": {
+        "replace": "PAYLOAD",
+        "quote": true,
+        "text": "x",
+        "repeat": 2000
+      },
+      "expectedOutcome": "exactEditOrNoEffectPreflightLimit"
+    },
+    {
+      "id": "N14",
+      "prompt": "Do not change Origin. Replace Destination with Austin.",
+      "initial": {
+        "origin": "Seattle"
+      },
+      "expected": {
+        "origin": "Seattle",
+        "destination": "Austin"
+      }
+    },
+    {
+      "id": "N12",
+      "prompt": "Set Origin to Oslo and Destination to Bergen.",
+      "expected": {
+        "origin": "Oslo",
+        "destination": "Bergen"
+      }
+    },
+    {
+      "id": "R15",
+      "prompt": "Set \"Destination\" to \"Berlin\".",
+      "expected": {
+        "origin": "",
+        "destination": "Berlin"
+      }
+    },
+    {
+      "id": "R16",
+      "prompt": "Put \"Origin\" in Destination.",
+      "expected": {
+        "origin": "",
+        "destination": "Origin"
+      }
+    },
+    {
+      "id": "R17",
+      "prompt": "Set \"Origin\" to \"Tallinn\", and \"Destination\" to \"Riga\".",
+      "expected": {
+        "origin": "Tallinn",
+        "destination": "Riga"
+      }
+    }
+  ]
+}

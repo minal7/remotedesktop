@@ -1,0 +1,87 @@
+{
+  "schemaVersion": 1,
+  "scope": "Unseen clarification phrasing frozen before quotation-preserving candidate inference. Twenty independent initial/answered proposal states; no desktop effects, no host/client continuation claim.",
+  "cases": [
+    {
+      "id": "QH16",
+      "prompt": "Set the Message field to an exact value.",
+      "fields": [
+        "Message",
+        "Title"
+      ],
+      "expectedDisposition": "supported",
+      "clarificationAnswers": [
+        {
+          "question": "Which field should I edit, and what exact text should it contain?",
+          "text": "p1"
+        }
+      ],
+      "allowedPlans": [
+        [
+          {
+            "field": 0,
+            "mode": "replaceAll",
+            "value": "p1"
+          }
+        ]
+      ]
+    },
+    {
+      "id": "QH17",
+      "prompt": "Put \"draft\" in a field and do not submit anything.",
+      "fields": [
+        "Headline",
+        "Status"
+      ],
+      "expectedDisposition": "clarification"
+    },
+    {
+      "id": "QH18",
+      "prompt": "Put \"draft\" in a field and do not submit anything.",
+      "fields": [
+        "Headline",
+        "Status"
+      ],
+      "expectedDisposition": "supported",
+      "clarificationAnswers": [
+        {
+          "question": "Which field should I edit, and what exact text should it contain?",
+          "text": "Headline"
+        }
+      ],
+      "allowedPlans": [
+        [
+          {
+            "field": 0,
+            "mode": "replaceAll",
+            "value": "draft"
+          }
+        ]
+      ]
+    },
+    {
+      "id": "QH19",
+      "prompt": "Put \"draft\" in one of these fields.",
+      "fields": [
+        "Headline",
+        "Status"
+      ],
+      "expectedDisposition": "clarification"
+    },
+    {
+      "id": "QH20",
+      "prompt": "Put \"draft\" in one of these fields.",
+      "fields": [
+        "Headline",
+        "Status"
+      ],
+      "expectedDisposition": "clarification",
+      "clarificationAnswers": [
+        {
+          "question": "Which field should I edit, and what exact text should it contain?",
+          "text": "I still haven't decided between Headline and Status."
+        }
+      ]
+    }
+  ]
+}

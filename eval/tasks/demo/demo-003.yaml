@@ -1,0 +1,14 @@
+id: "demo-003"
+surface: web
+start: {url: "https://www.apple.com/"}
+prompt: "Go to apple.com and tell me the starting price of the MacBook Air."
+checker:
+  type: manual_review
+  expect:
+    criteria:
+      - "Confirm the final observed Apple page shows the MacBook Air starting price."
+      - "Confirm the answer states that price verbatim, including currency."
+      - "Review the recorded final screenshot/page evidence and this task's episode."
+max_steps: 14
+tags: ["demo", "web", "read", "public-web", "read-only"]
+approval_policy: {allow_start_interaction: true}

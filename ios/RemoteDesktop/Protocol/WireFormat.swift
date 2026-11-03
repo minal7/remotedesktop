@@ -8,7 +8,7 @@ enum InputScrollPhase: String, Codable {
 }
 
 /// Messages sent from the client to the host, per `protocol/PROTOCOL.md`.
-enum ControlMessage {
+enum ControlMessage: Equatable {
     case hello(proto: Int)
     case pointer(x: Int, y: Int, buttons: UInt8)
     case scroll(x: Int, y: Int, dx: Int, dy: Int, phase: InputScrollPhase)
@@ -17,7 +17,8 @@ enum ControlMessage {
     case qos(targetFps: Int, maxBitrateKbps: Int, prefer: String)
     case bye(reason: String)
 
-    func encoded(seq: UInt32, ts: UInt64) -> Data {
+    func encoded(seq: UInt32, ts: UInt64, inputHello: DirectInputHello? = nil,
+                 inputStamp: DirectInputStamp? = nil) -> Data {
         var obj: [String: Any] = ["s": seq, "ts": ts]
         switch self {
         case .hello(let p):
@@ -30,6 +31,10 @@ enum ControlMessage {
                 "osVersion": UIDevice.current.systemVersion,
                 "orderedComputerUseControls": Config.orderedComputerUseControlsVersion,
             ]
+            if let inputHello {
+                obj["inputSession"] = DirectInputWire.object(inputHello)
+                obj["caps"] = ["inputInvalidation": DirectInputWire.inputInvalidationVersion]
+            }
         case let .pointer(x, y, b):
             obj["t"] = "pointer"
             obj["x"] = x; obj["y"] = y; obj["buttons"] = b
@@ -49,6 +54,11 @@ enum ControlMessage {
         case .bye(let r):
             obj["t"] = "bye"; obj["reason"] = r
         }
+        switch self {
+        case .pointer, .scroll, .key, .text:
+            if let inputStamp { obj["inputSession"] = DirectInputWire.object(inputStamp) }
+        case .hello, .qos, .bye: break
+        }
         return (try? JSONSerialization.data(withJSONObject: obj)) ?? Data()
     }
 }
@@ -64,6 +74,9 @@ struct HostHello: Equatable {
     let audio: Bool
     let monitors: Int
     let orderedComputerUseControls: Int
+    let inputSessions: Int
+    let inputSession: DirectInputAcknowledgement?
+    let inputInvalidation: Int
 
     init(
         app: String,
@@ -72,7 +85,10 @@ struct HostHello: Equatable {
         os: String,
         audio: Bool,
         monitors: Int,
-        orderedComputerUseControls: Int = 0
+        orderedComputerUseControls: Int = 0,
+        inputSessions: Int = 0,
+        inputSession: DirectInputAcknowledgement? = nil,
+        inputInvalidation: Int = 0
     ) {
         self.app = app
         self.version = version
@@ -81,6 +97,9 @@ struct HostHello: Equatable {
         self.audio = audio
         self.monitors = monitors
         self.orderedComputerUseControls = orderedComputerUseControls
+        self.inputSessions = inputSessions
+        self.inputSession = inputSession
+        self.inputInvalidation = inputInvalidation
     }
 }
 
@@ -88,11 +107,20 @@ struct DisplayInfo: Equatable {
     let w: Int
     let h: Int
     let scale: Double
+    let inputSession: DirectInputAcknowledgement?
+    let fullDisplaySurface: Bool
+
+    init(w: Int, h: Int, scale: Double, inputSession: DirectInputAcknowledgement? = nil,
+         fullDisplaySurface: Bool = false) {
+        self.w = w; self.h = h; self.scale = scale; self.inputSession = inputSession
+        self.fullDisplaySurface = fullDisplaySurface
+    }
 }
 
 enum HostMessage: Equatable {
     case helloAck(HostHello)
     case display(DisplayInfo)
+    case inputUnavailable(DirectInputAcknowledgement)
     case bye(String)
 
     static func decode(_ data: Data) -> HostMessage? {
@@ -109,6 +137,20 @@ enum HostMessage: Equatable {
             }
             let host = obj["host"] as? [String: Any]
             let caps = obj["caps"] as? [String: Any]
+            guard obj["caps"] == nil || caps != nil else {
+                return .bye("invalid host capabilities")
+            }
+            guard let inputSessions = DirectInputWire.capability(in: caps),
+                  let inputInvalidation = DirectInputWire.invalidationCapability(in: caps) else {
+                return .bye("invalid input-session capability")
+            }
+            var inputSession: DirectInputAcknowledgement?
+            if let metadata = obj["inputSession"] {
+                guard let value = DirectInputWire.decode(metadata, as: DirectInputAcknowledgement.self), value.isValid else {
+                    return .bye("invalid input-session acknowledgement")
+                }
+                inputSession = value
+            }
             return .helloAck(HostHello(
                 app: host?["app"] as? String ?? "RemoteDesktop-Host",
                 version: host?["version"] as? String ?? "0.1.0",
@@ -117,17 +159,53 @@ enum HostMessage: Equatable {
                 audio: caps?["audio"] as? Bool ?? false,
                 monitors: int(caps?["monitors"]),
                 orderedComputerUseControls: int(
-                    caps?["orderedComputerUseControls"])))
+                    caps?["orderedComputerUseControls"]),
+                inputSessions: inputSessions,
+                inputSession: inputSession,
+                inputInvalidation: inputInvalidation))
+        case "input_unavailable":
+            guard let metadata = obj["inputSession"],
+                  let scope = DirectInputWire.decode(metadata, as: DirectInputAcknowledgement.self), scope.isValid else {
+                return .bye("invalid input-unavailable scope")
+            }
+            return .inputUnavailable(scope)
         case "display":
+            var inputSession: DirectInputAcknowledgement?
+            if let metadata = obj["inputSession"] {
+                guard let value = DirectInputWire.decode(metadata, as: DirectInputAcknowledgement.self), value.isValid else { return nil }
+                inputSession = value
+            }
+            var fullDisplaySurface = false
+            if let raw = obj["fullDisplaySurface"] {
+                guard let value = raw as? NSNumber, CFGetTypeID(value) != CFBooleanGetTypeID(),
+                      value == NSNumber(value: 1) else { return .bye("unsupported display surface mapping") }
+                fullDisplaySurface = true
+            }
+            guard let width = displayDimension(obj["w"]), let height = displayDimension(obj["h"]),
+                  let scale = displayScale(obj["scale"] ?? NSNumber(value: 1)) else {
+                return .bye("invalid display geometry")
+            }
             return .display(DisplayInfo(
-                w: int(obj["w"]),
-                h: int(obj["h"]),
-                scale: double(obj["scale"], default: 1.0)))
+                w: width, h: height, scale: scale,
+                inputSession: inputSession, fullDisplaySurface: fullDisplaySurface))
         case "bye":
             return .bye(obj["reason"] as? String ?? "user")
         default:
             return nil
         }
+    }
+
+    private static func displayDimension(_ raw: Any?) -> Int? {
+        guard let value = raw as? NSNumber, CFGetTypeID(value) != CFBooleanGetTypeID(),
+              let exact = Int32(exactly: value.doubleValue), exact > 0,
+              value == NSNumber(value: exact) else { return nil }
+        return Int(exact)
+    }
+
+    private static func displayScale(_ raw: Any?) -> Double? {
+        guard let value = raw as? NSNumber, CFGetTypeID(value) != CFBooleanGetTypeID(),
+              value.doubleValue.isFinite, (1...4).contains(value.doubleValue) else { return nil }
+        return value.doubleValue
     }
 
     private static func int(_ v: Any?, default d: Int = 0) -> Int {
@@ -137,10 +215,4 @@ enum HostMessage: Equatable {
         return d
     }
 
-    private static func double(_ v: Any?, default d: Double = 0) -> Double {
-        if let v = v as? Double { return v }
-        if let v = v as? Int { return Double(v) }
-        if let s = v as? String, let v = Double(s) { return v }
-        return d
-    }
 }

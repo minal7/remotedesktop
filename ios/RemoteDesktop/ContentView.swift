@@ -34,7 +34,7 @@ private struct EndedView: View {
                 .foregroundStyle(.secondary)
             Text("Session ended").font(.title2.weight(.semibold))
             Text(reason).foregroundStyle(.secondary)
-            Button("Pair again") { session.reset() }
+            Button("Retry") { session.reset() }
                 .buttonStyle(.borderedProminent)
         }
         .padding()

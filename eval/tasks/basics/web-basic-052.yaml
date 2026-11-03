@@ -1,0 +1,8 @@
+id: "web-basic-052"
+surface: web
+start: {"url":"http://127.0.0.1:8765/controls.html"}
+prompt: "Choose North from the region combobox."
+checker: {"type":"dom","expect":[{"selector":"#custom-combo","value":"North"}],"url_prefix":"http://127.0.0.1:8765/"}
+max_steps: 10
+tags: ["combobox","select"]
+approval_policy: {"allow_fixture_interaction":true}

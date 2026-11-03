@@ -1,0 +1,8 @@
+id: "web-basic-034"
+surface: web
+start: {"url":"http://127.0.0.1:8765/controls.html"}
+prompt: "Open the details panel, then close it. Leave the catalog page open."
+checker: {"type":"dom","expect":[{"selector":"#modal-details","text":"Details panel","visible":false}],"min_events":[{"selector":"#open-modal","event":"click","count":1},{"selector":"#close-modal","event":"click","count":1}],"url_prefix":"http://127.0.0.1:8765/"}
+max_steps: 10
+tags: ["modal","click"]
+approval_policy: {"allow_fixture_interaction":true}

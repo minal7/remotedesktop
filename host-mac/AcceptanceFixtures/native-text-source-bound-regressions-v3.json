@@ -1,0 +1,304 @@
+{
+  "schemaVersion": 1,
+  "scope": "known-regressions-with-complete-edit-sequence-oracle",
+  "cases": [
+    {
+      "id": "N01",
+      "prompt": "Set both Origin and Destination to San Francisco.",
+      "fields": [
+        "Origin",
+        "Destination"
+      ],
+      "expectedDisposition": "supported",
+      "allowedPlans": [
+        [
+          {
+            "field": 0,
+            "mode": "replaceAll",
+            "value": "San Francisco"
+          },
+          {
+            "field": 1,
+            "mode": "replaceAll",
+            "value": "San Francisco"
+          }
+        ],
+        [
+          {
+            "field": 1,
+            "mode": "replaceAll",
+            "value": "San Francisco"
+          },
+          {
+            "field": 0,
+            "mode": "replaceAll",
+            "value": "San Francisco"
+          }
+        ]
+      ]
+    },
+    {
+      "id": "N02",
+      "prompt": "Please replace the Origin with Tokyo and the Destination with Kyoto.",
+      "fields": [
+        "Origin",
+        "Destination"
+      ],
+      "expectedDisposition": "supported",
+      "allowedPlans": [
+        [
+          {
+            "field": 0,
+            "mode": "replaceAll",
+            "value": "Tokyo"
+          },
+          {
+            "field": 1,
+            "mode": "replaceAll",
+            "value": "Kyoto"
+          }
+        ],
+        [
+          {
+            "field": 1,
+            "mode": "replaceAll",
+            "value": "Kyoto"
+          },
+          {
+            "field": 0,
+            "mode": "replaceAll",
+            "value": "Tokyo"
+          }
+        ]
+      ]
+    },
+    {
+      "id": "N03",
+      "prompt": "Append \" — confirmed\" to Origin. Leave Destination alone.",
+      "fields": [
+        "Origin",
+        "Destination"
+      ],
+      "expectedDisposition": "supported",
+      "allowedPlans": [
+        [
+          {
+            "field": 0,
+            "mode": "append",
+            "value": " — confirmed"
+          }
+        ]
+      ]
+    },
+    {
+      "id": "N04",
+      "prompt": "Put \"  東京 é 😀\n  \" in Destination exactly as written.",
+      "fields": [
+        "Origin",
+        "Destination"
+      ],
+      "expectedDisposition": "supported",
+      "allowedPlans": [
+        [
+          {
+            "field": 1,
+            "mode": "replaceAll",
+            "value": "  東京 é 😀\n  "
+          }
+        ]
+      ]
+    },
+    {
+      "id": "N05",
+      "prompt": "Replace Origin with \"Seattle\", then append \" / Tacoma\" to it.",
+      "fields": [
+        "Origin",
+        "Destination"
+      ],
+      "expectedDisposition": "supported",
+      "allowedPlans": [
+        [
+          {
+            "field": 0,
+            "mode": "replaceAll",
+            "value": "Seattle"
+          },
+          {
+            "field": 0,
+            "mode": "append",
+            "value": " / Tacoma"
+          }
+        ]
+      ]
+    },
+    {
+      "id": "N06",
+      "prompt": "Fill Origin with Boston, and send the form.",
+      "fields": [
+        "Origin",
+        "Destination"
+      ],
+      "expectedDisposition": "unsupported"
+    },
+    {
+      "id": "N07",
+      "prompt": "Write a poem in Destination.",
+      "fields": [
+        "Origin",
+        "Destination"
+      ],
+      "expectedDisposition": "unsupported"
+    },
+    {
+      "id": "N08",
+      "prompt": "Change City to Portland.",
+      "fields": [
+        "Origin",
+        "Destination"
+      ],
+      "expectedDisposition": "clarification"
+    },
+    {
+      "id": "N13",
+      "prompt": "Put the following exact quoted text in Origin: \"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\"",
+      "fields": [
+        "Origin",
+        "Destination"
+      ],
+      "expectedDisposition": "supported",
+      "allowedPlans": [
+        [
+          {
+            "field": 0,
+            "mode": "replaceAll",
+            "value": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+          }
+        ]
+      ]
+    },
+    {
+      "id": "N14",
+      "prompt": "Do not change Origin. Replace Destination with Austin.",
+      "fields": [
+        "Origin",
+        "Destination"
+      ],
+      "expectedDisposition": "supported",
+      "allowedPlans": [
+        [
+          {
+            "field": 1,
+            "mode": "replaceAll",
+            "value": "Austin"
+          }
+        ]
+      ]
+    },
+    {
+      "id": "N12",
+      "prompt": "Set Origin to Oslo and Destination to Bergen.",
+      "fields": [
+        "Origin",
+        "Destination"
+      ],
+      "expectedDisposition": "supported",
+      "allowedPlans": [
+        [
+          {
+            "field": 0,
+            "mode": "replaceAll",
+            "value": "Oslo"
+          },
+          {
+            "field": 1,
+            "mode": "replaceAll",
+            "value": "Bergen"
+          }
+        ],
+        [
+          {
+            "field": 1,
+            "mode": "replaceAll",
+            "value": "Bergen"
+          },
+          {
+            "field": 0,
+            "mode": "replaceAll",
+            "value": "Oslo"
+          }
+        ]
+      ]
+    },
+    {
+      "id": "R15",
+      "prompt": "Set \"Destination\" to \"Berlin\".",
+      "fields": [
+        "Origin",
+        "Destination"
+      ],
+      "expectedDisposition": "supported",
+      "allowedPlans": [
+        [
+          {
+            "field": 1,
+            "mode": "replaceAll",
+            "value": "Berlin"
+          }
+        ]
+      ]
+    },
+    {
+      "id": "R16",
+      "prompt": "Put \"Origin\" in Destination.",
+      "fields": [
+        "Origin",
+        "Destination"
+      ],
+      "expectedDisposition": "supported",
+      "allowedPlans": [
+        [
+          {
+            "field": 1,
+            "mode": "replaceAll",
+            "value": "Origin"
+          }
+        ]
+      ]
+    },
+    {
+      "id": "R17",
+      "prompt": "Set \"Origin\" to \"Tallinn\", and \"Destination\" to \"Riga\".",
+      "fields": [
+        "Origin",
+        "Destination"
+      ],
+      "expectedDisposition": "supported",
+      "allowedPlans": [
+        [
+          {
+            "field": 0,
+            "mode": "replaceAll",
+            "value": "Tallinn"
+          },
+          {
+            "field": 1,
+            "mode": "replaceAll",
+            "value": "Riga"
+          }
+        ],
+        [
+          {
+            "field": 1,
+            "mode": "replaceAll",
+            "value": "Riga"
+          },
+          {
+            "field": 0,
+            "mode": "replaceAll",
+            "value": "Tallinn"
+          }
+        ]
+      ]
+    }
+  ]
+}

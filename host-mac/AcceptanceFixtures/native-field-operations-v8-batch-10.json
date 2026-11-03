@@ -1,0 +1,74 @@
+{
+  "schemaVersion": 1,
+  "scope": "Known 54-case regression comparison for unified typed field operations v8; combines 20 copy and 34 earlier literal/decline cases; not held-out qualification; preselected batch 10/11",
+  "cases": [
+    {
+      "id": "H512",
+      "prompt": "Set Tag to \"one\", then replace Tag with \"two\".",
+      "fields": [
+        "Tag",
+        "Title"
+      ],
+      "expectedDisposition": "supported",
+      "allowedPlans": [
+        [
+          {
+            "field": 0,
+            "mode": "replaceAll",
+            "value": "one"
+          },
+          {
+            "field": 0,
+            "mode": "replaceAll",
+            "value": "two"
+          }
+        ]
+      ]
+    },
+    {
+      "id": "H513",
+      "prompt": "Fill Subject with \"Update\" and send the message.",
+      "fields": [
+        "Subject",
+        "Notes"
+      ],
+      "expectedDisposition": "unsupported"
+    },
+    {
+      "id": "H514",
+      "prompt": "Put \"draft\" in Notes; after that, save the document.",
+      "fields": [
+        "Notes",
+        "Tag"
+      ],
+      "expectedDisposition": "unsupported"
+    },
+    {
+      "id": "H515",
+      "prompt": "Copy the current value of Title into Tag.",
+      "fields": [
+        "Title",
+        "Tag"
+      ],
+      "expectedDisposition": "supported",
+      "allowedPlans": [
+        [
+          {
+            "field": 1,
+            "mode": "replaceAll",
+            "sourceField": 0
+          }
+        ]
+      ]
+    },
+    {
+      "id": "H516",
+      "prompt": "Write a warm welcome in Notes.",
+      "fields": [
+        "Notes",
+        "Tag"
+      ],
+      "expectedDisposition": "unsupported"
+    }
+  ]
+}

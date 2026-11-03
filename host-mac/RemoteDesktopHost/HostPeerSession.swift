@@ -17,6 +17,273 @@ extension ICEConfig {
     }
 }
 
+/// Serializes direct-input authority separately from media teardown. The
+/// change callback must not re-enter this object; it runs inside the same lock
+/// so authorization notifications keep the order of native transitions.
+final class HostPeerInputAuthorization: @unchecked Sendable {
+    struct State: Equatable, Sendable {
+        let authorized: Bool
+        let orderedComputerUseControls: Int
+    }
+    private let lock = NSLock()
+    private let injector: InputInjector
+    private let onChange: @Sendable (State) -> Void
+    private var channelID: ObjectIdentifier?
+    private var helloCapabilities: Int?
+    private var connected = false
+    private var closed = false
+    private var session: InputInjector.DirectInputSession?
+    private var inputHello: DirectInputHello?
+    private var acknowledgement: DirectInputAcknowledgement?
+    private var inputGeneration: UInt32 = 0
+    private var lastInputSequence: UInt32 = 0
+    private var captureAvailable: Bool
+    private var captureDisplay: CaptureDisplayGeometry?
+    private let requiresCaptureDisplay: Bool
+    private var inputInvalidation: Int?
+    private var hasAuthorizedInput = false
+
+    enum CaptureChange: Equatable {
+        case unchanged, available, unavailable(DirectInputAcknowledgement?), reconnect
+    }
+
+    init(injector: InputInjector, initialCaptureAvailable: Bool = false, requiresCaptureDisplay: Bool = true,
+         onChange: @escaping @Sendable (State) -> Void = { _ in }) {
+        self.injector = injector; self.onChange = onChange
+        self.requiresCaptureDisplay = requiresCaptureDisplay
+        captureAvailable = initialCaptureAvailable && !requiresCaptureDisplay
+    }
+
+    @discardableResult
+    func openChannel(_ id: ObjectIdentifier) -> Bool {
+        lock.withLock {
+            guard !closed else { return false }
+            if let channelID { return channelID == id }
+            channelID = id; helloCapabilities = nil
+            inputHello = nil; acknowledgement = nil; inputGeneration = 0; lastInputSequence = 0
+            inputInvalidation = nil; hasAuthorizedInput = false
+            return true
+        }
+    }
+
+    @discardableResult
+    func acceptHello(channel id: ObjectIdentifier, orderedControls: Int,
+                     inputHello nextHello: DirectInputHello? = nil,
+                     inputInvalidation nextInvalidation: Int = 0) -> Bool {
+        lock.withLock {
+            guard !closed, channelID == id,
+                  (0...DirectInputWire.inputInvalidationVersion).contains(nextInvalidation),
+                  nextInvalidation == 0 || nextHello != nil,
+                  inputInvalidation == nil || inputInvalidation == nextInvalidation else { return false }
+            if let nextHello, !nextHello.isValid { return false }
+            if let inputHello {
+                guard let nextHello, nextHello.clientID == inputHello.clientID,
+                      nextHello.revision >= inputHello.revision else { return false }
+                if nextHello.revision > inputHello.revision {
+                    retireSessionLocked()
+                    // A phone-observed loss still fences AI if the host never
+                    // received its own disconnected callback.
+                    publishLocked()
+                }
+            } else if helloCapabilities != nil, nextHello != nil {
+                return false // The negotiated mode cannot change on this channel.
+            }
+            inputHello = nextHello
+            inputInvalidation = nextInvalidation
+            helloCapabilities = max(0, orderedControls)
+            reconcileLocked(publishWhenUnauthorized: false)
+            return true
+        }
+    }
+
+    @discardableResult
+    func connectionChanged(connected: Bool, terminal: Bool = false) -> Bool {
+        lock.withLock {
+            guard !closed else { return false }
+            // Legacy packets cannot prove which recovered lifetime sent them.
+            let mustClose = terminal || (!connected && inputHello == nil)
+            self.connected = connected && !mustClose
+            if mustClose { closed = true; channelID = nil; helloCapabilities = nil }
+            reconcileLocked(publishWhenUnauthorized: !self.connected)
+            return true
+        }
+    }
+
+    /// Capture is independent of transport connectivity. Retire the posting
+    /// session and release its holds before returning the scope to notify.
+    func captureChanged(available: Bool, display: CaptureDisplayGeometry? = nil) -> CaptureChange {
+        lock.withLock {
+            guard !closed, !available || display != nil || !requiresCaptureDisplay else { return .unchanged }
+            if captureAvailable, available, captureDisplay != display {
+                // A replacement layout needs an explicit loss/new scope.
+                // Never silently remap an already authorized generation.
+                closed = true; connected = false; channelID = nil; helloCapabilities = nil
+                captureAvailable = false; captureDisplay = nil
+                reconcileLocked()
+                return .reconnect
+            }
+            guard captureAvailable != available else { return .unchanged }
+            captureAvailable = available
+            captureDisplay = available ? display : nil
+            if available {
+                reconcileLocked(publishWhenUnauthorized: false)
+                return .available
+            }
+            let previous = acknowledgement
+            let hadSession = session != nil
+            let mustReconnect = hasAuthorizedInput && inputInvalidation != DirectInputWire.inputInvalidationVersion
+            if mustReconnect { closed = true; connected = false; channelID = nil; helloCapabilities = nil }
+            reconcileLocked(publishWhenUnauthorized: hadSession)
+            return mustReconnect ? .reconnect : .unavailable(previous)
+        }
+    }
+
+    @discardableResult
+    func closeChannel(_ id: ObjectIdentifier) -> Bool {
+        lock.withLock {
+            guard !closed, channelID == id else { return false }
+            channelID = nil; helloCapabilities = nil
+            reconcileLocked()
+            return true
+        }
+    }
+
+    func ownsChannel(_ id: ObjectIdentifier) -> Bool {
+        lock.withLock { !closed && channelID == id }
+    }
+
+    func inputSession(for id: ObjectIdentifier) -> InputInjector.DirectInputSession? {
+        lock.withLock { !closed && channelID == id ? session : nil }
+    }
+
+    var isClosed: Bool { lock.withLock { closed } }
+
+    func readyAcknowledgement(for id: ObjectIdentifier) -> (session: InputInjector.DirectInputSession, wire: DirectInputAcknowledgement?, inputInvalidation: Int)? {
+        lock.withLock {
+            guard !closed, channelID == id, let session else { return nil }
+            return (session, acknowledgement, inputInvalidation ?? 0)
+        }
+    }
+
+    /// Consumes the wire sequence only for this exact live session. The
+    /// injector must still recheck the returned local identity at posting.
+    func admitInput(channel id: ObjectIdentifier, stamp: DirectInputStamp?) -> InputInjector.DirectInputSession? {
+        lock.withLock {
+            guard !closed, channelID == id, let session else { return nil }
+            if inputHello != nil {
+                guard let acknowledgement, let stamp, stamp.isValid,
+                      stamp.hostID == acknowledgement.hostID,
+                      stamp.generation == acknowledgement.generation,
+                      stamp.sequence > lastInputSequence else { return nil }
+                lastInputSequence = stamp.sequence
+            } else if stamp != nil { return nil }
+            return session
+        }
+    }
+
+    func close() { _ = connectionChanged(connected: false, terminal: true) }
+
+    @discardableResult
+    func close(ifChannel id: ObjectIdentifier) -> Bool {
+        lock.withLock {
+            guard !closed, channelID == id else { return false }
+            closed = true; connected = false; channelID = nil; helloCapabilities = nil
+            reconcileLocked()
+            return true
+        }
+    }
+
+    private func retireSessionLocked() {
+        if let session { injector.endDirectInputSession(session) }
+        session = nil; acknowledgement = nil; lastInputSequence = 0
+    }
+
+    private func reconcileLocked(publishWhenUnauthorized: Bool = true) {
+        if !closed, captureAvailable, connected, channelID != nil, helloCapabilities != nil {
+            if session == nil {
+                guard inputGeneration < UInt32.max else {
+                    closed = true; connected = false; channelID = nil; helloCapabilities = nil
+                    publishLocked(); return
+                }
+                inputGeneration += 1
+                session = injector.beginDirectInputSession(display: captureDisplay)
+                hasAuthorizedInput = true
+                if let inputHello {
+                    acknowledgement = .init(hello: inputHello, hostID: UUID(), generation: inputGeneration)
+                }
+            }
+        } else { retireSessionLocked() }
+        // A partially completed initial handshake is not a loss of control.
+        // Merely opening the visual sidecar must not interrupt a live LAN task.
+        if session != nil || publishWhenUnauthorized { publishLocked() }
+    }
+
+    private func publishLocked() {
+        onChange(.init(authorized: session != nil,
+            orderedComputerUseControls: session == nil ? 0 : (helloCapabilities ?? 0)))
+    }
+}
+
+private final class PeerCloseBarrier: @unchecked Sendable {
+    private let lock = NSLock()
+    private var finished = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    func wait() async {
+        await withCheckedContinuation { continuation in
+            lock.lock()
+            if finished {
+                lock.unlock()
+                continuation.resume()
+                return
+            }
+            waiters.append(continuation)
+            lock.unlock()
+        }
+    }
+
+    func finish() {
+        lock.lock()
+        finished = true
+        let pending = waiters
+        waiters.removeAll()
+        lock.unlock()
+        pending.forEach { $0.resume() }
+    }
+}
+
+/// Gives every caller the same teardown barrier while allowing the session to
+/// snapshot its state under its own lock before performing native cleanup.
+final class PeerCloseCoordinator: @unchecked Sendable {
+    private let lock = NSLock()
+    private var completion: Task<Void, Never>?
+
+    /// Revoke authority for every caller, but let only the first caller run
+    /// teardown. Neither callback runs while the coordinator lock is held, so
+    /// native close callbacks may safely reenter this method.
+    func close(revokeInput: () -> Void,
+               teardown: () -> Task<Void, Never>) -> Task<Void, Never> {
+        lock.lock()
+        if let completion {
+            lock.unlock()
+            revokeInput()
+            return completion
+        }
+        let barrier = PeerCloseBarrier()
+        let task = Task { await barrier.wait() }
+        completion = task
+        lock.unlock()
+
+        revokeInput()
+        let teardown = teardown()
+        Task {
+            await teardown.value
+            barrier.finish()
+        }
+        return task
+    }
+}
+
 final class HostPeerSession: NSObject {
     struct PeerAuthorization: Equatable, Sendable {
         let senderID: String
@@ -35,14 +302,12 @@ final class HostPeerSession: NSObject {
     private let injector: InputInjector
     private let iceConfig: ICEConfig
     private let audioEnabled: Bool
-    private let peerSenderID: String
-    private let onUserInput: @Sendable () -> Void
-    private let onPeerAuthorizationChanged:
-        @Sendable (PeerAuthorization) -> Void
+    private let onUserInput: @Sendable () -> Bool
+    private let inputAuthorization: HostPeerInputAuthorization
     private let onEnded: @Sendable (String) -> Void
     private let log = Logger(subsystem: "com.threadmark.remotedesktop.host", category: "webrtc")
     private let signalingStateQueue = DispatchQueue(label: "com.threadmark.remotedesktop.host.webrtc.signaling")
-    private let closeStateLock = NSLock()
+    private let closeStateLock = NSRecursiveLock()
 
     private let factory: RTCPeerConnectionFactory
     private let audioBridge: SystemAudioBridge
@@ -59,28 +324,23 @@ final class HostPeerSession: NSObject {
     private var adaptedVideoHeight: Int?
     private var captureMaximumMacroblocksPerFrame =
         DesktopVideoQuality.fallbackH264MaximumMacroblocksPerFrame
-    private var captureStarted = false
+    private var captureOwner: CaptureOwnerLease?
     private var audioRecordingStarted = false
     private var localMediaConfigured = false
     private var ended = false
-    private var helloAuthenticated = false
-    private var orderedComputerUseControls = 0
+    private var captureStartupRequested = false
     private var captureRestartTask: Task<Void, Never>?
-    private var captureTeardownTask: Task<Void, Never>?
+    private var captureRestartID: UUID?
+    private var captureRecovery: CaptureRecoveryEpisode?
+    private var captureRecoveryDeadlineTask: Task<Void, Never>?
+    private var lastVideoAttempt: CaptureAttemptLease?
+    private let closeCoordinator = PeerCloseCoordinator()
     private var hostSeq: UInt32 = 0
     private var answerSent = false
     private var pendingLocalICEPayloads: [[String: String]] = []
-    private let captureRestartBackoff: [Duration] = [
-        .milliseconds(250),
-        .seconds(1),
-        .seconds(2),
-        .seconds(5),
-        .seconds(10),
-    ]
 
-    /// Pointer and keyboard packets are privileged only after the peer has
-    /// completed the protocol hello. A WebRTC data channel opening is not, by
-    /// itself, authorization to control the Mac.
+    /// Message-kind/protocol classification only. Dispatch also requires the
+    /// current channel's exact connected input session, rechecked by the injector.
     nonisolated static func acceptsDirectInput(
         _ message: ControlMessage,
         helloAuthenticated: Bool
@@ -101,7 +361,7 @@ final class HostPeerSession: NSObject {
         iceConfig: ICEConfig,
         audioEnabled: Bool,
         peerSenderID: String,
-        onUserInput: @escaping @Sendable () -> Void,
+        onUserInput: @escaping @Sendable () -> Bool,
         onPeerAuthorizationChanged:
             @escaping @Sendable (PeerAuthorization) -> Void,
         onEnded: @escaping @Sendable (String) -> Void
@@ -112,9 +372,11 @@ final class HostPeerSession: NSObject {
         self.injector = injector
         self.iceConfig = iceConfig
         self.audioEnabled = audioEnabled
-        self.peerSenderID = peerSenderID
         self.onUserInput = onUserInput
-        self.onPeerAuthorizationChanged = onPeerAuthorizationChanged
+        self.inputAuthorization = HostPeerInputAuthorization(injector: injector) { state in
+            onPeerAuthorizationChanged(PeerAuthorization(senderID: peerSenderID,
+                authorized: state.authorized, orderedComputerUseControls: state.orderedComputerUseControls))
+        }
         self.onEnded = onEnded
         self.factory = RTCPeerConnectionFactory(
             audioDeviceModuleType: .audioEngine,
@@ -159,9 +421,8 @@ final class HostPeerSession: NSObject {
         try configureLocalMedia(on: peerConnection)
         let answer = try await createAnswer(on: peerConnection)
         try await setLocalDescription(answer, on: peerConnection)
-        captureMaximumMacroblocksPerFrame = DesktopVideoQuality
-            .maximumMacroblocksPerFrame(
-                negotiatedCodecs: videoSender?.parameters.codecs ?? [])
+        setCaptureMacroblockLimit(DesktopVideoQuality.maximumMacroblocksPerFrame(
+            negotiatedCodecs: videoSender?.parameters.codecs ?? []))
         applyVideoSenderPolicy(DesktopVideoQuality.sharpnessPolicy)
         startAudioRecordingIfNeeded()
         try await signaling.send(SignalingEnvelope(
@@ -174,9 +435,9 @@ final class HostPeerSession: NSObject {
             ts: Date().timeIntervalSince1970))
         flushBufferedLocalICEAfterAnswer()
 
-        if !captureStarted {
-            try await startCapture()
-        }
+        // Capture discovery/start and first-frame delivery have their own
+        // bounded worker. Keep signaling free to deliver ICE and disconnects.
+        try requestCaptureStartup()
     }
 
     func addRemoteIce(_ payload: [String: String]) {
@@ -196,44 +457,55 @@ final class HostPeerSession: NSObject {
     /// task before installing new capture callbacks on the shared capturer.
     @discardableResult
     func close(reason: String) -> Task<Void, Never> {
-        closeStateLock.lock()
-        if let captureTeardownTask {
-            closeStateLock.unlock()
-            return captureTeardownTask
+        return closeCoordinator.close(revokeInput: {
+            self.inputAuthorization.close()
+        }) {
+            self.closeStateLock.lock()
+            self.ended = true
+            let restartTask = self.captureRestartTask
+            self.captureRestartTask = nil
+            self.captureRestartID = nil
+            self.captureRecovery = nil
+            let recoveryDeadlineTask = self.captureRecoveryDeadlineTask
+            self.captureRecoveryDeadlineTask = nil
+            let owner = self.captureOwner
+            let channelToClose = self.dataChannel
+            self.dataChannel = nil
+            let peerConnectionToClose = self.peerConnection
+            self.peerConnection = nil
+            self.videoSender = nil
+            self.adaptedVideoWidth = nil
+            self.adaptedVideoHeight = nil
+            self.lastVideoAttempt = nil
+            let shouldDetachAudio = self.audioEnabled
+            let shouldStopAudioRecording = self.audioRecordingStarted
+            self.audioRecordingStarted = false
+            self.localMediaConfigured = false
+            self.hostSeq &+= 1
+            let timestamp = UInt64(DispatchTime.now().uptimeNanoseconds / 1_000)
+            let byePayload = self.messageData(for: .bye(reason: reason), seq: self.hostSeq, ts: timestamp)
+            self.closeStateLock.unlock()
+
+            restartTask?.cancel()
+            recoveryDeadlineTask?.cancel()
+            // Never acquire the capture gate under the peer lock: capture callbacks
+            // may synchronously reenter native peer callbacks during teardown.
+            let captureTeardown = owner.map { self.capture.endSession($0) } ?? Task {}
+            self.resetBufferedLocalICE()
+            if let channelToClose, channelToClose.readyState == .open {
+                _ = channelToClose.sendData(RTCDataBuffer(data: byePayload, isBinary: false))
+            }
+            channelToClose?.close()
+            peerConnectionToClose?.close()
+            if shouldDetachAudio {
+                self.audioBridge.detach(from: self.factory.audioDeviceModule)
+            }
+            if shouldStopAudioRecording {
+                let stopStatus = self.factory.audioDeviceModule.stopRecording()
+                self.log.info("host audio ADM stop=\(stopStatus, privacy: .public)")
+            }
+            return captureTeardown
         }
-        ended = true
-        helloAuthenticated = false
-        injector.releaseHeldInput()
-        notifyPeerAuthorization(authorized: false)
-        orderedComputerUseControls = 0
-        captureRestartTask?.cancel()
-        captureRestartTask = nil
-        resetBufferedLocalICE()
-        send(.bye(reason: reason))
-        dataChannel?.close()
-        dataChannel = nil
-        peerConnection?.close()
-        peerConnection = nil
-        videoSender = nil
-        adaptedVideoWidth = nil
-        adaptedVideoHeight = nil
-        if audioEnabled {
-            audioBridge.detach(from: factory.audioDeviceModule)
-        }
-        stopAudioRecording()
-        // Clear capture callbacks before stopping to prevent the
-        // delegate's didStopWithError from re-firing onEnded.
-        capture.onStopped = nil
-        capture.onVideoSample = nil
-        capture.onAudioSample = nil
-        let teardown = Task {
-            await capture.stop()
-        }
-        captureTeardownTask = teardown
-        captureStarted = false
-        localMediaConfigured = false
-        closeStateLock.unlock()
-        return teardown
     }
 
     private func makePeerConnection() throws -> RTCPeerConnection {
@@ -256,15 +528,6 @@ final class HostPeerSession: NSObject {
                 userInfo: [NSLocalizedDescriptionKey: "Couldn't create the peer connection."])
         }
         return peerConnection
-    }
-
-    private func notifyPeerAuthorization(authorized: Bool) {
-        onPeerAuthorizationChanged(PeerAuthorization(
-            senderID: peerSenderID,
-            authorized: authorized,
-            orderedComputerUseControls: authorized
-                ? orderedComputerUseControls
-                : 0))
     }
 
     private func configureLocalMedia(on peerConnection: RTCPeerConnection?) throws {
@@ -329,27 +592,64 @@ final class HostPeerSession: NSObject {
     }
 
     private func configureCaptureCallbacks() {
-        capture.onVideoSample = { [weak self] sampleBuffer in
-            self?.pushVideoSample(sampleBuffer)
-        }
+        let onAudioSample: (@Sendable (CMSampleBuffer) -> Void)?
         if audioEnabled {
-            capture.onAudioSample = { [weak self] sampleBuffer in
-                self?.audioBridge.enqueue(sampleBuffer)
-            }
+            onAudioSample = { [weak self] sample in self?.audioBridge.enqueue(sample) }
         } else {
-            capture.onAudioSample = nil
+            onAudioSample = nil
         }
-        capture.onStopped = { [weak self] error in
-            guard let self, !self.ended else { return }
-            self.handleCaptureStopped(error)
-        }
+        captureOwner = capture.beginSession(callbacks: ScreenCapture.Callbacks(
+            onVideoFrame: { [weak self] frame, attempt in
+                self?.pushVideoFrame(frame)
+                self?.recordRecoveryFrame(from: attempt)
+            },
+            onAudioSample: onAudioSample,
+            onVideoUnavailable: { [weak self] attempt in self?.handleCaptureVideoUnavailable(from: attempt) },
+            onStopped: { [weak self] receipt, error in
+                // Classify the stop before any retry can retire its receipt.
+                // Input closes synchronously; native peer teardown is deferred.
+                self?.revokeCaptureInput()
+                self?.handleCaptureStopped(receipt, error: error)
+            }))
+    }
+
+    private func captureStartParameters() throws -> (CaptureOwnerLease, Int) {
+        closeStateLock.lock()
+        defer { closeStateLock.unlock() }
+        guard !ended, let captureOwner else { throw CancellationError() }
+        return (captureOwner, captureMaximumMacroblocksPerFrame)
+    }
+
+    private func setCaptureMacroblockLimit(_ limit: Int) {
+        closeStateLock.lock()
+        defer { closeStateLock.unlock() }
+        guard !ended else { return }
+        captureMaximumMacroblocksPerFrame = limit
+    }
+
+    var isEnded: Bool {
+        closeStateLock.lock()
+        defer { closeStateLock.unlock() }
+        return ended
+    }
+
+    private func requestCaptureStartup() throws {
+        closeStateLock.lock()
+        defer { closeStateLock.unlock() }
+        guard !ended, captureOwner != nil else { throw CancellationError() }
+        // Renegotiation joins the original request. It cannot renew an
+        // unavailable episode or restart a stream that is already available.
+        guard !captureStartupRequested else { return }
+        captureStartupRequested = true
+        beginCaptureRecoveryLocked()
+        startCaptureWorkerLocked()
     }
 
     private func startCapture() async throws {
-        try await capture.start(
-            audioEnabled: audioEnabled,
-            maximumMacroblocksPerFrame: captureMaximumMacroblocksPerFrame)
-        captureStarted = true
+        let (owner, limit) = try captureStartParameters()
+        try await capture.start(for: owner, audioEnabled: audioEnabled,
+                                maximumMacroblocksPerFrame: limit)
+        refreshCaptureInputAvailability()
     }
 
     private func applyVideoSenderPolicy(
@@ -379,62 +679,266 @@ final class HostPeerSession: NSObject {
             nil,
             currentBitrateBps: nil,
             maxBitrateBps: NSNumber(value: policy.maximumBitrateBps)) ?? false
+        let captureLimit = (try? captureStartParameters().1) ?? 0
         log.info(
-            "desktop video quality captureMacroblocks=\(self.captureMaximumMacroblocksPerFrame, privacy: .public) maxBitrate=\(policy.maximumBitrateBps, privacy: .public) maxFps=\(policy.maximumFramesPerSecond, privacy: .public) degradation=\(policy.degradationPreference.rawValue, privacy: .public) bweUpdated=\(bweUpdated, privacy: .public)")
+            "desktop video quality captureMacroblocks=\(captureLimit, privacy: .public) maxBitrate=\(policy.maximumBitrateBps, privacy: .public) maxFps=\(policy.maximumFramesPerSecond, privacy: .public) degradation=\(policy.degradationPreference.rawValue, privacy: .public) bweUpdated=\(bweUpdated, privacy: .public)")
     }
 
-    private func handleCaptureStopped(_ error: Error?) {
-        captureStarted = false
-        guard let error else {
-            log.error("screen capture stopped without an error")
-            onEnded("Screen capture stopped.")
-            return
-        }
-
-        guard ScreenCapture.isSystemStopped(error) else {
-            log.error("screen capture stopped: \(String(describing: error), privacy: .public)")
-            onEnded("Screen capture stopped.")
-            return
-        }
-
-        restartCaptureAfterSystemStop(error)
-    }
-
-    private func restartCaptureAfterSystemStop(_ error: Error) {
-        guard captureRestartTask == nil else {
-            log.info("screen capture restart already pending")
-            return
-        }
-
-        log.warning("screen capture was stopped by the system; attempting in-place restart: \(String(describing: error), privacy: .public)")
-        captureRestartTask = Task { [weak self] in
-            await self?.restartCaptureLoop()
-        }
-    }
-
-    private func restartCaptureLoop() async {
-        var attempt = 0
-        while !Task.isCancelled {
+    private func handleCaptureStopped(_ receipt: CaptureStopReceipt, error: Error) {
+        // All composed transitions acquire capture admission before the peer
+        // lock. Validation and the recovery decision share that same admission.
+        var terminalReason: String?
+        var terminalOwner: CaptureOwnerLease?
+        capture.consumeStop(receipt) {
+            closeStateLock.lock()
+            defer { closeStateLock.unlock() }
             guard !ended else { return }
-            do {
-                try await startCapture()
-                log.info("screen capture restarted after system stop")
-                captureRestartTask = nil
+            guard ScreenCapture.isRecoverableStop(error) else {
+                log.error("screen capture stopped: \(String(describing: error), privacy: .public)")
+                ended = true
+                terminalOwner = captureOwner
+                terminalReason = "Screen capture stopped. Reconnect to try again."
                 return
-            } catch {
-                attempt += 1
-                captureStarted = false
-                log.error("screen capture restart attempt \(attempt, privacy: .public) failed: \(String(describing: error), privacy: .public)")
-                let delay = captureRestartBackoff[min(attempt - 1, captureRestartBackoff.count - 1)]
-                try? await Task.sleep(for: delay)
+            }
+            beginCaptureRecoveryLocked()
+            startCaptureWorkerLocked()
+        }
+        if let terminalReason {
+            // This method is entered under the capture callback's gate, with
+            // no outer peer lock. Retire native admission before a waiting
+            // worker can begin another attempt; defer native peer teardown.
+            if let terminalOwner { _ = capture.endSession(terminalOwner) }
+            scheduleCaptureClose(terminalReason)
+        }
+    }
+
+    /// Called with the peer lock held. Startup arms the deadline before any
+    /// native await; capture callbacks acquire capture admission first.
+    /// Nonterminal output loss waits on the continuing stream without restart.
+    private func beginCaptureRecoveryLocked(waitingForOutputFrom attempt: CaptureAttemptLease? = nil) {
+        guard captureRecovery == nil else { return }
+        let episode = CaptureRecoveryEpisode(now: ContinuousClock.now, waitingForOutputFrom: attempt)
+        captureRecovery = episode
+        captureRecoveryDeadlineTask = Task { [weak self] in
+            do { try await ContinuousClock().sleep(until: episode.deadline) }
+            catch { return }
+            self?.endCaptureRecovery(episode.id, reason: CaptureRecoveryEpisode.Failure.timedOut.message)
+        }
+    }
+
+    private func startCaptureWorkerLocked() {
+        guard captureRestartTask == nil, let episode = captureRecovery else { return }
+        let worker = UUID()
+        captureRestartID = worker
+        captureRestartTask = Task { [weak self] in
+            await self?.restartCaptureLoop(worker: worker, episode: episode.id)
+        }
+    }
+
+    private func handleCaptureVideoUnavailable(from attempt: CaptureAttemptLease) {
+        // This callback is synchronous inside the current stream's admission
+        // gate. Clear remembered output before any startup completion can use it.
+        revokeCaptureInput()
+        closeStateLock.lock()
+        defer { closeStateLock.unlock() }
+        guard !ended else { return }
+        beginCaptureRecoveryLocked(waitingForOutputFrom: attempt)
+    }
+
+    private func ownsCaptureRestart(_ worker: UUID, episode: UUID) -> Bool {
+        closeStateLock.lock()
+        defer { closeStateLock.unlock() }
+        return !ended && captureRestartID == worker && captureRecovery?.id == episode
+    }
+
+    private func reserveCaptureRestart(_ worker: UUID, episode: UUID) -> Bool {
+        closeStateLock.lock()
+        defer { closeStateLock.unlock() }
+        guard !ended, captureRestartID == worker, captureRecovery?.id == episode else { return false }
+        return captureRecovery?.reserveAttempt(at: ContinuousClock.now) == true
+    }
+
+    private func captureRestartDelay(_ worker: UUID, episode: UUID) -> Duration? {
+        closeStateLock.lock()
+        defer { closeStateLock.unlock() }
+        guard !ended, captureRestartID == worker, captureRecovery?.id == episode else { return nil }
+        return captureRecovery?.retryDelay(at: ContinuousClock.now)
+    }
+
+    /// Called within the media admission gate after forwarding a validated
+    /// frame. This records source output, not remote decode or presentation.
+    private func recordRecoveryFrame(from attempt: CaptureAttemptLease) {
+        closeStateLock.lock()
+        guard !ended else { closeStateLock.unlock(); return }
+        lastVideoAttempt = attempt
+        closeStateLock.unlock()
+        refreshCaptureInputAvailability()
+    }
+
+    private func refreshCaptureInputAvailability() {
+        guard let (owner, _) = try? captureStartParameters() else { return }
+        capture.withRunningSession(owner) { runningAttempt, videoAvailable, display in
+            closeStateLock.lock()
+            defer { closeStateLock.unlock() }
+            guard !ended, videoAvailable, lastVideoAttempt == runningAttempt else { return }
+            if let episode = captureRecovery {
+                guard episode.acceptsFrame(lastOutput: lastVideoAttempt, running: runningAttempt,
+                                           at: ContinuousClock.now) else { return }
+                completeCaptureRecoveryLocked()
+            }
+            restoreCaptureInputLocked(display: display)
+        }
+    }
+
+    /// Called under the current capture gate and peer lock, after current
+    /// source output is available. This is not remote presentation proof.
+    private func restoreCaptureInputLocked(display: CaptureDisplayGeometry) {
+        switch inputAuthorization.captureChanged(available: true, display: display) {
+        case .available: sendHelloAckAndDisplay()
+        case .reconnect: scheduleCaptureTerminalFailure("The screen layout changed without a new input session. Reconnect to restore control.")
+        case .unchanged, .unavailable: break
+        }
+    }
+
+    /// Called synchronously inside the unavailable or retired stream's capture gate.
+    private func revokeCaptureInput() {
+        closeStateLock.lock()
+        lastVideoAttempt = nil
+        closeStateLock.unlock()
+        switch inputAuthorization.captureChanged(available: false) {
+        case .unchanged, .available: break
+        case .reconnect:
+            scheduleCaptureTerminalFailure("Screen capture was interrupted. Reconnect to restore control.")
+        case .unavailable(let scope):
+            if let scope, !sendInputUnavailable(scope) {
+                inputAuthorization.close()
+                scheduleCaptureTerminalFailure("The screen interruption could not be sent. Reconnect to restore control.")
             }
         }
     }
 
-    private func pushVideoSample(_ sampleBuffer: CMSampleBuffer) {
-        guard let imageBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else {
-            return
+    private func scheduleCaptureTerminalFailure(_ reason: String) {
+        closeStateLock.lock()
+        guard !ended else { closeStateLock.unlock(); return }
+        ended = true
+        closeStateLock.unlock()
+        scheduleCaptureClose(reason)
+    }
+
+    private func scheduleCaptureClose(_ reason: String) {
+        // Native teardown must run after this capture callback releases its
+        // gate. Input has already been revoked synchronously.
+        Task { [weak self] in
+            guard let self else { return }
+            self.close(reason: reason)
+            self.onEnded(reason)
         }
+    }
+
+    private enum CaptureStartDisposition { case restored, awaitingFrame, retry, retired }
+
+    /// Startup success alone cannot clear the watchdog. Early output can be
+    /// counted once this exact attempt is running; later output completes the
+    /// same episode through recordRecoveryFrame. Clearing the worker while the
+    /// stream gate is held prevents a simultaneous stop from being lost.
+    private func settleCaptureRestart(_ worker: UUID, episode: UUID) -> CaptureStartDisposition {
+        guard let (owner, _) = try? captureStartParameters() else { return .retired }
+        var result = CaptureStartDisposition.retry
+        capture.withRunningSession(owner) { runningAttempt, videoAvailable, display in
+            closeStateLock.lock()
+            defer { closeStateLock.unlock() }
+            guard !ended, captureRestartID == worker, let recovery = captureRecovery,
+                  recovery.id == episode else { result = .retired; return }
+            guard recovery.permitsRecovery(at: ContinuousClock.now) else { return }
+            if videoAvailable, recovery.acceptsFrame(lastOutput: lastVideoAttempt, running: runningAttempt,
+                                                     at: ContinuousClock.now) {
+                completeCaptureRecoveryLocked()
+                restoreCaptureInputLocked(display: display)
+                result = .restored
+            } else {
+                captureRestartID = nil
+                captureRestartTask = nil
+                result = .awaitingFrame
+            }
+        }
+        return result
+    }
+
+    /// Called with the peer lock held under capture admission.
+    private func completeCaptureRecoveryLocked() {
+        captureRecovery = nil
+        captureRecoveryDeadlineTask?.cancel()
+        captureRecoveryDeadlineTask = nil
+        captureRestartID = nil
+        captureRestartTask = nil
+        log.info("screen capture produced a complete frame from its current running stream")
+    }
+
+    private func retireCaptureRestart(_ worker: UUID) {
+        closeStateLock.lock()
+        defer { closeStateLock.unlock() }
+        guard captureRestartID == worker else { return }
+        captureRestartID = nil
+        captureRestartTask = nil
+    }
+
+    /// Claim termination before leaving the lock. Close revokes direct input
+    /// and media synchronously, while its returned barrier continues to join
+    /// any native operation that has not returned. The watchdog never claims
+    /// to have forcibly terminated ScreenCaptureKit.
+    private func endCaptureRecovery(_ episode: UUID, worker: UUID? = nil, reason: String) {
+        closeStateLock.lock()
+        guard !ended, captureRecovery?.id == episode,
+              worker == nil || captureRestartID == worker else { closeStateLock.unlock(); return }
+        ended = true
+        captureRecovery = nil
+        closeStateLock.unlock()
+        close(reason: reason)
+        onEnded(reason)
+    }
+
+    private func endAfterCaptureBudget(_ episode: UUID, worker: UUID) {
+        closeStateLock.lock()
+        let failure = captureRecovery?.id == episode
+            ? captureRecovery?.failure(at: ContinuousClock.now) : nil
+        closeStateLock.unlock()
+        guard let failure else { return }
+        endCaptureRecovery(episode, worker: worker, reason: failure.message)
+    }
+
+    private func restartCaptureLoop(worker: UUID, episode: UUID) async {
+        defer { retireCaptureRestart(worker) }
+        while !Task.isCancelled && ownsCaptureRestart(worker, episode: episode) {
+            guard reserveCaptureRestart(worker, episode: episode) else {
+                endAfterCaptureBudget(episode, worker: worker)
+                return
+            }
+            do {
+                try await startCapture()
+                switch settleCaptureRestart(worker, episode: episode) {
+                case .restored, .awaitingFrame, .retired: return
+                case .retry: break
+                }
+            } catch {
+                guard !Task.isCancelled, ownsCaptureRestart(worker, episode: episode) else { return }
+                if error is CaptureStreamTeardownFailure {
+                    endCaptureRecovery(episode, worker: worker,
+                        reason: "Screen capture cleanup failed. Restart the Mac host app before reconnecting.")
+                    return
+                }
+                log.error("screen capture restart failed: \(String(describing: error), privacy: .public)")
+            }
+            guard let delay = captureRestartDelay(worker, episode: episode) else {
+                endAfterCaptureBudget(episode, worker: worker)
+                return
+            }
+            do { try await Task.sleep(for: delay) }
+            catch { return }
+        }
+    }
+
+    private func pushVideoFrame(_ captured: CapturedVideoFrame) {
+        let imageBuffer = captured.imageBuffer
         let normalizedSize = CaptureSizing.normalized(
             width: CVPixelBufferGetWidth(imageBuffer),
             height: CVPixelBufferGetHeight(imageBuffer))
@@ -449,13 +953,14 @@ final class HostPeerSession: NSObject {
         }
 
         let rtcBuffer = RTCCVPixelBuffer(pixelBuffer: imageBuffer)
-        let presentationTime = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
-        let timestampNs = Int64(CMTimeGetSeconds(presentationTime) * 1_000_000_000)
-        let frame = RTCVideoFrame(buffer: rtcBuffer, rotation: ._0, timeStampNs: timestampNs)
+        let frame = RTCVideoFrame(buffer: rtcBuffer, rotation: ._0,
+                                  timeStampNs: captured.metadata.captureTimeNanoseconds)
         videoSource.capturer(videoCapturer, didCapture: frame)
     }
 
     private func send(_ message: ControlMessage) {
+        closeStateLock.lock()
+        defer { closeStateLock.unlock() }
         guard let dataChannel, dataChannel.readyState == .open else {
             return
         }
@@ -479,8 +984,27 @@ final class HostPeerSession: NSObject {
         }
     }
 
+    private func sendInputUnavailable(_ scope: DirectInputAcknowledgement) -> Bool {
+        closeStateLock.lock()
+        defer { closeStateLock.unlock() }
+        guard !ended, let dataChannel, dataChannel.readyState == .open,
+              inputAuthorization.ownsChannel(ObjectIdentifier(dataChannel)) else { return false }
+        hostSeq &+= 1
+        let timestamp = UInt64(DispatchTime.now().uptimeNanoseconds / 1_000)
+        let payload = HostMessageEncoder.inputUnavailable(scope, seq: hostSeq, ts: timestamp)
+        return dataChannel.sendData(RTCDataBuffer(data: payload, isBinary: false))
+    }
+
     private func sendHelloAckAndDisplay() {
-        guard let dataChannel, dataChannel.readyState == .open else {
+        closeStateLock.lock()
+        defer { closeStateLock.unlock() }
+        guard !ended, let dataChannel, dataChannel.readyState == .open,
+              let ready = inputAuthorization.readyAcknowledgement(for: ObjectIdentifier(dataChannel)) else {
+            return
+        }
+        guard let captureDisplay = ready.session.display else {
+            inputAuthorization.close()
+            scheduleCaptureTerminalFailure("The captured screen layout is unavailable. Reconnect to restore control.")
             return
         }
 
@@ -493,19 +1017,31 @@ final class HostPeerSession: NSObject {
             audio: audioEnabled,
             monitors: NSScreen.screens.count,
             seq: hostSeq,
-            ts: timestamp)
-        dataChannel.sendData(RTCDataBuffer(data: hello, isBinary: false))
+            ts: timestamp,
+            inputSession: ready.wire,
+            inputInvalidation: ready.inputInvalidation)
+        guard dataChannel.sendData(RTCDataBuffer(data: hello, isBinary: false)) else {
+            inputAuthorization.close()
+            scheduleCaptureTerminalFailure("The input handshake could not be sent. Reconnect to restore control.")
+            return
+        }
 
-        let frame = NSScreen.main?.frame ?? .zero
-        let scale = NSScreen.main?.backingScaleFactor ?? 2.0
         hostSeq &+= 1
         let display = HostMessageEncoder.display(
-            width: Int(frame.width.rounded()),
-            height: Int(frame.height.rounded()),
-            scale: scale,
+            captureDisplay,
             seq: hostSeq,
-            ts: timestamp)
-        dataChannel.sendData(RTCDataBuffer(data: display, isBinary: false))
+            ts: timestamp,
+            inputSession: ready.wire)
+        guard dataChannel.sendData(RTCDataBuffer(data: display, isBinary: false)) else {
+            inputAuthorization.close()
+            scheduleCaptureTerminalFailure("The screen layout could not be sent. Reconnect to restore control.")
+            return
+        }
+    }
+
+    private func invalidateChangedCaptureDisplay() {
+        guard let (owner, _) = try? captureStartParameters() else { return }
+        capture.invalidateChangedDisplay(for: owner)
     }
 
     private func iceCandidate(from payload: [String: String]) -> RTCIceCandidate? {
@@ -662,25 +1198,36 @@ extension HostPeerSession: RTCPeerConnectionDelegate {
 
     func peerConnection(_ peerConnection: RTCPeerConnection, didChange stateChanged: RTCConnectionState) {
         log.info("peer connection state → \(String(describing: stateChanged), privacy: .public)")
-        guard !ended else { return }
+        guard !isEnded, self.peerConnection === peerConnection else { return }
         switch stateChanged {
         case .connected:
-            if helloAuthenticated {
-                notifyPeerAuthorization(authorized: true)
-            }
+            inputAuthorization.connectionChanged(connected: true)
+            // Hello and the transport-state callback can arrive in either
+            // order. Publish readiness only once both have authorized input.
+            sendHelloAckAndDisplay()
         case .disconnected:
-            // Transient — ICE may recover on its own. Log but don't tear down.
-            notifyPeerAuthorization(authorized: false)
+            // ICE may recover, but queued input loses this exact session now.
+            if inputAuthorization.connectionChanged(connected: false), inputAuthorization.isClosed {
+                onEnded("The connection was interrupted. Reconnect to resume remote control.")
+            }
             log.warning("peer connection is disconnected (may recover)")
         case .failed, .closed:
-            notifyPeerAuthorization(authorized: false)
-            onEnded("The peer connection closed.")
+            if inputAuthorization.connectionChanged(connected: false, terminal: true) {
+                onEnded("The peer connection closed.")
+            }
         default:
             break
         }
     }
 
     func peerConnection(_ peerConnection: RTCPeerConnection, didOpen dataChannel: RTCDataChannel) {
+        closeStateLock.lock()
+        defer { closeStateLock.unlock() }
+        guard !ended, self.peerConnection === peerConnection, dataChannel.label == "control",
+              inputAuthorization.openChannel(ObjectIdentifier(dataChannel)) else {
+            dataChannel.close()
+            return
+        }
         self.dataChannel = dataChannel
         dataChannel.delegate = self
     }
@@ -689,40 +1236,53 @@ extension HostPeerSession: RTCPeerConnectionDelegate {
 extension HostPeerSession: RTCDataChannelDelegate {
     func dataChannelDidChangeState(_ dataChannel: RTCDataChannel) {
         if dataChannel.readyState == .closed || dataChannel.readyState == .closing {
-            helloAuthenticated = false
-            notifyPeerAuthorization(authorized: false)
-            orderedComputerUseControls = 0
+            inputAuthorization.closeChannel(ObjectIdentifier(dataChannel))
         }
     }
 
     func dataChannel(_ dataChannel: RTCDataChannel, didReceiveMessageWith buffer: RTCDataBuffer) {
-        guard let message = ControlMessage.decode(buffer.data) else {
+        guard inputAuthorization.ownsChannel(ObjectIdentifier(dataChannel)),
+              dataChannel.readyState == .open,
+              let packet = ControlPacket.decode(buffer.data) else {
             return
         }
+        let message = packet.message
         switch message {
         case .hello(let proto, let orderedComputerUseControls):
+            invalidateChangedCaptureDisplay()
             guard proto == HostConfig.protocolVersion else {
-                close(reason: "protocol")
+                if inputAuthorization.close(ifChannel: ObjectIdentifier(dataChannel)) {
+                    close(reason: "protocol")
+                    onEnded("protocol")
+                }
                 return
             }
-            self.orderedComputerUseControls = orderedComputerUseControls
-            helloAuthenticated = true
-            notifyPeerAuthorization(authorized: true)
+            guard inputAuthorization.acceptHello(channel: ObjectIdentifier(dataChannel),
+                orderedControls: orderedComputerUseControls, inputHello: packet.inputHello,
+                inputInvalidation: packet.inputInvalidation) else { return }
             sendHelloAckAndDisplay()
         case .bye(let reason):
-            close(reason: reason)
-            onEnded(reason)
+            if inputAuthorization.close(ifChannel: ObjectIdentifier(dataChannel)) {
+                close(reason: reason)
+                onEnded(reason)
+            }
         case .pointer, .scroll, .key, .text:
-            guard Self.acceptsDirectInput(
-                message,
-                helloAuthenticated: helloAuthenticated) else {
-                log.warning("dropping remote input received before authenticated hello")
+            invalidateChangedCaptureDisplay()
+            guard let session = inputAuthorization.admitInput(channel: ObjectIdentifier(dataChannel), stamp: packet.inputStamp),
+                  Self.acceptsDirectInput(message, helloAuthenticated: true) else {
+                log.warning("dropping remote input without a current authorized input session")
                 return
             }
-            onUserInput()
-            injector.apply(message)
+            if !injector.applyDirectInput(message, session: session, interruptAutomation: onUserInput) {
+                if let display = injector.takeDisplayInvalidation(for: session),
+                   let (owner, _) = try? captureStartParameters() {
+                    // Preserve a layout loss observed at posting even if the
+                    // display has already returned to its previous bounds.
+                    capture.invalidateDisplay(for: owner, matching: display)
+                }
+            }
         case let .qos(targetFps, maxBitrateKbps, prefer):
-            guard helloAuthenticated else {
+            guard inputAuthorization.inputSession(for: ObjectIdentifier(dataChannel)) != nil else {
                 log.warning("dropping video quality request received before authenticated hello")
                 return
             }

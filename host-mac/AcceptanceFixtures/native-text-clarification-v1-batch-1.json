@@ -1,0 +1,81 @@
+{
+  "schemaVersion": 1,
+  "scope": "First frozen explicit-clarification-input evaluation: initial requests, supplied answer states and one counterfactual constraint-retention probe. Proposal only, no desktop effects or client/host continuation qualification. Preselected batch 1/4.",
+  "cases": [
+    {
+      "id": "Q901",
+      "prompt": "Put \"blue\" in a field.",
+      "fields": [
+        "Notes",
+        "Tag"
+      ],
+      "expectedDisposition": "clarification"
+    },
+    {
+      "id": "Q902",
+      "prompt": "Put \"blue\" in a field.",
+      "fields": [
+        "Notes",
+        "Tag"
+      ],
+      "expectedDisposition": "supported",
+      "allowedPlans": [
+        [
+          {
+            "field": 1,
+            "mode": "replaceAll",
+            "value": "blue"
+          }
+        ]
+      ],
+      "clarificationAnswers": [
+        {
+          "question": "Which field should I edit, and what exact text should it contain?",
+          "text": "Tag"
+        }
+      ]
+    },
+    {
+      "id": "Q903",
+      "prompt": "Replace Notes with an exact value.",
+      "fields": [
+        "Notes",
+        "Tag"
+      ],
+      "expectedDisposition": "clarification"
+    },
+    {
+      "id": "Q904",
+      "prompt": "Replace Notes with an exact value.",
+      "fields": [
+        "Notes",
+        "Tag"
+      ],
+      "expectedDisposition": "supported",
+      "allowedPlans": [
+        [
+          {
+            "field": 0,
+            "mode": "replaceAll",
+            "value": "Oslo"
+          }
+        ]
+      ],
+      "clarificationAnswers": [
+        {
+          "question": "Which field should I edit, and what exact text should it contain?",
+          "text": "Oslo"
+        }
+      ]
+    },
+    {
+      "id": "Q905",
+      "prompt": "Append \" +\" to a field.",
+      "fields": [
+        "Notes",
+        "Tag"
+      ],
+      "expectedDisposition": "clarification"
+    }
+  ]
+}

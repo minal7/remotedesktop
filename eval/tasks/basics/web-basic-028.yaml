@@ -1,0 +1,8 @@
+id: "web-basic-028"
+surface: web
+start: {"url":"http://127.0.0.1:8765/controls.html"}
+prompt: "Search the catalog for atlas and confirm the matching item remains visible."
+checker: {"type":"dom","expect":[{"selector":"#search","value":"atlas"},{"selector":"#results","text":"Coastal atlas"},{"selector":"#result-2","visible":true}],"url_prefix":"http://127.0.0.1:8765/"}
+max_steps: 10
+tags: ["search","filter"]
+approval_policy: {"allow_fixture_interaction":true}

@@ -6,13 +6,16 @@ struct MenuContent: View {
     @EnvironmentObject private var session: HostSession
     private let openSetup: () -> Void
     private let openSettings: () -> Void
+    private let dismissPopover: () -> Void
 
     init(
         openSetup: @escaping () -> Void = {},
-        openSettings: @escaping () -> Void = {}
+        openSettings: @escaping () -> Void = {},
+        dismissPopover: @escaping () -> Void = {}
     ) {
         self.openSetup = openSetup
         self.openSettings = openSettings
+        self.dismissPopover = dismissPopover
     }
 
     var body: some View {
@@ -21,7 +24,7 @@ struct MenuContent: View {
             Divider()
             content
             Divider()
-            ComputerUseHostSection(manager: session.computerUse)
+            ComputerUseHostSection(manager: session.computerUse, dismissPopover: dismissPopover)
         }
         .padding(16)
         .frame(width: 340)
@@ -163,6 +166,7 @@ struct MenuContent: View {
 
 private struct ComputerUseHostSection: View {
     @ObservedObject var manager: HostComputerUseManager
+    let dismissPopover: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -195,6 +199,26 @@ private struct ComputerUseHostSection: View {
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
+
+            if let controls = manager.localTaskControls {
+                HStack {
+                    if controls.phase == .paused {
+                        Button("Let AI continue") {
+                            dismissPopover()
+                            manager.requestLocalTaskControl(.resume, displayed: controls)
+                        }
+                        .disabled(!controls.canResume)
+                    } else {
+                        Button("Take control") {
+                            manager.requestLocalTaskControl(.takeControl, displayed: controls)
+                        }
+                    }
+                    Spacer(minLength: 8)
+                    Button("Stop AI", role: .destructive) {
+                        manager.requestLocalTaskControl(.stop, displayed: controls)
+                    }
+                }
+            }
         }
         .accessibilityElement(children: .contain)
     }
@@ -217,7 +241,7 @@ private struct ComputerUseHostSection: View {
     private var supportingText: String? {
         switch manager.capability.state {
         case .ready:
-            return nil
+            return manager.capability.detail
         case .busy, .paused:
             return manager.capability.detail
         case .installing:

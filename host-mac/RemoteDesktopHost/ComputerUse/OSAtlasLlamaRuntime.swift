@@ -1,7 +1,10 @@
 import Darwin
 import CryptoKit
+import CoreFoundation
 import Foundation
 import ImageIO
+import MemoryStoreKit
+import os
 
 @_silgen_name("flock")
 private func osAtlasRuntimeFlock(
@@ -60,20 +63,29 @@ struct OSAtlasLlamaRuntimeInputs: Equatable, Sendable {
     }
 }
 
-struct OSAtlasLlamaEndpoint: Equatable, Sendable {
-    let generation: UInt64
-    let variant: OSAtlasModelVariant
-    let baseURL: URL
-    let bearerToken: String
+/// Resolved data-only text installation and signed bundled executable. Model
+/// checksum and executable trust remain the installer's responsibility.
+struct ComputerUseNativeTextRuntimeInputs: Equatable, Sendable {
+    static let modelAlias = "native-form-planner-v2"
+    static let contextTokens = 6_144
+    let modelURL: URL
+    let llamaServerURL: URL
+    let expectedModelFileName: String
+
+    init(modelURL: URL, llamaServerURL: URL,
+         expectedModelFileName: String = "Qwen3.5-4B-Q4_K_M.gguf") {
+        self.modelURL = modelURL.standardizedFileURL
+        self.llamaServerURL = llamaServerURL.standardizedFileURL
+        self.expectedModelFileName = expectedModelFileName
+    }
 }
 
-/// Host-only discriminator for semantic prompt/tool contracts. This value is
-/// intentionally absent from the OpenAI-compatible JSON body: the host uses
-/// it to reject a request whose frozen schema does not match the installed
-/// served-model alias before any model switch, tokenization, or completion.
-enum OSAtlasLlamaSemanticContract: Equatable, Sendable {
-    case nativeRoutingV4
-    case candidateSelectionV5
+struct OSAtlasLlamaEndpoint: Equatable, Sendable {
+    let generation: UInt64
+    /// Nil for the independent text planner; never label it as OS-Atlas.
+    let variant: OSAtlasModelVariant?
+    let baseURL: URL
+    let bearerToken: String
 }
 
 /// Stable, application-owned router identifiers. Callers never provide model
@@ -82,159 +94,6 @@ enum OSAtlasLlamaSemanticContract: Equatable, Sendable {
 enum OSAtlasLlamaServedModel: String, CaseIterable, Equatable, Hashable, Sendable {
     case visualGrounder = "visual-grounder-v1"
     case semanticRouter = "semantic-router-v1"
-
-    var semanticContract: OSAtlasLlamaSemanticContract? {
-        switch self {
-        case .visualGrounder:
-            return nil
-        case .semanticRouter:
-            return .nativeRoutingV4
-        }
-    }
-}
-
-/// A deliberately small JSON value used for native-tool parameter schemas.
-/// Keeping this typed prevents the semantic layer from passing arbitrary
-/// Foundation objects or pre-encoded request bodies through the runtime.
-indirect enum OSAtlasLlamaJSONValue: Codable, Equatable, Sendable {
-    case object([String: Self])
-    case array([Self])
-    case string(String)
-    case number(Double)
-    case boolean(Bool)
-    case null
-
-    init(from decoder: Decoder) throws {
-        let container = try decoder.singleValueContainer()
-        if container.decodeNil() {
-            self = .null
-        } else if let value = try? container.decode(Bool.self) {
-            self = .boolean(value)
-        } else if let value = try? container.decode(Double.self) {
-            self = .number(value)
-        } else if let value = try? container.decode(String.self) {
-            self = .string(value)
-        } else if let value = try? container.decode([Self].self) {
-            self = .array(value)
-        } else {
-            self = .object(try container.decode([String: Self].self))
-        }
-    }
-
-    func encode(to encoder: Encoder) throws {
-        var container = encoder.singleValueContainer()
-        switch self {
-        case .object(let value):
-            try container.encode(value)
-        case .array(let value):
-            try container.encode(value)
-        case .string(let value):
-            try container.encode(value)
-        case .number(let value):
-            try container.encode(value)
-        case .boolean(let value):
-            try container.encode(value)
-        case .null:
-            try container.encodeNil()
-        }
-    }
-}
-
-struct OSAtlasLlamaSemanticMessage: Codable, Equatable, Sendable {
-    enum Role: String, Codable, Equatable, Sendable {
-        case system
-        case user
-        case assistant
-    }
-
-    let role: Role
-    let content: String
-}
-
-struct OSAtlasLlamaSemanticTool: Equatable, Sendable {
-    let name: String
-    let description: String
-    let parameters: OSAtlasLlamaJSONValue
-}
-
-/// Model-neutral input for one native-tool semantic routing request. The
-/// runtime supplies the fixed model ID, deterministic sampling values,
-/// required tool choice, and non-streaming policy.
-struct OSAtlasLlamaSemanticRequest: Equatable, Sendable {
-    static let maximumMessages = 16
-    static let maximumMessageBytes = 64 * 1_024
-    static let maximumTools = 64
-    static let maximumToolDescriptionBytes = 4 * 1_024
-    static let maximumGeneratedTokens = 256
-
-    let contract: OSAtlasLlamaSemanticContract
-    let messages: [OSAtlasLlamaSemanticMessage]
-    let tools: [OSAtlasLlamaSemanticTool]
-    let maxTokens: Int
-
-    init(
-        contract: OSAtlasLlamaSemanticContract,
-        messages: [OSAtlasLlamaSemanticMessage],
-        tools: [OSAtlasLlamaSemanticTool],
-        maxTokens: Int = Self.maximumGeneratedTokens
-    ) {
-        self.contract = contract
-        self.messages = messages
-        self.tools = tools
-        self.maxTokens = maxTokens
-    }
-
-    /// Binds the caller's host-only discriminator to the exact frozen prompt
-    /// and native-tool surface. The tag alone is not authority: a request with
-    /// V5 messages/tools relabeled as V4 must fail before model switching,
-    /// tokenization, or completion.
-    func matchesFrozenShape(
-        for servedContract: OSAtlasLlamaSemanticContract
-    ) -> Bool {
-        guard contract == servedContract,
-              messages.count == 2,
-              messages[0].role == .system,
-              messages[1].role == .user else {
-            return false
-        }
-        switch servedContract {
-        case .nativeRoutingV4:
-            guard messages[0].content == LlamaSemanticActionRouter.systemPrompt,
-                  maxTokens == Self.maximumGeneratedTokens else {
-                return false
-            }
-            let names = tools.map(\.name)
-            let allowedOrder = SemanticNativeToolWireContract
-                .canonicalToolNames
-                + [SemanticNativeToolWireContract.evaluatorAbstainName]
-            let offered = Set(names)
-            guard !names.isEmpty,
-                  offered.count == names.count,
-                  names == allowedOrder.filter(offered.contains),
-                  names.last
-                    == SemanticNativeToolWireContract.evaluatorAbstainName else {
-                return false
-            }
-            for tool in tools {
-                guard let definition = SemanticNativeToolWireContract
-                        .definition(named: tool.name),
-                      let parameters = try? LlamaSemanticActionRouter
-                        .llamaJSON(definition.inputSchema),
-                      tool == OSAtlasLlamaSemanticTool(
-                        name: definition.name,
-                        description: definition.description,
-                        parameters: parameters) else {
-                    return false
-                }
-            }
-            return true
-        case .candidateSelectionV5:
-            return messages[0].content
-                    == SemanticCandidateSelectionV5.systemPrompt
-                && maxTokens == SemanticCandidateSelectionV5.maximumTokens
-                && SemanticCandidateSelectionV5.matchesRuntimeTools(tools)
-        }
-    }
 }
 
 /// Hardware-aware limits for the one-at-a-time local visual runtime. The
@@ -266,6 +125,20 @@ struct OSAtlasLlamaResourceProfile: Equatable, Sendable {
         physicalBatchSize: 128,
         maximumResidentMemoryBytes: 8 * 1_024 * 1_024 * 1_024,
         minimumLaunchMemoryBytes: 6 * 1_024 * 1_024 * 1_024,
+        minimumInferenceMemoryBytes: 2 * 1_024 * 1_024 * 1_024)
+
+    // The native-format trial used this context/batch size. Retain the existing
+    // compact memory ceiling until managed physical-footprint evidence exists.
+    static let fara = OSAtlasLlamaResourceProfile(
+        tier: .compact, contextSize: 8_192, logicalBatchSize: 512, physicalBatchSize: 128,
+        maximumResidentMemoryBytes: 4 * 1_024 * 1_024 * 1_024,
+        minimumLaunchMemoryBytes: 4 * 1_024 * 1_024 * 1_024,
+        minimumInferenceMemoryBytes: 1 * 1_024 * 1_024 * 1_024)
+
+    static let agentVision = OSAtlasLlamaResourceProfile(
+        tier: .compact, contextSize: 16_384, logicalBatchSize: 512, physicalBatchSize: 128,
+        maximumResidentMemoryBytes: 12 * 1_024 * 1_024 * 1_024,
+        minimumLaunchMemoryBytes: 8 * 1_024 * 1_024 * 1_024,
         minimumInferenceMemoryBytes: 2 * 1_024 * 1_024 * 1_024)
 
     let tier: Tier
@@ -309,6 +182,10 @@ struct OSAtlasLlamaRouterPreset: Equatable, Sendable {
         let boundedWorkerSettings = [
             "threads = \(OSAtlasLlamaLaunchConfiguration.workerThreads)",
             "threads-batch = \(OSAtlasLlamaLaunchConfiguration.workerThreads)",
+            // Each child has its own CPU pools; router flags alone would not
+            // establish the worker's wait policy.
+            "poll = 0",
+            "poll-batch = 0",
             "parallel = 1",
             "no-cont-batching = true",
             "batch-size = \(resourceProfile.logicalBatchSize)",
@@ -368,13 +245,27 @@ struct OSAtlasLlamaRouterPreset: Equatable, Sendable {
 /// launch configuration so the launcher can verify the file immediately
 /// before executing llama-server, then the lifecycle owner deletes it only
 /// after the full process tree has exited.
-struct OSAtlasLlamaRouterPresetFile: Equatable, Sendable {
+typealias OSAtlasLlamaRouterPresetFile = OSAtlasLlamaPrivateFile
+
+struct OSAtlasLlamaPrivateFile: Equatable, Sendable {
     let directoryURL: URL
     let fileURL: URL
     let expectedContents: Data
 
     static func create(_ preset: OSAtlasLlamaRouterPreset) throws -> Self {
         try preset.validate()
+        return try create(bytes: Data(preset.contents.utf8), fileName: "models.ini")
+    }
+
+    static func authentication(token: String) throws -> Self {
+        guard (16...256).contains(token.utf8.count),
+              token.unicodeScalars.allSatisfy({ (33...126).contains($0.value) }) else {
+            throw OSAtlasLlamaRuntimeError.invalidLocalInstallation
+        }
+        return try create(bytes: Data(token.utf8), fileName: "api-key")
+    }
+
+    private static func create(bytes: Data, fileName: String) throws -> Self {
         let fileManager = FileManager.default
         let directory = fileManager.temporaryDirectory
             .appendingPathComponent(
@@ -385,8 +276,7 @@ struct OSAtlasLlamaRouterPresetFile: Equatable, Sendable {
                 at: directory,
                 withIntermediateDirectories: false,
                 attributes: [.posixPermissions: 0o700])
-            let file = directory.appendingPathComponent("models.ini")
-            let bytes = Data(preset.contents.utf8)
+            let file = directory.appendingPathComponent(fileName)
             try bytes.write(to: file, options: .atomic)
             try fileManager.setAttributes(
                 [.posixPermissions: 0o600],
@@ -440,6 +330,15 @@ struct OSAtlasLlamaRouterPresetFile: Equatable, Sendable {
 
 struct OSAtlasLlamaLaunchConfiguration: Equatable, Sendable {
     static let host = "127.0.0.1"
+    static let defaultTrainedVisionImageTokensPerScreenshot = 1_536
+    static func trainedVisionImageTokensPerScreenshot(for model: AgentPolicyModel) -> Int {
+        model == .fara15_4b
+            ? ComputerUseFaraModel.contextImageTokensPerScreenshot
+            : defaultTrainedVisionImageTokensPerScreenshot
+    }
+    static func reservedAgentImageTokens(imageCount: Int, for model: AgentPolicyModel) -> Int {
+        imageCount * trainedVisionImageTokensPerScreenshot(for: model)
+    }
     static let maximumGeneratedTokens = 256
     static let imageTokensPerScreenshot = 256
     static let workerThreads = 4
@@ -458,11 +357,14 @@ struct OSAtlasLlamaLaunchConfiguration: Equatable, Sendable {
     let executableURL: URL
     let workingDirectoryURL: URL
     let modelFirstSplitURL: URL
-    let multimodalProjectorURL: URL
+    let multimodalProjectorURL: URL?
     let port: UInt16
     let bearerToken: String
     let resourceProfile: OSAtlasLlamaResourceProfile
     let routerPresetFile: OSAtlasLlamaRouterPresetFile?
+    let authenticationFile: OSAtlasLlamaPrivateFile?
+    private let trainedVisionAlias: String?
+    private let isMemoryEmbedding: Bool
 
     init(
         executableURL: URL,
@@ -481,6 +383,9 @@ struct OSAtlasLlamaLaunchConfiguration: Equatable, Sendable {
         self.bearerToken = bearerToken
         self.resourceProfile = resourceProfile
         routerPresetFile = nil
+        authenticationFile = nil
+        trainedVisionAlias = nil
+        isMemoryEmbedding = false
     }
 
     init(
@@ -501,9 +406,141 @@ struct OSAtlasLlamaLaunchConfiguration: Equatable, Sendable {
         self.bearerToken = bearerToken
         self.resourceProfile = resourceProfile
         self.routerPresetFile = routerPresetFile
+        authenticationFile = nil
+        trainedVisionAlias = nil
+        isMemoryEmbedding = false
+    }
+
+    init(nativeTextInputs: ComputerUseNativeTextRuntimeInputs,
+         port: UInt16, bearerToken: String,
+         authenticationFile: OSAtlasLlamaPrivateFile) {
+        executableURL = nativeTextInputs.llamaServerURL
+        workingDirectoryURL = nativeTextInputs.llamaServerURL.deletingLastPathComponent()
+        modelFirstSplitURL = nativeTextInputs.modelURL
+        multimodalProjectorURL = nil
+        self.port = port
+        self.bearerToken = bearerToken
+        resourceProfile = .compact
+        routerPresetFile = nil
+        self.authenticationFile = authenticationFile
+        trainedVisionAlias = nil
+        isMemoryEmbedding = false
+    }
+
+    init(memoryEmbeddingInputs: PersonalMemoryRuntimeInputs, port: UInt16, bearerToken: String,
+         authenticationFile: OSAtlasLlamaPrivateFile) {
+        executableURL = memoryEmbeddingInputs.llamaServerURL
+        workingDirectoryURL = memoryEmbeddingInputs.llamaServerURL.deletingLastPathComponent()
+        modelFirstSplitURL = memoryEmbeddingInputs.modelURL
+        multimodalProjectorURL = nil
+        self.port = port
+        self.bearerToken = bearerToken
+        resourceProfile = .compact
+        routerPresetFile = nil
+        self.authenticationFile = authenticationFile
+        trainedVisionAlias = nil
+        isMemoryEmbedding = true
+    }
+
+    init(faraInputs: ComputerUseFaraRuntimeInputs, port: UInt16, bearerToken: String,
+         authenticationFile: OSAtlasLlamaPrivateFile) {
+        executableURL = faraInputs.llamaServerURL
+        workingDirectoryURL = faraInputs.llamaServerURL.deletingLastPathComponent()
+        modelFirstSplitURL = faraInputs.modelURL
+        multimodalProjectorURL = faraInputs.projectorURL
+        self.port = port; self.bearerToken = bearerToken
+        resourceProfile = .fara
+        routerPresetFile = nil
+        self.authenticationFile = authenticationFile
+        trainedVisionAlias = ComputerUseFaraRuntimeInputs.modelAlias
+        isMemoryEmbedding = false
+    }
+
+    init(agentVisionInputs: AgentVisionRuntimeInputs, port: UInt16, bearerToken: String,
+         authenticationFile: OSAtlasLlamaPrivateFile) {
+        executableURL = agentVisionInputs.llamaServerURL
+        workingDirectoryURL = agentVisionInputs.llamaServerURL.deletingLastPathComponent()
+        modelFirstSplitURL = agentVisionInputs.modelURL
+        multimodalProjectorURL = agentVisionInputs.projectorURL
+        self.port = port
+        self.bearerToken = bearerToken
+        resourceProfile = .agentVision
+        routerPresetFile = nil
+        self.authenticationFile = authenticationFile
+        trainedVisionAlias = agentVisionInputs.runtimeAlias
+        isMemoryEmbedding = false
+    }
+
+    init(holoInputs: ComputerUseHoloRuntimeInputs, port: UInt16, bearerToken: String,
+         authenticationFile: OSAtlasLlamaPrivateFile, resourceProfile: OSAtlasLlamaResourceProfile = .fara) {
+        executableURL = holoInputs.llamaServerURL
+        workingDirectoryURL = holoInputs.llamaServerURL.deletingLastPathComponent()
+        modelFirstSplitURL = holoInputs.modelURL
+        multimodalProjectorURL = holoInputs.projectorURL
+        self.port = port; self.bearerToken = bearerToken
+        self.resourceProfile = resourceProfile
+        routerPresetFile = nil
+        self.authenticationFile = authenticationFile
+        trainedVisionAlias = ComputerUseHoloModel.modelAlias
+        isMemoryEmbedding = false
     }
 
     var arguments: [String] {
+        if isMemoryEmbedding, let authenticationFile {
+            return [
+                "--model", modelFirstSplitURL.path,
+                "--host", Self.host, "--port", String(port),
+                "--api-key-file", authenticationFile.fileURL.path,
+                "--embedding", "--pooling", "mean",
+                "--offline", "--no-ui", "--log-disable",
+                "--parallel", "1", "--ctx-size", String(PersonalMemoryRuntimeInputs.contextTokens),
+                "--no-context-shift", "--cache-ram", "0", "--ctx-checkpoints", "0",
+                "--no-cache-idle-slots",
+                "--batch-size", String(PersonalMemoryRuntimeInputs.maximumEmbeddingInputTokens),
+                "--ubatch-size", String(PersonalMemoryRuntimeInputs.maximumEmbeddingInputTokens),
+                "--threads", String(Self.workerThreads), "--threads-batch", String(Self.workerThreads),
+                "--poll", "0", "--poll-batch", "0", "--n-gpu-layers", "99",
+            ]
+        }
+        if let trainedVisionAlias, let authenticationFile, let multimodalProjectorURL {
+            let isAgentFara = trainedVisionAlias == ComputerUseFaraRuntimeInputs.modelAlias
+                && resourceProfile == .agentVision
+            let imageTokensPerScreenshot = trainedVisionAlias == ComputerUseFaraRuntimeInputs.modelAlias
+                ? Self.trainedVisionImageTokensPerScreenshot(for: .fara15_4b)
+                : Self.defaultTrainedVisionImageTokensPerScreenshot
+            var arguments = [
+                "--model", modelFirstSplitURL.path, "--mmproj", multimodalProjectorURL.path,
+                "--alias", trainedVisionAlias,
+                "--host", Self.host, "--port", String(port), "--api-key-file", authenticationFile.fileURL.path,
+                "--offline", "--no-ui", "--log-disable", "--parallel", "1", "--no-cont-batching",
+                "--ctx-size", String(isAgentFara ? 16_384 : resourceProfile.contextSize), "--no-context-shift",
+                "--batch-size", String(resourceProfile.logicalBatchSize), "--ubatch-size", String(resourceProfile.physicalBatchSize),
+                "--cache-ram", "0", "--ctx-checkpoints", "0", "--no-cache-idle-slots",
+                "--threads", String(Self.workerThreads), "--threads-batch", String(Self.workerThreads),
+                "--poll", "0", "--poll-batch", "0", "--n-gpu-layers", "99",
+                "--image-max-tokens", String(imageTokensPerScreenshot),
+                "--mtmd-batch-max-tokens", String(ComputerUseFaraModel.contextImageBatchTokens), "--jinja",
+            ]
+            if isAgentFara {
+                arguments += ["--flash-attn", "on", "--cache-type-k", "f16", "--cache-type-v", "f16"]
+            }
+            return arguments
+        }
+        if let authenticationFile {
+            // The Qwen3.5 form configuration, without a projector or
+            // visual template. Its credential remains in an owner-only file.
+            return [
+                "--model", modelFirstSplitURL.path,
+                "--alias", ComputerUseNativeTextRuntimeInputs.modelAlias,
+                "--host", Self.host, "--port", String(port),
+                "--api-key-file", authenticationFile.fileURL.path,
+                "--offline", "--no-ui", "--no-mmproj", "--log-disable",
+                "--parallel", "1", "--ctx-size", String(ComputerUseNativeTextRuntimeInputs.contextTokens), "--cache-ram", "0",
+                "--threads", String(Self.workerThreads), "--threads-batch", String(Self.workerThreads),
+                "--poll", "0", "--poll-batch", "0", "--n-gpu-layers", "99",
+                "--jinja", "--reasoning", "on", "--reasoning-budget", "512",
+            ]
+        }
         if let routerPresetFile {
             return [
                 "--host", Self.host,
@@ -519,7 +556,7 @@ struct OSAtlasLlamaLaunchConfiguration: Equatable, Sendable {
         }
         return [
             "--model", modelFirstSplitURL.path,
-            "--mmproj", multimodalProjectorURL.path,
+            "--mmproj", multimodalProjectorURL!.path,
             "--alias", OSAtlasLlamaServedModel.visualGrounder.rawValue,
             "--host", Self.host,
             "--port", String(port),
@@ -533,6 +570,11 @@ struct OSAtlasLlamaLaunchConfiguration: Equatable, Sendable {
             "--ubatch-size", String(resourceProfile.physicalBatchSize),
             "--threads", String(Self.workerThreads),
             "--threads-batch", String(Self.workerThreads),
+            // b9992 defaults to busy-wait level 50 between CPU graphs. Wake
+            // sleeping workers for real work instead of spending that budget
+            // polling, including in the separate prompt-processing pool.
+            "--poll", "0",
+            "--poll-batch", "0",
             "--parallel", "1",
             "--no-cont-batching",
             // One 448 px InternVL tile produces 256 image tokens. Keep both
@@ -646,8 +688,27 @@ protocol OSAtlasLlamaResourceInspecting: Sendable {
 }
 
 protocol OSAtlasLlamaServerProcess: Sendable {
+    var workerStopReason: OSAtlasLlamaWorkerStopReason? { get }
     func terminate() async
     func waitUntilExit() async throws
+}
+
+extension OSAtlasLlamaServerProcess {
+    var workerStopReason: OSAtlasLlamaWorkerStopReason? { nil }
+}
+
+enum OSAtlasLlamaWorkerStopReason: Equatable, Sendable, Codable {
+    case resourceLimit(observedBytes: UInt64, limitBytes: UInt64, observedProcesses: Int, limitProcesses: Int)
+    case inspectionFailed
+    case exited(status: Int32)
+    case signal(Int32)
+    case requested
+}
+
+struct OSAtlasLlamaWorkerStop: Equatable, Sendable, Codable {
+    let generation: UInt64
+    let reason: OSAtlasLlamaWorkerStopReason?
+    let cleanupSucceeded: Bool
 }
 
 protocol OSAtlasLlamaServerLaunching: Sendable {
@@ -775,7 +836,7 @@ struct OSAtlasProcessTreeController: Sendable {
     }
 }
 
-protocol OSAtlasLlamaHTTPTransport: Sendable {
+protocol OSAtlasLlamaHTTPTransport: ComputerUseTextModelTransport {
     func health(baseURL: URL, bearerToken: String) async throws -> Bool
     func modelIsHealthy(
         baseURL: URL,
@@ -804,6 +865,34 @@ protocol OSAtlasLlamaHTTPTransport: Sendable {
 
 protocol OSAtlasLlamaHTTPTransportMaking: Sendable {
     func makeTransport() -> any OSAtlasLlamaHTTPTransport
+    func makeTransport(observer: (any OSAtlasLlamaHTTPRequestObserver)?) -> any OSAtlasLlamaHTTPTransport
+}
+
+extension OSAtlasLlamaHTTPTransportMaking {
+    func makeTransport(observer: (any OSAtlasLlamaHTTPRequestObserver)?) -> any OSAtlasLlamaHTTPTransport {
+        makeTransport()
+    }
+}
+
+enum OSAtlasLlamaHTTPRequestKind: String, Sendable {
+    case applyTemplate = "apply_template"
+    case tokenize
+    case chatCompletion = "chat_completion"
+}
+
+enum OSAtlasLlamaHTTPOutcome: String, Sendable {
+    case completed
+    case httpError = "http_error"
+    case transportError = "transport_error"
+    case cancelled
+    case oversized
+}
+
+protocol OSAtlasLlamaHTTPRequestObserver: Sendable {
+    func willDispatch(id: UUID, kind: OSAtlasLlamaHTTPRequestKind, body: Data)
+    func didReadResponsePrefix(id: UUID, byteCount: Int)
+    func didFinish(id: UUID, outcome: OSAtlasLlamaHTTPOutcome,
+                   responseBody: Data?, responseComplete: Bool)
 }
 
 protocol OSAtlasLlamaPortProviding: Sendable {
@@ -822,6 +911,7 @@ enum OSAtlasLlamaRuntimeError: Error, LocalizedError, Equatable {
     case inactiveSession
     case invalidResponse
     case invalidVisionInput
+    case inputContextTooLarge
     case insufficientPhysicalMemory
     case insufficientAvailableMemory
     case resourceInspectionFailed
@@ -831,24 +921,102 @@ enum OSAtlasLlamaRuntimeError: Error, LocalizedError, Equatable {
         case .proModelRequired:
             return "OS-Atlas Pro 4B is required for AI Computer Use."
         case .invalidLocalInstallation:
-            return "The installed OS-Atlas runtime could not be verified. Choose Retry to repair it."
+            return "The installed local AI runtime could not be verified. Choose Retry to repair it."
         case .invalidEndpoint:
-            return "The local OS-Atlas endpoint was rejected because it was not loopback-only."
+            return "The local AI endpoint was rejected because it was not loopback-only."
         case .serverFailedToStart:
-            return "The local OS-Atlas model could not start."
+            return "The local AI model could not start."
         case .inactiveSession:
-            return "The local OS-Atlas model changed while this task was running. Please retry."
+            return "The local AI model changed while this task was running. Please retry."
         case .invalidResponse:
-            return "The local OS-Atlas model returned an invalid response, so no further action was performed. Any earlier completed steps remain on the Mac."
+            return "The local AI model returned an invalid response, so no further action was performed. Any earlier completed steps remain on the Mac."
         case .invalidVisionInput:
             return "The screenshot exceeded the safe local-model image limit, so no further action was performed. Any earlier completed steps remain on the Mac."
+        case .inputContextTooLarge:
+            return "The current task and screenshot exceed the local model's context limit, so no further action was performed. Any earlier completed steps remain on the Mac."
         case .insufficientPhysicalMemory:
-            return "AI Computer Use requires a Mac with at least 8 GB of memory."
+            return "This Mac does not have enough physical memory for the local AI model. Any earlier completed steps remain on the Mac."
         case .insufficientAvailableMemory:
-            return "There is not enough free memory for AI Computer Use. Close some apps, then choose Retry."
+            return "There is not enough available memory for AI Computer Use. Close some apps and try again. Any earlier completed steps remain on the Mac."
         case .resourceInspectionFailed:
-            return "The Mac could not verify that enough memory is available for AI Computer Use. Choose Retry."
+            return "The Mac could not verify that enough memory is available for AI Computer Use. Try again. Any earlier completed steps remain on the Mac."
         }
+    }
+}
+
+/// Serializes model access across actor suspension points. All ownership and
+/// queue state is protected by the lock; continuations always resume outside
+/// it. Cancellation can remove a queued request without touching the owner.
+final class OSAtlasModelAccessGate: @unchecked Sendable {
+    private struct Waiter {
+        let id: UUID
+        let continuation: CheckedContinuation<UUID, Error>
+    }
+    private enum Admission { case granted, queued, cancelled }
+    private let lock = NSLock()
+    private var owner: UUID?
+    private var waiters: [Waiter] = []
+
+    var queuedRequestCount: Int { lock.withLock { waiters.count } }
+
+    func acquire() async throws -> UUID {
+        let id = UUID()
+        let lease: UUID = try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                let admission = lock.withLock { () -> Admission in
+                    // Check inside the same critical section as registration.
+                    // Cancellation before registration cannot be lost between
+                    // an earlier check and inserting this continuation.
+                    guard !Task.isCancelled else { return .cancelled }
+                    if owner == nil {
+                        owner = id
+                        return .granted
+                    }
+                    waiters.append(Waiter(id: id, continuation: continuation))
+                    return .queued
+                }
+                switch admission {
+                case .granted: continuation.resume(returning: id)
+                case .queued: break
+                case .cancelled: continuation.resume(throwing: CancellationError())
+                }
+            }
+        } onCancel: {
+            self.cancelQueuedRequest(id)
+        }
+        do {
+            // Release may have reserved the slot just before cancellation.
+            // Return that reservation before exposing it to model work.
+            try Task.checkCancellation()
+            return lease
+        } catch {
+            release(lease)
+            throw error
+        }
+    }
+
+    func release(_ lease: UUID) {
+        let next = lock.withLock { () -> Waiter? in
+            guard owner == lease else { return nil }
+            guard !waiters.isEmpty else {
+                owner = nil
+                return nil
+            }
+            let waiter = waiters.removeFirst()
+            // Reserve ownership before resuming. New callers cannot overtake
+            // the selected waiter, and an old release cannot clear its lease.
+            owner = waiter.id
+            return waiter
+        }
+        if let next { next.continuation.resume(returning: next.id) }
+    }
+
+    private func cancelQueuedRequest(_ id: UUID) {
+        let removed = lock.withLock { () -> Waiter? in
+            guard let index = waiters.firstIndex(where: { $0.id == id }) else { return nil }
+            return waiters.remove(at: index)
+        }
+        removed?.continuation.resume(throwing: CancellationError())
     }
 }
 
@@ -856,20 +1024,62 @@ enum OSAtlasLlamaRuntimeError: Error, LocalizedError, Equatable {
 /// stop-and-await activation boundary guarantees that Base and Pro are never
 /// resident at the same time.
 actor OSAtlasLlamaRuntime {
+    private static let resourceLog = Logger(
+        subsystem: "com.threadmark.remotedesktop.host", category: "ai-resources")
     static let shared = OSAtlasLlamaRuntime()
 
     private enum RuntimeInputs: Equatable, Sendable {
         case visual(OSAtlasLlamaRuntimeInputs)
+        case nativeText(ComputerUseNativeTextRuntimeInputs)
+        case memoryEmbedding(PersonalMemoryRuntimeInputs)
+        case fara(ComputerUseFaraRuntimeInputs)
+        case agentVision(AgentVisionRuntimeInputs)
+        case holo(ComputerUseHoloRuntimeInputs)
         case router(
             visual: OSAtlasLlamaRuntimeInputs,
             semanticModelURL: URL)
 
-        var visual: OSAtlasLlamaRuntimeInputs {
+        var visual: OSAtlasLlamaRuntimeInputs? {
             switch self {
             case .visual(let inputs), .router(let inputs, _):
                 return inputs
+            case .nativeText, .memoryEmbedding, .fara, .agentVision, .holo:
+                return nil
             }
         }
+
+        var nativeText: ComputerUseNativeTextRuntimeInputs? {
+            if case .nativeText(let inputs) = self { return inputs }
+            return nil
+        }
+
+        var memoryEmbedding: PersonalMemoryRuntimeInputs? {
+            if case .memoryEmbedding(let inputs) = self { return inputs }
+            return nil
+        }
+
+        var fara: ComputerUseFaraRuntimeInputs? {
+            if case .fara(let inputs) = self { return inputs }
+            return nil
+        }
+
+        var agentVision: AgentVisionRuntimeInputs? {
+            if case .agentVision(let inputs) = self { return inputs }
+            return nil
+        }
+
+        var agentPolicyModel: AgentPolicyModel? {
+            if let inputs = agentVision { return inputs.model }
+            if fara != nil { return .fara15_4b }
+            return nil
+        }
+
+        var holo: ComputerUseHoloRuntimeInputs? {
+            if case .holo(let inputs) = self { return inputs }
+            return nil
+        }
+
+        var isTrainedVision: Bool { fara != nil || agentVision != nil || holo != nil }
 
         var isRouter: Bool {
             if case .router = self { return true }
@@ -889,6 +1099,7 @@ actor OSAtlasLlamaRuntime {
         let process: any OSAtlasLlamaServerProcess
         let transport: any OSAtlasLlamaHTTPTransport
         let routerPresetFile: OSAtlasLlamaRouterPresetFile?
+        let authenticationFile: OSAtlasLlamaPrivateFile?
         var residentModels: Set<OSAtlasLlamaServedModel>
         /// Monotonically changes whenever the router's physically resident
         /// worker set changes. Executors use this as an optimistic-concurrency
@@ -920,6 +1131,11 @@ actor OSAtlasLlamaRuntime {
     private let resourceInspector: any OSAtlasLlamaResourceInspecting
     private let readinessAttempts: Int
     private let readinessDelay: Duration
+    /// Explicit diagnostic observer. Normal app composition retains no model
+    /// exchanges; callers receive bodies only, never authentication headers.
+    private let inspectFaraExchange: (@Sendable (Data, Data) -> Void)?
+    private let observeHTTPRequest: (any OSAtlasLlamaHTTPRequestObserver)?
+    private let personalMemoryClient: any PersonalMemoryRuntimeClient
     private let cachedHealthAttempts = 3
     private let cachedHealthDelay: Duration = .milliseconds(100)
     private var active: ActiveServer?
@@ -943,12 +1159,16 @@ actor OSAtlasLlamaRuntime {
     /// Inference and cached activation checks must not overlap a compact-model
     /// switch. Actor methods are reentrant at HTTP awaits, so an explicit lease
     /// keeps another request from unloading the worker currently completing.
-    private var modelAccessLease: UInt64?
-    private var nextModelAccessLease: UInt64 = 0
-    private var modelAccessWaiters: [CheckedContinuation<Void, Never>] = []
+    private let modelAccessGate = OSAtlasModelAccessGate()
 
-    init() {
-        launcher = FoundationOSAtlasLlamaServerLauncher()
+    init(launcher: any OSAtlasLlamaServerLaunching = FoundationOSAtlasLlamaServerLauncher(),
+         inspectFaraExchange: (@Sendable (Data, Data) -> Void)? = nil,
+         observeHTTPRequest: (any OSAtlasLlamaHTTPRequestObserver)? = nil,
+         personalMemoryClient: any PersonalMemoryRuntimeClient = LocalPersonalMemoryRuntimeClient()) {
+        self.launcher = launcher
+        self.inspectFaraExchange = inspectFaraExchange
+        self.observeHTTPRequest = observeHTTPRequest
+        self.personalMemoryClient = personalMemoryClient
         transportMaker = URLSessionOSAtlasTransportMaker()
         portProvider = LoopbackPortProvider()
         tokenProvider = RandomBearerTokenProvider()
@@ -964,9 +1184,15 @@ actor OSAtlasLlamaRuntime {
         tokenProvider: any OSAtlasLlamaTokenProviding,
         readinessAttempts: Int,
         readinessDelay: Duration,
-        resourceInspector: any OSAtlasLlamaResourceInspecting = DarwinOSAtlasLlamaResourceInspector()
+        resourceInspector: any OSAtlasLlamaResourceInspecting = DarwinOSAtlasLlamaResourceInspector(),
+        inspectFaraExchange: (@Sendable (Data, Data) -> Void)? = nil,
+        observeHTTPRequest: (any OSAtlasLlamaHTTPRequestObserver)? = nil,
+        personalMemoryClient: any PersonalMemoryRuntimeClient = LocalPersonalMemoryRuntimeClient()
     ) {
         self.launcher = launcher
+        self.inspectFaraExchange = inspectFaraExchange
+        self.observeHTTPRequest = observeHTTPRequest
+        self.personalMemoryClient = personalMemoryClient
         self.transportMaker = transportMaker
         self.portProvider = portProvider
         self.tokenProvider = tokenProvider
@@ -979,6 +1205,141 @@ actor OSAtlasLlamaRuntime {
         _ inputs: OSAtlasLlamaRuntimeInputs
     ) async throws -> OSAtlasLlamaEndpoint {
         try await activateResolved(.visual(inputs))
+    }
+
+    func activateNativeText(
+        _ inputs: ComputerUseNativeTextRuntimeInputs
+    ) async throws -> OSAtlasLlamaEndpoint {
+        try await activateResolved(.nativeText(inputs))
+    }
+
+    func activateMemoryEmbedding(
+        _ inputs: PersonalMemoryRuntimeInputs
+    ) async throws -> OSAtlasLlamaEndpoint {
+        try await activateResolved(.memoryEmbedding(inputs))
+    }
+
+    func embed(endpoint: OSAtlasLlamaEndpoint, text: String,
+               purpose: MemoryEmbeddingPurpose) async throws -> [Float] {
+        let lease = try await acquireModelAccessLease()
+        defer { releaseModelAccessLease(lease) }
+        try Task.checkCancellation()
+        guard let server = active, server.endpoint == endpoint,
+              server.inputs.memoryEmbedding != nil else {
+            throw OSAtlasLlamaRuntimeError.inactiveSession
+        }
+        let localEndpoint = try LlamaCppLocalEndpoint(
+            baseURL: endpoint.baseURL, bearerToken: endpoint.bearerToken)
+        do {
+            let vector = try await withTaskCancellationHandler {
+                try await personalMemoryClient.embed(endpoint: localEndpoint, text: text, purpose: purpose)
+            } onCancel: {
+                Task { await self.cancel(endpoint: endpoint) }
+            }
+            try Task.checkCancellation()
+            guard active?.endpoint == endpoint,
+                  active?.inputs.memoryEmbedding != nil else {
+                throw OSAtlasLlamaRuntimeError.inactiveSession
+            }
+            guard vector.count == PersonalMemoryRuntimeInputs.embeddingDimensions,
+                  vector.allSatisfy(\.isFinite), vector.contains(where: { $0 != 0 }) else {
+                throw OSAtlasLlamaRuntimeError.invalidResponse
+            }
+            return vector
+        } catch {
+            try await stopMemoryRequestEndpointAfterFailure(endpoint)
+            throw error
+        }
+    }
+
+    /// Counts the serialized memory context with the resident Fara planner
+    /// tokenizer. Nomic's tokenizer is never reported as planner tokens.
+    func countMemoryTokens(endpoint: OSAtlasLlamaEndpoint, context: String) async throws -> Int {
+        let lease = try await acquireModelAccessLease()
+        defer { releaseModelAccessLease(lease) }
+        try Task.checkCancellation()
+        guard let server = active, server.endpoint == endpoint,
+              server.inputs.agentVision?.model == .fara15_4b else {
+            throw OSAtlasLlamaRuntimeError.inactiveSession
+        }
+        let localEndpoint = try LlamaCppLocalEndpoint(
+            baseURL: endpoint.baseURL, bearerToken: endpoint.bearerToken)
+        let tokenizer = try LlamaCppTokenizerIdentity(
+            value: ComputerUseFaraRuntimeInputs.modelAlias,
+            addSpecialTokens: false, parseSpecialTokens: true)
+        do {
+            let count = try await withTaskCancellationHandler {
+                try await personalMemoryClient.countTokens(
+                    endpoint: localEndpoint, context: context, tokenizer: tokenizer)
+            } onCancel: {
+                Task { await self.cancel(endpoint: endpoint) }
+            }
+            try Task.checkCancellation()
+            guard active?.endpoint == endpoint,
+                  active?.inputs.agentVision?.model == .fara15_4b else {
+                throw OSAtlasLlamaRuntimeError.inactiveSession
+            }
+            guard (1...1_000_000).contains(count) else { throw OSAtlasLlamaRuntimeError.invalidResponse }
+            return count
+        } catch {
+            try await stopMemoryRequestEndpointAfterFailure(endpoint)
+            throw error
+        }
+    }
+
+    private func stopMemoryRequestEndpointAfterFailure(
+        _ endpoint: OSAtlasLlamaEndpoint
+    ) async throws {
+        await waitForLifecycleTransition()
+        guard active?.endpoint == endpoint else { return }
+        let result = await runLifecycleTransition(.stop, activationEpoch: nil)
+        if case .failure(let error) = result { throw error }
+    }
+
+    func activateFara(_ inputs: ComputerUseFaraRuntimeInputs) async throws -> OSAtlasLlamaEndpoint {
+        try await activateResolved(.fara(inputs))
+    }
+
+    func activateAgentVision(_ inputs: AgentVisionRuntimeInputs) async throws -> OSAtlasLlamaEndpoint {
+        try await activateResolved(.agentVision(inputs))
+    }
+
+    func ensureAgentVisionReady(_ inputs: AgentVisionRuntimeInputs) async -> String? {
+        do {
+            _ = try await activateAgentVision(inputs)
+            await shutdown()
+            return nil
+        } catch {
+            await shutdown()
+            return String(describing: error)
+        }
+    }
+
+    func activateHolo(_ inputs: ComputerUseHoloRuntimeInputs) async throws -> OSAtlasLlamaEndpoint {
+        try await activateResolved(.holo(inputs))
+    }
+
+    func proposeHolo(endpoint: OSAtlasLlamaEndpoint, input: ComputerUseFaraModel.Input) async throws -> ComputerUseFaraModel.Proposal {
+        let lease = try await acquireModelAccessLease()
+        defer { releaseModelAccessLease(lease) }
+        guard let server = active, server.endpoint == endpoint, server.inputs.holo != nil else {
+            throw OSAtlasLlamaRuntimeError.inactiveSession
+        }
+        do {
+            try validateResources(minimumReclaimableBytes: server.resourceProfile.minimumInferenceMemoryBytes)
+            let request = try ComputerUseHoloModel.makeRequest(endpoint: endpoint, input: input)
+            let data = try await withTaskCancellationHandler {
+                try await server.transport.complete(request: request)
+            } onCancel: {
+                Task { await self.cancel(endpoint: endpoint) }
+            }
+            try Task.checkCancellation()
+            guard active?.endpoint == endpoint else { throw OSAtlasLlamaRuntimeError.inactiveSession }
+            return try ComputerUseHoloModel.decode(data)
+        } catch {
+            if active?.endpoint == endpoint { try await stopActiveServerUnserialized() }
+            throw error
+        }
     }
 
     /// Starts one b9992 router process with exactly two generated presets.
@@ -996,11 +1357,24 @@ actor OSAtlasLlamaRuntime {
     private func activateResolved(
         _ inputs: RuntimeInputs
     ) async throws -> OSAtlasLlamaEndpoint {
-        let visualInputs = inputs.visual
-        guard visualInputs.variant == .pro4B else {
-            throw OSAtlasLlamaRuntimeError.proModelRequired
+        if let visualInputs = inputs.visual {
+            guard visualInputs.variant == .pro4B else {
+                throw OSAtlasLlamaRuntimeError.proModelRequired
+            }
+            try Self.validateLocalInputs(visualInputs)
+        } else if let textInputs = inputs.nativeText {
+            try Self.validateNativeTextInputs(textInputs)
+        } else if let memoryInputs = inputs.memoryEmbedding {
+            try Self.validateMemoryEmbeddingInputs(memoryInputs)
+        } else if let faraInputs = inputs.fara {
+            try Self.validateFaraInputs(faraInputs)
+        } else if let agentVisionInputs = inputs.agentVision {
+            try Self.validateAgentVisionInputs(agentVisionInputs)
+        } else if let holoInputs = inputs.holo {
+            try Self.validateTrainedVisionInputs(modelURL: holoInputs.modelURL, projectorURL: holoInputs.projectorURL,
+                llamaServerURL: holoInputs.llamaServerURL, modelFileName: ComputerUseHoloRuntimeInputs.modelFileName,
+                projectorFileName: ComputerUseHoloRuntimeInputs.projectorFileName)
         }
-        try Self.validateLocalInputs(visualInputs)
         if let semanticModelURL = inputs.semanticModelURL {
             try Self.validateSemanticModelURL(semanticModelURL)
         }
@@ -1098,7 +1472,7 @@ actor OSAtlasLlamaRuntime {
         prompt: String,
         jpegData: Data
     ) async throws -> String {
-        guard active?.endpoint == endpoint else {
+        guard active?.endpoint == endpoint, active?.inputs.visual != nil else {
             throw OSAtlasLlamaRuntimeError.inactiveSession
         }
         let modelAccessLease = try await acquireModelAccessLease()
@@ -1150,115 +1524,359 @@ actor OSAtlasLlamaRuntime {
         }
     }
 
-    /// Executes one deterministic native-tool request against the fixed
-    /// semantic worker and returns the raw OpenAI-compatible response bytes.
-    /// Strict tool-call decoding belongs to the semantic wire layer.
-    func completeSemantic(
-        endpoint: OSAtlasLlamaEndpoint,
-        request: OSAtlasLlamaSemanticRequest
-    ) async throws -> Data {
-        try await completeSemantic(
-            endpoint: endpoint,
-            candidateRequests: [request],
-            maximumInputTokens: LlamaSemanticActionRouter.maximumInputTokens)
+    /// Fara's native multimodal request uses the same serialized model owner.
+    /// No caller-supplied URL, action or model alias bypasses this boundary.
+    func proposeFara(endpoint: OSAtlasLlamaEndpoint, input: ComputerUseFaraModel.Input) async throws -> ComputerUseFaraModel.Proposal {
+        let lease = try await acquireModelAccessLease()
+        defer { releaseModelAccessLease(lease) }
+        guard let server = active, server.endpoint == endpoint, server.inputs.fara != nil else {
+            throw OSAtlasLlamaRuntimeError.inactiveSession
+        }
+        do {
+            try validateResources(minimumReclaimableBytes: server.resourceProfile.minimumInferenceMemoryBytes)
+            let proposal = try await withTaskCancellationHandler {
+                var preparedInput = input
+                var correctionUsed = false
+                while true {
+                    try Task.checkCancellation()
+                    guard active?.endpoint == endpoint else { throw OSAtlasLlamaRuntimeError.inactiveSession }
+                    // Validate the caller's complete history before any local copy is trimmed.
+                    let request = try ComputerUseFaraModel.makeRequest(endpoint: endpoint, input: preparedInput)
+                    let exactTokens = try await server.transport.exactInputTokenCount(completionRequest: request)
+                    try Task.checkCancellation()
+                    guard active?.endpoint == endpoint else { throw OSAtlasLlamaRuntimeError.inactiveSession }
+                    guard exactTokens > 0 else { throw OSAtlasLlamaRuntimeError.invalidResponse }
+                    let screenshotCount = preparedInput.surface == .desktop
+                        ? 1 : min(preparedInput.history.count, 2) + 1
+                    let reservedTokens = screenshotCount * ComputerUseFaraModel.contextImageTokensPerScreenshot
+                        + ComputerUseFaraModel.maximumCompletionTokens
+                        + ComputerUseFaraModel.contextSafetyReserveTokens
+                    let remainingBudget = server.resourceProfile.contextSize - reservedTokens
+                    if exactTokens > remainingBudget {
+                        guard !correctionUsed, !preparedInput.history.isEmpty else {
+                            throw OSAtlasLlamaRuntimeError.inputContextTooLarge
+                        }
+                        preparedInput.history.removeFirst()
+                        continue
+                    }
+                    try Task.checkCancellation()
+                    guard active?.endpoint == endpoint else { throw OSAtlasLlamaRuntimeError.inactiveSession }
+                    if correctionUsed {
+                        try validateResources(minimumReclaimableBytes: server.resourceProfile.minimumInferenceMemoryBytes)
+                    }
+                    let data = try await server.transport.complete(request: request)
+                    try Task.checkCancellation()
+                    guard active?.endpoint == endpoint else { throw OSAtlasLlamaRuntimeError.inactiveSession }
+                    if let body = request.httpBody { inspectFaraExchange?(body, data) }
+                    do {
+                        return try ComputerUseFaraModel.decode(data)
+                    } catch {
+                        // Only a complete, stopped assistant envelope with an invalid
+                        // action gets one bounded format correction. Never retry transport,
+                        // envelope, cancellation, or a second invalid action response.
+                        _ = try ComputerUseFaraModel.decodePageAnswer(data)
+                        guard !correctionUsed else { throw OSAtlasLlamaRuntimeError.invalidResponse }
+                        let feedback = "The previous proposal was rejected before execution; no input was sent. Return one supported action only. For type, use text and optional coordinates, and do not include keys. Enter must be a separate key proposal after an observation."
+                        let combined = [preparedInput.actionError, feedback]
+                            .compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: "\n")
+                        guard combined.utf8.count <= 16_384 else { throw OSAtlasLlamaRuntimeError.invalidResponse }
+                        preparedInput.actionError = combined
+                        correctionUsed = true
+                    }
+                }
+            } onCancel: {
+                Task { await self.cancel(endpoint: endpoint) }
+            }
+            try Task.checkCancellation()
+            guard active?.endpoint == endpoint else { throw OSAtlasLlamaRuntimeError.inactiveSession }
+            return proposal
+        } catch {
+            if active?.endpoint == endpoint { try await stopActiveServerUnserialized() }
+            throw error
+        }
     }
 
-    func completeSemantic(
-        endpoint: OSAtlasLlamaEndpoint,
-        candidateRequests: [OSAtlasLlamaSemanticRequest],
-        maximumInputTokens: Int
-    ) async throws -> Data {
-        guard active?.endpoint == endpoint else {
-            throw OSAtlasLlamaRuntimeError.inactiveSession
-        }
-        guard !candidateRequests.isEmpty,
-              maximumInputTokens > 0 else {
-            throw OSAtlasLlamaRuntimeError.invalidResponse
-        }
-        guard let servedContract = OSAtlasLlamaServedModel.semanticRouter
-                .semanticContract,
-              candidateRequests.allSatisfy({
-                  $0.matchesFrozenShape(for: servedContract)
-              }) else {
-            throw OSAtlasLlamaRuntimeError.invalidResponse
-        }
-        let modelAccessLease = try await acquireModelAccessLease()
-        defer { releaseModelAccessLease(modelAccessLease) }
-        guard let active,
-              active.endpoint == endpoint,
-              active.inputs.isRouter else {
+    /// Runs one native policy action through the active vision worker. It holds
+    /// the shared model lease through token counting and completion.
+    func completeAgentAction(endpoint: OSAtlasLlamaEndpoint, input: AgentVLMRequestInput) async throws -> String {
+        let lease = try await acquireModelAccessLease()
+        defer { releaseModelAccessLease(lease) }
+        guard let server = active, server.endpoint == endpoint,
+              server.inputs.agentPolicyModel == input.model else {
             throw OSAtlasLlamaRuntimeError.inactiveSession
         }
         do {
-            try validateResources(
-                minimumReclaimableBytes:
-                    active.resourceProfile.minimumInferenceMemoryBytes)
-        } catch {
-            try await stopActiveServerUnserialized()
-            throw error
-        }
-        do {
-            try await ensureModelResident(
-                .semanticRouter,
-                endpoint: endpoint,
-                server: active)
-            var selectedRequest: URLRequest?
-            for candidate in candidateRequests {
-                guard maximumInputTokens + candidate.maxTokens
-                        <= active.resourceProfile.contextSize else {
+            try validateResources(minimumReclaimableBytes: server.resourceProfile.minimumInferenceMemoryBytes)
+            let answer = try await withTaskCancellationHandler {
+                try Task.checkCancellation()
+                var preparedInput = input
+                var request: URLRequest
+                while true {
+                    try Task.checkCancellation()
+                    guard active?.endpoint == endpoint else { throw OSAtlasLlamaRuntimeError.inactiveSession }
+                    request = try OSAtlasLlamaHTTPClient.makeAgentActionRequest(endpoint: endpoint, input: preparedInput)
+                    let exactTokens = try await server.transport.exactInputTokenCount(completionRequest: request)
+                    try Task.checkCancellation()
+                    guard active?.endpoint == endpoint else { throw OSAtlasLlamaRuntimeError.inactiveSession }
+                    let reservedTokens = OSAtlasLlamaLaunchConfiguration.reservedAgentImageTokens(
+                        imageCount: preparedInput.imageCount, for: input.model)
+                        + OSAtlasLlamaHTTPClient.agentMaximumCompletionTokens
+                        + ComputerUseFaraModel.contextSafetyReserveTokens
+                    guard exactTokens > 0 else { throw OSAtlasLlamaRuntimeError.invalidResponse }
+                    if exactTokens <= server.resourceProfile.contextSize - reservedTokens { break }
+                    guard preparedInput.model == .fara15_4b,
+                          let trimmed = Self.trimNextAgentActionContext(preparedInput) else {
+                        throw OSAtlasLlamaRuntimeError.inputContextTooLarge
+                    }
+                    preparedInput = trimmed
+                }
+                try validateResources(minimumReclaimableBytes: server.resourceProfile.minimumInferenceMemoryBytes)
+                let data = try await server.transport.complete(request: request)
+                try Task.checkCancellation()
+                guard active?.endpoint == endpoint else { throw OSAtlasLlamaRuntimeError.inactiveSession }
+                if let body = request.httpBody { inspectFaraExchange?(body, data) }
+                guard data.count <= FaraPolicyAdapter.maximumCompletionBytes else {
                     throw OSAtlasLlamaRuntimeError.invalidResponse
                 }
-                let completionRequest = try OSAtlasLlamaHTTPClient
-                    .makeSemanticRequest(
-                        endpoint: endpoint,
-                        request: candidate)
-                let exactTokenCount = try await active.transport
-                    .exactInputTokenCount(
-                        completionRequest: completionRequest)
-                try Task.checkCancellation()
-                guard self.active?.endpoint == endpoint else {
-                    throw OSAtlasLlamaRuntimeError.inactiveSession
+                if input.model == .fara15_4b || input.model == .guiOwl15_4b {
+                    // Native model protocols live in assistant message content;
+                    // do not turn them into function/tool calls.
+                    return try OSAtlasLlamaHTTPClient.responseText(from: data)
                 }
-                if exactTokenCount <= maximumInputTokens {
-                    selectedRequest = completionRequest
-                    break
+                guard let completion = String(data: data, encoding: .utf8), !completion.isEmpty else {
+                    throw OSAtlasLlamaRuntimeError.invalidResponse
                 }
+                return completion
+            } onCancel: {
+                Task { await self.cancel(endpoint: endpoint) }
             }
-            guard let selectedRequest else {
-                throw OSAtlasLlamaRuntimeError.invalidResponse
-            }
-            let data = try await active.transport.complete(
-                request: selectedRequest)
             try Task.checkCancellation()
-            guard self.active?.endpoint == endpoint else {
-                throw OSAtlasLlamaRuntimeError.inactiveSession
-            }
-            // Compact hosts return to the visual worker before exposing a
-            // semantic route. Pointer grounding therefore never consumes a
-            // pre-switch screenshot, and non-pointer routes can be guarded by
-            // the residency-generation/fresh-observation check in the host.
-            if active.resourceProfile.maximumResidentModelWorkers == 1 {
-                try await ensureModelResident(
-                    .visualGrounder,
-                    endpoint: endpoint,
-                    server: active)
-            }
-            return data
-        } catch is CancellationError {
-            if self.active?.endpoint == endpoint {
-                try await stopActiveServerUnserialized()
-            }
-            throw CancellationError()
-        } catch let error as OSAtlasLlamaRuntimeError {
-            if self.active?.endpoint == endpoint {
-                try await stopActiveServerUnserialized()
-            }
-            throw error
+            guard active?.endpoint == endpoint else { throw OSAtlasLlamaRuntimeError.inactiveSession }
+            return answer
         } catch {
-            if self.active?.endpoint == endpoint {
-                try await stopActiveServerUnserialized()
+            if active?.endpoint == endpoint { try await stopActiveServerUnserialized() }
+            throw error
+        }
+    }
+
+    private static func trimNextAgentActionContext(_ input: AgentVLMRequestInput) -> AgentVLMRequestInput? {
+        var messages = input.messages
+        guard messages.count >= 2, let currentUser = messages.last, currentUser.role == .user else { return nil }
+
+        for index in messages.indices.dropFirst().dropLast() where messages[index].role == .user {
+            if let imageIndex = messages[index].content.firstIndex(where: {
+                if case .imagePNG = $0 { return true }
+                return false
+            }) {
+                var content = messages[index].content
+                content.remove(at: imageIndex)
+                guard !content.isEmpty else { return nil }
+                messages[index] = AgentVLMMessage(role: .user, content: content)
+                return AgentVLMRequestInput(messages: messages, modelAlias: input.modelAlias, model: input.model)
             }
-            throw OSAtlasLlamaRuntimeError.invalidResponse
+        }
+
+        if messages.count > 3, messages[1].role == .user, messages[2].role == .assistant {
+            messages.removeSubrange(1...2)
+            return AgentVLMRequestInput(messages: messages, modelAlias: input.modelAlias, model: input.model)
+        }
+
+        if let textIndex = currentUser.content.firstIndex(where: {
+            if case .text = $0 { return true }
+            return false
+        }), case .text(let text) = currentUser.content[textIndex],
+           let reduced = trimmingOlderFeedback(from: text), reduced != text {
+            var content = currentUser.content
+            content[textIndex] = .text(reduced)
+            messages[messages.count - 1] = AgentVLMMessage(role: .user, content: content)
+            return AgentVLMRequestInput(messages: messages, modelAlias: input.modelAlias, model: input.model)
+        }
+
+        guard let textIndex = currentUser.content.firstIndex(where: {
+            if case .text = $0 { return true }
+            return false
+        }), case .text(let text) = currentUser.content[textIndex],
+              let reduced = trimmingObservationMarks(from: text), reduced != text else { return nil }
+        var content = currentUser.content
+        content[textIndex] = .text(reduced)
+        messages[messages.count - 1] = AgentVLMMessage(role: .user, content: content)
+        return AgentVLMRequestInput(messages: messages, modelAlias: input.modelAlias, model: input.model)
+    }
+
+    private static func trimmingOlderFeedback(from text: String) -> String? {
+        let marker = "\n\nPrior proposal results:\n"
+        guard let range = text.range(of: marker) else { return nil }
+        let feedback = text[range.upperBound...]
+        let resultStart = feedback.range(of: "\nResult: ", options: .backwards)?.lowerBound
+        let proposalStart = feedback.range(of: "\nPrior proposal ", options: .backwards)?.lowerBound
+        guard let latestStart = [resultStart, proposalStart].compactMap({ $0 }).max() else { return nil }
+        return String(text[..<range.lowerBound]) + marker + String(feedback[latestStart...].dropFirst())
+    }
+
+    private static func trimmingObservationMarks(from text: String) -> String? {
+        let marker = "\n\nPrior proposal results:\n"
+        let observationText = text.components(separatedBy: marker).first ?? text
+        guard let data = observationText.data(using: .utf8),
+              var object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let elements = object["elements"] as? [[String: Any]], !elements.isEmpty else { return nil }
+        let focus = (object["focus"] as? [String: Any])?["id"] as? Int
+        func center(_ element: [String: Any]) -> (Double, Double)? {
+            guard let box = element["bbox"] as? [Double], box.count == 4 else { return nil }
+            return (box[0] + box[2] / 2, box[1] + box[3] / 2)
+        }
+        let focusCenter = elements.first(where: { $0["id"] as? Int == focus }).flatMap(center)
+        func priorityDistance(_ element: [String: Any]) -> Double {
+            guard let point = center(element) else { return .greatestFiniteMagnitude }
+            let target = focusCenter ?? (500.0, 500.0)
+            let dx = point.0 - target.0, dy = point.1 - target.1
+            return dx * dx + dy * dy
+        }
+        let ranked = elements.enumerated().sorted { lhs, rhs in
+            let leftDistance = priorityDistance(lhs.element)
+            let rightDistance = priorityDistance(rhs.element)
+            return leftDistance == rightDistance ? lhs.offset < rhs.offset : leftDistance < rightDistance
+        }
+        let retainedCount = elements.count > 2 ? max(2, elements.count * 3 / 4) : elements.count - 1
+        let retainedOffsets = Set(ranked.prefix(retainedCount).map(\.offset))
+        object["elements"] = elements.enumerated().compactMap { retainedOffsets.contains($0.offset) ? $0.element : nil }
+        guard JSONSerialization.isValidJSONObject(object),
+              let encoded = try? JSONSerialization.data(withJSONObject: object,
+                options: [.sortedKeys, .withoutEscapingSlashes]) else { return nil }
+        let suffix = text.range(of: marker).map { String(text[$0.lowerBound...]) } ?? ""
+        return String(decoding: encoded, as: UTF8.self) + suffix
+    }
+
+    /// Page extraction shares the action model's serialized owner and cancellation.
+    func readFaraPage(endpoint: OSAtlasLlamaEndpoint, reading: ComputerUseFaraModel.PageReading) async throws -> String {
+        let lease = try await acquireModelAccessLease()
+        defer { releaseModelAccessLease(lease) }
+        guard let server = active, server.endpoint == endpoint, server.inputs.fara != nil else {
+            throw OSAtlasLlamaRuntimeError.inactiveSession
+        }
+        do {
+            try validateResources(minimumReclaimableBytes: server.resourceProfile.minimumInferenceMemoryBytes)
+            let request = try ComputerUseFaraModel.makePageReadRequest(endpoint: endpoint, reading: reading)
+            let data = try await withTaskCancellationHandler {
+                try await server.transport.complete(request: request)
+            } onCancel: { Task { await self.cancel(endpoint: endpoint) } }
+            try Task.checkCancellation()
+            guard active?.endpoint == endpoint else { throw OSAtlasLlamaRuntimeError.inactiveSession }
+            if let body = request.httpBody { inspectFaraExchange?(body, data) }
+            return try ComputerUseFaraModel.decodePageAnswer(data)
+        } catch {
+            if active?.endpoint == endpoint { try await stopActiveServerUnserialized() }
+            throw error
+        }
+    }
+
+    /// Reviews a candidate against one current screenshot while retaining the
+    /// same serialized Fara model owner and resource/cancellation boundaries.
+    func reviewFaraOutcome(endpoint: OSAtlasLlamaEndpoint, input: ComputerUseFaraModel.Input,
+                           candidateAnswer: String) async throws -> ComputerUseFaraModel.OutcomeReview {
+        let lease = try await acquireModelAccessLease()
+        defer { releaseModelAccessLease(lease) }
+        guard let server = active, server.endpoint == endpoint, server.inputs.fara != nil else {
+            throw OSAtlasLlamaRuntimeError.inactiveSession
+        }
+        do {
+            try validateResources(minimumReclaimableBytes: server.resourceProfile.minimumInferenceMemoryBytes)
+            let request = try ComputerUseFaraModel.makeOutcomeReviewRequest(endpoint: endpoint, input: input,
+                candidateAnswer: candidateAnswer)
+            try Task.checkCancellation()
+            guard active?.endpoint == endpoint else { throw OSAtlasLlamaRuntimeError.inactiveSession }
+            let exactTokens = try await server.transport.exactInputTokenCount(completionRequest: request)
+            try Task.checkCancellation()
+            guard active?.endpoint == endpoint else { throw OSAtlasLlamaRuntimeError.inactiveSession }
+            guard exactTokens > 0 else { throw OSAtlasLlamaRuntimeError.invalidResponse }
+            let reservedTokens = ComputerUseFaraModel.contextImageTokensPerScreenshot + 512
+                + ComputerUseFaraModel.contextSafetyReserveTokens
+            guard server.resourceProfile.contextSize > reservedTokens else {
+                throw OSAtlasLlamaRuntimeError.inputContextTooLarge
+            }
+            guard exactTokens <= server.resourceProfile.contextSize - reservedTokens else {
+                throw OSAtlasLlamaRuntimeError.inputContextTooLarge
+            }
+            try validateResources(minimumReclaimableBytes: server.resourceProfile.minimumInferenceMemoryBytes)
+            try Task.checkCancellation()
+            guard active?.endpoint == endpoint else { throw OSAtlasLlamaRuntimeError.inactiveSession }
+            let data = try await withTaskCancellationHandler {
+                try await server.transport.complete(request: request)
+            } onCancel: {
+                Task { await self.cancel(endpoint: endpoint) }
+            }
+            try Task.checkCancellation()
+            guard active?.endpoint == endpoint else { throw OSAtlasLlamaRuntimeError.inactiveSession }
+            if let body = request.httpBody { inspectFaraExchange?(body, data) }
+            return try ComputerUseFaraModel.decodeOutcomeReview(data)
+        } catch {
+            if active?.endpoint == endpoint { try await stopActiveServerUnserialized() }
+            throw error
+        }
+    }
+
+    /// Holds the owner's model lease across template/tokenization, inference
+    /// and strict decoding. Callers supply a goal and field snapshot, never a
+    /// raw model request or a second independently owned server.
+    /// Keeps the native model lease through exact token counting, inference
+    /// and strict goal decoding. A goal proposal cannot authorize any effect.
+    func proposeDefaultBrowserControl(endpoint: OSAtlasLlamaEndpoint,
+        input: ComputerUseFaraModel.Input,
+        page: ComputerUseDefaultBrowserPageReader.Observation,
+        inspectExchange: (@Sendable (Data, Data) -> Void)? = nil
+    ) async throws -> ComputerUseDefaultBrowserControlPlan {
+        try Task.checkCancellation()
+        let lease = try await acquireModelAccessLease()
+        defer { releaseModelAccessLease(lease) }
+        guard let server = active, server.endpoint == endpoint, server.inputs.nativeText != nil else {
+            throw OSAtlasLlamaRuntimeError.inactiveSession
+        }
+        do {
+            try validateResources(minimumReclaimableBytes: server.resourceProfile.minimumInferenceMemoryBytes)
+            let connection = try ComputerUseTextModelConnection(baseURL: endpoint.baseURL,
+                bearerToken: endpoint.bearerToken, modelAlias: ComputerUseNativeTextRuntimeInputs.modelAlias)
+            let planner = ComputerUseLocalDefaultBrowserControlPlanner(connection: connection, transport: server.transport,
+                inspectExchange: inspectExchange)
+            let plan = try await withTaskCancellationHandler {
+                try await planner.propose(input: input, page: page)
+            } onCancel: {
+                Task { await self.cancel(endpoint: endpoint) }
+            }
+            try Task.checkCancellation()
+            guard active?.endpoint == endpoint else { throw OSAtlasLlamaRuntimeError.inactiveSession }
+            return plan
+        } catch {
+            if active?.endpoint == endpoint { try await stopActiveServerUnserialized() }
+            throw error
+        }
+    }
+
+    func proposeDefaultBrowserBootstrap(endpoint: OSAtlasLlamaEndpoint,
+        input: ComputerUseFaraModel.Input,
+        inspectExchange: (@Sendable (Data, Data) -> Void)? = nil
+    ) async throws -> ComputerUseDefaultBrowserControlPlan {
+        try Task.checkCancellation()
+        let lease = try await acquireModelAccessLease()
+        defer { releaseModelAccessLease(lease) }
+        guard let server = active, server.endpoint == endpoint, server.inputs.nativeText != nil else {
+            throw OSAtlasLlamaRuntimeError.inactiveSession
+        }
+        do {
+            try validateResources(minimumReclaimableBytes: server.resourceProfile.minimumInferenceMemoryBytes)
+            let connection = try ComputerUseTextModelConnection(baseURL: endpoint.baseURL,
+                bearerToken: endpoint.bearerToken, modelAlias: ComputerUseNativeTextRuntimeInputs.modelAlias)
+            let planner = ComputerUseLocalDefaultBrowserControlPlanner(connection: connection, transport: server.transport,
+                inspectExchange: inspectExchange)
+            let plan = try await withTaskCancellationHandler {
+                try await planner.proposeBootstrap(input: input)
+            } onCancel: {
+                Task { await self.cancel(endpoint: endpoint) }
+            }
+            try Task.checkCancellation()
+            guard active?.endpoint == endpoint else { throw OSAtlasLlamaRuntimeError.inactiveSession }
+            return plan
+        } catch {
+            if active?.endpoint == endpoint { try await stopActiveServerUnserialized() }
+            throw error
         }
     }
 
@@ -1288,6 +1906,9 @@ actor OSAtlasLlamaRuntime {
         active?.endpoint.variant
     }
 
+    var queuedModelAccessRequestCount: Int { modelAccessGate.queuedRequestCount }
+    private(set) var lastWorkerStop: OSAtlasLlamaWorkerStop?
+
     func residencyGeneration(
         endpoint: OSAtlasLlamaEndpoint
     ) throws -> UInt64 {
@@ -1297,28 +1918,20 @@ actor OSAtlasLlamaRuntime {
         return active.residencyGeneration
     }
 
-    private func acquireModelAccessLease() async throws -> UInt64 {
-        try Task.checkCancellation()
-        while modelAccessLease != nil {
-            await withCheckedContinuation { continuation in
-                modelAccessWaiters.append(continuation)
-            }
+    private func acquireModelAccessLease() async throws -> UUID {
+        let lease = try await modelAccessGate.acquire()
+        do {
+            // Cancellation may arrive while returning to this runtime actor.
             try Task.checkCancellation()
+            return lease
+        } catch {
+            modelAccessGate.release(lease)
+            throw error
         }
-        nextModelAccessLease &+= 1
-        let lease = nextModelAccessLease
-        modelAccessLease = lease
-        return lease
     }
 
-    private func releaseModelAccessLease(_ lease: UInt64) {
-        guard modelAccessLease == lease else { return }
-        modelAccessLease = nil
-        let waiters = modelAccessWaiters
-        modelAccessWaiters.removeAll(keepingCapacity: true)
-        for waiter in waiters {
-            waiter.resume()
-        }
+    private func releaseModelAccessLease(_ lease: UUID) {
+        modelAccessGate.release(lease)
     }
 
     private func ensureModelResident(
@@ -1398,7 +2011,8 @@ actor OSAtlasLlamaRuntime {
         // published to callers.
         try validateResources(
             minimumReclaimableBytes:
-                beforeLoad.resourceProfile.minimumInferenceMemoryBytes)
+                beforeLoad.resourceProfile.minimumInferenceMemoryBytes,
+            stage: "model-load")
         guard var updated = active, updated.endpoint == endpoint else {
             throw OSAtlasLlamaRuntimeError.inactiveSession
         }
@@ -1478,11 +2092,13 @@ actor OSAtlasLlamaRuntime {
             }
         case .replace(let inputs):
             var pendingPresetFile: OSAtlasLlamaRouterPresetFile?
+            var pendingAuthenticationFile: OSAtlasLlamaPrivateFile?
             do {
                 try await stopActiveServerUnserialized()
                 try validateActivation(epoch: expectedActivationEpoch)
-                let resourceProfile = try resourceProfileForLaunch()
-                let visualInputs = inputs.visual
+                let resourceProfile = try resourceProfileForLaunch(nativeText: inputs.nativeText != nil,
+                    memoryEmbedding: inputs.memoryEmbedding != nil,
+                    trainedVision: inputs.isTrainedVision, agentVision: inputs.agentVision != nil)
                 let port = try portProvider.availableLoopbackPort()
                 let token = tokenProvider.bearerToken()
                 guard !token.isEmpty else {
@@ -1492,7 +2108,33 @@ actor OSAtlasLlamaRuntime {
                     string: "http://\(OSAtlasLlamaLaunchConfiguration.host):\(port)")!
                 try Self.validateLoopbackEndpoint(baseURL)
                 let configuration: OSAtlasLlamaLaunchConfiguration
-                if let semanticModelURL = inputs.semanticModelURL {
+                if let faraInputs = inputs.fara {
+                    let authentication = try OSAtlasLlamaPrivateFile.authentication(token: token)
+                    pendingAuthenticationFile = authentication
+                    configuration = .init(faraInputs: faraInputs, port: port, bearerToken: token, authenticationFile: authentication)
+                } else if let agentVisionInputs = inputs.agentVision {
+                    let authentication = try OSAtlasLlamaPrivateFile.authentication(token: token)
+                    pendingAuthenticationFile = authentication
+                    configuration = .init(agentVisionInputs: agentVisionInputs, port: port,
+                        bearerToken: token, authenticationFile: authentication)
+                } else if let holoInputs = inputs.holo {
+                    let authentication = try OSAtlasLlamaPrivateFile.authentication(token: token)
+                    pendingAuthenticationFile = authentication
+                    configuration = .init(holoInputs: holoInputs, port: port, bearerToken: token, authenticationFile: authentication)
+                } else if let memoryInputs = inputs.memoryEmbedding {
+                    let authentication = try OSAtlasLlamaPrivateFile.authentication(token: token)
+                    pendingAuthenticationFile = authentication
+                    configuration = OSAtlasLlamaLaunchConfiguration(
+                        memoryEmbeddingInputs: memoryInputs, port: port, bearerToken: token,
+                        authenticationFile: authentication)
+                } else if let textInputs = inputs.nativeText {
+                    let authentication = try OSAtlasLlamaPrivateFile.authentication(token: token)
+                    pendingAuthenticationFile = authentication
+                    configuration = OSAtlasLlamaLaunchConfiguration(
+                        nativeTextInputs: textInputs, port: port, bearerToken: token,
+                        authenticationFile: authentication)
+                } else if let visualInputs = inputs.visual,
+                          let semanticModelURL = inputs.semanticModelURL {
                     let presetFile = try OSAtlasLlamaRouterPresetFile.create(
                         OSAtlasLlamaRouterPreset(
                             visualModelFirstSplitURL:
@@ -1512,7 +2154,7 @@ actor OSAtlasLlamaRuntime {
                         bearerToken: token,
                         resourceProfile: resourceProfile,
                         routerPresetFile: presetFile)
-                } else {
+                } else if let visualInputs = inputs.visual {
                     configuration = OSAtlasLlamaLaunchConfiguration(
                         executableURL: visualInputs.llamaServerURL,
                         workingDirectoryURL: visualInputs.runtimeDirectoryURL,
@@ -1522,13 +2164,15 @@ actor OSAtlasLlamaRuntime {
                         port: port,
                         bearerToken: token,
                         resourceProfile: resourceProfile)
+                } else {
+                    throw OSAtlasLlamaRuntimeError.invalidLocalInstallation
                 }
-                let transport = transportMaker.makeTransport()
+                let transport = transportMaker.makeTransport(observer: observeHTTPRequest)
                 let process = try await launcher.launch(configuration: configuration)
                 nextGeneration &+= 1
                 let endpoint = OSAtlasLlamaEndpoint(
                     generation: nextGeneration,
-                    variant: visualInputs.variant,
+                    variant: inputs.visual?.variant,
                     baseURL: baseURL,
                     bearerToken: token)
                 active = ActiveServer(
@@ -1538,13 +2182,20 @@ actor OSAtlasLlamaRuntime {
                     process: process,
                     transport: transport,
                     routerPresetFile: pendingPresetFile,
-                    residentModels: inputs.isRouter
+                    authenticationFile: pendingAuthenticationFile,
+                    residentModels: inputs.isRouter || inputs.nativeText != nil ||
+                        inputs.memoryEmbedding != nil || inputs.isTrainedVision
                         ? []
                         : [.visualGrounder],
                     residencyGeneration: inputs.isRouter ? 0 : 1)
                 pendingPresetFile = nil
+                pendingAuthenticationFile = nil
                 try validateActivation(epoch: expectedActivationEpoch)
                 try await waitUntilReady(endpoint: endpoint, transport: transport)
+                if let memoryInputs = inputs.memoryEmbedding {
+                    try await validateMemoryEmbeddingServer(
+                        inputs: memoryInputs, endpoint: endpoint, transport: transport)
+                }
                 if inputs.isRouter {
                     // A compact endpoint is not ready until both packaged
                     // models have been proven loadable one at a time and the
@@ -1570,11 +2221,13 @@ actor OSAtlasLlamaRuntime {
                 // "ready" when there is no safe headroom for the first tile.
                 try validateResources(
                     minimumReclaimableBytes:
-                        resourceProfile.minimumInferenceMemoryBytes)
+                        resourceProfile.minimumInferenceMemoryBytes,
+                    stage: "post-load")
                 try validateActivation(epoch: expectedActivationEpoch)
                 return .success
             } catch is CancellationError {
                 pendingPresetFile?.remove()
+                pendingAuthenticationFile?.remove()
                 do {
                     try await stopActiveServerUnserialized()
                 } catch {
@@ -1583,6 +2236,7 @@ actor OSAtlasLlamaRuntime {
                 return .cancelled
             } catch let error as OSAtlasLlamaRuntimeError {
                 pendingPresetFile?.remove()
+                pendingAuthenticationFile?.remove()
                 do {
                     try await stopActiveServerUnserialized()
                 } catch {
@@ -1591,6 +2245,7 @@ actor OSAtlasLlamaRuntime {
                 return .failure(error)
             } catch {
                 pendingPresetFile?.remove()
+                pendingAuthenticationFile?.remove()
                 do {
                     try await stopActiveServerUnserialized()
                 } catch {
@@ -1701,28 +2356,52 @@ actor OSAtlasLlamaRuntime {
         lifecycleTransition?.task.cancel()
     }
 
-    private func resourceProfileForLaunch() throws -> OSAtlasLlamaResourceProfile {
+    private func resourceProfileForLaunch(nativeText: Bool = false, memoryEmbedding: Bool = false,
+        trainedVision: Bool = false,
+        agentVision: Bool = false) throws -> OSAtlasLlamaResourceProfile {
         let snapshot = try resourceSnapshot()
-        guard let profile = OSAtlasLlamaResourceProfile.select(
-            physicalMemoryBytes: snapshot.physicalMemoryBytes
-        ) else {
+        guard !trainedVision || snapshot.physicalMemoryBytes >= 16 * 1_024 * 1_024 * 1_024 else {
+            logResourceFailure(stage: "launch-physical", snapshot: snapshot,
+                requiredBytes: OSAtlasLlamaResourceProfile.standardPhysicalMemoryBytes)
             throw OSAtlasLlamaRuntimeError.insufficientPhysicalMemory
         }
+        guard let hardwareProfile = OSAtlasLlamaResourceProfile.select(
+            physicalMemoryBytes: snapshot.physicalMemoryBytes
+        ) else {
+            logResourceFailure(stage: "launch-physical", snapshot: snapshot,
+                requiredBytes: OSAtlasLlamaResourceProfile.minimumPhysicalMemoryBytes)
+            throw OSAtlasLlamaRuntimeError.insufficientPhysicalMemory
+        }
+        // Text and memory embedding use compact profiles; this budget is not a
+        // claim of physical 8 GiB qualification.
+        let visionProfile: OSAtlasLlamaResourceProfile = agentVision ? .agentVision : .fara
+        let profile: OSAtlasLlamaResourceProfile = trainedVision ? visionProfile :
+            (nativeText || memoryEmbedding) ? .compact : hardwareProfile
         guard snapshot.reclaimableMemoryBytes >= profile.minimumLaunchMemoryBytes else {
+            logResourceFailure(stage: "launch", snapshot: snapshot,
+                requiredBytes: profile.minimumLaunchMemoryBytes)
             throw OSAtlasLlamaRuntimeError.insufficientAvailableMemory
         }
         return profile
     }
 
-    private func validateResources(minimumReclaimableBytes: UInt64) throws {
+    private func validateResources(minimumReclaimableBytes: UInt64, stage: String = "inference") throws {
         let snapshot = try resourceSnapshot()
         guard snapshot.physicalMemoryBytes >=
                 OSAtlasLlamaResourceProfile.minimumPhysicalMemoryBytes else {
+            logResourceFailure(stage: "\(stage)-physical", snapshot: snapshot,
+                requiredBytes: OSAtlasLlamaResourceProfile.minimumPhysicalMemoryBytes)
             throw OSAtlasLlamaRuntimeError.insufficientPhysicalMemory
         }
         guard snapshot.reclaimableMemoryBytes >= minimumReclaimableBytes else {
+            logResourceFailure(stage: stage, snapshot: snapshot, requiredBytes: minimumReclaimableBytes)
             throw OSAtlasLlamaRuntimeError.insufficientAvailableMemory
         }
+    }
+
+    private func logResourceFailure(stage: String, snapshot: OSAtlasLlamaResourceSnapshot,
+                                    requiredBytes: UInt64) {
+        Self.resourceLog.error("AI resource guard stage=\(stage, privacy: .public) physical_bytes=\(snapshot.physicalMemoryBytes, privacy: .public) reclaimable_bytes=\(snapshot.reclaimableMemoryBytes, privacy: .public) required_bytes=\(requiredBytes, privacy: .public)")
     }
 
     private func resourceSnapshot() throws -> OSAtlasLlamaResourceSnapshot {
@@ -1762,7 +2441,10 @@ actor OSAtlasLlamaRuntime {
                 return false
             }
         }.value
+        lastWorkerStop = .init(generation: server.endpoint.generation,
+            reason: server.process.workerStopReason, cleanupSucceeded: cleanupSucceeded)
         server.routerPresetFile?.remove()
+        server.authenticationFile?.remove()
 
         // Caller cancellation is handled after the old process is gone and
         // therefore never poisons the runtime. Only a cleanup operation that
@@ -1791,6 +2473,100 @@ actor OSAtlasLlamaRuntime {
                 .lowercased().contains("00001-of-"),
               inputs.multimodalProjectorURL.lastPathComponent
                 .lowercased().contains("f16") else {
+            throw OSAtlasLlamaRuntimeError.invalidLocalInstallation
+        }
+    }
+
+    private static func validateNativeTextInputs(_ inputs: ComputerUseNativeTextRuntimeInputs) throws {
+        try validateSemanticModelURL(inputs.modelURL)
+        guard inputs.modelURL.lastPathComponent == inputs.expectedModelFileName,
+              inputs.llamaServerURL.isFileURL,
+              inputs.llamaServerURL.lastPathComponent == "llama-server",
+              !inputs.llamaServerURL.path.contains("\0") else {
+            throw OSAtlasLlamaRuntimeError.invalidLocalInstallation
+        }
+    }
+
+    private static func validateMemoryEmbeddingInputs(_ inputs: PersonalMemoryRuntimeInputs) throws {
+        try validateSemanticModelURL(inputs.modelURL)
+        guard inputs.modelURL.lastPathComponent == PersonalMemoryRuntimeInputs.modelFileName,
+              inputs.llamaServerURL.isFileURL,
+              inputs.llamaServerURL.lastPathComponent == "llama-server",
+              !inputs.llamaServerURL.path.contains("\0") else {
+            throw OSAtlasLlamaRuntimeError.invalidLocalInstallation
+        }
+    }
+
+    private func validateMemoryEmbeddingServer(
+        inputs: PersonalMemoryRuntimeInputs,
+        endpoint: OSAtlasLlamaEndpoint,
+        transport: any OSAtlasLlamaHTTPTransport
+    ) async throws {
+        try Task.checkCancellation()
+        guard active?.endpoint == endpoint,
+              active?.inputs.memoryEmbedding == inputs else {
+            throw OSAtlasLlamaRuntimeError.inactiveSession
+        }
+        var request = URLRequest(url: endpoint.baseURL.appendingPathComponent("props"))
+        request.httpMethod = "GET"
+        request.timeoutInterval = 3
+        request.setValue("Bearer \(endpoint.bearerToken)", forHTTPHeaderField: "Authorization")
+        let data = try await transport.complete(request: request)
+        try Task.checkCancellation()
+        guard active?.endpoint == endpoint,
+              let properties = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              properties["model_path"] as? String == inputs.modelURL.path,
+              properties["build_info"] as? String == PersonalMemoryRuntimeInputs.llamaServerBuildInfo,
+              let sleeping = properties["is_sleeping"] as? NSNumber,
+              CFGetTypeID(sleeping) == CFBooleanGetTypeID(),
+              sleeping.boolValue == false else {
+            throw OSAtlasLlamaRuntimeError.invalidLocalInstallation
+        }
+        let localEndpoint = try LlamaCppLocalEndpoint(
+            baseURL: endpoint.baseURL, bearerToken: endpoint.bearerToken)
+        let vector = try await personalMemoryClient.embed(
+            endpoint: localEndpoint, text: "runtime readiness check", purpose: .query)
+        try Task.checkCancellation()
+        guard active?.endpoint == endpoint,
+              active?.inputs.memoryEmbedding == inputs,
+              vector.count == PersonalMemoryRuntimeInputs.embeddingDimensions,
+              vector.allSatisfy(\.isFinite), vector.contains(where: { $0 != 0 }) else {
+            throw OSAtlasLlamaRuntimeError.invalidLocalInstallation
+        }
+    }
+
+    private static func validateFaraInputs(_ inputs: ComputerUseFaraRuntimeInputs) throws {
+        try validateTrainedVisionInputs(modelURL: inputs.modelURL, projectorURL: inputs.projectorURL, llamaServerURL: inputs.llamaServerURL,
+            modelFileName: ComputerUseFaraRuntimeInputs.modelFileName, projectorFileName: ComputerUseFaraRuntimeInputs.projectorFileName)
+    }
+
+    private static func validateAgentVisionInputs(_ inputs: AgentVisionRuntimeInputs) throws {
+        let modelName: String
+        let projectorName: String
+        switch inputs.model {
+        case .fara15_4b:
+            modelName = ComputerUseFaraRuntimeInputs.modelFileName
+            projectorName = ComputerUseFaraRuntimeInputs.projectorFileName
+        case .uiTars15_7b:
+            modelName = "UI-TARS-1.5-7B.Q4_K_M.gguf"
+            projectorName = "UI-TARS-1.5-7B.mmproj-f16.gguf"
+        case .guiOwl15_4b:
+            modelName = "GUI-Owl-1.5-4B-Instruct.Q4_K_M.gguf"
+            projectorName = "GUI-Owl-1.5-4B-Instruct.mmproj-Q8_0.gguf"
+        }
+        try validateTrainedVisionInputs(modelURL: inputs.modelURL, projectorURL: inputs.projectorURL,
+            llamaServerURL: inputs.llamaServerURL, modelFileName: modelName, projectorFileName: projectorName)
+    }
+
+    private static func validateTrainedVisionInputs(modelURL: URL, projectorURL: URL, llamaServerURL: URL,
+        modelFileName: String, projectorFileName: String) throws {
+        try validateSemanticModelURL(modelURL)
+        try validateSemanticModelURL(projectorURL)
+        guard modelURL.lastPathComponent == modelFileName,
+              projectorURL.lastPathComponent == projectorFileName,
+              modelURL != projectorURL,
+              llamaServerURL.isFileURL, llamaServerURL.lastPathComponent == "llama-server",
+              !llamaServerURL.path.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains) else {
             throw OSAtlasLlamaRuntimeError.invalidLocalInstallation
         }
     }
@@ -1873,44 +2649,8 @@ enum OSAtlasLlamaHTTPClient {
         let choices: [Choice]
     }
 
-    private struct SemanticFunction: Encodable {
-        let name: String
-        let description: String
-        let parameters: OSAtlasLlamaJSONValue
-        let strict = true
-    }
-
-    private struct SemanticTool: Encodable {
-        let type = "function"
-        let function: SemanticFunction
-    }
-
-    private struct SemanticRequestBody: Encodable {
-        let model: String
-        let messages: [OSAtlasLlamaSemanticMessage]
-        let tools: [SemanticTool]
-        let toolChoice = "required"
-        let parallelToolCalls = false
-        let temperature: Double = 0
-        let seed = 0
-        let maxTokens: Int
-        let stream = false
-
-        enum CodingKeys: String, CodingKey {
-            case model
-            case messages
-            case tools
-            case toolChoice = "tool_choice"
-            case parallelToolCalls = "parallel_tool_calls"
-            case temperature
-            case seed
-            case maxTokens = "max_tokens"
-            case stream
-        }
-    }
-
     private struct TokenizeRequestBody: Encodable {
-        let model = OSAtlasLlamaServedModel.semanticRouter.rawValue
+        let model: String
         let content: String
         let addSpecial = false
         let parseSpecial = true
@@ -1927,43 +2667,67 @@ enum OSAtlasLlamaHTTPClient {
 
     static let maximumTemplateResponseBytes = 512 * 1_024
     static let maximumTokenizeResponseBytes = 1_024 * 1_024
-    static let maximumTokenizedInputTokens = 65_536
+    // A tokenizer response may describe an input much larger than the model
+    // context. Count it so the caller can trim and retry the count; the bounded
+    // response body limits the maximum number of one-digit token IDs.
+    static let maximumTokenizeResponseItems = maximumTokenizeResponseBytes / 2
+    static let agentMaximumCompletionTokens = 1_024
 
-    private static func validToolSchema(
-        _ schema: OSAtlasLlamaJSONValue
-    ) -> Bool {
-        var nodes = 0
-        func visit(_ value: OSAtlasLlamaJSONValue, depth: Int) -> Bool {
-            nodes += 1
-            guard nodes <= 4_096, depth <= 16 else { return false }
-            switch value {
-            case .object(let object):
-                guard object.keys.allSatisfy({
-                    !$0.isEmpty && $0.utf8.count <= 256
-                }) else { return false }
-                if let maximumLength = object["maxLength"] {
-                    guard case .number(let value) = maximumLength,
-                          value.isFinite,
-                          value.rounded(.towardZero) == value,
-                          (0 ... 512).contains(value) else {
-                        return false
-                    }
-                }
-                return object.values.allSatisfy {
-                    visit($0, depth: depth + 1)
-                }
-            case .array(let array):
-                return array.allSatisfy { visit($0, depth: depth + 1) }
-            case .string(let string):
-                return string.utf8.count <= 64 * 1_024
-            case .number(let number):
-                return number.isFinite
-            case .boolean, .null:
-                return true
-            }
+    static func makeAgentActionRequest(endpoint: OSAtlasLlamaEndpoint,
+                                       input: AgentVLMRequestInput) throws -> URLRequest {
+        try OSAtlasLlamaRuntime.validateLoopbackEndpoint(endpoint.baseURL)
+        let expectedAlias = input.model == .fara15_4b ? ComputerUseFaraRuntimeInputs.modelAlias :
+            (input.model == .uiTars15_7b ? "ui-tars15-7b-v1" : "gui-owl15-4b-v1")
+        guard endpoint.variant == nil, !endpoint.bearerToken.isEmpty,
+              input.modelAlias == expectedAlias,
+              input.messages.count >= 2, input.messages.first?.role == .system,
+              input.messages.last?.role == .user else {
+            throw OSAtlasLlamaRuntimeError.invalidResponse
         }
-        guard case .object = schema else { return false }
-        return visit(schema, depth: 0)
+        guard (1...3).contains(input.imageCount) else { throw OSAtlasLlamaRuntimeError.invalidVisionInput }
+        var request = URLRequest(url: endpoint.baseURL.appendingPathComponent("v1/chat/completions"))
+        request.httpMethod = "POST"
+        request.timeoutInterval = 60
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("Bearer " + endpoint.bearerToken, forHTTPHeaderField: "Authorization")
+        var messages: [[String: Any]] = []
+        for message in input.messages {
+            var parts: [[String: Any]] = []
+            var plainText: [String] = []
+            for part in message.content {
+                switch part {
+                case .text(let text):
+                    guard !text.isEmpty else { throw OSAtlasLlamaRuntimeError.invalidResponse }
+                    plainText.append(text)
+                    parts.append(["type": "text", "text": text])
+                case .imagePNG(let image):
+                    try ComputerUseFaraModel.validatePNG(image)
+                    parts.append(["type": "image_url", "image_url": ["url":
+                        "data:image/png;base64," + image.base64EncodedString()]])
+                }
+            }
+            guard !parts.isEmpty else { throw OSAtlasLlamaRuntimeError.invalidResponse }
+            let content: Any = message.role == .system || message.role == .assistant
+                ? plainText.joined(separator: "\n") : parts
+            if message.role == .system || message.role == .assistant {
+                guard !plainText.isEmpty, parts.count == plainText.count else {
+                    throw OSAtlasLlamaRuntimeError.invalidResponse
+                }
+            }
+            messages.append(["role": message.role.rawValue, "content": content])
+        }
+        let body: [String: Any] = [
+            "model": input.modelAlias,
+            "messages": messages,
+            "temperature": 0, "max_tokens": agentMaximumCompletionTokens, "stream": false,
+            "reasoning_format": "none",
+        ]
+        request.httpBody = try JSONSerialization.data(withJSONObject: body,
+            options: [.sortedKeys, .withoutEscapingSlashes])
+        guard let body = request.httpBody, body.count <= 9 * 1_024 * 1_024 else {
+            throw OSAtlasLlamaRuntimeError.invalidResponse
+        }
+        return request
     }
 
     static func makeCompletionRequest(
@@ -2023,91 +2787,10 @@ enum OSAtlasLlamaHTTPClient {
         return request
     }
 
-    static func makeSemanticRequest(
-        endpoint: OSAtlasLlamaEndpoint,
-        request semanticRequest: OSAtlasLlamaSemanticRequest
-    ) throws -> URLRequest {
-        try OSAtlasLlamaRuntime.validateLoopbackEndpoint(endpoint.baseURL)
-        guard !endpoint.bearerToken.isEmpty,
-              !semanticRequest.messages.isEmpty,
-              semanticRequest.messages.count
-                <= OSAtlasLlamaSemanticRequest.maximumMessages,
-              semanticRequest.messages.first?.role == .system,
-              semanticRequest.messages.last?.role == .user,
-              semanticRequest.messages.allSatisfy({ message in
-                  !message.content.trimmingCharacters(
-                    in: .whitespacesAndNewlines).isEmpty
-                      && message.content.utf8.count
-                        <= OSAtlasLlamaSemanticRequest.maximumMessageBytes
-              }),
-              !semanticRequest.tools.isEmpty,
-              semanticRequest.tools.count
-                <= OSAtlasLlamaSemanticRequest.maximumTools,
-              (1 ... OSAtlasLlamaSemanticRequest.maximumGeneratedTokens)
-                .contains(semanticRequest.maxTokens) else {
-            throw OSAtlasLlamaRuntimeError.invalidResponse
-        }
-
-        var names = Set<String>()
-        let allowedNameCharacters = CharacterSet(
-            charactersIn:
-                "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-")
-        for tool in semanticRequest.tools {
-            guard !tool.name.isEmpty,
-                  tool.name.utf8.count <= 64,
-                  tool.name.unicodeScalars.allSatisfy(
-                    allowedNameCharacters.contains),
-                  names.insert(tool.name).inserted,
-                  !tool.description.trimmingCharacters(
-                    in: .whitespacesAndNewlines).isEmpty,
-                  tool.description.utf8.count
-                    <= OSAtlasLlamaSemanticRequest.maximumToolDescriptionBytes,
-                  Self.validToolSchema(tool.parameters) else {
-                throw OSAtlasLlamaRuntimeError.invalidResponse
-            }
-        }
-
-        let completionURL = endpoint.baseURL
-            .appendingPathComponent("v1")
-            .appendingPathComponent("chat")
-            .appendingPathComponent("completions")
-        var urlRequest = URLRequest(url: completionURL)
-        urlRequest.httpMethod = "POST"
-        urlRequest.timeoutInterval = 120
-        urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        urlRequest.setValue(
-            "Bearer \(endpoint.bearerToken)",
-            forHTTPHeaderField: "Authorization")
-        let body = SemanticRequestBody(
-            model: OSAtlasLlamaServedModel.semanticRouter.rawValue,
-            messages: semanticRequest.messages,
-            tools: semanticRequest.tools.map {
-                SemanticTool(function: SemanticFunction(
-                    name: $0.name,
-                    description: $0.description,
-                    parameters: $0.parameters))
-            },
-            maxTokens: semanticRequest.maxTokens)
-        // llama.cpp's OpenAI compatibility layer preserves JSON object order
-        // while handing native-tool schemas to the embedded chat template.
-        // Sorting every keyed container makes the model-facing prompt stable
-        // across Swift, the Windows evaluation harness, and the pinned b9992
-        // token preflight instead of depending on Dictionary iteration order.
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
-        let encoded = try encoder.encode(body)
-        guard encoded.count <= 512 * 1_024 else {
-            throw OSAtlasLlamaRuntimeError.invalidResponse
-        }
-        urlRequest.httpBody = encoded
-        return urlRequest
-    }
-
     /// b9992's `/apply-template` runs the same
     /// `oaicompat_chat_params_parse` path as `/v1/chat/completions`. Reusing
-    /// the exact completion body therefore includes tools, required tool
-    /// choice, `parallel_tool_calls: false`, and every sampling/request field
-    /// in the model's real Granite chat-template render.
+    /// the exact completion body keeps its system prompt, images, and sampling
+    /// fields identical to the request sent to the model.
     static func makeSemanticTemplateRequest(
         from completionRequest: URLRequest
     ) throws -> URLRequest {
@@ -2164,6 +2847,9 @@ enum OSAtlasLlamaHTTPClient {
               completionURL.query == nil,
               completionURL.fragment == nil,
               completionURL.port != nil,
+              let completionBody = completionRequest.httpBody,
+              let body = try? JSONSerialization.jsonObject(with: completionBody) as? [String: Any],
+              let model = body["model"] as? String, !model.isEmpty,
               !templatePrompt.isEmpty,
               templatePrompt.utf8.count <= maximumTemplateResponseBytes else {
             throw OSAtlasLlamaRuntimeError.invalidResponse
@@ -2182,8 +2868,10 @@ enum OSAtlasLlamaHTTPClient {
             throw OSAtlasLlamaRuntimeError.invalidResponse
         }
         request.setValue(authorization, forHTTPHeaderField: "Authorization")
+        // Count with the model selected by this exact completion request.
+        // Native text planners and semantic routing use different aliases.
         request.httpBody = try JSONEncoder().encode(TokenizeRequestBody(
-            content: templatePrompt))
+            model: model, content: templatePrompt))
         return request
     }
 
@@ -2195,12 +2883,12 @@ enum OSAtlasLlamaHTTPClient {
         }
         var parser = StrictSemanticJSONParser(
             source,
-            maximumValueCount: maximumTokenizedInputTokens + 2)
+            maximumValueCount: maximumTokenizeResponseItems + 2)
         guard case .object(let object) = try parser.parse(),
               Set(object.keys) == ["tokens"],
               case .array(let tokens)? = object["tokens"],
               !tokens.isEmpty,
-              tokens.count <= maximumTokenizedInputTokens,
+              tokens.count <= maximumTokenizeResponseItems,
               tokens.allSatisfy({ token in
                   if case .integer(let value) = token { return value >= 0 }
                   return false
@@ -2275,9 +2963,13 @@ private struct URLSessionOSAtlasTransportMaker: OSAtlasLlamaHTTPTransportMaking 
     func makeTransport() -> any OSAtlasLlamaHTTPTransport {
         URLSessionOSAtlasTransport()
     }
+
+    func makeTransport(observer: (any OSAtlasLlamaHTTPRequestObserver)?) -> any OSAtlasLlamaHTTPTransport {
+        URLSessionOSAtlasTransport(observer: observer)
+    }
 }
 
-private final class URLSessionOSAtlasTransport: OSAtlasLlamaHTTPTransport,
+final class URLSessionOSAtlasTransport: OSAtlasLlamaHTTPTransport, ComputerUseTextModelTransport,
     @unchecked Sendable {
     private struct LoadModelBody: Encodable {
         let model: String
@@ -2288,16 +2980,19 @@ private final class URLSessionOSAtlasTransport: OSAtlasLlamaHTTPTransport,
     }
 
     private let session: URLSession
+    private let observer: (any OSAtlasLlamaHTTPRequestObserver)?
 
-    init() {
-        let configuration = URLSessionConfiguration.ephemeral
+    init(configuration: URLSessionConfiguration = .ephemeral,
+         observer: (any OSAtlasLlamaHTTPRequestObserver)? = nil) {
+        self.observer = observer
         configuration.urlCache = nil
         configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
         configuration.httpCookieStorage = nil
         configuration.httpShouldSetCookies = false
         configuration.waitsForConnectivity = false
         configuration.connectionProxyDictionary = [:]
-        session = URLSession(configuration: configuration)
+        session = URLSession(configuration: configuration,
+                             delegate: LocalModelRedirectRejection(), delegateQueue: nil)
     }
 
     func health(baseURL: URL, bearerToken: String) async throws -> Bool {
@@ -2305,7 +3000,7 @@ private final class URLSessionOSAtlasTransport: OSAtlasLlamaHTTPTransport,
         var request = URLRequest(url: baseURL.appendingPathComponent("health"))
         request.timeoutInterval = 1
         request.setValue("Bearer \(bearerToken)", forHTTPHeaderField: "Authorization")
-        let (_, response) = try await session.data(for: request)
+        let (_, response) = try await boundedResponse(for: request, maximumBytes: 64 * 1_024)
         return (response as? HTTPURLResponse)?.statusCode == 200
     }
 
@@ -2328,7 +3023,7 @@ private final class URLSessionOSAtlasTransport: OSAtlasLlamaHTTPTransport,
         var request = URLRequest(url: url)
         request.timeoutInterval = 1
         request.setValue("Bearer \(bearerToken)", forHTTPHeaderField: "Authorization")
-        let (_, response) = try await session.data(for: request)
+        let (_, response) = try await boundedResponse(for: request, maximumBytes: 64 * 1_024)
         return (response as? HTTPURLResponse)?.statusCode == 200
     }
 
@@ -2378,7 +3073,7 @@ private final class URLSessionOSAtlasTransport: OSAtlasLlamaHTTPTransport,
             forHTTPHeaderField: "Authorization")
         request.httpBody = try JSONEncoder().encode(
             LoadModelBody(model: model.rawValue))
-        let (data, response) = try await session.data(for: request)
+        let (data, response) = try await boundedResponse(for: request, maximumBytes: 64 * 1_024)
         guard (response as? HTTPURLResponse)?.statusCode == 200,
               data.count <= 64 * 1_024,
               let result = try? JSONDecoder().decode(
@@ -2399,7 +3094,7 @@ private final class URLSessionOSAtlasTransport: OSAtlasLlamaHTTPTransport,
             throw OSAtlasLlamaRuntimeError.invalidEndpoint
         }
         try OSAtlasLlamaRuntime.validateLoopbackEndpoint(baseURL)
-        let (data, response) = try await session.data(for: request)
+        let (data, response) = try await boundedResponse(for: request, maximumBytes: 1_024 * 1_024)
         guard (response as? HTTPURLResponse)?.statusCode == 200,
               data.count <= 1_024 * 1_024 else {
             throw OSAtlasLlamaRuntimeError.invalidResponse
@@ -2412,8 +3107,8 @@ private final class URLSessionOSAtlasTransport: OSAtlasLlamaHTTPTransport,
     ) async throws -> Int {
         let templateRequest = try OSAtlasLlamaHTTPClient
             .makeSemanticTemplateRequest(from: completionRequest)
-        let (templateData, templateResponse) = try await session.data(
-            for: templateRequest)
+        let (templateData, templateResponse) = try await boundedResponse(
+            for: templateRequest, maximumBytes: OSAtlasLlamaHTTPClient.maximumTemplateResponseBytes)
         guard (templateResponse as? HTTPURLResponse)?.statusCode == 200,
               templateData.count
                 <= OSAtlasLlamaHTTPClient.maximumTemplateResponseBytes else {
@@ -2424,8 +3119,8 @@ private final class URLSessionOSAtlasTransport: OSAtlasLlamaHTTPTransport,
         let tokenizeRequest = try OSAtlasLlamaHTTPClient.makeTokenizeRequest(
             from: completionRequest,
             templatePrompt: prompt)
-        let (tokenData, tokenResponse) = try await session.data(
-            for: tokenizeRequest)
+        let (tokenData, tokenResponse) = try await boundedResponse(
+            for: tokenizeRequest, maximumBytes: OSAtlasLlamaHTTPClient.maximumTokenizeResponseBytes)
         guard (tokenResponse as? HTTPURLResponse)?.statusCode == 200,
               tokenData.count
                 <= OSAtlasLlamaHTTPClient.maximumTokenizeResponseBytes else {
@@ -2434,8 +3129,121 @@ private final class URLSessionOSAtlasTransport: OSAtlasLlamaHTTPTransport,
         return try OSAtlasLlamaHTTPClient.tokenCount(from: tokenData)
     }
 
+    /// Enforce the response limit while reading, including chunked responses
+    /// without a Content-Length. Collecting an unbounded body and checking its
+    /// size afterward does not establish a memory bound. Cancellation also
+    /// closes the actual request instead of merely abandoning the result.
+    private func boundedResponse(for request: URLRequest, maximumBytes: Int) async throws
+        -> (Data, URLResponse) {
+        let attempt = captureKind(for: request).flatMap { kind -> UUID? in
+            guard observer != nil else { return nil }
+            return UUID()
+        }
+        if attempt != nil {
+            try Task.checkCancellation()
+            if let kind = captureKind(for: request), let attempt {
+                observer?.willDispatch(id: attempt, kind: kind, body: request.httpBody ?? Data())
+            }
+        }
+        var terminal: OSAtlasLlamaHTTPOutcome = .transportError
+        var capturedResponse: Data?
+        var responseComplete = false
+        defer {
+            if let attempt {
+                observer?.didFinish(id: attempt, outcome: terminal,
+                    responseBody: capturedResponse, responseComplete: responseComplete)
+            }
+        }
+        do {
+        let (bytes, response) = try await session.bytes(for: request)
+        defer { bytes.task.cancel() }
+        guard let http = response as? HTTPURLResponse else {
+            throw OSAtlasLlamaRuntimeError.invalidResponse
+        }
+        // No caller uses an error body. In particular, do not download one
+        // from a rejected redirect or failed local health endpoint.
+        guard http.statusCode == 200 else {
+            terminal = .httpError
+            return (Data(), response)
+        }
+        guard response.expectedContentLength <= Int64(maximumBytes) else {
+            terminal = .oversized
+            throw OSAtlasLlamaRuntimeError.invalidResponse
+        }
+        let result = try await withTaskCancellationHandler {
+            var data = Data()
+            if response.expectedContentLength > 0 {
+                data.reserveCapacity(Int(response.expectedContentLength))
+            }
+            do {
+                var reportedPrefix = false
+                for try await byte in bytes {
+                    try Task.checkCancellation()
+                    guard data.count < maximumBytes else {
+                        capturedResponse = data
+                        terminal = .oversized
+                        throw OSAtlasLlamaRuntimeError.invalidResponse
+                    }
+                    data.append(byte)
+                    if !reportedPrefix, let attempt {
+                        reportedPrefix = true
+                        observer?.didReadResponsePrefix(id: attempt, byteCount: data.count)
+                    }
+                }
+                try Task.checkCancellation()
+            } catch {
+                capturedResponse = data
+                if terminal == .transportError {
+                    terminal = Self.isCancellation(error) ? .cancelled : .transportError
+                }
+                throw error
+            }
+            capturedResponse = data
+            terminal = .completed
+            responseComplete = true
+            return (data, response)
+        } onCancel: {
+            bytes.task.cancel()
+        }
+        return result
+        } catch {
+            if terminal == .transportError {
+                terminal = Self.isCancellation(error) ? .cancelled : .transportError
+            }
+            throw error
+        }
+    }
+
+    private static func isCancellation(_ error: Error) -> Bool {
+        Task.isCancelled || (error as? URLError)?.code == .cancelled
+    }
+
+    private func captureKind(for request: URLRequest) -> OSAtlasLlamaHTTPRequestKind? {
+        guard request.httpMethod?.uppercased() == "POST", let url = request.url,
+              url.scheme == "http", url.host == OSAtlasLlamaLaunchConfiguration.host,
+              url.user == nil, url.password == nil, url.port != nil else { return nil }
+        let path = url.path
+        switch path {
+        case "/apply-template": return .applyTemplate
+        case "/tokenize": return .tokenize
+        case "/v1/chat/completions": return .chatCompletion
+        default: return nil
+        }
+    }
+
     func cancelAll() async {
         session.invalidateAndCancel()
+    }
+}
+
+/// Even a loopback request must never forward model inputs to a redirect.
+/// A separate stateless delegate avoids a session/transport retain cycle.
+private final class LocalModelRedirectRejection: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
+    func urlSession(_ session: URLSession, task: URLSessionTask,
+                    willPerformHTTPRedirection response: HTTPURLResponse,
+                    newRequest request: URLRequest,
+                    completionHandler: @escaping @Sendable (URLRequest?) -> Void) {
+        completionHandler(nil)
     }
 }
 
@@ -2601,7 +3409,7 @@ final class OSAtlasLlamaServerLifetimeLease: @unchecked Sendable {
     }
 }
 
-private struct FoundationOSAtlasLlamaServerLauncher: OSAtlasLlamaServerLaunching {
+struct FoundationOSAtlasLlamaServerLauncher: OSAtlasLlamaServerLaunching {
     private let processInspector = DarwinOSAtlasProcessInspector()
     private let processReaper = OSAtlasExclusiveProcessReaper()
 
@@ -2625,6 +3433,13 @@ private struct FoundationOSAtlasLlamaServerLauncher: OSAtlasLlamaServerLaunching
             do {
                 try presetFile.verify()
             } catch {
+                throw OSAtlasLlamaRuntimeError.invalidLocalInstallation
+            }
+        }
+
+        if let authentication = configuration.authenticationFile {
+            try authentication.verify()
+            guard authentication.expectedContents == Data(configuration.bearerToken.utf8) else {
                 throw OSAtlasLlamaRuntimeError.invalidLocalInstallation
             }
         }
@@ -3128,6 +3943,15 @@ struct OSAtlasEmergencyProcessReaper: Sendable {
     }
 }
 
+private final class OSAtlasLlamaWorkerStopState: @unchecked Sendable {
+    private let lock = NSLock()
+    private var reason: OSAtlasLlamaWorkerStopReason?
+    var value: OSAtlasLlamaWorkerStopReason? { lock.withLock { reason } }
+    func recordFirst(_ value: OSAtlasLlamaWorkerStopReason) {
+        lock.withLock { if reason == nil { reason = value } }
+    }
+}
+
 final class FoundationOSAtlasLlamaServerProcess: OSAtlasLlamaServerProcess,
     @unchecked Sendable {
     private let process: Process
@@ -3137,10 +3961,20 @@ final class FoundationOSAtlasLlamaServerProcess: OSAtlasLlamaServerProcess,
     private let processReaper: OSAtlasExclusiveProcessReaper
     private let processInspector: any OSAtlasProcessInspecting
     private let cleanupState = OSAtlasProcessCleanupState()
+    private let stopState = OSAtlasLlamaWorkerStopState()
     private let lock = NSLock()
     private var lifetimeLease: OSAtlasLlamaServerLifetimeLease?
     private var memoryMonitor: Task<Void, Never>?
     private var terminationRequested = false
+
+    var workerStopReason: OSAtlasLlamaWorkerStopReason? {
+        if let reason = stopState.value { return reason }
+        // Foundation's exit-status getters require an exited, launched process.
+        guard process.processIdentifier > 0, !process.isRunning else { return nil }
+        stopState.recordFirst(process.terminationReason == .uncaughtSignal
+            ? .signal(process.terminationStatus) : .exited(status: process.terminationStatus))
+        return stopState.value
+    }
 
     init(
         process: Process,
@@ -3172,7 +4006,7 @@ final class FoundationOSAtlasLlamaServerProcess: OSAtlasLlamaServerProcess,
         } else {
             memoryMonitor = Task.detached(priority: .utility) {
             [weak process, processTreeController, emergencyReaper,
-             executableURL, cleanupState] in
+             executableURL, cleanupState, stopState] in
             while !Task.isCancelled {
                 guard let process, process.isRunning else { return }
                 let snapshot: OSAtlasProcessTreeSnapshot
@@ -3183,6 +4017,7 @@ final class FoundationOSAtlasLlamaServerProcess: OSAtlasLlamaServerProcess,
                     // An uninspectable live process tree cannot be proven to
                     // obey the resource or worker bound. Kill the root now;
                     // waitUntilExit performs exact-executable orphan cleanup.
+                    stopState.recordFirst(.inspectionFailed)
                     do {
                         try await emergencyReaper.killAndReap(
                             rootProcess: rootIdentity,
@@ -3201,6 +4036,9 @@ final class FoundationOSAtlasLlamaServerProcess: OSAtlasLlamaServerProcess,
                     // This is the last safety boundary if a future mtmd
                     // regression ignores the image/batch limits or the router
                     // exceeds this profile's permitted model-worker count.
+                    stopState.recordFirst(.resourceLimit(observedBytes: snapshot.aggregateResidentMemoryBytes,
+                        limitBytes: maximumResidentMemoryBytes, observedProcesses: snapshot.processIdentitiesChildFirst.count,
+                        limitProcesses: maximumProcessCount))
                     do {
                         try await emergencyReaper.killAndReap(
                             rootProcess: rootIdentity,
@@ -3233,6 +4071,8 @@ final class FoundationOSAtlasLlamaServerProcess: OSAtlasLlamaServerProcess,
     }
 
     func terminate() async {
+        // Observe an existing exit before recording our cleanup request.
+        _ = workerStopReason
         await quiesceMemoryMonitor()
         let shouldTerminate = lock.withLock { () -> Bool in
             guard !terminationRequested else { return false }
@@ -3240,6 +4080,7 @@ final class FoundationOSAtlasLlamaServerProcess: OSAtlasLlamaServerProcess,
             return process.isRunning
         }
         if shouldTerminate {
+            stopState.recordFirst(.requested)
             do {
                 try processTreeController.signalTree(
                     rootProcess: rootIdentity,

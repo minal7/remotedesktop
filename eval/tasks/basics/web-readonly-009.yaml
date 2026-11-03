@@ -1,0 +1,8 @@
+id: "web-readonly-009"
+surface: web
+start: {"url":"https://en.wikipedia.org/wiki/Antarctica"}
+prompt: "Read the public page about Antarctica and report one fact stated there that includes the term South Pole. Do not sign in or interact with forms."
+checker: {"type":"page_text","expect":{"contains":["South Pole"],"url_prefix":"https://en.wikipedia.org/wiki/","answer_contains":["South Pole"]}}
+max_steps: 12
+tags: ["read","public-web","read-only"]
+approval_policy: {"allow_start_interaction":true}

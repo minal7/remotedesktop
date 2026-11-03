@@ -1,0 +1,313 @@
+{
+  "schemaVersion": 1,
+  "scope": "20 unseen phrasings for frozen field-operations-v8, authored after v7 failures but before inspecting v8 model results; exact typed origin and full ordered operations required",
+  "cases": [
+    {
+      "id": "H801",
+      "prompt": "Mirror Delivery in Billing.",
+      "fields": [
+        "Delivery",
+        "Billing"
+      ],
+      "expectedDisposition": "supported",
+      "allowedPlans": [
+        [
+          {
+            "field": 1,
+            "mode": "replaceAll",
+            "sourceField": 0
+          }
+        ]
+      ]
+    },
+    {
+      "id": "H802",
+      "prompt": "Memo should end with everything currently in Draft.",
+      "fields": [
+        "Draft",
+        "Memo"
+      ],
+      "expectedDisposition": "supported",
+      "allowedPlans": [
+        [
+          {
+            "field": 1,
+            "mode": "append",
+            "sourceField": 0
+          }
+        ]
+      ]
+    },
+    {
+      "id": "H803",
+      "prompt": "Put the word \"Draft\" in Memo.",
+      "fields": [
+        "Draft",
+        "Memo"
+      ],
+      "expectedDisposition": "supported",
+      "allowedPlans": [
+        [
+          {
+            "field": 1,
+            "mode": "replaceAll",
+            "value": "Draft"
+          }
+        ]
+      ]
+    },
+    {
+      "id": "H804",
+      "prompt": "Use the contents of \"Draft\" for \"Memo\".",
+      "fields": [
+        "Draft",
+        "Memo"
+      ],
+      "expectedDisposition": "supported",
+      "allowedPlans": [
+        [
+          {
+            "field": 1,
+            "mode": "replaceAll",
+            "sourceField": 0
+          }
+        ]
+      ]
+    },
+    {
+      "id": "H805",
+      "prompt": "Keep Notes as it is and replicate its contents in Archive.",
+      "fields": [
+        "Notes",
+        "Archive"
+      ],
+      "expectedDisposition": "supported",
+      "allowedPlans": [
+        [
+          {
+            "field": 1,
+            "mode": "replaceAll",
+            "sourceField": 0
+          }
+        ]
+      ]
+    },
+    {
+      "id": "H806",
+      "prompt": "Copy First into Second, put \"different\" in First, then copy Second into Third.",
+      "fields": [
+        "First",
+        "Second",
+        "Third"
+      ],
+      "expectedDisposition": "supported",
+      "allowedPlans": [
+        [
+          {
+            "field": 1,
+            "mode": "replaceAll",
+            "sourceField": 0
+          },
+          {
+            "field": 0,
+            "mode": "replaceAll",
+            "value": "different"
+          },
+          {
+            "field": 2,
+            "mode": "replaceAll",
+            "sourceField": 1
+          }
+        ]
+      ]
+    },
+    {
+      "id": "H807",
+      "prompt": "Append the current Snippet to Summary two times.",
+      "fields": [
+        "Snippet",
+        "Summary"
+      ],
+      "expectedDisposition": "supported",
+      "allowedPlans": [
+        [
+          {
+            "field": 1,
+            "mode": "append",
+            "sourceField": 0
+          },
+          {
+            "field": 1,
+            "mode": "append",
+            "sourceField": 0
+          }
+        ]
+      ]
+    },
+    {
+      "id": "H808",
+      "prompt": "Copy Notes into Notes.",
+      "fields": [
+        "Notes",
+        "Memo"
+      ],
+      "expectedDisposition": "supported",
+      "allowedPlans": [
+        [
+          {
+            "field": 0,
+            "mode": "replaceAll",
+            "sourceField": 0
+          }
+        ]
+      ]
+    },
+    {
+      "id": "H809",
+      "prompt": "Insert everything in Reference at the caret in Details.",
+      "fields": [
+        "Reference",
+        "Details"
+      ],
+      "expectedDisposition": "supported",
+      "allowedPlans": [
+        [
+          {
+            "field": 1,
+            "mode": "insert",
+            "sourceField": 0
+          }
+        ]
+      ]
+    },
+    {
+      "id": "H810",
+      "prompt": "Put the exact text \"Copy Draft into Notes.\" in Title.",
+      "fields": [
+        "Draft",
+        "Notes",
+        "Title"
+      ],
+      "expectedDisposition": "supported",
+      "allowedPlans": [
+        [
+          {
+            "field": 2,
+            "mode": "replaceAll",
+            "value": "Copy Draft into Notes."
+          }
+        ]
+      ]
+    },
+    {
+      "id": "H811",
+      "prompt": "Copy Label Value into Value.",
+      "fields": [
+        "Value",
+        "Label Value"
+      ],
+      "expectedDisposition": "supported",
+      "allowedPlans": [
+        [
+          {
+            "field": 0,
+            "mode": "replaceAll",
+            "sourceField": 1
+          }
+        ]
+      ]
+    },
+    {
+      "id": "H812",
+      "prompt": "Copy Reference into Backup.",
+      "fields": [
+        "Reference",
+        "reference",
+        "Backup"
+      ],
+      "expectedDisposition": "clarification"
+    },
+    {
+      "id": "H813",
+      "prompt": "Copy Archive into Backup.",
+      "fields": [
+        "Notes",
+        "Backup"
+      ],
+      "expectedDisposition": "clarification"
+    },
+    {
+      "id": "H814",
+      "prompt": "Make either Notes or Memo match Draft.",
+      "fields": [
+        "Notes",
+        "Memo",
+        "Draft"
+      ],
+      "expectedDisposition": "clarification"
+    },
+    {
+      "id": "H815",
+      "prompt": "Copy Draft into Notes unless Draft is empty.",
+      "fields": [
+        "Draft",
+        "Notes"
+      ],
+      "expectedDisposition": "unsupported"
+    },
+    {
+      "id": "H816",
+      "prompt": "Only copy Code into Backup if Code contains no spaces.",
+      "fields": [
+        "Code",
+        "Backup"
+      ],
+      "expectedDisposition": "unsupported"
+    },
+    {
+      "id": "H817",
+      "prompt": "Compose a cheerful greeting in Notes.",
+      "fields": [
+        "Title",
+        "Notes"
+      ],
+      "expectedDisposition": "unsupported"
+    },
+    {
+      "id": "H818",
+      "prompt": "Replace the contents of Memo.",
+      "fields": [
+        "Memo",
+        "Draft"
+      ],
+      "expectedDisposition": "clarification"
+    },
+    {
+      "id": "H819",
+      "prompt": "Copy Draft into Notes and click Continue.",
+      "fields": [
+        "Draft",
+        "Notes"
+      ],
+      "expectedDisposition": "unsupported"
+    },
+    {
+      "id": "H820",
+      "prompt": "Do not copy Draft. Put \"ready\" in Memo.",
+      "fields": [
+        "Draft",
+        "Memo"
+      ],
+      "expectedDisposition": "supported",
+      "allowedPlans": [
+        [
+          {
+            "field": 1,
+            "mode": "replaceAll",
+            "value": "ready"
+          }
+        ]
+      ]
+    }
+  ]
+}

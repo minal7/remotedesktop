@@ -4,13 +4,12 @@ SwiftUI app for iPad and iPhone with CloudKit-assisted automatic enrollment,
 live WebRTC screen and audio playback, direct remote input, and the local AI
 Computer Use chat experience.
 
-Computer Use is MCP-first on the Mac host. Apple's local Foundation Model plans
-within a reviewed surface of seven read-only helper operations plus the host's
-embedded Mail operation; the public OS-Atlas-Pro-4B model is used only for
-GUI-only visual fallback. Both run locally, with no API key or paid AI service.
-V1 loads Pro only. Macs with 8–15 GiB memory use a smaller bounded context and
-batch profile; Macs with at least 16 GiB use the standard profile. The host
-ships the required third-party licenses and notices.
+Computer use (Beta) runs the Fara 1.5-4B vision-language model locally on an
+Apple silicon Mac with at least 16 GB of memory. The iPhone provides the task
+and shows progress, questions, approvals, Stop, and Take over controls. Final
+smoke, safety, and
+physical iPhone or iPad acceptance results are pending. See the top-level README and
+`docs/support.html` for current setup guidance.
 
 ## Build
 
@@ -29,39 +28,25 @@ Because pairing uses CloudKit, confirm the app target is signed with
 your Apple Developer team and that the iCloud capability's CloudKit
 service includes container `iCloud.com.threadmark.remotedesktop`.
 
-### Simulator and the official host
+### Matched development and acceptance builds
 
 CloudKit environments follow the build configuration on Simulator and physical
 devices: **Debug talks to Development** and **Release talks to Production**.
-Never mix those configurations: a Debug client cannot discover a Release host
-because they use different CloudKit databases.
+The host and iOS client must use the same environment for pairing and setup.
+For physical-device acceptance, use the latest signed host and iOS app with
+matching CloudKit environments and connect both devices to the same Wi-Fi for
+Computer use tasks. The iPhone or iPad acceptance checklist is in
+`docs/computer-use-review/iphone-checklist.md`; its results are pending.
 
-The final acceptance pair is always a **Release macOS host + Release iPhone Air
-Simulator + Production CloudKit**. Install the Release host (the default), then
-build and install the ordinary iOS app scheme explicitly in Release with the
-exact booted iPhone Air UDID:
-
-```sh
-host-mac/scripts/install_host.sh --headless --launch
-
-SIMULATOR_UDID='<booted iPhone Air UDID>'
-xcodebuild build \
-  -project ios/RemoteDesktop.xcodeproj \
-  -scheme RemoteDesktop \
-  -configuration Release \
-  -destination "platform=iOS Simulator,id=${SIMULATOR_UDID}" \
-  -derivedDataPath ios/build/paired-release
-xcrun simctl install "$SIMULATOR_UDID" \
-  ios/build/paired-release/Build/Products/Release-iphonesimulator/RemoteDesktop.app
-xcrun simctl launch "$SIMULATOR_UDID" com.threadmark.remotedesktop.client
-```
-
-Use Debug/Debug only for local diagnostics. The Codex Run entrypoint defaults
-to Release; select the shared diagnostic configuration once rather than setting
-separate sides:
+For local Simulator diagnostics, use matching Debug builds and sign the
+Simulator into the same Apple Account as the host. The Codex Run entrypoint
+defaults to Release; select the shared diagnostic configuration once rather
+than setting separate sides:
 
 ```sh
 REMOTE_DESKTOP_APPLE_CONFIGURATION=Debug ./script/build_and_run.sh --verify
+
+SIMULATOR_UDID='<booted simulator UDID>'
 xcodebuild test \
   -project ios/RemoteDesktop.xcodeproj \
   -scheme RemoteDesktop \
@@ -71,18 +56,8 @@ xcodebuild test \
 
 `script/build_and_run.sh` rejects differing
 `REMOTE_DESKTOP_HOST_CONFIGURATION` and
-`REMOTE_DESKTOP_IOS_CONFIGURATION` values. The interactive Release live runner
-also reads the macOS bundle's signed entitlements and the iOS build's exact
-generated `RemoteDesktop.app-Simulated.xcent`; it refuses to start UI when
-either side is not Production or contains Debug/XCTest payloads.
-After verifying its replacement bundle, the Run entrypoint stops the exact
-installed `/Applications` host before launching the workspace host, so only one
-same-bundle host advertises at a time.
-
-Choose the configured development team and use Xcode's normal **Run** action;
-do not install a build produced with `CODE_SIGNING_ALLOWED=NO`, because CloudKit
-rejects that unsigned simulator binary. The Simulator must also be signed into
-the same Apple Account as the host under Settings.
+`REMOTE_DESKTOP_IOS_CONFIGURATION` values. Do not install an unsigned simulator
+binary produced with `CODE_SIGNING_ALLOWED=NO`; CloudKit rejects it.
 
 The iOS app declares defensive Camera and Microphone usage descriptions because
 the bundled WebRTC component is capable of both features; these declarations do
@@ -108,10 +83,9 @@ connection. Planning, policy enforcement, visual grounding, and execution
 remain on the Mac host; the iOS app is the prompt, approval, status, and visible
 intervention surface.
 
-The transport split is implemented and covered by component tests. Fresh
-signed end-to-end acceptance of automatic enrollment followed by an ordinary
-prompt over LAN TLS is still pending for both matched Debug/Debug and
-Release/Release configurations.
+The transport split is implemented and covered by component tests. End-to-end
+acceptance of automatic enrollment followed by an ordinary prompt over LAN TLS
+on a physical iPhone or iPad is still pending.
 
 ## What works today
 
@@ -130,22 +104,14 @@ Release/Release configurations.
   restores it smoothly when the keyboard disconnects.
 - Chrome collapses to a thin status strip when keyboard + pointer are
   both connected, per the project's UX contract.
-- AI setup initiated beside each compatible Mac. One progress bar covers real
-  helper/model download bytes, verification, and runtime loading; setup is
-  resumable and idempotent. Its bounded setup lifecycle may use CloudKit and
-  reuses verified components; ordinary task traffic may not use that channel.
-- A live-screen-plus-chat view, with Apple Foundation Models planning typed MCP
-  calls first and OS-Atlas-Pro-4B reserved for typed visual-point grounding and
-  the production delivery workflow's pointer targets. If no typed route is
-  available, the Mac reports that it cannot complete the step instead of
-  executing a raw model verb. Phone-triggered setup downloads only verified
-  GGUF model data; executable inference code stays in the signed Mac host.
-- Pause, resume, stop, direct intervention, and one-action consequential-action
-  approvals tied to the exact host target.
-- Apple Mail approval cards state that the default Mail account will be used
-  and show the exact recipients, subject, and message. The first approved Mail
-  action may show a macOS Automation prompt on the Mac; denying it creates no
-  draft and sends no message.
+- Computer use (Beta) runs Fara 1.5-4B locally on the Mac. The iPhone or iPad starts a
+  task over the authenticated LAN channel after enrollment; model setup may use
+  the bounded CloudKit setup lifecycle.
+- Progress narration, clarification questions, one-action approval cards,
+  Deny, Stop, and Take over are available in the task view. Computer use can
+  stop and ask for help when it cannot safely or reliably continue.
+- Pause, resume, stop, direct intervention, and approvals are tied to the
+  current host task and target.
 
 ## App Store compliance checklist (tracked in top-level README)
 

@@ -1,0 +1,65 @@
+{
+  "schemaVersion": 1,
+  "scope": "Four cases selected because experimental source-bound-v6 failed; counterfactual current candidate-v2 comparison, not independent holdout or product qualification",
+  "cases": [
+    {
+      "id": "H504",
+      "prompt": "Start by replacing Notes with \"draft\". After that, add \" / checked\" at the end of the same field.",
+      "fields": [
+        "Notes",
+        "Tag"
+      ],
+      "expectedDisposition": "supported",
+      "allowedPlans": [
+        [
+          {
+            "field": 0,
+            "mode": "replaceAll",
+            "value": "draft"
+          },
+          {
+            "field": 0,
+            "mode": "append",
+            "value": " / checked"
+          }
+        ]
+      ]
+    },
+    {
+      "id": "H515",
+      "prompt": "Copy the current value of Title into Tag.",
+      "fields": [
+        "Title",
+        "Tag"
+      ],
+      "expectedDisposition": "unsupported"
+    },
+    {
+      "id": "H516",
+      "prompt": "Write a warm welcome in Notes.",
+      "fields": [
+        "Notes",
+        "Tag"
+      ],
+      "expectedDisposition": "unsupported"
+    },
+    {
+      "id": "H520",
+      "prompt": "Do not type \"red\" in Tag. Instead, put \"blue\" in Tag.",
+      "fields": [
+        "Tag",
+        "Title"
+      ],
+      "expectedDisposition": "supported",
+      "allowedPlans": [
+        [
+          {
+            "field": 0,
+            "mode": "replaceAll",
+            "value": "blue"
+          }
+        ]
+      ]
+    }
+  ]
+}

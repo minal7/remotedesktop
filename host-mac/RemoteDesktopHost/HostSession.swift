@@ -3,6 +3,19 @@ import Combine
 import Foundation
 import os
 
+private final class TaskMemoryOwnerIdentityBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: String?
+
+    func set(_ value: String?) { lock.lock(); self.value = value; lock.unlock() }
+    func get() -> String? { lock.lock(); defer { lock.unlock() }; return value }
+}
+
+@MainActor
+private final class TaskMemoryManagerReference {
+    weak var value: HostComputerUseManager?
+}
+
 /// Top-level state holder for the host agent. Owns the private session binding,
 /// signaling client, capture, live WebRTC peer session, and input
 /// injector; exposes a small enum state that the menu bar UI renders.
@@ -43,7 +56,9 @@ final class HostSession: ObservableObject {
     @Published private(set) var state: State = .idle
     @Published private(set) var permissions = Permissions()
     @Published private(set) var optionalAudioError: String?
+    @Published private(set) var ownerMemory: PersonalMemoryViewModel?
     let computerUse: HostComputerUseManager
+    var hideOwnerMemoryWindow: (@MainActor () -> Void)?
 
     private struct ActiveWebRTCPeer {
         let senderID: String
@@ -64,16 +79,22 @@ final class HostSession: ObservableObject {
     private let permissionsProvider: PermissionsProvider
     private let validateAudioInputEntitlements: @Sendable () throws -> Void
     private let deviceIdentityProvider: @Sendable () -> String
+    private let advertisedHostName: String?
     private let cloudAccountBindingProvider:
         @Sendable () async throws -> CloudKitAccountBinding
     private let signalingRunOverride: (@MainActor @Sendable (String) async -> Void)?
+    private let enablePersonalMemory: Bool
+    private let taskMemoryOwnerIdentity: TaskMemoryOwnerIdentityBox
+    private let taskMemoryContextSlot: TaskMemoryContextSlot?
+    private var personalMemorySession: MacPersonalMemorySession?
+    private var ownerMemoryScopeLease: OwnerMemoryScopeLease?
     private var pendingSignalingCleanupTasks: [Task<Void, Never>] = []
     private var pendingRemoteICEPayloads: [[String: String]] = []
     private var loggedPendingRemoteICE = false
     private var disconnecting = false
     private let iceConfigFetcher = ICEConfigFetcher(
         containerIdentifier: HostConfig.cloudKitContainerIdentifier)
-    private let localCredentialStore = LocalComputerUseCredentialStore()
+    private let localCredentialStore: LocalComputerUseCredentialStore
     private var localComputerUseServer: LocalComputerUseBrokerServer?
     private var localComputerUseChannel: LocalHostComputerUseChannel?
     /// Set by every CloudKit account-change notification, including ones that
@@ -93,6 +114,10 @@ final class HostSession: ObservableObject {
         deviceIdentityProvider: @escaping @Sendable () -> String = {
             DeviceIdentity.get()
         },
+        advertisedHostName: String? = nil,
+        localCredentialStore: LocalComputerUseCredentialStore =
+            LocalComputerUseCredentialStore(),
+        allowsAutomaticComputerUseSetup: Bool = true,
         cloudAccountBindingProvider: @escaping @Sendable () async throws
             -> CloudKitAccountBinding = {
                 try await CloudKitAccountBinding.current(
@@ -100,21 +125,76 @@ final class HostSession: ObservableObject {
             },
         computerUseExecutor: (any ComputerUseExecuting)? = nil,
         computerUseManager: HostComputerUseManager? = nil,
+        computerUseTaskLedger: ComputerUseTaskLedger? = nil,
         allowsExternalComputerUseServices: Bool =
             !HostRuntimeContext.isRunningUnitTests,
-        signalingRunOverride: (@MainActor @Sendable (String) async -> Void)? = nil
+        signalingRunOverride: (@MainActor @Sendable (String) async -> Void)? = nil,
+        enablePersonalMemory: Bool = false
     ) {
         let injector = InputInjector()
         self.injector = injector
-        self.computerUse = computerUseManager ?? HostComputerUseManager(
+        let composeTaskMemory = enablePersonalMemory && computerUseManager == nil
+            && computerUseExecutor == nil
+        let ownerIdentity = TaskMemoryOwnerIdentityBox()
+        let faraInputs = composeTaskMemory ? PersonalMemoryFaraRuntimeInputsCache() : nil
+        let leaseBox = TaskMemoryContextLeaseAuthorizationBox()
+        let contextSlot = composeTaskMemory
+            ? TaskMemoryContextSlot(leaseAuthorizationBox: leaseBox) : nil
+        let managerReference = TaskMemoryManagerReference()
+        let contextProvider: PersonalMemoryTaskContextProvider? = composeTaskMemory
+            ? PersonalMemoryTaskContextProvider(
+                enabled: true,
+                ownerID: { ownerIdentity.get() },
+                isLeaseCurrent: { lease in
+                    managerReference.value?.isTaskMemoryLeaseCurrent(lease) == true
+                },
+                isLeaseCurrentSynchronously: { leaseBox.isCurrent($0) },
+                faraRuntimeInputs: { faraInputs?.faraInputs() })
+            : nil
+        let manager = computerUseManager ?? HostComputerUseManager(
             injector: injector,
             executor: computerUseExecutor,
-            allowsExternalServices: allowsExternalComputerUseServices)
+            taskLedger: computerUseTaskLedger ?? ComputerUseTaskLedger(),
+            allowsExternalServices: allowsExternalComputerUseServices,
+            allowsAutomaticSetup: allowsAutomaticComputerUseSetup,
+            taskMemoryContextProvider: contextProvider,
+            taskMemoryContextSlot: contextSlot,
+            taskMemoryFaraRuntimeInputs: faraInputs)
+        self.computerUse = manager
+        managerReference.value = manager
+        self.taskMemoryOwnerIdentity = ownerIdentity
+        self.taskMemoryContextSlot = contextSlot
         self.permissionsProvider = permissionsProvider
         self.validateAudioInputEntitlements = validateAudioInputEntitlements
         self.deviceIdentityProvider = deviceIdentityProvider
+        self.advertisedHostName = advertisedHostName
+        self.localCredentialStore = localCredentialStore
         self.cloudAccountBindingProvider = cloudAccountBindingProvider
         self.signalingRunOverride = signalingRunOverride
+        self.enablePersonalMemory = enablePersonalMemory
+        if enablePersonalMemory {
+            let priorOwnerScopeRevocation = self.computerUse.didRevokeOwnerMemoryScope
+            self.computerUse.didRevokeOwnerMemoryScope = { [weak self] revokedScope in
+                if let self, self.ownerMemoryScopeLease == revokedScope {
+                    self.invalidatePersonalMemorySession()
+                    self.hideOwnerMemoryWindow?()
+                }
+                priorOwnerScopeRevocation?(revokedScope)
+            }
+            let priorAutomationHook = self.computerUse.willBeginAutomation
+            self.computerUse.willBeginAutomation = { [weak self] in
+                if let self, let session = self.personalMemorySession {
+                    let matchingErasure = self.ownerMemoryScopeLease.map {
+                        self.computerUse.isOwnerMemoryErasure($0)
+                    } == true
+                    if !matchingErasure || !session.willBeginAutomation() {
+                        self.invalidatePersonalMemorySession()
+                        self.hideOwnerMemoryWindow?()
+                    }
+                }
+                priorAutomationHook?()
+            }
+        }
     }
 
     private var allowsLocalCredentialAccess: Bool {
@@ -250,6 +330,17 @@ final class HostSession: ObservableObject {
         confirmedBinding != currentBinding
     }
 
+    /// A local computer-use peer is a visual sidecar for the already-advertised
+    /// LAN task session. Its lifetime must not withdraw that independent
+    /// discovery path. A primary remote-control peer still takes the host out
+    /// of advertising state after its offer is accepted.
+    static func shouldWithdrawAdvertisement(
+        afterAcceptedPeer classification:
+            HostComputerUseManager.WebRTCPeerClassification
+    ) -> Bool {
+        classification == .primaryRemoteControl
+    }
+
     /// Periodic defense for a missed or delayed CKAccountChanged notification.
     /// A short transient outage may continue only inside the bounded trust
     /// window established by a positive lookup in this process.
@@ -291,6 +382,9 @@ final class HostSession: ObservableObject {
     /// Tears down an authenticated generation immediately and serializes a
     /// fresh start behind its bounded CloudKit/task cleanup.
     private func restartAfterCloudAccountInvalidation(reason: String) {
+        taskMemoryOwnerIdentity.set(nil)
+        taskMemoryContextSlot?.clear()
+        invalidatePersonalMemorySession()
         requiresFreshCloudAccountResolution = true
         lastPositiveCloudAccountResolutionAt = nil
         lastPositivelyResolvedCloudAccountBinding = nil
@@ -386,6 +480,7 @@ final class HostSession: ObservableObject {
     /// Validates permissions, generates a new private session binding, and kicks
     /// off the signaling run-loop.
     private func startListening() {
+        invalidatePersonalMemorySession()
         refreshPermissions()
         computerUse.refreshModelState()
         guard permissions.ok else {
@@ -421,6 +516,9 @@ final class HostSession: ObservableObject {
     }
 
     func stop() {
+        taskMemoryOwnerIdentity.set(nil)
+        taskMemoryContextSlot?.clear()
+        invalidatePersonalMemorySession()
         let transportTeardown = computerUse.stop()
         pendingSignalingCleanupTasks.append(
             stageConnectionShutdown(after: transportTeardown))
@@ -430,6 +528,9 @@ final class HostSession: ObservableObject {
     /// AppKit uses this awaited path before process termination so the
     /// multi-gigabyte local model cannot outlive its owning host process.
     func shutdown() async {
+        taskMemoryOwnerIdentity.set(nil)
+        taskMemoryContextSlot?.clear()
+        invalidatePersonalMemorySession()
         // Keep every task we cancelled alive until its final CloudKit cleanup
         // has completed. The host advertisement has a stable record
         // name per Mac, so launching a replacement before this returns lets
@@ -506,6 +607,8 @@ final class HostSession: ObservableObject {
         // session was stopped before the task received its first turn, do not
         // touch the Keychain or create any external signaling state.
         guard !Task.isCancelled else { return }
+        taskMemoryOwnerIdentity.set(nil)
+        taskMemoryContextSlot?.clear()
         resetPendingRemoteICE()
         let senderID = deviceIdentityProvider()
         guard !senderID.trimmingCharacters(
@@ -517,7 +620,9 @@ final class HostSession: ObservableObject {
             return
         }
         guard !Task.isCancelled else { return }
-        let hostName = Host.current().localizedName ?? ProcessInfo.processInfo.hostName
+        let hostName = advertisedHostName
+            ?? Host.current().localizedName
+            ?? ProcessInfo.processInfo.hostName
         let claimedComputerUseCapability = computerUse.capability
         let localChannel = LocalHostComputerUseChannel(
             hostID: senderID,
@@ -527,21 +632,98 @@ final class HostSession: ObservableObject {
         var localCredentialID: String?
         var localCredential: LocalComputerUseCredential?
         var localAccountBinding: CloudKitAccountBinding?
+        var activeMemoryCoordinator: PersonalMemoryCoordinator?
+        var activePersonalMemorySession: MacPersonalMemorySession?
+        defer {
+            taskMemoryOwnerIdentity.set(nil)
+            taskMemoryContextSlot?.clear()
+            if let activePersonalMemorySession {
+                invalidatePersonalMemorySession(ifOwnedBy: activePersonalMemorySession)
+            }
+        }
 
-        if let localIdentity = await resolveLocalComputerUseIdentity() {
+        let localIdentity = await resolveLocalComputerUseIdentity()
+        guard !Task.isCancelled else { return }
+        if let localIdentity {
+            taskMemoryOwnerIdentity.set(localIdentity.binding.rawValue)
             let credential = localIdentity.credential
             localCredential = credential
             localAccountBinding = localIdentity.binding
+            if enablePersonalMemory && computerUse.permitsOwnerMemorySession {
+                invalidatePersonalMemorySession()
+                if let ownerScope = computerUse.mintOwnerMemoryScope(scopeID: UUID()) {
+                    ownerMemoryScopeLease = ownerScope
+                    let boundary = MacPersonalMemoryErasureBoundary(
+                        authorizationGeneration: ownerScope.generation,
+                        isScopeCurrent: { [weak computerUse] in
+                            computerUse?.isOwnerMemoryScopeCurrent(ownerScope) == true
+                        },
+                        hasMatchingErasure: { [weak computerUse] in
+                            computerUse?.isOwnerMemoryErasure(ownerScope) == true
+                        },
+                        begin: { [weak computerUse] _ in
+                            computerUse?.beginOwnerMemoryErasure(ownerScope)
+                        },
+                        isQuiescent: { [weak computerUse] token in
+                            computerUse?.memoryErasureIsQuiescent(token) ?? false
+                        },
+                        end: { [weak computerUse] token in
+                            computerUse?.endMemoryErasure(token)
+                        },
+                        revokeScope: { [weak computerUse] in
+                            computerUse?.revokeOwnerMemoryScope(ownerScope)
+                        })
+                    let memorySession = MacPersonalMemorySession(
+                        enabled: true,
+                        ownerID: localIdentity.binding.rawValue,
+                        erasureBoundary: boundary)
+                    personalMemorySession = memorySession
+                    ownerMemory = memorySession.controller
+                    activePersonalMemorySession = memorySession
+                }
+            }
+            let memoryCoordinator = PersonalMemoryCoordinator(
+                enabled: enablePersonalMemory,
+                proposalsEnabled: false,
+                ownerID: localIdentity.binding.rawValue,
+                leaseProvider: { [weak computerUse] context, requiresTask in
+                    computerUse?.localMemoryLease(
+                        peerID: context.peerID,
+                        sessionID: context.sessionID,
+                        requiresTask: requiresTask)
+                },
+                beginErasure: { [weak computerUse] lease in
+                    computerUse?.beginMemoryErasure(lease)
+                },
+                isErasureQuiescent: { [weak computerUse] token in
+                    computerUse?.memoryErasureIsQuiescent(token) ?? false
+                },
+                endErasure: { [weak computerUse] token in
+                    computerUse?.endMemoryErasure(token)
+                })
+            activeMemoryCoordinator = memoryCoordinator
             let server = LocalComputerUseBrokerServer(
                 credential: credential,
                 hostID: senderID,
                 channel: localChannel,
+                memoryFeatureEnabled: enablePersonalMemory,
+                memoryHandler: { [weak memoryCoordinator] command, context in
+                    guard let memoryCoordinator else {
+                        return LocalComputerUseBrokerServer.disabledMemoryReply(for: command)
+                    }
+                    return await memoryCoordinator.handle(command, context: context)
+                },
                 authorizePeer: { [weak computerUse] senderID in
                     computerUse?.authorizeLocalPeer(senderID: senderID) ?? false
                 },
                 revokePeer: { [weak computerUse] senderID in
                     computerUse?.revokeLocalPeerAuthorization(
                         senderID: senderID)
+                },
+                bindSession: { [weak computerUse] senderID, sessionID in
+                    computerUse?.bindLocalMemorySession(
+                        peerID: senderID,
+                        sessionID: sessionID) ?? false
                 })
             do {
                 localPort = Int32(try await server.start())
@@ -559,6 +741,7 @@ final class HostSession: ObservableObject {
         }
         defer {
             activeLocalServer?.stop()
+            activeMemoryCoordinator?.close()
             if let activeLocalServer,
                localComputerUseServer === activeLocalServer {
                 localComputerUseServer = nil
@@ -822,11 +1005,11 @@ final class HostSession: ObservableObject {
                                 audioEnabled: permissions.audioEnabled,
                                 peerSenderID: offerSenderID,
                                 onUserInput: { [weak computerUse] in
-                                    if computerUse?.blockActionsForUserIntervention() == true {
-                                        Task { @MainActor [weak computerUse] in
-                                            computerUse?.userIntervened()
-                                        }
+                                    guard let intervention = computerUse?.recordUserInputInInjectionTransaction() else { return false }
+                                    Task { @MainActor [weak computerUse] in
+                                        computerUse?.applyUserInputIntervention(intervention)
                                     }
+                                    return true
                                 },
                                 onPeerAuthorizationChanged: { [weak self, weak computerUse] update in
                                     guard let computerUse else { return }
@@ -860,36 +1043,50 @@ final class HostSession: ObservableObject {
                                     }
                                 })
                         }
+                        guard let offeredPeer = peerSession,
+                              let offeredOwner = activeWebRTCPeer,
+                              offeredOwner.senderID == offerSenderID else { continue }
                         do {
-                            try await peerSession?.acceptOffer(sdp: sdp)
+                            try await offeredPeer.acceptOffer(sdp: sdp)
+                            guard !Task.isCancelled, peerSession === offeredPeer,
+                                  activeWebRTCPeer?.generation == offeredOwner.generation,
+                                  !offeredPeer.isEnded else { continue }
                             flushPendingRemoteICEIfPossible()
-                            advertiser.stop()
-                            await client.stopAdvertising()
-                            state = .paired(clientDescription: clientName)
+                            if Self.shouldWithdrawAdvertisement(
+                                afterAcceptedPeer: offeredOwner.classification) {
+                                advertiser.stop()
+                                await client.stopAdvertising()
+                                guard !Task.isCancelled, peerSession === offeredPeer,
+                                      activeWebRTCPeer?.generation == offeredOwner.generation,
+                                      !offeredPeer.isEnded else { continue }
+                                state = .paired(clientDescription: clientName)
+                            }
                         } catch {
+                            // A capture deadline/close can retire this exact
+                            // peer while offer negotiation or advertisement
+                            // cleanup awaits. Old completion cannot act on a
+                            // successor or publish the retired peer as paired.
+                            guard !Task.isCancelled, peerSession === offeredPeer,
+                                  activeWebRTCPeer?.generation == offeredOwner.generation else { continue }
                             log.error("failed to accept WebRTC offer: \(String(describing: error), privacy: .public)")
-                            if let activeWebRTCPeer,
-                               activeWebRTCPeer.senderID == offerSenderID,
-                               activeWebRTCPeer.classification
-                                == .localComputerUseSidecar {
+                            if offeredOwner.classification == .localComputerUseSidecar {
                                 handlePeerEnded(
                                     reason: "error",
                                     senderID: offerSenderID,
-                                    generation:
-                                        activeWebRTCPeer.generation,
-                                    classification:
-                                        activeWebRTCPeer.classification)
+                                    generation: offeredOwner.generation,
+                                    classification: offeredOwner.classification)
                                 continue
                             }
                             state = .error("Couldn't start the WebRTC session.")
                             advertiser.stop()
                             await stopComputerUseBeforeTransportClosure()
+                            guard !Task.isCancelled, peerSession === offeredPeer,
+                                  activeWebRTCPeer?.generation == offeredOwner.generation else { continue }
                             activeWebRTCPeer = nil
-                            let captureTeardown = peerSession?.close(
-                                reason: "error")
+                            let captureTeardown = offeredPeer.close(reason: "error")
                             peerSession = nil
-                            await captureTeardown?.value
                             resetPendingRemoteICE()
+                            await captureTeardown.value
                             await client.cleanup()
                             return
                         }
@@ -1074,7 +1271,10 @@ final class HostSession: ObservableObject {
             log.info("handleDisconnect re-entered (reason=\(reason, privacy: .public)) — skipping")
             return
         }
+        taskMemoryOwnerIdentity.set(nil)
+        taskMemoryContextSlot?.clear()
         disconnecting = true
+        invalidatePersonalMemorySession()
         log.info("connection ended (\(reason, privacy: .public)) — restarting listener")
         // A terminal peer failure is not a resumable pause. Persist and send
         // the terminal Computer Use result while the old task channel is still
@@ -1097,6 +1297,31 @@ final class HostSession: ObservableObject {
         // still blocks cached fallback on the next run.
         restartAfterCloudAccountInvalidation(
             reason: "cloud-account-changed")
+    }
+
+    /// Clears sensitive owner text when the settings window closes while
+    /// keeping this authenticated session reusable if the window is reopened.
+    func closeOwnerMemoryView() {
+        personalMemorySession?.controller.close()
+    }
+
+    private func invalidatePersonalMemorySession() {
+        guard let current = personalMemorySession else {
+            ownerMemory = nil
+            ownerMemoryScopeLease = nil
+            return
+        }
+        current.invalidate()
+        personalMemorySession = nil
+        ownerMemoryScopeLease = nil
+        ownerMemory = nil
+    }
+
+    private func invalidatePersonalMemorySession(
+        ifOwnedBy expected: MacPersonalMemorySession
+    ) {
+        guard personalMemorySession === expected else { return }
+        invalidatePersonalMemorySession()
     }
 
     /// MainActor bridge from the authenticated WebRTC hello into the

@@ -1,0 +1,8 @@
+id: "native-006"
+surface: app
+start: {"app":"Finder"}
+approval_policy: {"allow_start_interaction":true}
+prompt: "In Finder, open the AgentEval/n006 folder in your home folder, create a folder named Archive, then create a subfolder named 2026 inside it."
+checker: {"type":"folder_exists","expect":{"path":"{eval_dir}/Archive/2026"}}
+max_steps: 18
+tags: ["native","finder","nested-folders"]

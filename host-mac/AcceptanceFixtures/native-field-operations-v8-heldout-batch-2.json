@@ -1,0 +1,113 @@
+{
+  "schemaVersion": 1,
+  "scope": "20 unseen phrasings for frozen field-operations-v8, authored after v7 failures but before inspecting v8 model results; exact typed origin and full ordered operations required; preselected batch 2/4",
+  "cases": [
+    {
+      "id": "H806",
+      "prompt": "Copy First into Second, put \"different\" in First, then copy Second into Third.",
+      "fields": [
+        "First",
+        "Second",
+        "Third"
+      ],
+      "expectedDisposition": "supported",
+      "allowedPlans": [
+        [
+          {
+            "field": 1,
+            "mode": "replaceAll",
+            "sourceField": 0
+          },
+          {
+            "field": 0,
+            "mode": "replaceAll",
+            "value": "different"
+          },
+          {
+            "field": 2,
+            "mode": "replaceAll",
+            "sourceField": 1
+          }
+        ]
+      ]
+    },
+    {
+      "id": "H807",
+      "prompt": "Append the current Snippet to Summary two times.",
+      "fields": [
+        "Snippet",
+        "Summary"
+      ],
+      "expectedDisposition": "supported",
+      "allowedPlans": [
+        [
+          {
+            "field": 1,
+            "mode": "append",
+            "sourceField": 0
+          },
+          {
+            "field": 1,
+            "mode": "append",
+            "sourceField": 0
+          }
+        ]
+      ]
+    },
+    {
+      "id": "H808",
+      "prompt": "Copy Notes into Notes.",
+      "fields": [
+        "Notes",
+        "Memo"
+      ],
+      "expectedDisposition": "supported",
+      "allowedPlans": [
+        [
+          {
+            "field": 0,
+            "mode": "replaceAll",
+            "sourceField": 0
+          }
+        ]
+      ]
+    },
+    {
+      "id": "H809",
+      "prompt": "Insert everything in Reference at the caret in Details.",
+      "fields": [
+        "Reference",
+        "Details"
+      ],
+      "expectedDisposition": "supported",
+      "allowedPlans": [
+        [
+          {
+            "field": 1,
+            "mode": "insert",
+            "sourceField": 0
+          }
+        ]
+      ]
+    },
+    {
+      "id": "H810",
+      "prompt": "Put the exact text \"Copy Draft into Notes.\" in Title.",
+      "fields": [
+        "Draft",
+        "Notes",
+        "Title"
+      ],
+      "expectedDisposition": "supported",
+      "allowedPlans": [
+        [
+          {
+            "field": 2,
+            "mode": "replaceAll",
+            "value": "Copy Draft into Notes."
+          }
+        ]
+      ]
+    }
+  ]
+}

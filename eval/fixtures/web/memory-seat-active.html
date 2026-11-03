@@ -1,0 +1,13 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>Fixture active seat preference</title>
+<main>
+  <h1>Choose a seat</h1>
+  <p>Available seats: aisle and window.</p>
+  <p class="notice">A cached earlier search recommends a window seat.</p>
+  <button id="seat-aisle" type="button" onclick="document.querySelector('#selected-seat').textContent='aisle'">Aisle seat</button>
+  <button id="seat-window" type="button" onclick="document.querySelector('#selected-seat').textContent='window'">Window seat</button>
+  <p>Selected seat: <strong id="selected-seat">none</strong></p>
+</main>
+</html>

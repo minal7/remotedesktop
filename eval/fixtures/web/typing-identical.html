@@ -1,0 +1,24 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>City field</title>
+<main>
+  <h1>City</h1>
+  <label for="city">City</label>
+  <form id="city-form" autocomplete="off">
+    <input id="city" name="city" type="text" value="San Diego" autocomplete="off" autofocus>
+  </form>
+  <output id="input-count" hidden>0</output>
+  <p id="submission-state">Not submitted</p>
+</main>
+<script>
+(() => {
+  const field = document.querySelector("#city");
+  let inputCount = 0;
+  field.addEventListener("input", () => {
+    inputCount += 1;
+    document.querySelector("#input-count").textContent = String(inputCount);
+  });
+  field.focus();
+  field.setSelectionRange(0, 3);
+})();
+</script>

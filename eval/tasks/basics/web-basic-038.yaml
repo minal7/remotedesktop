@@ -1,0 +1,8 @@
+id: "web-basic-038"
+surface: web
+start: {"url":"http://127.0.0.1:8765/controls.html"}
+prompt: "Switch to the second tab so its content is visible."
+checker: {"type":"dom","expect":[{"selector":"#tab-two","text":"Second tab content","visible":true}],"url_prefix":"http://127.0.0.1:8765/"}
+max_steps: 10
+tags: ["tabs","click"]
+approval_policy: {"allow_fixture_interaction":true}

@@ -38,6 +38,21 @@ pair with TestFlight/App Store clients and the specially configured iOS
 Simulator build. A Debug host and a Production client cannot discover each
 other even when they use the same Apple Account.
 
+## Native UI tests
+
+The XCTest host suppresses production services, the menu bar item, setup
+windows and automatic activation. By default it also prohibits test windows
+from becoming active. For an explicitly selected batch that opens native
+windows, prefix the `xcodebuild test` command with
+`TEST_RUNNER_RUN_COMPUTER_USE_UI_TESTS=1`. Keep each test's own opt-in flags
+as well, and run with `-jobs 1 -parallel-testing-enabled NO`.
+
+This flag sets one accessory activation policy for the UI-test process.
+Repeated prohibited/accessory transitions between methods can complete late
+and prevent the next test's browser from becoming active. The flag only
+applies inside XCTest and does not enable host services or automatic windows.
+Tests still own and close any windows they create. Omit it for ordinary tests.
+
 ## GitHub release package
 
 The GitHub `Release` workflow builds the macOS target as a signed,
@@ -120,8 +135,8 @@ CloudKit fallback for those messages: a missing, unreachable, or
 unauthenticated broker fails closed before the host receives a task.
 
 WebRTC remains a separate visual sidecar for live screen pixels, host audio,
-and direct input. All planning, policy validation, Foundation Models
-inference, OS-Atlas visual grounding, and action execution remain on the Mac.
+and direct input. Computer use planning, policy validation, visual grounding,
+and action execution remain on the Mac.
 
 ## What works today
 
@@ -150,123 +165,40 @@ inference, OS-Atlas visual grounding, and action execution remain on the Mac.
 - `InputInjector` — consumes `ControlMessage.pointer|scroll|key|text`
   and posts `CGEvent`s with correct button transitions and drag types
 - Full HID → macOS virtual-keycode translation table for common keys
-- MCP-first Computer Use using Apple's on-device Foundation Models planner and
-  a pinned, notarized universal `mac-control-mcp` helper. It runs locally over
-  stdio with a scrubbed environment: no API key, paid service, Python,
-  Homebrew, or Conda is required. The host owns the tool allowlist, schema
-  validation, mutation ledger, and exact one-use approvals.
-- Reliable Apple Mail draft/send support through `remote_desktop_mail`, a
-  reviewed MCP server embedded in the signed host and connected in memory. It
-  uses the default Mail sending account, creates a visible draft, suppresses
-  automatic signatures so the approved body stays exact, and sends only after
-  iOS shows the complete recipients, subject, and body for one-action approval.
-  The downloaded helper's generic `mail_send` tool remains blocked.
-- GUI-only apps use a local hybrid when no suitable structured tool exists.
-  Its always-installed semantic router opens an explicitly named common app
-  once before interacting and handles bounded literal text and unambiguous
-  current-app navigation deterministically. Remaining ordinary-language steps
-  use Apple's on-device model to select one typed semantic action and bounded
-  arguments. OS-Atlas-Pro-4B grounds pointer targets, and the host composes,
-  validates, approves, and executes the native action.
-  iOS sends one idempotent request through the bounded setup lifecycle; the
-  host streams the helper download, model download, verification, and
-  runtime-loading progress back to the device row. Setup is the only
-  Computer Use lifecycle permitted on CloudKit.
-- Versioned model installation in Application Support with Apple-silicon,
-  8 GiB memory, free-space, byte-size, and streaming SHA-256 checks before an
-  atomic receipt is activated. An 8–15 GiB Mac uses a 4,096-token compact
-  llama.cpp profile, smaller logical/physical batches, 3 GiB launch headroom,
-  1 GiB post-load headroom, and a 4 GiB process ceiling. Macs with at least
-  16 GiB retain the 8,192-token profile and larger safety margins. Resumable
-  progress is calculated from durable bytes across every artifact, and chat is
-  exposed only after the complete model package loads successfully.
-- The host-composed surface covers 16 semantic operations. `ANSWER` and
-  `REPORT` are aliases for the same evidence-checked visible-facts behavior.
-  Click, double-click, secondary-click, and drag use harmless OS-Atlas primary
-  click carriers only for visual points; the typed plan owns the final verb.
-  Text, four-direction scroll, app opening, Return, hotkeys, wait, completion,
-  clarification, and visible answers are composed directly from validated
-  arguments without visual-model verb selection. The router remains installed
-  regardless of Apple's startup availability and re-checks availability for
-  every non-deterministic step. Its deterministic, host-authored routes remain
-  usable during an Apple-model outage. If no such route matches, the task
-  returns `unable to complete` before any further OS-Atlas inference or host
-  effects; the raw checkpoint path is not revived. Authentication-boundary app
-  switching likewise accepts only a typed `OPEN_APP` route. Direct user input
-  immediately pauses automation, and malformed or out-of-range actions are
-  rejected before any effect.
+## Computer use (Beta)
 
-## Computer Use local component distribution
+Computer use runs Fara 1.5-4B locally on an Apple silicon Mac with at least
+16 GB of memory. It observes the active Mac window and acts through a visual
+screen-and-input loop; browser interaction uses the screen and does not require
+a browser extension. The model is installed from two pinned, checksummed
+artifacts: the Fara model and its vision projector. Setup checks memory and
+free disk space, reports download progress, resumes interrupted downloads, and
+verifies SHA-256 before activating the installation.
 
-`mac-control-mcp` 0.8.2 is fetched only after setup is requested on iOS. The
-host pins its release URL, byte count, SHA-256, bundle identifier, Developer ID
-team, hardened-runtime signature, universal architectures, Gatekeeper result,
-and notarization ticket before activating a versioned receipt. The helper is
-not launched by the installer. Its MIT license and notice ship in the host.
-
-The v1 visual model is OS-Atlas-Pro-4B, pinned to the public, ungated
-`OS-Copilot/OS-Atlas-Pro-4B` revision
-`06b790b907d82f29bb317ba889e6888805953036`. It runs locally and requires no
-API key or paid service. Pro is selected because the upstream project trains it
-for agentic next-action generation. The Base 4B variant is represented for a
-possible future grounding-only package, but v1 neither downloads nor loads it
-alongside Pro.
-
-The phone-triggered setup downloads only immutable, verified OS-Atlas Pro 4B
-GGUF model data. Each manifest entry contains its complete HTTPS URL, byte
-count, and SHA-256. Downloaded model files are explicitly non-executable; the
-signed host contains all inference code. Conversion provenance is pinned to
-llama.cpp tag `b9992`, revision
-`6eddde06a4f25d55d538b5d15628dcc2b6882147`.
-
-The signed host bundles and verifies the complete
-[OS-Atlas Apache 2.0 License](https://github.com/OS-Copilot/OS-Atlas/blob/bad08407ab54b5bf6c17a69fe1ced476b9494926/LICENSE),
-the pinned llama.cpp MIT license, and a conversion notice before activating a
-receipt. Missing or tampered installed copies are repaired from the signed app;
-no legal document or executable is fetched during model setup.
+After same-account enrollment, prompts, task status, results, questions,
+approvals, and task controls travel over the authenticated LAN TLS channel.
+CloudKit supports enrollment and Computer use setup; it does not carry task
+prompts or results. Live pixels and direct remote input use the separate
+WebRTC connection. The model may ask for missing information or help, and the
+user can approve or deny consequential actions, stop a task, or take over the
+live Mac view.
 
 ## Computer Use acceptance
 
 The acceptance runners keep hidden component evidence separate from visible
 product behavior:
 
-The strict signed Release sequence—automatic same-account enrollment,
-authenticated LAN TLS prompt, host-local planning/grounding, any required
-approval, and typed terminal result—still requires a fresh end-to-end run on
-the signed-in iPhone Air Simulator. The component and UI tests below establish
-their individual contracts; they are not a substitute for that pending release
-acceptance result.
+The release end-to-end checklist uses the owner's physical iPhone or iPad on
+the same Wi-Fi as the signed host; its timestamps, task IDs, episodes, and
+fixture receipts are the release evidence. Simulator suites are diagnostics
+and do not replace that physical-device check.
 
-- `host-mac/scripts/run_mcp_acceptance.py` validates the pinned helper identity,
-  inventory, host policy, and schemas, then issues real stdio JSON-RPC
-  `tools/call` requests for all 29 exposed sidecar operations. A no-Dock
-  accessory AppKit fixture stays outside every display. A 20 ms native
-  watchdog starts before helper launch/initialization and aborts on any new
-  visible window or prompt. The one explicit native-feedback allowance is the
-  bounded macOS screen-capture privacy status indicator during
-  `ax_tree_augmented`; it is reported and must fade before the next call. Exact
-  frontmost state is restored after cleanup. Private read results are never
-  printed. Five Safari tab tools are explicitly blocked because the live gate
-  proved v0.8.2 activates and mutates Safari's ambient front window; browser
-  pricing tasks therefore use the OS-Atlas visual fallback and its login
-  handoff instead. This 29-operation gate is low-level component and host-policy
-  coverage; it does not claim that all 29 operations are available to the
-  natural-language product planner. The production structured planner exposes
-  seven read-only sidecar operations (Contacts search, Reminders list,
-  Shortcuts list, focused app, running apps, windows, and permission status)
-  plus the host's embedded Mail operation. Host executor tests cover an
-  ordinary-person prompt, typed proposal, execution, and consumed result for
-  every read-only operation. A separate Contacts-to-Mail test proves that a
-  detailed send request consumes the contact result, stops at the exact Mail
-  approval, and invokes Mail only after approval.
-- The `RemoteDesktopLiveE2E` suite is the acceptance path for visible login
-  takeover, exact email-send confirmation, approvals, progress, and results on
-  an iOS Simulator. Its final signed Release transport run is pending, so no
-  live result is claimed here.
+- `RemoteDesktopLiveE2E` exercises simulator-only transport and task UI cases;
+  it is not evidence for the physical-device release checklist.
 - `host-mac/scripts/run_doordash_takeover_resume_simulator_live_e2e.py`
   runs only the continuous Release-Simulator DoorDash acceptance through
   direct `xcodebuild`, preserving the person-handled macOS consent, private
-  login, quote preparation, and resume windows without an MCP transport
+  login, quote preparation, and resume windows without a request transport
   timeout. It requires `--allow-visible-ui`, validates the installed Release
   host and one booted iPhone Air, and stops after 40 minutes. It first uses
   `build-for-testing`, copies the generated old-style xctestrun beside the
@@ -293,60 +225,25 @@ acceptance result.
   `doordash.com` sign-in form. The test OCR-audits only the streamed Mac
   viewport before credentials and after the prepared quote, failing on visible
   Safari History, Everyday Planner,
-  Reminders/Calendar/Contacts, or MCP UI. It deliberately performs no OCR
+  Reminders/Calendar/Contacts. It deliberately performs no OCR
   during the person's private sign-in window.
-- `host-mac/scripts/run_osatlas_acceptance.sh` runs a hidden deterministic
-  parser/executor/safety/native-input matrix by default. That matrix covers the
-  full host grammar: 16 semantic operations across 17 raw variants.
-- `host-mac/scripts/run_osatlas_acceptance.sh --actual-model` additionally
-  begins with a final-package release gate that resolves
-  `ComputerUseArtifactManifest.current` through the production package
-  resolver, loads its installed Granite semantic GGUF and OS-Atlas Pro through
-  the production multi-model API, and forces Apple's model unavailable. A
-  purchase scenario must then pass strict Granite tool decoding, OS-Atlas point
-  grounding, and host approval validation without posting input. Until the
-  immutable V4 semantic artifact is published in the production manifest and
-  installed, that test reports the prerequisite explicitly instead of falling
-  back to the visual-only package. The remaining hidden semantic matrix covers
-  all 16 host actions:
-  direct actions use the typed plan, while pointer actions require one or two
-  real OS-Atlas point-grounding inferences. Separate stateful delivery
-  component tests retain the legacy raw parser in a test-only configuration;
-  they are not production-equivalent fallback tests. Production loading always
-  installs the semantic router and disables explicit raw-action compatibility.
-  A separate 15-scenario regular-user matrix forces the Apple planner
-  unavailable and classifies each terminal state as `task completed`, `user
-  intervention required`, or `unable to complete`. It includes authentication,
-  purchase approval, persistent-error, platform-incompatibility, and an
-  unrecognized-operation fail-closed boundary. Every raw checkpoint response
-  in that matrix must be a `CLICK` point carrier for a typed pointer route;
-  direct and terminal routes require zero checkpoint calls.
-  These tests do not capture the desktop, post system input, or advance
-  checkout.
-- Live DoorDash quote reading requires `--live-doordash`,
-  `--allow-visible-ui`, and exact `DOORDASH_EXPECTED_ITEM`,
-  `DOORDASH_EXPECTED_TOTAL`, and `DOORDASH_EXPECTED_ETA` values. It reads a
-  review page prepared by the user and uses local Vision OCR for the itemized
-  quote. It intercepts all input, so it cannot advance checkout or place an
-  order. A login wall always pauses for user takeover.
+- `host-mac/scripts/run_osatlas_acceptance.sh` runs the hidden deterministic
+  OS-Atlas compatibility tests selected by the checked-in inventory. It
+  defaults to Debug and accepts `--configuration Release`; the inventory is
+  verified before and after the test run, with automatic package resolution
+  disabled and the resolved package versions enforced.
 
-See [AcceptanceFixtures/README.md](AcceptanceFixtures/README.md) for exact
-commands, mode boundaries, privacy guidance, and the MCP operation matrix.
+See [AcceptanceFixtures/README.md](AcceptanceFixtures/README.md) for local fixture
+commands, mode boundaries, and privacy guidance.
 
 ## Current limitations
 
 - `WireFormat.swift` and `SignalingClient.swift` are duplicated
   between `ios/` and `host-mac/`. Extract to a shared SPM package
   under `protocol/Swift/` before further divergence.
-- Apple's language-model planner requires the Foundation Models framework and
-  an available on-device model. Older or ineligible Macs keep the reviewed
-  deterministic route subset and fail closed for other ordinary-language
-  steps; an open-source typed semantic planner is not yet shipped.
-- The 8–15 GiB compact runtime profile has been exercised on a 32 GiB Apple
-  silicon Mac with its exact 4,096-token limits and measured at about 2.27 GiB
-  peak process footprint. It has not yet been validated on physical 8 GiB Mac
-  hardware, so that hardware tier is supported by bounded-resource tests, not
-  a completed low-memory field qualification.
+- Computer use requires Apple silicon and at least 16 GB of Mac memory. It is
+  limited to basic visual browser and Mac-app tasks and may stop to ask for
+  help.
 - The downloadable v0.2.0 host release predates the current main-branch
   Computer Use hardening. A new signed/notarized release is still required
   before end users receive these changes.

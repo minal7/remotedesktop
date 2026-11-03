@@ -43,6 +43,153 @@ respective hello capability dictionaries. This scoped negotiation keeps
 ordinary protocol-v1 remote control compatible with Windows, Android, and
 staggered iOS/macOS upgrades while preventing mixed-generation automation.
 
+## Negotiated direct-input sessions
+
+The Mac/iOS implementation can opt into `inputSessions: 1` without changing
+base protocol v1. This extension binds pointer, key, scroll and text input to
+a particular authorized connection lifetime. It supplements authenticated peer
+and channel ownership; the UUIDs are freshness identifiers, not credentials.
+
+A supporting client includes an optional `inputSession` object in `hello`:
+
+```json
+{"version":1,"clientID":"6F291DC4-5B15-4B1E-AC62-82AA2F46E313","revision":1}
+```
+
+The client uses a new UUID for each control-channel lifetime and a positive
+UInt32 revision. After an observed transient connection loss, it disables
+outbound input, increments the revision without wrapping, and sends a new hello
+when both the connection and channel are ready. It does not queue or replay
+input while waiting. An exhausted counter requires a new connection.
+
+A supporting host advertises `caps.inputSessions: 1`. The current Mac also
+requires a running capture attempt with admitted complete video output before
+it authorizes input. When capture, connected state and the current channel's
+hello are established, its `hello_ack` includes:
+
+```json
+{"inputSession":{"version":1,"clientID":"6F291DC4-5B15-4B1E-AC62-82AA2F46E313","revision":1,"hostID":"75AA76B8-BA2B-4C96-9FBD-927557D7A988","generation":1}}
+```
+
+The host echoes the exact client ID/revision and issues a fresh host UUID and
+increasing positive UInt32 generation whenever its input lifetime changes.
+Its own disconnect/reconnect and a higher client hello revision both retire
+the prior lifetime and its held direct input. A duplicate identical hello
+preserves the lifetime and sequence state. An older revision, changed client
+ID or mode downgrade cannot replace the current handshake on that channel.
+
+The client accepts input readiness only after sending its current hello and
+receiving an acknowledgement for that client ID/revision. It ignores older
+host generations and rejects inconsistent acknowledgements for one generation.
+Duplicate acknowledgements do not reset its packet counter. The Mac can send
+a newer acknowledgement after host-only recovery even if the phone never
+observed a disconnect. A phone hello requires acknowledgement within ten
+seconds in the current implementation; send failure or deadline expiry closes
+the transport instead of retrying possibly accepted input.
+
+A `display` sent with a scoped acknowledgement also includes that complete
+`inputSession` acknowledgement beside its dimensions. The phone accepts those
+dimensions only for its current input session. After hello and display, an
+owned renderer subscription forwards decoded frames to the actual sink. Its
+first valid forwarded frame reports submission readiness. Replacement/removal
+retires the exact subscription before native track removal; old queued callbacks
+cannot establish readiness for the successor subscription. Renderer loss releases
+local holds under the still-current input scope, then disables direct input.
+The screen stays prepared behind an opaque waiting overlay so its replacement
+can receive a frame without requiring input readiness first. The optional video
+sidecar retains its current hello/display and leaves the TLS AI task connected.
+A forwarded frame is not a GPU presentation acknowledgement or proof of capture
+after the handshake. Each renderer attachment now owns a newly created native
+video view and immutable display metadata. Retirement removes that exact view;
+queued internal work can finish on the removed object without sharing its frame
+cache or drawable size with a successor. Native presentation timing, capture
+freshness and foreground return still need repair and qualification. See the
+[renderer ownership review](https://github.com/minal7/remotedesktop/blob/7a43912f1f27049723d70ec9669ba9a871f3e216/docs/audits/2026-09-04-mac-computer-use/RENDERER_OWNERSHIP_REVIEW.md)
+and [native surface review](https://github.com/minal7/remotedesktop/blob/7a43912f1f27049723d70ec9669ba9a871f3e216/docs/audits/2026-09-04-mac-computer-use/NATIVE_SURFACE_LIFETIME_REVIEW.md). These display
+requirements are part of the unreleased `inputSessions: 1` extension and require
+the matching host and phone implementation. See the
+[presentation recovery review](https://github.com/minal7/remotedesktop/blob/7a43912f1f27049723d70ec9669ba9a871f3e216/docs/audits/2026-09-04-mac-computer-use/INPUT_PRESENTATION_RECOVERY_REVIEW.md).
+
+### Capture-loss invalidation
+
+A client that supports scoped capture-loss recovery adds `caps.inputInvalidation: 1`
+to its `hello`, alongside `inputSession`. The host returns the selected
+`caps.inputInvalidation` value in `hello_ack`; absent or zero means unsupported.
+The mode is fixed for that control channel. Values must be integers 0 or 1;
+booleans, strings, fractional values and unsupported versions are rejected.
+Selecting 1 requires input-session metadata.
+
+On a current ScreenCaptureKit stream-stop callback, the Mac synchronously
+revokes the input session and releases its held input before deferred recovery
+work. Capture availability is separate from ICE/channel state: neither a
+connected callback nor a repeated hello can authorize input while capture is
+unavailable. A supporting peer receives the exact revoked acknowledgement:
+
+```json
+{"t":"input_unavailable","s":43,"ts":1235,"inputSession":{"version":1,"clientID":"6F291DC4-5B15-4B1E-AC62-82AA2F46E313","revision":1,"hostID":"75AA76B8-BA2B-4C96-9FBD-927557D7A988","generation":1}}
+```
+
+The phone acts only when this scope equals its current acknowledgement. It
+revokes input and screen readiness, retires old input/renderer subscription generations,
+increments the client hello revision and sends a new hello. Duplicate or
+superseded invalidations do not restart that handshake or clear newer readiness.
+A delayed old acknowledgement cannot reopen the revoked revision. Malformed
+recognized invalidations and unnegotiated current-scope invalidations terminate
+the transport.
+
+The Mac waits for complete output from the current running capture attempt,
+then creates a fresh input generation and sends its acknowledgement and scoped
+dimensions. Both event/ack arrival orders are supported; input stamped before
+the outage remains rejected. Failure to send invalidation, hello or dimensions
+revokes input and closes the peer. A client without this negotiated capability,
+including an earlier input-session client, must reconnect after capture loss
+once it has had authorized input. A new phone using an older host cannot infer
+this protection from `inputSessions` alone.
+
+The capture-only re-handshake timeout is 35 seconds: the shared 30-second host
+recovery budget plus a five-second delivery allowance. Initial/transport hello
+waits remain 10 seconds and ICE recovery retains its separate timeout; concurrent
+outages may therefore end sooner. These are configured limits, not measured
+network guarantees.
+
+The source implementation handles reported stream stops and nonterminal
+blank/suspended or invalid output. Silent stalls still need handling. Source
+output and a later renderer submission do not prove that current source pixels
+were displayed on the phone. End-to-end media identity, actual presentation and
+native compatibility remain unqualified; see the [capture/input review](https://github.com/minal7/remotedesktop/blob/7a43912f1f27049723d70ec9669ba9a871f3e216/docs/audits/2026-09-04-mac-computer-use/CAPTURE_INPUT_INVALIDATION_REVIEW.md).
+
+Each scoped input message carries a separate envelope, for example:
+
+```json
+{"t":"text","s":42,"ts":1234,"s2":"Exact text 😀","inputSession":{"hostID":"75AA76B8-BA2B-4C96-9FBD-927557D7A988","generation":1,"sequence":1}}
+```
+
+The input sequence is a positive UInt32, separate from the legacy `s` counter.
+The host requires an exact current host ID/generation and a sequence greater
+than the last admitted input sequence. Missing, malformed, duplicate and older
+claims are dropped before the input-interruption callback or native dispatch.
+The admitted packet retains a local session identity which is rechecked under
+the posting lock, including between complete text graphemes. A buffered packet
+from a retired host lifetime cannot acquire authority merely by arriving late.
+These counters are bounded integers; booleans, strings, negative/fractional
+values and overflow are invalid. Unknown extension versions do not silently
+become legacy readiness.
+
+Legacy clients may still use an initial ordinary v1 remote-control connection.
+On an observed loss, the updated Mac terminates a legacy channel rather than
+reusing it after recovery. An updated iOS client likewise closes after a loss
+when paired with an older host that did not negotiate input sessions. A new
+connection is required. Older hosts do not validate this extension; their
+host-only outage behavior is not qualified by the updated Mac implementation.
+
+This extension does not prove that an action reached its intended UI target,
+expire delayed input on an otherwise continuously live channel, or qualify
+native RTC callback order and the channel's reliable-ordered delivery. It also
+does not scope the separate `bye` or video-quality messages. Physical input,
+AI task controls, account handoff and result verification retain their own
+contracts. The source changes and pending qualification are tracked in the
+[wire-input session review](https://github.com/minal7/remotedesktop/blob/7a43912f1f27049723d70ec9669ba9a871f3e216/docs/audits/2026-09-04-mac-computer-use/WIRE_INPUT_SESSION_REVIEW.md).
+
 ## Message types
 
 ### `hello` (client → host)
@@ -74,18 +221,62 @@ scale, monitor switch).
 
 ```jsonc
 { "t": "display", "s": …, "ts": …,
-  "w": 2560, "h": 1440,                 // logical pixel size of active monitor
+  "w": 2560, "h": 1440,                 // logical size of the captured display
   "scale": 2.0,                         // HiDPI backing scale
+  "fullDisplaySurface": 1,              // optional: the full video surface represents this display
   "monitors": [
     { "id": 0, "w": 2560, "h": 1440, "x": 0, "y": 0, "primary": true }
   ],
   "active": 0 }
 ```
 
+`w` and `h` are positive JSON integers representable as signed 32-bit values;
+`scale` is a finite JSON number in `[1, 4]` (an omitted legacy scale defaults
+to `1`). Strings, booleans, fractional dimensions and out-of-range numbers
+are invalid geometry.
+
+`fullDisplaySurface: 1` means the host captures the entire selected logical
+display into the entire video surface, without letterboxing or a content
+crop. The host validates native per-frame placement before forwarding video
+or declaring capture available. The client aspect-fits the logical `w:h`
+rectangle inside its viewport and fills that exact rectangle with the whole
+decoded surface. Input uses the same rectangle. This restores the logical
+aspect ratio after even codec sizing or drawable rounding; the client must
+not introduce another aspect-fit based on encoded pixel dimensions inside
+that rectangle. Absent metadata retains legacy presentation. A present
+value other than numeric `1` is unsupported and closes the session.
+
+This field belongs to the same input scope as its `display` message. It is
+a placement contract, not proof of frame freshness, delivery or actual
+renderer presentation. Older clients that ignore it retain their earlier
+mapping behavior and require separate compatibility qualification.
+
 ### `pointer` (client → host)
 
-Absolute pointer position in the host's logical pixel space, plus button
-state. Coalesce at the sender — don't send more than one per WebRTC frame.
+Absolute position within the captured display's logical coordinate space,
+plus button state. The top-left corner is `(0, 0)` and valid positions are
+`0 <= x < w`, `0 <= y < h` from the scoped `display` message. The Mac host
+maps these coordinates through the captured display's global origin before
+posting input. The phone must not add an origin from another display or infer
+one from the host's focused window. Coalesce at the sender — don't send more
+than one per WebRTC frame.
+
+The phone maps the visible content rectangle across all `w` by `h` logical
+cells, flooring the normalized position and bounding the result to the last
+cell. An absolute pointer press must begin inside the visible viewport/content
+intersection; a press in a black margin must not be clamped into a desktop
+click. Held movement may clamp to the visible boundary. A release outside the
+surface uses its last admitted position and must not add buttons. Relative
+finger input controls the visible floating cursor, so its finger position is
+not interpreted as an absolute desktop click.
+
+The host binds this layout to its native capture attempt and local input
+session. A detected display identity, bounds, mode or rotation change retires
+the old input scope through the negotiated capture-loss invalidation path;
+older clients reconnect. A new hello alone cannot remap an existing capture
+descriptor. Actual encoded content padding, presentation evidence and native
+multi-display behavior remain qualification requirements; this coordinate
+contract does not establish that every rendered frame has that geometry.
 
 ```jsonc
 { "t": "pointer", "s": …, "ts": …,
@@ -98,6 +289,9 @@ state. Coalesce at the sender — don't send more than one per WebRTC frame.
 
 Wheel / trackpad scroll. Deltas are in host-logical pixels; positive `dy`
 means "content moves up" (natural scrolling is handled by the host).
+The `x` and `y` fields use the same captured-display coordinates as `pointer`.
+The host maps the event location to global coordinates while preserving the
+deltas; the Mac implementation sets that location on the scroll event.
 
 ```jsonc
 { "t": "scroll", "s": …, "ts": …,

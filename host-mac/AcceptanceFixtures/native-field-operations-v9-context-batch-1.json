@@ -1,0 +1,113 @@
+{
+  "schemaVersion": 1,
+  "scope": "Preselected context-only diagnostic: every prior v8 regression with a quotation matching a field label, plus three unchanged-request controls; not held-out or product qualification",
+  "cases": [
+    {
+      "id": "C06",
+      "prompt": "Copy the \"Origin\" field into the \"Destination\" field.",
+      "fields": [
+        "Origin",
+        "Destination"
+      ],
+      "expectedDisposition": "supported",
+      "allowedPlans": [
+        [
+          {
+            "field": 1,
+            "mode": "replaceAll",
+            "sourceField": 0
+          }
+        ]
+      ]
+    },
+    {
+      "id": "C11",
+      "prompt": "Type the literal word \"Title\" in Tag.",
+      "fields": [
+        "Title",
+        "Tag"
+      ],
+      "expectedDisposition": "supported",
+      "allowedPlans": [
+        [
+          {
+            "field": 1,
+            "mode": "replaceAll",
+            "value": "Title"
+          }
+        ]
+      ]
+    },
+    {
+      "id": "R15",
+      "prompt": "Set \"Destination\" to \"Berlin\".",
+      "fields": [
+        "Origin",
+        "Destination"
+      ],
+      "expectedDisposition": "supported",
+      "allowedPlans": [
+        [
+          {
+            "field": 1,
+            "mode": "replaceAll",
+            "value": "Berlin"
+          }
+        ]
+      ]
+    },
+    {
+      "id": "R16",
+      "prompt": "Put \"Origin\" in Destination.",
+      "fields": [
+        "Origin",
+        "Destination"
+      ],
+      "expectedDisposition": "supported",
+      "allowedPlans": [
+        [
+          {
+            "field": 1,
+            "mode": "replaceAll",
+            "value": "Origin"
+          }
+        ]
+      ]
+    },
+    {
+      "id": "R17",
+      "prompt": "Set \"Origin\" to \"Tallinn\", and \"Destination\" to \"Riga\".",
+      "fields": [
+        "Origin",
+        "Destination"
+      ],
+      "expectedDisposition": "supported",
+      "allowedPlans": [
+        [
+          {
+            "field": 0,
+            "mode": "replaceAll",
+            "value": "Tallinn"
+          },
+          {
+            "field": 1,
+            "mode": "replaceAll",
+            "value": "Riga"
+          }
+        ],
+        [
+          {
+            "field": 1,
+            "mode": "replaceAll",
+            "value": "Riga"
+          },
+          {
+            "field": 0,
+            "mode": "replaceAll",
+            "value": "Tallinn"
+          }
+        ]
+      ]
+    }
+  ]
+}

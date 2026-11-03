@@ -1,0 +1,8 @@
+id: "web-basic-051"
+surface: web
+start: {"url":"http://127.0.0.1:8765/controls.html"}
+prompt: "Go to the next catalog page and read the featured item."
+checker: {"type":"dom","expect":[{"selector":"#page-item","text":"Featured item: Cedar desk organizer"}],"url_prefix":"http://127.0.0.1:8765/","answer_contains":["Cedar desk organizer"]}
+max_steps: 10
+tags: ["pagination","navigation"]
+approval_policy: {"allow_fixture_interaction":true}

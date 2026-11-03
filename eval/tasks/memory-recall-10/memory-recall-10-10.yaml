@@ -1,0 +1,9 @@
+id: "memory-recall-10-10"
+surface: web
+start: {url: "http://127.0.0.1:8765/memory-name-style.html"}
+prompt: "Copy the attendee name from this page into the name field using my saved text style."
+checker: {type: dom, expect: [{selector: "#attendee-name", value: "CASEY", case_sensitive: true}], min_events: [{selector: "#attendee-name", event: input}], url_prefix: "http://127.0.0.1:8765/"}
+max_steps: 8
+tags: ["memory-recall", "synthetic", "ordinary-memory"]
+approval_policy: {allow_fixture_interaction: true}
+memory_fixture: "memory-recall-10-10"

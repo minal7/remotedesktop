@@ -22,8 +22,13 @@ targets:
     platform: iOS
     sources:
       - path: RemoteDesktop
+        excludes:
+          - PrivacyInfo.xcprivacy
+      - path: ../shared/PersonalMemory
       - path: RemoteDesktop/Transport/WebRTCAliases.swift
       - path: ../protocol/Swift
+      - path: RemoteDesktop/PrivacyInfo.xcprivacy
+        buildPhase: resources
     dependencies:
       - package: LiveKitWebRTC
         product: LiveKitWebRTC
@@ -73,7 +78,7 @@ targets:
       base:
         CODE_SIGN_STYLE: Automatic
         DEVELOPMENT_TEAM: V9AX39SPJD
-        MARKETING_VERSION: "1.1"
+        MARKETING_VERSION: "1.2.1"
         CURRENT_PROJECT_VERSION: "5"
         PRODUCT_BUNDLE_IDENTIFIER: com.threadmark.remotedesktop.client
         TARGETED_DEVICE_FAMILY: "1,2"
@@ -96,9 +101,10 @@ targets:
     dependencies:
       - target: RemoteDesktop
     settings:
-      DEVELOPMENT_TEAM: V9AX39SPJD
-      PRODUCT_BUNDLE_IDENTIFIER: com.threadmark.remotedesktop.client.tests
-      GENERATE_INFOPLIST_FILE: YES
+      base:
+        DEVELOPMENT_TEAM: V9AX39SPJD
+        PRODUCT_BUNDLE_IDENTIFIER: com.threadmark.remotedesktop.client.tests
+        GENERATE_INFOPLIST_FILE: YES
 
   RemoteDesktopLiveE2ETests:
     type: bundle.ui-testing
@@ -139,6 +145,7 @@ schemes:
         - RemoteDesktopLiveE2ETests
       environmentVariables:
         RUN_COMPUTER_USE_LIVE_E2E: "1"
+        RUN_EOD_SIMPLE_LIVE_E2E: "$(RUN_EOD_SIMPLE_LIVE_E2E)"
         RUN_COMPUTER_USE_TYPED_OUTCOME_SIMULATOR_E2E: "$(RUN_COMPUTER_USE_TYPED_OUTCOME_SIMULATOR_E2E)"
         # DoorDash/OS-Atlas is independently gated. Values are command-line
         # build settings expanded into the test process only for an explicit
@@ -152,6 +159,8 @@ schemes:
         RUN_OSATLAS_LOCAL_BROWSER_SEARCH_SIMULATOR_E2E: "$(RUN_OSATLAS_LOCAL_BROWSER_SEARCH_SIMULATOR_E2E)"
         RUN_OSATLAS_LOCAL_BROWSER_SPINNER_SIMULATOR_E2E: "$(RUN_OSATLAS_LOCAL_BROWSER_SPINNER_SIMULATOR_E2E)"
         RUN_OSATLAS_LOCAL_BROWSER_EDGE_SIMULATOR_E2E: "$(RUN_OSATLAS_LOCAL_BROWSER_EDGE_SIMULATOR_E2E)"
+        RUN_OSATLAS_AGENT_DENY_SIMULATOR_E2E: "$(RUN_OSATLAS_AGENT_DENY_SIMULATOR_E2E)"
+        OSATLAS_DENY_FIXTURE_TOKEN: "$(OSATLAS_DENY_FIXTURE_TOKEN)"
         OSATLAS_STALE_APPROVAL_COORDINATOR: "$(OSATLAS_STALE_APPROVAL_COORDINATOR)"
         RUN_OSATLAS_DOORDASH_SIMULATOR_E2E: "$(RUN_OSATLAS_DOORDASH_SIMULATOR_E2E)"
         RUN_OSATLAS_DOORDASH_GUEST_HANDOFF_SIMULATOR_E2E: "$(RUN_OSATLAS_DOORDASH_GUEST_HANDOFF_SIMULATOR_E2E)"

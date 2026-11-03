@@ -1,0 +1,10 @@
+id: "native-011"
+surface: app
+start: {app: "Finder"}
+approval_policy: {allow_start_interaction: true}
+prompt: "In Finder, make a folder called Q4 Reports on the Desktop."
+checker:
+  type: folder_exists
+  expect: {path: "{home}/Desktop/Q4 Reports"}
+max_steps: 14
+tags: ["demo", "native", "finder", "folder-create", "owner-gated"]

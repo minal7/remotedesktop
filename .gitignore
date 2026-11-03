@@ -4,8 +4,8 @@
 # Xcode
 build/
 DerivedData/
-*.xcodeproj/xcuserdata/
-*.xcworkspace/xcuserdata/
+**/*.xcodeproj/xcuserdata/
+**/*.xcworkspace/xcuserdata/
 *.xcuserstate
 *.hmap
 *.ipa
@@ -14,8 +14,11 @@ DerivedData/
 
 # Swift Package Manager
 .build/
+# Disposable computer-use verification cache
+.build/repair-verification/
 Packages/
 Package.resolved
+!/Package.resolved
 !host-mac/RemoteDesktopHost.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved
 .swiftpm/
 *.profraw
@@ -72,3 +75,6 @@ x86/
 
 # Local XcodeBuildMCP workspace selection
 .xcodebuildmcp/
+
+# Generated computer-use evaluation measurements
+eval/results/

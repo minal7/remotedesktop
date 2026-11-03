@@ -87,7 +87,7 @@ enum ComputerUseLiveE2ECleanup {
                 approvalCanceledResponse))
         let assistantMessages = app.staticTexts.matching(
             NSPredicate(format: "label BEGINSWITH %@", "AI: "))
-        let approvalCancel = app.buttons["Cancel"]
+        let approvalDeny = app.buttons["computer-use-approval-deny"]
         let takeControl = app.buttons["computer-use-take-control"]
         let stop = app.buttons["computer-use-stop-task"]
         let hideKeyboard = app.buttons["computer-use-hide-remote-keyboard"]
@@ -120,9 +120,9 @@ enum ComputerUseLiveE2ECleanup {
 
             if !requestedApprovalCancellation,
                !requestedStop,
-               approvalCancel.exists,
-               approvalCancel.isHittable {
-                approvalCancel.tap()
+               approvalDeny.exists,
+               approvalDeny.isHittable {
+                approvalDeny.tap()
                 requestedApprovalCancellation = true
             } else if !requestedApprovalCancellation,
                       stop.exists,

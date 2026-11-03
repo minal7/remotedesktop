@@ -1,0 +1,135 @@
+{
+  "schemaVersion": 1,
+  "scope": "Known 54-case regression comparison for unified typed field operations v8; combines 20 copy and 34 earlier literal/decline cases; not held-out qualification; preselected batch 5/11",
+  "cases": [
+    {
+      "id": "N01",
+      "prompt": "Set both Origin and Destination to San Francisco.",
+      "fields": [
+        "Origin",
+        "Destination"
+      ],
+      "expectedDisposition": "supported",
+      "allowedPlans": [
+        [
+          {
+            "field": 0,
+            "mode": "replaceAll",
+            "value": "San Francisco"
+          },
+          {
+            "field": 1,
+            "mode": "replaceAll",
+            "value": "San Francisco"
+          }
+        ],
+        [
+          {
+            "field": 1,
+            "mode": "replaceAll",
+            "value": "San Francisco"
+          },
+          {
+            "field": 0,
+            "mode": "replaceAll",
+            "value": "San Francisco"
+          }
+        ]
+      ]
+    },
+    {
+      "id": "N02",
+      "prompt": "Please replace the Origin with Tokyo and the Destination with Kyoto.",
+      "fields": [
+        "Origin",
+        "Destination"
+      ],
+      "expectedDisposition": "supported",
+      "allowedPlans": [
+        [
+          {
+            "field": 0,
+            "mode": "replaceAll",
+            "value": "Tokyo"
+          },
+          {
+            "field": 1,
+            "mode": "replaceAll",
+            "value": "Kyoto"
+          }
+        ],
+        [
+          {
+            "field": 1,
+            "mode": "replaceAll",
+            "value": "Kyoto"
+          },
+          {
+            "field": 0,
+            "mode": "replaceAll",
+            "value": "Tokyo"
+          }
+        ]
+      ]
+    },
+    {
+      "id": "N03",
+      "prompt": "Append \" — confirmed\" to Origin. Leave Destination alone.",
+      "fields": [
+        "Origin",
+        "Destination"
+      ],
+      "expectedDisposition": "supported",
+      "allowedPlans": [
+        [
+          {
+            "field": 0,
+            "mode": "append",
+            "value": " — confirmed"
+          }
+        ]
+      ]
+    },
+    {
+      "id": "N04",
+      "prompt": "Put \"  東京 é 😀\n  \" in Destination exactly as written.",
+      "fields": [
+        "Origin",
+        "Destination"
+      ],
+      "expectedDisposition": "supported",
+      "allowedPlans": [
+        [
+          {
+            "field": 1,
+            "mode": "replaceAll",
+            "value": "  東京 é 😀\n  "
+          }
+        ]
+      ]
+    },
+    {
+      "id": "N05",
+      "prompt": "Replace Origin with \"Seattle\", then append \" / Tacoma\" to it.",
+      "fields": [
+        "Origin",
+        "Destination"
+      ],
+      "expectedDisposition": "supported",
+      "allowedPlans": [
+        [
+          {
+            "field": 0,
+            "mode": "replaceAll",
+            "value": "Seattle"
+          },
+          {
+            "field": 0,
+            "mode": "append",
+            "value": " / Tacoma"
+          }
+        ]
+      ]
+    }
+  ]
+}

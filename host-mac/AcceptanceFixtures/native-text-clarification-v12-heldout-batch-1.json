@@ -1,0 +1,81 @@
+{
+  "schemaVersion": 1,
+  "scope": "Unseen clarification phrasing frozen before quotation-preserving candidate inference. Twenty independent initial/answered proposal states; no desktop effects, no host/client continuation claim.",
+  "cases": [
+    {
+      "id": "QH01",
+      "prompt": "Replace a text field with “moss”.",
+      "fields": [
+        "Summary",
+        "Code"
+      ],
+      "expectedDisposition": "clarification"
+    },
+    {
+      "id": "QH02",
+      "prompt": "Replace a text field with “moss”.",
+      "fields": [
+        "Summary",
+        "Code"
+      ],
+      "expectedDisposition": "supported",
+      "clarificationAnswers": [
+        {
+          "question": "Which field should I edit, and what exact text should it contain?",
+          "text": "The Summary field."
+        }
+      ],
+      "allowedPlans": [
+        [
+          {
+            "field": 0,
+            "mode": "replaceAll",
+            "value": "moss"
+          }
+        ]
+      ]
+    },
+    {
+      "id": "QH03",
+      "prompt": "I want the Status field replaced, but I haven't provided the replacement yet.",
+      "fields": [
+        "Status",
+        "Title"
+      ],
+      "expectedDisposition": "clarification"
+    },
+    {
+      "id": "QH04",
+      "prompt": "I want the Status field replaced, but I haven't provided the replacement yet.",
+      "fields": [
+        "Status",
+        "Title"
+      ],
+      "expectedDisposition": "supported",
+      "clarificationAnswers": [
+        {
+          "question": "Which field should I edit, and what exact text should it contain?",
+          "text": "\"  ready\n東京  \""
+        }
+      ],
+      "allowedPlans": [
+        [
+          {
+            "field": 0,
+            "mode": "replaceAll",
+            "value": "  ready\n東京  "
+          }
+        ]
+      ]
+    },
+    {
+      "id": "QH05",
+      "prompt": "Please add \" / checked\" at the end of a field.",
+      "fields": [
+        "Project",
+        "Remarks"
+      ],
+      "expectedDisposition": "clarification"
+    }
+  ]
+}

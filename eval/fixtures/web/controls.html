@@ -1,0 +1,26 @@
+<!doctype html><meta charset="utf-8"><title>General interactive controls</title>
+<main><h1>Catalog controls</h1>
+<label for="search">Search items</label><input id="search"><button id="search-button">Search</button>
+<ul id="results"><li id="result-1">Alpine notebook</li><li id="result-2">Coastal atlas</li><li id="result-3">Garden journal</li></ul>
+<label for="choice">Display order</label><select id="choice"><option>Newest</option><option>Price: low to high</option><option>Title</option></select>
+<label><input id="option-a" name="radio" type="radio" value="a"> Option A</label>
+<label><input id="option-b" name="radio" type="radio" value="b"> Option B</label>
+<button id="open-modal">Open details</button><section id="modal" hidden><p id="modal-details">Details panel</p><button id="close-modal">Close</button></section>
+<nav><a id="next-page" href="page2.html">Next page</a><a id="home-link" href="forms.html">Home</a></nav>
+<section id="tab-one">First tab content</section><section id="tab-two" hidden>Second tab content</section>
+<button id="tab-switch">Show second tab</button>
+<div id="scroll-area" style="height:100px;overflow:auto"><p>List begins</p><div style="height:350px"></div><p id="bottom-item">Bottom item: Cedar</p></div>
+<button id="more">Load more</button><p id="more-result"></p>
+<label for="custom-combo">Choose a region</label><input id="custom-combo" role="combobox" aria-expanded="false" aria-controls="region-options">
+<ul id="region-options" role="listbox" hidden><li role="option">North</li><li role="option">South</li><li role="option">West</li></ul>
+<form id="wizard"><fieldset id="wizard-step-one"><legend>Step 1 of 2</legend><label for="wizard-project">Project name</label><input id="wizard-project"><button id="wizard-next" type="button">Continue</button></fieldset><fieldset id="wizard-step-two" hidden><legend>Step 2 of 2</legend><p>Review project details</p><label><input id="wizard-confirm" type="checkbox"> Ready to continue</label></fieldset></form>
+</main><script>
+document.querySelector('#open-modal').onclick=()=>document.querySelector('#modal').hidden=false;
+document.querySelector('#close-modal').onclick=()=>document.querySelector('#modal').hidden=true;
+document.querySelector('#tab-switch').onclick=()=>{document.querySelector('#tab-one').hidden=true;document.querySelector('#tab-two').hidden=false};
+document.querySelector('#more').onclick=()=>document.querySelector('#more-result').textContent='Loaded: Pine';
+document.querySelector('#search-button').onclick=()=>{for(const n of document.querySelectorAll('#results li'))n.hidden=!n.textContent.toLowerCase().includes(document.querySelector('#search').value.toLowerCase())};
+document.querySelector('#custom-combo').onfocus=()=>{document.querySelector('#custom-combo').setAttribute('aria-expanded','true');document.querySelector('#region-options').hidden=false};
+document.querySelectorAll('[role=option]').forEach(n=>n.onclick=()=>{document.querySelector('#custom-combo').value=n.textContent;document.querySelector('#region-options').hidden=true});
+document.querySelector('#wizard-next').onclick=()=>{document.querySelector('#wizard-step-one').hidden=true;document.querySelector('#wizard-step-two').hidden=false};
+</script>

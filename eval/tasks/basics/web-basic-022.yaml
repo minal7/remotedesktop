@@ -1,0 +1,8 @@
+id: "web-basic-022"
+surface: web
+start: {"url":"http://127.0.0.1:8765/controls.html"}
+prompt: "Enter Redwood as the project name in the two-step wizard, then continue to its review step. Do not submit."
+checker: {"type":"dom","url_prefix":"http://127.0.0.1:8765/","expect":[{"selector":"#wizard-project","value":"Redwood"},{"selector":"#wizard-step-two","visible":true}]}
+max_steps: 10
+tags: ["wizard","type","click","no-commit"]
+approval_policy: {"allow_fixture_interaction":true}

@@ -18,6 +18,10 @@ struct SessionView: View {
     @State private var restoreSoftKeyboardAfterHardwareDisconnect = false
     @State private var chromeRevealed = false
     @State private var hideTask: Task<Void, Never>?
+    #if DEBUG
+    @State private var showsVideoStatistics = false
+    @State private var videoStatistics = "Waiting for video stats…"
+    #endif
 
     // Special-key idle translucency
     @State private var specialKeysIdle = false
@@ -29,7 +33,7 @@ struct SessionView: View {
 
     /// Whether the chrome overlay should be showing right now.
     private var shouldShowChrome: Bool {
-        chromeRevealed
+        chromeRevealed || !session.hasInteractiveRemoteScreen
     }
 
     private var specialKeysAttentive: Bool {
@@ -60,6 +64,26 @@ struct SessionView: View {
             RemoteScreenView(accessories: accessories, zoom: zoom)
                 .ignoresSafeArea()
 
+            if !session.hasInteractiveRemoteScreen {
+                ZStack {
+                    if !session.mayRevealRemoteScreenPixels { Color.black.ignoresSafeArea() }
+                    VStack(spacing: 12) {
+                        if session.inputActivity.allowsInput {
+                            ConnectionWaitNotice(
+                                title: session.state == .connecting ? "Connecting to your computer…" : "Restoring the remote screen…",
+                                recovery: "Can't reach your computer. Keep the host app open and make sure both devices are on the same Wi-Fi.",
+                                retry: { session.reset() })
+                        } else {
+                            Text("Return to this window to control your Mac.")
+                                .foregroundStyle(.primary)
+                        }
+                    }
+                    .padding(16)
+                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+                }
+                .accessibilityIdentifier("remote-input-unavailable")
+            }
+
             // ── Disconnect swipe indicator ─────────────────────
             if disconnectDragOffset > 0 {
                 disconnectIndicator
@@ -81,6 +105,7 @@ struct SessionView: View {
 
             // ── Input controls (orientation-aware) ─────────────
             inputDock
+                .disabled(!session.hasInteractiveRemoteScreen)
 
             // Keep zoom and two-finger mode controls in the same predictable
             // top-left location on iPhone and iPad.
@@ -95,16 +120,18 @@ struct SessionView: View {
             }
 
             // ── Invisible soft-keyboard capture ────────────────
-            if softKeyboardOpen && !accessories.hasHardwareKeyboard {
+            if session.hasInteractiveRemoteScreen && softKeyboardOpen && !accessories.hasHardwareKeyboard {
                 SoftKeyboardCapture(isOpen: $softKeyboardOpen)
+                    .id(session.remoteKeyboardCaptureIdentity)
                     .frame(width: 1, height: 1)
                     .opacity(0.001)
                     .allowsHitTesting(false)
             }
 
             // ── Hardware-keyboard capture ──────────────────────
-            if accessories.hasHardwareKeyboard {
+            if session.hasInteractiveRemoteScreen && accessories.hasHardwareKeyboard {
                 KeyboardCapture()
+                    .id(session.remoteKeyboardCaptureIdentity)
                     .frame(width: 0, height: 0)
             }
 
@@ -112,7 +139,32 @@ struct SessionView: View {
                 accountRevalidationShield
             }
         }
+        #if DEBUG
+        .overlay(alignment: .topTrailing) {
+            if showsVideoStatistics {
+                Text(videoStatistics)
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.white)
+                    .padding(8)
+                    .background(.black.opacity(0.8), in: RoundedRectangle(cornerRadius: 8))
+                    .padding(.top, 64)
+                    .padding(.horizontal, 10)
+                    .allowsHitTesting(false)
+            }
+        }
+        .task(id: showsVideoStatistics) {
+            guard showsVideoStatistics else { return }
+            while !Task.isCancelled {
+                videoStatistics = await session.debugVideoStatistics()
+                do { try await Task.sleep(for: .seconds(1)) } catch { return }
+            }
+        }
+        #endif
         .statusBarHidden(!shouldShowChrome)
+        .onChange(of: session.remoteInputGeneration) { _, _ in
+            softKeyboardOpen = false
+            restoreSoftKeyboardAfterHardwareDisconnect = false
+        }
         .persistentSystemOverlays(.hidden)
         .animation(.easeInOut(duration: 0.25), value: shouldShowChrome)
         .animation(.easeInOut(duration: 0.25), value: zoom.isZoomed)
@@ -137,15 +189,15 @@ struct SessionView: View {
         ZStack {
             Color.black.ignoresSafeArea()
             VStack(spacing: 12) {
-                ProgressView()
+                ConnectionWaitNotice(
+                    title: "Verifying Apple Account…",
+                    recovery: "Couldn't verify your Apple Account yet. Check your internet connection, then try again.",
+                    retry: { session.reset() })
                     .tint(.white)
-                Text("Verifying Apple Account…")
-                    .font(.headline)
                     .foregroundStyle(.white)
             }
         }
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("Verifying Apple Account")
+        .accessibilityIdentifier("account-revalidation-shield")
     }
 
     // MARK: - Left-edge swipe strip
@@ -270,6 +322,9 @@ struct SessionView: View {
                 .frame(height: 0.5)
         }
         .accessibilityIdentifier("sessionStatusStrip")
+        #if DEBUG
+        .onLongPressGesture(minimumDuration: 1) { showsVideoStatistics.toggle() }
+        #endif
     }
 
     // MARK: - Input dock (orientation-aware)
@@ -497,5 +552,35 @@ enum SessionChromePolicy {
             return true
         }
         return false
+    }
+}
+
+/// A slow connection remains recoverable, but never leaves an indefinite spinner.
+struct ConnectionWaitNotice: View {
+    let title: String
+    let recovery: String
+    let retry: () -> Void
+    @State private var needsHelp = false
+
+    var body: some View {
+        VStack(spacing: 10) {
+            if needsHelp {
+                Text(recovery)
+                    .font(.callout)
+                    .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
+                Button("Retry", action: retry)
+                    .buttonStyle(.borderedProminent)
+            } else {
+                ProgressView()
+                Text(title)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .task {
+            needsHelp = false
+            do { try await Task.sleep(for: .seconds(10)) } catch { return }
+            needsHelp = true
+        }
     }
 }

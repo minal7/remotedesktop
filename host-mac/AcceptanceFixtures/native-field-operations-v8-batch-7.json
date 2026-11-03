@@ -1,0 +1,130 @@
+{
+  "schemaVersion": 1,
+  "scope": "Known 54-case regression comparison for unified typed field operations v8; combines 20 copy and 34 earlier literal/decline cases; not held-out qualification; preselected batch 7/11",
+  "cases": [
+    {
+      "id": "N12",
+      "prompt": "Set Origin to Oslo and Destination to Bergen.",
+      "fields": [
+        "Origin",
+        "Destination"
+      ],
+      "expectedDisposition": "supported",
+      "allowedPlans": [
+        [
+          {
+            "field": 0,
+            "mode": "replaceAll",
+            "value": "Oslo"
+          },
+          {
+            "field": 1,
+            "mode": "replaceAll",
+            "value": "Bergen"
+          }
+        ],
+        [
+          {
+            "field": 1,
+            "mode": "replaceAll",
+            "value": "Bergen"
+          },
+          {
+            "field": 0,
+            "mode": "replaceAll",
+            "value": "Oslo"
+          }
+        ]
+      ]
+    },
+    {
+      "id": "R15",
+      "prompt": "Set \"Destination\" to \"Berlin\".",
+      "fields": [
+        "Origin",
+        "Destination"
+      ],
+      "expectedDisposition": "supported",
+      "allowedPlans": [
+        [
+          {
+            "field": 1,
+            "mode": "replaceAll",
+            "value": "Berlin"
+          }
+        ]
+      ]
+    },
+    {
+      "id": "R16",
+      "prompt": "Put \"Origin\" in Destination.",
+      "fields": [
+        "Origin",
+        "Destination"
+      ],
+      "expectedDisposition": "supported",
+      "allowedPlans": [
+        [
+          {
+            "field": 1,
+            "mode": "replaceAll",
+            "value": "Origin"
+          }
+        ]
+      ]
+    },
+    {
+      "id": "R17",
+      "prompt": "Set \"Origin\" to \"Tallinn\", and \"Destination\" to \"Riga\".",
+      "fields": [
+        "Origin",
+        "Destination"
+      ],
+      "expectedDisposition": "supported",
+      "allowedPlans": [
+        [
+          {
+            "field": 0,
+            "mode": "replaceAll",
+            "value": "Tallinn"
+          },
+          {
+            "field": 1,
+            "mode": "replaceAll",
+            "value": "Riga"
+          }
+        ],
+        [
+          {
+            "field": 1,
+            "mode": "replaceAll",
+            "value": "Riga"
+          },
+          {
+            "field": 0,
+            "mode": "replaceAll",
+            "value": "Tallinn"
+          }
+        ]
+      ]
+    },
+    {
+      "id": "H501",
+      "prompt": "In Tag, put amber.",
+      "fields": [
+        "Tag",
+        "Title"
+      ],
+      "expectedDisposition": "supported",
+      "allowedPlans": [
+        [
+          {
+            "field": 0,
+            "mode": "replaceAll",
+            "value": "amber"
+          }
+        ]
+      ]
+    }
+  ]
+}

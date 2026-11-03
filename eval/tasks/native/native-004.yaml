@@ -1,0 +1,9 @@
+id: "native-004"
+surface: app
+start: {"app":"TextEdit"}
+approval_policy: {"allow_start_interaction":true}
+setup: {"new_untitled":true}
+prompt: "Create a new TextEdit document. Its complete content must be exactly the text between the quotation marks, without the quotation marks and without a newline after it: \"The review starts at 10 AM\". Save it to Desktop in your home folder as Review."
+checker: {"type":"file_text","expect":{"path":"{home}/Desktop/Review","stem":"Review","allow_rtf":true,"equals":"The review starts at 10 AM"}}
+max_steps: 14
+tags: ["native","textedit","type","save"]

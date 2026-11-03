@@ -1,0 +1,8 @@
+id: "web-basic-060"
+surface: web
+start: {"url":"http://127.0.0.1:8765/upload.html"}
+prompt: "Attach the provided sample.txt file to the upload field."
+checker: {"type":"dom","expect":[{"selector":"#file-name","text":"sample.txt"}],"url_prefix":"http://127.0.0.1:8765/"}
+max_steps: 10
+tags: ["file-upload"]
+approval_policy: {"allow_fixture_interaction":true,"allow_fixture_commit":true}

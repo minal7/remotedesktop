@@ -20,6 +20,10 @@ actor ComputerUseInstaller {
     // treated as activation proof by this build.
     nonisolated static let deferredLegacyCleanupMarkerName = ".deferred-legacy-cleanup.json"
     nonisolated static let installationHeadroomBytes: Int64 = 1_000_000_000
+    /// A complete, checksum-verified package needs only legal files, an atomic
+    /// receipt and directory metadata. Keep margin without requiring another
+    /// model-sized allocation after an interrupted download has finished.
+    nonisolated static let cachedPackageHeadroomBytes: Int64 = 64 * 1_024 * 1_024
     private nonisolated static let processLaunchIdentifier = UUID().uuidString
 
     struct Update: Equatable, Sendable {
@@ -130,7 +134,7 @@ actor ComputerUseInstaller {
         legalResourceDirectory: URL? = nil,
         downloadSession: URLSession = .shared,
         downloadChunkByteCount: Int64 = 16 * 1_024 * 1_024,
-        legacyManifest: ComputerUseArtifactManifest? = .legacyVisualOnly,
+        legacyManifest: ComputerUseArtifactManifest? = nil,
         operations: Operations? = nil,
         launchIdentifier: String = ComputerUseInstaller.processLaunchIdentifier
     ) {
@@ -1036,6 +1040,39 @@ actor ComputerUseInstaller {
         }
     }
 
+#if DEBUG
+    /// Evaluation-only status lookup. It pins and validates the existing
+    /// installation without acquiring the installation lease or recovering an
+    /// interrupted activation. Any activation marker makes the result unknown.
+    func readOnlyCurrentInstallationForEvaluation()
+        -> ComputerUseInstallationReceipt? {
+        guard let rootPin = try? ManagedRootPin.openExisting(
+            rootDirectory: rootDirectory),
+              (try? rootPin.validate()) != nil,
+              activationMarkersAreAbsent(rootPin: rootPin),
+              let receipt = currentInstallation(using: rootPin),
+              (try? rootPin.validate()) != nil,
+              activationMarkersAreAbsent(rootPin: rootPin) else {
+            return nil
+        }
+        return receipt
+    }
+
+    private func activationMarkersAreAbsent(rootPin: ManagedRootPin) -> Bool {
+        for name in [
+            Self.pendingRuntimeActivationMarkerName,
+            Self.runtimeActivationSuccessMarkerName,
+        ] {
+            do {
+                guard try rootPin.itemStatus(name: name) == nil else { return false }
+            } catch {
+                return false
+            }
+        }
+        return (try? rootPin.validate()) != nil
+    }
+#endif
+
     private func runtimeActivationRecoveryRequired(
         rootPin: ManagedRootPin
     ) -> Bool {
@@ -1394,6 +1431,17 @@ actor ComputerUseInstaller {
         let capacityProbeURL = Self.nearestExistingAncestor(
             of: rootDirectory,
             fileManager: fileManager)
+        let cachedPackageIsComplete = [activeModelComponents, stagingComponents].contains { directory in
+            manifest.modelArtifacts.allSatisfy { artifact in
+                (try? verifyReadOnly(artifact, directoryComponents: directory, rootPin: rootPin)) != nil
+            }
+        }
+        try Task.checkCancellation()
+        if cachedPackageIsComplete {
+            try ensureDiskCapacity(requiredBytes: Self.cachedPackageHeadroomBytes, at: capacityProbeURL)
+            try rootPin.validate()
+            return
+        }
         let reusableBytes = try legacyReusePlan(rootPin: rootPin)?
             .reusableByteCount ?? 0
         let totalBytes = manifest.modelArtifacts.reduce(Int64(0)) {
@@ -1818,6 +1866,10 @@ actor ComputerUseInstaller {
         at capacityProbeURL: URL
     ) throws {
         let required = Self.requiredDiskBytes(forModelBytes: modelBytes)
+        try ensureDiskCapacity(requiredBytes: required, at: capacityProbeURL)
+    }
+
+    private func ensureDiskCapacity(requiredBytes required: Int64, at capacityProbeURL: URL) throws {
         if let available = try operations.availableCapacity(capacityProbeURL),
            available < required {
             throw InstallError.insufficientDisk(
@@ -2189,7 +2241,7 @@ actor ComputerUseInstaller {
         guard rootPin.directoryExists(directoryComponents) else {
             throw InstallError.invalidArtifact(directoryComponents.last ?? "Models")
         }
-        for artifact in ComputerUseArtifactManifest.modelLegalArtifacts {
+        for artifact in manifest.legalArtifacts {
             let source = try legalResourceURL(for: artifact)
             try verifyBundledArtifact(artifact, at: source)
             if (try? verify(

@@ -5,12 +5,14 @@ name: Release
 # dispatch defaults to a non-publishing candidate build bound to the exact
 # selected commit.
 #
-# Trigger by pushing a version tag:
-#   git tag v0.2.1 && git push origin v0.2.1
+# Release tags and GitHub Release names follow the macOS host version. Each
+# platform artifact keeps its own project version (Windows remains Cargo.toml).
+# Trigger by pushing a macOS host version tag:
+#   git tag v0.3.0 && git push origin v0.3.0
 # Build a current-source candidate without creating a release:
-#   gh workflow run release.yml --ref main -f version=0.2.1 -f publish=false
+#   gh workflow run release.yml --ref main -f version=0.3.0 -f publish=false
 # Rerun publishing only from an existing exact version tag:
-#   gh workflow run release.yml --ref v0.2.1 -f version=0.2.1 -f publish=true
+#   gh workflow run release.yml --ref v0.3.0 -f version=0.3.0 -f publish=true
 #
 # Required repository secrets:
 #   REMOTE_DESKTOP_CLOUDKIT_API_TOKEN       - CloudKit Web Services API token
@@ -35,9 +37,9 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Version to build (without leading v), e.g. 0.2.1"
+        description: "macOS host release version (without leading v), e.g. 0.3.0"
         required: true
-        default: "0.2.1"
+        default: "0.3.0"
       publish:
         description: "Publish a GitHub Release (requires an existing exact version tag)"
         required: true
@@ -52,6 +54,9 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.version.outputs.version }}
+      macos_version: ${{ steps.version.outputs.macos_version }}
+      macos_build: ${{ steps.version.outputs.macos_build }}
+      windows_version: ${{ steps.version.outputs.windows_version }}
       tag_name: ${{ steps.version.outputs.tag_name }}
       release_sha: ${{ steps.version.outputs.release_sha }}
       publish: ${{ steps.version.outputs.publish }}
@@ -65,17 +70,19 @@ jobs:
 
       - name: Resolve version
         id: version
-        working-directory: host-windows
         env:
           REQUESTED_VERSION: ${{ github.event_name == 'workflow_dispatch' && inputs.version || '' }}
           REQUESTED_PUBLISH: ${{ github.event_name == 'workflow_dispatch' && inputs.publish || false }}
         run: |
           set -euo pipefail
 
-          # Cargo.toml is the source of truth for the release version.
-          cargo="$(sed -nE 's/^version = "([^"]+)".*/\1/p' Cargo.toml | head -n 1)"
-          if [[ -z "$cargo" ]]; then
-            echo "::error::Could not read version from host-windows/Cargo.toml"
+          # The release tag names the macOS host. Each artifact carries its
+          # platform's own project version; Windows stays independently versioned.
+          windows_version="$(sed -nE 's/^version = "([^"]+)".*/\1/p' host-windows/Cargo.toml | head -n 1)"
+          macos_version="$(sed -nE 's/^[[:space:]]*MARKETING_VERSION:[[:space:]]*([0-9]+(\.[0-9]+)*)[[:space:]]*$/\1/p' host-mac/project.yml | head -n 1)"
+          macos_build="$(sed -nE 's/^[[:space:]]*CURRENT_PROJECT_VERSION:[[:space:]]*([0-9]+)[[:space:]]*$/\1/p' host-mac/project.yml | head -n 1)"
+          if [[ -z "$windows_version" || -z "$macos_version" || -z "$macos_build" ]]; then
+            echo "::error::Could not resolve the Windows Cargo version or macOS project version/build."
             exit 1
           fi
 
@@ -86,14 +93,14 @@ jobs:
               exit 1
             fi
             tag="${GITHUB_REF#refs/tags/v}"
-            if [[ "$tag" != "$cargo" ]]; then
-              echo "::error::Tag v$tag does not match Cargo.toml version $cargo. Bump host-windows/Cargo.toml and commit Cargo.lock before tagging."
+            if [[ "$tag" != "$macos_version" ]]; then
+              echo "::error::Tag v$tag does not match macOS host version $macos_version from host-mac/project.yml."
               exit 1
             fi
             publish=true
           elif [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
-            if [[ -z "$REQUESTED_VERSION" || "$REQUESTED_VERSION" != "$cargo" ]]; then
-              echo "::error::Requested version $REQUESTED_VERSION does not match Cargo.toml version $cargo."
+            if [[ -z "$REQUESTED_VERSION" || "$REQUESTED_VERSION" != "$macos_version" ]]; then
+              echo "::error::Requested version $REQUESTED_VERSION does not match macOS host version $macos_version from host-mac/project.yml."
               exit 1
             fi
             case "$REQUESTED_PUBLISH" in
@@ -113,7 +120,7 @@ jobs:
             exit 1
           fi
 
-          expected_tag="v$cargo"
+          expected_tag="v$macos_version"
           release_sha="$(git rev-parse HEAD | tr '[:upper:]' '[:lower:]')"
           event_sha="$(printf '%s' "$GITHUB_SHA" | tr '[:upper:]' '[:lower:]')"
           if [[ ! "$release_sha" =~ ^[0-9a-f]{40}$ || "$release_sha" != "$event_sha" ]]; then
@@ -138,12 +145,15 @@ jobs:
             mode="non-publishing candidate"
           fi
 
-          echo "version=$cargo" >> "$GITHUB_OUTPUT"
+          echo "version=$macos_version" >> "$GITHUB_OUTPUT"
+          echo "macos_version=$macos_version" >> "$GITHUB_OUTPUT"
+          echo "macos_build=$macos_build" >> "$GITHUB_OUTPUT"
+          echo "windows_version=$windows_version" >> "$GITHUB_OUTPUT"
           echo "tag_name=$expected_tag" >> "$GITHUB_OUTPUT"
           echo "release_sha=$release_sha" >> "$GITHUB_OUTPUT"
           echo "publish=$publish" >> "$GITHUB_OUTPUT"
           echo "artifact_suffix=$artifact_suffix" >> "$GITHUB_OUTPUT"
-          echo "Building version $cargo as a $mode from exact commit $release_sha"
+          echo "Building macOS $macos_version ($macos_build) and Windows $windows_version as a $mode from exact commit $release_sha"
 
   validate-windows:
     runs-on: windows-latest
@@ -220,6 +230,12 @@ jobs:
           unzip -q "$archive" -d "$install_root"
           echo "$install_root/xcodegen/bin" >> "$GITHUB_PATH"
           "$install_root/xcodegen/bin/xcodegen" --version
+
+      - name: Prepare pinned universal SQLCipher for clean checkout
+        run: |
+          set -euo pipefail
+          python3 host-mac/scripts/bootstrap_memory_sqlcipher.py --download
+          host-mac/scripts/build_memory_sqlcipher.sh
 
       - name: Regenerate iOS project
         working-directory: ios
@@ -487,7 +503,7 @@ jobs:
         env:
           ARTIFACT_SUFFIX: ${{ needs.resolve-version.outputs.artifact_suffix }}
         run: |
-          $v = "${{ needs.resolve-version.outputs.version }}"
+          $v = "${{ needs.resolve-version.outputs.windows_version }}"
           & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" "/DMyAppVersion=$v" installer.iss
           if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed with exit code $LASTEXITCODE" }
 
@@ -504,7 +520,7 @@ jobs:
           ARTIFACT_SUFFIX: ${{ needs.resolve-version.outputs.artifact_suffix }}
           EXPECTED_THUMBPRINT: ${{ steps.windows-signing.outputs.thumbprint }}
           TIMESTAMP_URL: ${{ vars.WINDOWS_TIMESTAMP_URL || 'http://timestamp.digicert.com' }}
-          VERSION: ${{ needs.resolve-version.outputs.version }}
+          VERSION: ${{ needs.resolve-version.outputs.windows_version }}
         run: |
           $installer = "dist\RemoteDesktopHost-Setup-$($env:VERSION)$($env:ARTIFACT_SUFFIX).exe"
           if (-not (Test-Path -LiteralPath $installer -PathType Leaf)) {
@@ -546,7 +562,7 @@ jobs:
         env:
           ARTIFACT_SUFFIX: ${{ needs.resolve-version.outputs.artifact_suffix }}
           RELEASE_SHA: ${{ needs.resolve-version.outputs.release_sha }}
-          VERSION: ${{ needs.resolve-version.outputs.version }}
+          VERSION: ${{ needs.resolve-version.outputs.windows_version }}
         run: |
           $artifactName = "RemoteDesktopHost-Setup-$($env:VERSION)$($env:ARTIFACT_SUFFIX).exe"
           $artifactPath = Join-Path "dist" $artifactName
@@ -577,7 +593,7 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: windows-installer
-          path: host-windows/dist/RemoteDesktopHost-Setup-${{ needs.resolve-version.outputs.version }}.exe
+          path: host-windows/dist/RemoteDesktopHost-Setup-${{ needs.resolve-version.outputs.windows_version }}.exe
           if-no-files-found: error
 
       - name: Upload SHA-bound Windows candidate
@@ -586,8 +602,8 @@ jobs:
         with:
           name: windows-installer-${{ needs.resolve-version.outputs.release_sha }}
           path: |
-            host-windows/dist/RemoteDesktopHost-Setup-${{ needs.resolve-version.outputs.version }}-${{ needs.resolve-version.outputs.release_sha }}.exe
-            host-windows/dist/RemoteDesktopHost-Windows-${{ needs.resolve-version.outputs.version }}-${{ needs.resolve-version.outputs.release_sha }}.provenance.json
+            host-windows/dist/RemoteDesktopHost-Setup-${{ needs.resolve-version.outputs.windows_version }}-${{ needs.resolve-version.outputs.release_sha }}.exe
+            host-windows/dist/RemoteDesktopHost-Windows-${{ needs.resolve-version.outputs.windows_version }}-${{ needs.resolve-version.outputs.release_sha }}.provenance.json
           if-no-files-found: error
 
       - name: Remove imported Windows signing material
@@ -618,7 +634,8 @@ jobs:
       - validate-computer-use
     env:
       DEVELOPER_DIR: /Applications/Xcode_26.2.app/Contents/Developer
-      VERSION: ${{ needs.resolve-version.outputs.version }}
+      VERSION: ${{ needs.resolve-version.outputs.macos_version }}
+      MACOS_BUILD: ${{ needs.resolve-version.outputs.macos_build }}
       RELEASE_SHA: ${{ needs.resolve-version.outputs.release_sha }}
       MACOS_CODE_SIGN_IDENTITY: ${{ vars.MACOS_CODE_SIGN_IDENTITY || 'Developer ID Application' }}
       XCODEGEN_SHA256: 0c90f4d28ca57335f9fa78cf5bf6dabfe20a232036dabe36de2eef79cb7c0878
@@ -650,6 +667,12 @@ jobs:
           unzip -q "$archive" -d "$install_root"
           echo "$install_root/xcodegen/bin" >> "$GITHUB_PATH"
           "$install_root/xcodegen/bin/xcodegen" --version
+
+      - name: Prepare pinned universal SQLCipher for clean checkout
+        run: |
+          set -euo pipefail
+          python3 host-mac/scripts/bootstrap_memory_sqlcipher.py --download
+          host-mac/scripts/build_memory_sqlcipher.sh
 
       - name: Validate generated macOS project is current
         run: |
@@ -818,7 +841,7 @@ jobs:
             CODE_SIGN_IDENTITY="$MACOS_CODE_SIGN_IDENTITY" \
             PROVISIONING_PROFILE_SPECIFIER="$MACOS_PROVISIONING_PROFILE_SPECIFIER" \
             MARKETING_VERSION="$VERSION" \
-            CURRENT_PROJECT_VERSION="$GITHUB_RUN_NUMBER" \
+            CURRENT_PROJECT_VERSION="$MACOS_BUILD" \
             OTHER_CODE_SIGN_FLAGS="--timestamp --options runtime" \
             archive
 
@@ -994,7 +1017,7 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: macos-app
-          path: host-mac/dist/RemoteDesktopHost-macOS-${{ needs.resolve-version.outputs.version }}.zip
+          path: host-mac/dist/RemoteDesktopHost-macOS-${{ needs.resolve-version.outputs.macos_version }}.zip
           if-no-files-found: error
 
       - name: Upload SHA-bound notarized macOS candidate
@@ -1003,8 +1026,8 @@ jobs:
         with:
           name: macos-app-${{ needs.resolve-version.outputs.release_sha }}
           path: |
-            host-mac/dist/RemoteDesktopHost-macOS-${{ needs.resolve-version.outputs.version }}-${{ needs.resolve-version.outputs.release_sha }}.zip
-            host-mac/dist/RemoteDesktopHost-macOS-${{ needs.resolve-version.outputs.version }}-${{ needs.resolve-version.outputs.release_sha }}.provenance.json
+            host-mac/dist/RemoteDesktopHost-macOS-${{ needs.resolve-version.outputs.macos_version }}-${{ needs.resolve-version.outputs.release_sha }}.zip
+            host-mac/dist/RemoteDesktopHost-macOS-${{ needs.resolve-version.outputs.macos_version }}-${{ needs.resolve-version.outputs.release_sha }}.provenance.json
           if-no-files-found: error
 
   release:

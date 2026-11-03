@@ -1,0 +1,13 @@
+id: "eod-calculator"
+surface: app
+start: {app: "Calculator"}
+prompt: "Use Calculator to multiply 7 by 8 and tell me the result."
+checker:
+  type: manual_review
+  expect:
+    criteria:
+      - "The episode must show Calculator being used and the result 56 visible in its display."
+      - "The final answer must state 56; an answer from memory without the visible calculation fails."
+max_steps: 12
+tags: ["eod-simple", "native", "calculator"]
+approval_policy: {allow_start_interaction: true}

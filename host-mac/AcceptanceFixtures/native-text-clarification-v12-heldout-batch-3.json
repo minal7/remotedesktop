@@ -1,0 +1,83 @@
+{
+  "schemaVersion": 1,
+  "scope": "Unseen clarification phrasing frozen before quotation-preserving candidate inference. Twenty independent initial/answered proposal states; no desktop effects, no host/client continuation claim.",
+  "cases": [
+    {
+      "id": "QH11",
+      "prompt": "Keep Country unchanged; replace another field with \"Oslo\".",
+      "fields": [
+        "Country",
+        "City",
+        "Region"
+      ],
+      "expectedDisposition": "clarification"
+    },
+    {
+      "id": "QH12",
+      "prompt": "Keep Country unchanged; replace another field with \"Oslo\".",
+      "fields": [
+        "Country",
+        "City",
+        "Region"
+      ],
+      "expectedDisposition": "supported",
+      "clarificationAnswers": [
+        {
+          "question": "Which field should I edit, and what exact text should it contain?",
+          "text": "City."
+        }
+      ],
+      "allowedPlans": [
+        [
+          {
+            "field": 1,
+            "mode": "replaceAll",
+            "value": "Oslo"
+          }
+        ]
+      ]
+    },
+    {
+      "id": "QH13",
+      "prompt": "Fill a field with exactly \"  界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂\n  \".",
+      "fields": [
+        "Source",
+        "Destination"
+      ],
+      "expectedDisposition": "clarification"
+    },
+    {
+      "id": "QH14",
+      "prompt": "Fill a field with exactly \"  界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂\n  \".",
+      "fields": [
+        "Source",
+        "Destination"
+      ],
+      "expectedDisposition": "supported",
+      "clarificationAnswers": [
+        {
+          "question": "Which field should I edit, and what exact text should it contain?",
+          "text": "Destination"
+        }
+      ],
+      "allowedPlans": [
+        [
+          {
+            "field": 1,
+            "mode": "replaceAll",
+            "value": "  界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂界é🙂\n  "
+          }
+        ]
+      ]
+    },
+    {
+      "id": "QH15",
+      "prompt": "Set the Message field to an exact value.",
+      "fields": [
+        "Message",
+        "Title"
+      ],
+      "expectedDisposition": "clarification"
+    }
+  ]
+}

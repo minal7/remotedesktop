@@ -3,6 +3,9 @@ from __future__ import annotations
 
 import os
 import pathlib
+import plistlib
+import importlib.util
+import json
 import subprocess
 import unittest
 
@@ -18,6 +21,54 @@ HEADLESS_SETTINGS = (
 
 
 class BuildAndRunContractTests(unittest.TestCase):
+    def test_pinned_sqlcipher_builder_and_verifier_require_universal_slices(self) -> None:
+        manifest = pathlib.Path(
+            REPO_ROOT / "host-mac/ThirdPartyRuntime/sqlcipher/source-manifest.json")
+        build_script = pathlib.Path(REPO_ROOT / "host-mac/scripts/build_memory_sqlcipher.sh")
+        verifier_path = pathlib.Path(REPO_ROOT / "host-mac/scripts/verify_memory_sqlcipher.py")
+        self.assertEqual(json.loads(manifest.read_text(encoding="utf-8"))["libraryArchitectures"],
+                         ["arm64", "x86_64"])
+        builder = build_script.read_text(encoding="utf-8")
+        self.assertIn("ARCHITECTURES=(arm64 x86_64)", builder)
+        self.assertIn('export CFLAGS="-arch $ARCH $BASE_CFLAGS"', builder)
+        self.assertIn("/usr/bin/lipo -create", builder)
+        self.assertIn("library_architectures=arm64 x86_64", builder)
+        verifier_source = verifier_path.read_text(encoding="utf-8")
+        self.assertIn('["/usr/bin/lipo", "-archs",', verifier_source)
+
+        spec = importlib.util.spec_from_file_location("verify_memory_sqlcipher", verifier_path)
+        self.assertIsNotNone(spec)
+        self.assertIsNotNone(spec.loader)
+        verifier = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(verifier)
+        verifier.validate_architectures(["arm64", "x86_64"], ["arm64", "x86_64"])
+        for actual in (["arm64"], ["x86_64"], ["arm64", "arm64"], ["arm64", "x86_64", "i386"]):
+            with self.subTest(actual=actual), self.assertRaises(ValueError):
+                verifier.validate_architectures(actual, ["arm64", "x86_64"])
+
+    def test_clean_apple_ci_jobs_prepare_pinned_sqlcipher_before_host_builds(self) -> None:
+        workflows = {
+            REPO_ROOT / ".github/workflows/validation.yml": 1,
+            REPO_ROOT / ".github/workflows/release.yml": 2,
+        }
+        for path, expected_preparations in workflows.items():
+            source = path.read_text(encoding="utf-8")
+            self.assertEqual(source.count("python3 host-mac/scripts/bootstrap_memory_sqlcipher.py --download"),
+                             expected_preparations, path.name)
+            self.assertEqual(source.count("host-mac/scripts/build_memory_sqlcipher.sh"),
+                             expected_preparations, path.name)
+            cursor = 0
+            for _ in range(expected_preparations):
+                bootstrap = source.index(
+                    "python3 host-mac/scripts/bootstrap_memory_sqlcipher.py --download", cursor)
+                builder = source.index("host-mac/scripts/build_memory_sqlcipher.sh", bootstrap)
+                next_build = source.find("xcodebuild ", builder)
+                next_bootstrap = source.find(
+                    "python3 host-mac/scripts/bootstrap_memory_sqlcipher.py --download", builder)
+                self.assertNotEqual(next_build, -1, path.name)
+                self.assertTrue(next_bootstrap == -1 or next_build < next_bootstrap, path.name)
+                cursor = builder + 1
+
     def test_release_is_default_and_launch_stops_canonical_installed_host(self) -> None:
         source = SCRIPT.read_text(encoding="utf-8")
         self.assertIn(
@@ -334,6 +385,72 @@ class BuildAndRunContractTests(unittest.TestCase):
         self.assertEqual(completed.returncode, 2)
         self.assertIn("Refusing mixed Apple configurations", completed.stderr)
         self.assertNotIn("xcodebuild", completed.stdout + completed.stderr)
+
+
+    def test_memory_beta_condition_is_absent_in_specs_and_projects(self) -> None:
+        projects = (
+            (REPO_ROOT / "host-mac/project.yml",
+             REPO_ROOT / "host-mac/RemoteDesktopHost.xcodeproj/project.pbxproj",
+             "RemoteDesktopHost", "RemoteDesktopHostTests", {
+                 "CODE_SIGN_IDENTITY": "Apple Development",
+                 "CODE_SIGN_STYLE": "Automatic",
+                 "DEVELOPMENT_TEAM": "V9AX39SPJD",
+                 "PRODUCT_BUNDLE_IDENTIFIER": "com.threadmark.remotedesktop.host.tests",
+                 "GENERATE_INFOPLIST_FILE": "YES",
+             }),
+            (REPO_ROOT / "ios/project.yml",
+             REPO_ROOT / "ios/RemoteDesktop.xcodeproj/project.pbxproj",
+             "RemoteDesktop", "RemoteDesktopTests", {
+                 "DEVELOPMENT_TEAM": "V9AX39SPJD",
+                 "PRODUCT_BUNDLE_IDENTIFIER": "com.threadmark.remotedesktop.client.tests",
+                 "GENERATE_INFOPLIST_FILE": "YES",
+             }),
+        )
+        macro = "MEMORY_V1_SHIPPING_BETA"
+        for spec_path, project_path, app_name, test_name, expected_test_settings in projects:
+            with self.subTest(project=str(project_path)):
+                self.assertNotIn(macro, spec_path.read_text(encoding="utf-8"))
+                converted = subprocess.run(
+                    ["/usr/bin/plutil", "-convert", "xml1", "-o", "-", str(project_path)],
+                    check=True, capture_output=True,
+                ).stdout
+                objects = plistlib.loads(converted)["objects"]
+                targets = {
+                    item["name"]: item for item in objects.values()
+                    if item.get("isa") == "PBXNativeTarget"
+                }
+                self.assertIn(app_name, targets)
+                self.assertIn(test_name, targets)
+
+                def configurations(target: dict) -> dict[str, dict]:
+                    config_list = objects[target["buildConfigurationList"]]
+                    return {
+                        objects[ref]["name"]: objects[ref].get("buildSettings", {})
+                        for ref in config_list["buildConfigurations"]
+                    }
+
+                for name in (app_name, test_name):
+                    configs = configurations(targets[name])
+                    for settings in configs.values():
+                        self.assertNotIn(macro, str(settings.get(
+                            "SWIFT_ACTIVE_COMPILATION_CONDITIONS", "")))
+                test_configs = configurations(targets[test_name])
+                for config_name, settings in test_configs.items():
+                    for key, expected in expected_test_settings.items():
+                        self.assertEqual(settings.get(key), expected,
+                            f"{test_name} {config_name} lost {key}")
+
+                project_target = next(item for item in objects.values()
+                                      if item.get("isa") == "PBXProject")
+                for settings in configurations(project_target).values():
+                    self.assertNotIn(macro, str(settings.get(
+                        "SWIFT_ACTIVE_COMPILATION_CONDITIONS", "")))
+                for name, target in targets.items():
+                    if name in (app_name, test_name):
+                        continue
+                    for settings in configurations(target).values():
+                        self.assertNotIn(macro, str(settings.get(
+                            "SWIFT_ACTIVE_COMPILATION_CONDITIONS", "")))
 
 
 if __name__ == "__main__":

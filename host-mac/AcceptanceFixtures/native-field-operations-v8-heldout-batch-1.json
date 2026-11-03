@@ -1,0 +1,96 @@
+{
+  "schemaVersion": 1,
+  "scope": "20 unseen phrasings for frozen field-operations-v8, authored after v7 failures but before inspecting v8 model results; exact typed origin and full ordered operations required; preselected batch 1/4",
+  "cases": [
+    {
+      "id": "H801",
+      "prompt": "Mirror Delivery in Billing.",
+      "fields": [
+        "Delivery",
+        "Billing"
+      ],
+      "expectedDisposition": "supported",
+      "allowedPlans": [
+        [
+          {
+            "field": 1,
+            "mode": "replaceAll",
+            "sourceField": 0
+          }
+        ]
+      ]
+    },
+    {
+      "id": "H802",
+      "prompt": "Memo should end with everything currently in Draft.",
+      "fields": [
+        "Draft",
+        "Memo"
+      ],
+      "expectedDisposition": "supported",
+      "allowedPlans": [
+        [
+          {
+            "field": 1,
+            "mode": "append",
+            "sourceField": 0
+          }
+        ]
+      ]
+    },
+    {
+      "id": "H803",
+      "prompt": "Put the word \"Draft\" in Memo.",
+      "fields": [
+        "Draft",
+        "Memo"
+      ],
+      "expectedDisposition": "supported",
+      "allowedPlans": [
+        [
+          {
+            "field": 1,
+            "mode": "replaceAll",
+            "value": "Draft"
+          }
+        ]
+      ]
+    },
+    {
+      "id": "H804",
+      "prompt": "Use the contents of \"Draft\" for \"Memo\".",
+      "fields": [
+        "Draft",
+        "Memo"
+      ],
+      "expectedDisposition": "supported",
+      "allowedPlans": [
+        [
+          {
+            "field": 1,
+            "mode": "replaceAll",
+            "sourceField": 0
+          }
+        ]
+      ]
+    },
+    {
+      "id": "H805",
+      "prompt": "Keep Notes as it is and replicate its contents in Archive.",
+      "fields": [
+        "Notes",
+        "Archive"
+      ],
+      "expectedDisposition": "supported",
+      "allowedPlans": [
+        [
+          {
+            "field": 1,
+            "mode": "replaceAll",
+            "sourceField": 0
+          }
+        ]
+      ]
+    }
+  ]
+}

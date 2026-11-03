@@ -1,0 +1,11 @@
+id: "demo-008"
+surface: web
+start: {url: "http://127.0.0.1:8765/forms.html"}
+prompt: "On the open local contact form, fill in name Ada Lovelace and email ada@example.test, and submit it."
+checker: {type: "dom", url_prefix: "http://127.0.0.1:8765/", min_events: [{selector: "#profile", event: "submit", count: 1}], expect: [{selector: "#name", value: "Ada Lovelace"}, {selector: "#email", value: "ada@example.test"}, {selector: "#submitted", text: "Submitted locally"}]}
+max_steps: 16
+tags: ["demo", "web", "fixture", "approval-required", "submit"]
+approval_policy: {allow_fixture_interaction: true}
+# The signed driver opens a per-run tokenized fixture URL; keep this ordinary task prompt on that page.
+# allow_fixture_commit is intentionally omitted. The eval driver does not prove a live phone approval;
+# this fixture submission must not be described as a verified phone-approval rehearsal.

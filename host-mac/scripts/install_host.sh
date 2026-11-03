@@ -19,7 +19,7 @@ Usage:
   install_host.sh [options]
 
 Options:
-  --debug                       Build a diagnostic Debug host; pair only with Debug iOS.
+  --debug                       Disabled: diagnostic builds must not replace the installed host.
   --skip-build                  Install the existing build product.
   --host-artifact APP           Install an absolute, notarized Release .app instead of rebuilding.
   --expected-source-commit SHA  Require APP's signed source revision to match this full Git commit.
@@ -32,10 +32,6 @@ Options:
   --generate-pppc-profile PATH  Generate an MDM PPPC profile for the installed app.
   -h, --help                    Show this help.
 
-For a screenless Debug developer Mac mini, use:
-  REMOTE_DESKTOP_APPLE_CONFIGURATION=Debug REMOTE_DESKTOP_HOST_CONFIGURATION=Debug REMOTE_DESKTOP_IOS_CONFIGURATION=Debug \
-    ./scripts/install_host.sh --debug --headless --start-at-login --launch --request-permissions --ssh-permission-report
-
 For Release, pass the extracted notarized app and its exact signed source SHA:
   ./scripts/install_host.sh --host-artifact /absolute/path/RemoteDesktopHost.app \
     --expected-source-commit FULL_SHA --headless --start-at-login --launch
@@ -44,7 +40,7 @@ Plain SSH cannot grant every required macOS TCC permission. Use
 --ssh-permission-report for the exact breakdown.
 Final acceptance uses the default Release host with a Release iPhone Air
 Simulator; both resolve to Production CloudKit. Release installation requires
---host-artifact and --expected-source-commit. Debug remains a local source build.
+--host-artifact and --expected-source-commit. Run Debug diagnostics from Xcode.
 USAGE
 }
 
@@ -140,11 +136,8 @@ verify_release_artifact_selection() {
   local canonical_parent current_source_commit source_status
 
   if [[ "$configuration" == "Debug" ]]; then
-    if [[ -n "$host_artifact" || -n "$expected_source_commit" ]]; then
-      echo "--host-artifact and --expected-source-commit are Release-only; Debug builds locally with Apple Development signing." >&2
-      return 1
-    fi
-    return 0
+    echo "Debug installation is disabled: its signing identity would replace the installed host and invalidate existing permissions. Run diagnostic builds from Xcode instead." >&2
+    return 1
   fi
 
   if [[ "$skip_build" -eq 1 ]]; then
@@ -363,6 +356,9 @@ built_executable_sha256="$(/usr/bin/shasum -a 256 "$built_executable" \
 # The replacement bundle has already passed trust verification. Stop only the
 # exact installed executable image and its exact packaged runtime before
 # replacing files, so launch can never leave an older same-bundle process alive.
+if [[ -n "$(matching_process_ids "$executable")" ]]; then
+  launch=1
+fi
 terminate_exact_processes "$executable" "installed Remote Desktop Host"
 terminate_exact_processes "$installed_runtime" "installed local AI runtime"
 

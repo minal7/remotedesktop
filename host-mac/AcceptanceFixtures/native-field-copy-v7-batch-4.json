@@ -1,0 +1,67 @@
+{
+  "schemaVersion": 1,
+  "scope": "First hand-authored typed field-copy capability corpus, frozen before any inference; full operation order and payload origin required; not general computer-use qualification; preselected batch 4/4 to bound temporary host storage",
+  "cases": [
+    {
+      "id": "C16",
+      "prompt": "Copy either First or Last into Full.",
+      "fields": [
+        "First",
+        "Last",
+        "Full"
+      ],
+      "expectedDisposition": "clarification"
+    },
+    {
+      "id": "C17",
+      "prompt": "Copy Title into Tag and write a poem in Notes.",
+      "fields": [
+        "Title",
+        "Tag",
+        "Notes"
+      ],
+      "expectedDisposition": "unsupported"
+    },
+    {
+      "id": "C18",
+      "prompt": "Read out the value in Title.",
+      "fields": [
+        "Title",
+        "Tag"
+      ],
+      "expectedDisposition": "unsupported"
+    },
+    {
+      "id": "C19",
+      "prompt": "Copy Title into Tag unless Title is red.",
+      "fields": [
+        "Title",
+        "Tag"
+      ],
+      "expectedDisposition": "unsupported"
+    },
+    {
+      "id": "C20",
+      "prompt": "Copy Notes into Tag twice.",
+      "fields": [
+        "Notes",
+        "Tag"
+      ],
+      "expectedDisposition": "supported",
+      "allowedPlans": [
+        [
+          {
+            "field": 1,
+            "mode": "replaceAll",
+            "sourceField": 0
+          },
+          {
+            "field": 1,
+            "mode": "replaceAll",
+            "sourceField": 0
+          }
+        ]
+      ]
+    }
+  ]
+}
