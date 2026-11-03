@@ -50,6 +50,7 @@ final class SessionModel: ObservableObject, VideoRendererTarget {
     typealias LocalAccountBindingValidator = @Sendable (
         _ expected: CloudKitAccountBinding
     ) async throws -> Void
+    typealias RemoteHostResolver = @Sendable (_ hostID: String) async throws -> String?
     typealias LocalComputerUseChannelConnector = @Sendable (
         _ endpoint: LocalComputerUseEndpoint,
         _ credentialID: String,
@@ -287,6 +288,18 @@ final class SessionModel: ObservableObject, VideoRendererTarget {
     private var accountRevalidationTask: Task<Void, Never>?
     private var sessionAccountBinding: CloudKitAccountBinding?
     private var accountRevalidationGeneration: UInt64 = 0
+    private struct RemoteReconnectContext {
+        let hostID: String
+        let accountBinding: CloudKitAccountBinding
+    }
+    private let remoteHostResolver: RemoteHostResolver
+    private let remoteReconnectTimeout: Duration
+    private let remoteReconnectDelay: Duration
+    private var remoteReconnectContext: RemoteReconnectContext?
+    private var remoteReconnectID: UUID?
+    private var remoteReconnectAttempts = 0
+    private var remoteReconnectTask: Task<Void, Never>?
+    private var remoteReconnectDeadlineTask: Task<Void, Never>?
     private var seq: UInt32 = 0
     private var inputHelloReceived = false { didSet { notifyRemoteScreenVisibilityChanged() } }
     private struct InputSource {
@@ -325,6 +338,14 @@ final class SessionModel: ObservableObject, VideoRendererTarget {
             { binding in
                 try await LocalCloudAccountBindingPolicy.validate(binding)
             },
+        remoteHostResolver: @escaping RemoteHostResolver = { hostID in
+            let hosts = try await CloudKitSignalingClient.fetchAvailableHostAdvertisements(
+                containerIdentifier: Config.cloudKitContainerIdentifier)
+                .filter { $0.senderID == hostID }
+            return hosts.count == 1 ? hosts[0].pairingCode : nil
+        },
+        remoteReconnectTimeout: Duration = .seconds(30),
+        remoteReconnectDelay: Duration = .seconds(1),
         localComputerUseChannelConnector:
             @escaping LocalComputerUseChannelConnector = {
                 endpoint,
@@ -364,6 +385,9 @@ final class SessionModel: ObservableObject, VideoRendererTarget {
         self.computerUseVisualTransportFactory =
             computerUseVisualTransportFactory
         self.localAccountBindingValidator = localAccountBindingValidator
+        self.remoteHostResolver = remoteHostResolver
+        self.remoteReconnectTimeout = remoteReconnectTimeout
+        self.remoteReconnectDelay = remoteReconnectDelay
         self.localComputerUseChannelConnector =
             localComputerUseChannelConnector
         self.localPendingStore = localPendingStore
@@ -395,6 +419,8 @@ final class SessionModel: ObservableObject, VideoRendererTarget {
     }
 
     deinit {
+        remoteReconnectTask?.cancel()
+        remoteReconnectDeadlineTask?.cancel()
         accountRevalidationTask?.cancel()
         for observer in applicationObservers { applicationNotificationCenter.removeObserver(observer) }
         if let accountChangeObserver {
@@ -464,12 +490,18 @@ final class SessionModel: ObservableObject, VideoRendererTarget {
             if case .ended = state { return true } else { return false }
         }() else { return }
         stopComputerUseVisualSidecar(preserveConfiguration: false)
+        cancelRemoteReconnect(clearContext: true)
         invalidateAccountRevalidation(clearBinding: true)
         state = .connecting
         error = nil
         invalidateRemoteInput()
         self.experience = experience
         sessionAccountBinding = localCloudAccountBinding
+        if experience == .remoteControl,
+           let hostID = computerUseHostID, !hostID.isEmpty,
+           let accountBinding = localCloudAccountBinding {
+            remoteReconnectContext = .init(hostID: hostID, accountBinding: accountBinding)
+        }
         computerUseConnectionMode = .liveScreen
 
         if experience == .computerUse {
@@ -740,6 +772,7 @@ final class SessionModel: ObservableObject, VideoRendererTarget {
     #endif
 
     func disconnect() {
+        cancelRemoteReconnect(clearContext: true)
         invalidateAccountRevalidation(clearBinding: true)
         releaseRemoteInputSources()
         stopComputerUseVisualSidecar(preserveConfiguration: false)
@@ -753,6 +786,7 @@ final class SessionModel: ObservableObject, VideoRendererTarget {
     }
 
     func reset() {
+        cancelRemoteReconnect(clearContext: true)
         invalidateAccountRevalidation(clearBinding: true)
         releaseRemoteInputSources()
         stopComputerUseVisualSidecar(preserveConfiguration: false)
@@ -828,6 +862,7 @@ final class SessionModel: ObservableObject, VideoRendererTarget {
     }
 
     private func endForCloudAccountChange() {
+        cancelRemoteReconnect(clearContext: true)
         let reason = "The Apple Account changed or is no longer available. Sign into the same Apple Account and pair again."
         invalidateAccountRevalidation(clearBinding: true)
         localConnectionTask?.cancel()
@@ -1065,6 +1100,7 @@ final class SessionModel: ObservableObject, VideoRendererTarget {
                 return
             }
             self.state = .connected
+            self.cancelRemoteReconnect(clearContext: false)
             if isInitialHandshake { self.computerUseSession?.start() }
             self.send(.qos(
                 targetFps: DesktopVideoQuality.targetFramesPerSecond,
@@ -1086,12 +1122,105 @@ final class SessionModel: ObservableObject, VideoRendererTarget {
         }
         t.onDisconnect = { [weak self, weak t] r in
             guard let self, let t, self.transport === t else { return }
+            if (t as? any RemoteSessionRecoveryTransport)?.canReconnectAfterDisconnect == true,
+               self.beginRemoteReconnect() { return }
+            self.cancelRemoteReconnect(clearContext: true)
             self.invalidateAccountRevalidation(clearBinding: true)
             self.computerUseSession?.stop()
             self.transport = nil
             self.invalidateRemoteInput()
             self.state = .ended(r)
         }
+    }
+
+    /// A host restart needs a new signaling and input lifetime. Re-discover only
+    /// the exact private-CloudKit host under the original verified account;
+    /// never replay keys, text, pointer state, or Computer use tasks.
+    private func beginRemoteReconnect() -> Bool {
+        guard experience == .remoteControl, !isCloudAccountRevalidationPending,
+              state == .connected || remoteReconnectID != nil,
+              let context = remoteReconnectContext,
+              sessionAccountBinding == context.accountBinding else { return false }
+        if remoteReconnectID == nil {
+            let id = UUID()
+            remoteReconnectID = id
+            remoteReconnectAttempts = 0
+            remoteReconnectDeadlineTask = Task { @MainActor [weak self, remoteReconnectTimeout] in
+                try? await Task.sleep(for: remoteReconnectTimeout)
+                guard !Task.isCancelled, let self, self.remoteReconnectID == id else { return }
+                self.finishRemoteReconnect()
+            }
+        }
+        guard let id = remoteReconnectID else { return false }
+        remoteReconnectAttempts += 1
+        guard remoteReconnectAttempts <= 3 else {
+            finishRemoteReconnect()
+            return true
+        }
+        remoteReconnectTask?.cancel()
+        transport = nil
+        invalidateRemoteInput()
+        state = .connecting
+        error = nil
+        remoteReconnectTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                // Give the old host time to withdraw its advertisement before
+                // selecting the replacement. The independent deadline also
+                // fences a CloudKit operation that completes after cancellation.
+                try await Task.sleep(for: self.remoteReconnectDelay)
+                while self.remoteReconnectID == id && !Task.isCancelled {
+                    try await self.localAccountBindingValidator(context.accountBinding)
+                    guard self.remoteReconnectID == id, !Task.isCancelled else { return }
+                    let code = try await self.remoteHostResolver(context.hostID)
+                    guard self.remoteReconnectID == id, !Task.isCancelled else { return }
+                    try await self.localAccountBindingValidator(context.accountBinding)
+                    guard self.remoteReconnectID == id, !Task.isCancelled else { return }
+                    guard let code else {
+                        try await Task.sleep(for: self.remoteReconnectDelay)
+                        continue
+                    }
+                    let replacement = self.transportFactory()
+                    self.bind(replacement)
+                    self.transport = replacement
+                    do {
+                        try await replacement.connect(pairingCode: code, expectedHostID: context.hostID)
+                    } catch {
+                        guard self.remoteReconnectID == id, self.transport === replacement,
+                              !Task.isCancelled else { return }
+                        self.finishRemoteReconnect()
+                    }
+                    return
+                }
+            } catch {
+                guard self.remoteReconnectID == id, !Task.isCancelled else { return }
+                // Account, credential and signaling failures remain terminal.
+                // A later explicit Retry performs ordinary pairing from scratch.
+                self.finishRemoteReconnect()
+            }
+        }
+        return true
+    }
+
+    private func cancelRemoteReconnect(clearContext: Bool) {
+        remoteReconnectID = nil
+        remoteReconnectAttempts = 0
+        remoteReconnectTask?.cancel()
+        remoteReconnectTask = nil
+        remoteReconnectDeadlineTask?.cancel()
+        remoteReconnectDeadlineTask = nil
+        if clearContext { remoteReconnectContext = nil }
+    }
+
+    private func finishRemoteReconnect() {
+        let reason = "Couldn't reconnect to your computer. Keep the host app open, then tap Retry."
+        cancelRemoteReconnect(clearContext: true)
+        invalidateAccountRevalidation(clearBinding: true)
+        let previous = transport
+        transport = nil
+        previous?.disconnect(reason: reason)
+        invalidateRemoteInput()
+        state = .ended(reason)
     }
 
     func releaseSoftModifiers() {
