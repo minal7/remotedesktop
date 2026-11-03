@@ -667,6 +667,7 @@ struct ComputerUseView: View {
                     Text(request.message)
                         .font(.callout)
                         .fixedSize(horizontal: false, vertical: true)
+                        .accessibilityIdentifier("computer-use-approval-reason")
                     if let details = request.details, !details.isEmpty {
                         VStack(alignment: .leading, spacing: 10) {
                             ForEach(details) { detail in
@@ -680,6 +681,7 @@ struct ComputerUseView: View {
                                         .fixedSize(horizontal: false, vertical: true)
                                 }
                                 .accessibilityElement(children: .combine)
+                                .accessibilityIdentifier(detail.label == "Action" ? "computer-use-approval-action" : "computer-use-approval-detail")
                             }
                         }
                         .padding(12)
@@ -717,6 +719,7 @@ struct ComputerUseView: View {
         .frame(maxWidth: 720)
         .accessibilityElement(children: .contain)
         .accessibilityAddTraits(.isModal)
+        .accessibilityIdentifier("computer-use-approval-card")
         .accessibilityAction(.escape) {
             if model.isConnected {
                 model.respondToApproval(request, approved: false)
@@ -750,6 +753,7 @@ struct ComputerUseView: View {
             }
             .buttonStyle(.borderedProminent)
             .accessibilityHint("Approves only the exact action shown above")
+            .accessibilityIdentifier("computer-use-approval-approve")
             .disabled(!model.isConnected)
         }
     }

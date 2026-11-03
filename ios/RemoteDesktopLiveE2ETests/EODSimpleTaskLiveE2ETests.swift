@@ -7,7 +7,7 @@ final class EODSimpleTaskLiveE2ETests: XCTestCase {
     private static var needsHuman = false
 
     private enum TaskKind: String, CaseIterable {
-        case apple, wikipedia, summary, textEdit, finder, openApp, search, calculator
+        case apple, wikipedia, summary, textEdit, finder, openApp, openNotes, openTextEdit, search, calculator
 
         func prompt(uniqueSuffix: String) -> String {
             switch self {
@@ -23,6 +23,10 @@ final class EODSimpleTaskLiveE2ETests: XCTestCase {
                 return "In Finder, make a folder called AgentEval-EOD-\(uniqueSuffix) on the Desktop. Do not change an existing folder."
             case .openApp:
                 return "Open Calculator."
+            case .openNotes:
+                return "Open Notes."
+            case .openTextEdit:
+                return "Open TextEdit."
             case .search:
                 return "Search the web for who designed the Sydney Opera House and tell me the answer and the source."
             case .calculator:
@@ -85,10 +89,42 @@ final class EODSimpleTaskLiveE2ETests: XCTestCase {
         let status = app.descendants(matching: .any)["computer-use-status"]
         let deadline = Date().addingTimeInterval(300)
         var outcome = ""
+        var approvedFirstUse = false
         repeat {
             try requireNoSystemPrompt(in: app, context: suffix)
-            guard !app.buttons["computer-use-approval-deny"].exists else {
-                // Leave the approval visible. This test never grants or denies it.
+            if app.buttons["computer-use-approval-deny"].exists {
+                let allowedApp: String?
+                switch task {
+                case .openApp: allowedApp = "Calculator"
+                case .openNotes: allowedApp = "Notes"
+                case .openTextEdit: allowedApp = "TextEdit"
+                default: allowedApp = nil
+                }
+                let card = app.descendants(matching: .any)["computer-use-approval-card"]
+                let reason = app.staticTexts["computer-use-approval-reason"]
+                let action = app.descendants(matching: .any)["computer-use-approval-action"]
+                let approve = app.buttons["computer-use-approval-approve"]
+                if run == 1, !approvedFirstUse, userMessages.count == priorUserCount + 1,
+                   let allowedApp, card.exists, reason.label == "This is the first use of an untrusted app or site.",
+                   action.exists, isExactOpenApp(action.label, named: allowedApp), approve.exists, approve.isHittable {
+                    attachDiagnostics(named: "first-use-approval-\(suffix)") { self.approvalDetails(in: app) }
+                    try requireNoSystemPrompt(in: app, context: suffix)
+                    guard userMessages.count == priorUserCount + 1, card.exists,
+                          reason.label == "This is the first use of an untrusted app or site.",
+                          action.exists, isExactOpenApp(action.label, named: allowedApp), approve.isHittable else {
+                        Self.needsHuman = true
+                        throw fail("EOD_NEEDS_USER task=\(task.rawValue) run=\(run): approval changed before selection; no action selected.")
+                    }
+                    approvedFirstUse = true
+                    print("EOD_APPROVE_FIRST_USE task=\(task.rawValue) app=\(allowedApp) timestamp_utc=\(ISO8601DateFormatter().string(from: Date()))")
+                    approve.tap()
+                    guard wait(seconds: 10, until: { !card.exists }) else {
+                        Self.needsHuman = true
+                        throw fail("EOD_NEEDS_USER task=\(task.rawValue) run=\(run): approval did not clear; no second approval sent.")
+                    }
+                    continue
+                }
+                // Leave every other approval visible; do not grant or deny it.
                 Self.needsHuman = true
                 attachDiagnostics(
                     named: "approval-\(suffix)",
@@ -136,7 +172,11 @@ final class EODSimpleTaskLiveE2ETests: XCTestCase {
     private func requireNoSystemPrompt(in app: XCUIApplication, context: String = "pre-task") throws {
         let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
         let springboardCount = springboard.alerts.count
-        let appCount = app.alerts.count
+        let appCount = (0..<app.alerts.count).filter { index in
+            let alert = app.alerts.element(boundBy: index)
+            return alert.identifier != "computer-use-approval-card" &&
+                !alert.descendants(matching: .any)["computer-use-approval-card"].exists
+        }.count
         if springboardCount > 0 || appCount > 0 {
             Self.needsHuman = true
             attachDiagnostics(named: "alert-\(context)") {
@@ -153,8 +193,15 @@ final class EODSimpleTaskLiveE2ETests: XCTestCase {
         }
     }
 
+    private func isExactOpenApp(_ label: String, named expectedName: String) -> Bool {
+        guard let start = label.firstIndex(of: "{"), let end = label.lastIndex(of: "}"), start <= end,
+              let data = String(label[start...end]).data(using: .utf8),
+              let action = try? JSONSerialization.jsonObject(with: data) as? [String: String] else { return false }
+        return Set(action.keys) == ["type", "name"] && action["type"] == "open_app" && action["name"] == expectedName
+    }
+
     private func approvalDetails(in app: XCUIApplication) -> String {
-        let identifiers = ["computer-use-status", "computer-use-approval-outcome", "computer-use-approval-deny", "computer-use-resume-ai", "computer-use-stop-task"]
+        let identifiers = ["computer-use-status", "computer-use-approval-card", "computer-use-approval-reason", "computer-use-approval-action", "computer-use-approval-outcome", "computer-use-approval-deny", "computer-use-approval-approve", "computer-use-resume-ai", "computer-use-stop-task"]
         return identifiers.map { identifier in
             let element = app.descendants(matching: .any)[identifier]
             return element.exists
@@ -220,6 +267,10 @@ final class EODSimpleTaskLiveE2ETests: XCTestCase {
     func test06OpenAppRun3() throws { try perform(.openApp, run: 3) }
     func test06OpenAppRun4() throws { try perform(.openApp, run: 4) }
     func test06OpenAppRun5() throws { try perform(.openApp, run: 5) }
+    func test06OpenNotesRun1() throws { try perform(.openNotes, run: 1) }
+    func test06OpenNotesRun2() throws { try perform(.openNotes, run: 2) }
+    func test06OpenTextEditRun1() throws { try perform(.openTextEdit, run: 1) }
+    func test06OpenTextEditRun2() throws { try perform(.openTextEdit, run: 2) }
     func test07SearchRun1() throws { try perform(.search, run: 1) }
     func test07SearchRun2() throws { try perform(.search, run: 2) }
     func test07SearchRun3() throws { try perform(.search, run: 3) }
