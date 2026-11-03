@@ -937,7 +937,7 @@ enum OSAtlasLlamaRuntimeError: Error, LocalizedError, Equatable {
         case .insufficientPhysicalMemory:
             return "This Mac does not have enough physical memory for the local AI model. Any earlier completed steps remain on the Mac."
         case .insufficientAvailableMemory:
-            return "There is not enough available memory for AI Computer Use. Close some apps and try again. Any earlier completed steps remain on the Mac."
+            return "There is not enough available memory for AI Computer Use. Close heavy apps such as Xcode or Simulator, then retry. Any earlier completed steps remain on the Mac."
         case .resourceInspectionFailed:
             return "The Mac could not verify that enough memory is available for AI Computer Use. Try again. Any earlier completed steps remain on the Mac."
         }

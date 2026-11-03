@@ -806,6 +806,18 @@ struct ComputerUseView: View {
         .frame(maxWidth: .infinity)
     }
 
+    /// A retry here only restores text for review. It never repeats host actions.
+    private var memoryRetryPrompt: String? {
+        guard model.state == .ready, model.composerMode == .request,
+              model.latestTerminalOutcome == .unableToComplete,
+              model.retryPrompt == nil, draft.isEmpty,
+              let reply = model.messages.last, reply.author == .assistant,
+              reply.text.contains("not enough available memory for AI Computer Use")
+                || reply.text.contains("could not verify that enough memory is available for AI Computer Use"),
+              let prompt = model.messages.last(where: { $0.author == .user })?.text else { return nil }
+        return prompt
+    }
+
     private var composer: some View {
         VStack(spacing: 8) {
             if model.showsTaskMemoryControls {
@@ -847,6 +859,17 @@ struct ComputerUseView: View {
                         .font(.caption.weight(.semibold))
                 }
                 .buttonStyle(.bordered)
+                .disabled(!model.isConnected)
+            }
+            if let prompt = memoryRetryPrompt {
+                Button("Retry") {
+                    draft = prompt
+                    composerFocused = true
+                }
+                .font(.caption.weight(.semibold))
+                .buttonStyle(.bordered)
+                .accessibilityIdentifier("computer-use-review-memory-retry")
+                .accessibilityHint("Restores the request for you to review before sending it again")
                 .disabled(!model.isConnected)
             }
 
