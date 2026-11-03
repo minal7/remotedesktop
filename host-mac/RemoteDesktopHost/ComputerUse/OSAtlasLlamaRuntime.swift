@@ -4,6 +4,7 @@ import CoreFoundation
 import Foundation
 import ImageIO
 import MemoryStoreKit
+import os
 
 @_silgen_name("flock")
 private func osAtlasRuntimeFlock(
@@ -934,11 +935,11 @@ enum OSAtlasLlamaRuntimeError: Error, LocalizedError, Equatable {
         case .inputContextTooLarge:
             return "The current task and screenshot exceed the local model's context limit, so no further action was performed. Any earlier completed steps remain on the Mac."
         case .insufficientPhysicalMemory:
-            return "AI Computer Use requires a Mac with at least 16 GB of memory."
+            return "This Mac does not have enough physical memory for the local AI model."
         case .insufficientAvailableMemory:
-            return "There is not enough free memory for AI Computer Use. Close some apps, then choose Retry."
+            return "There is not enough available memory for AI Computer Use. Close some apps and try again. Any earlier completed steps remain on the Mac."
         case .resourceInspectionFailed:
-            return "The Mac could not verify that enough memory is available for AI Computer Use. Choose Retry."
+            return "The Mac could not verify that enough memory is available for AI Computer Use. Try again."
         }
     }
 }
@@ -1023,6 +1024,8 @@ final class OSAtlasModelAccessGate: @unchecked Sendable {
 /// stop-and-await activation boundary guarantees that Base and Pro are never
 /// resident at the same time.
 actor OSAtlasLlamaRuntime {
+    private static let resourceLog = Logger(
+        subsystem: "com.threadmark.remotedesktop.host", category: "ai-resources")
     static let shared = OSAtlasLlamaRuntime()
 
     private enum RuntimeInputs: Equatable, Sendable {
@@ -2008,7 +2011,8 @@ actor OSAtlasLlamaRuntime {
         // published to callers.
         try validateResources(
             minimumReclaimableBytes:
-                beforeLoad.resourceProfile.minimumInferenceMemoryBytes)
+                beforeLoad.resourceProfile.minimumInferenceMemoryBytes,
+            stage: "model-load")
         guard var updated = active, updated.endpoint == endpoint else {
             throw OSAtlasLlamaRuntimeError.inactiveSession
         }
@@ -2217,7 +2221,8 @@ actor OSAtlasLlamaRuntime {
                 // "ready" when there is no safe headroom for the first tile.
                 try validateResources(
                     minimumReclaimableBytes:
-                        resourceProfile.minimumInferenceMemoryBytes)
+                        resourceProfile.minimumInferenceMemoryBytes,
+                    stage: "post-load")
                 try validateActivation(epoch: expectedActivationEpoch)
                 return .success
             } catch is CancellationError {
@@ -2356,11 +2361,15 @@ actor OSAtlasLlamaRuntime {
         agentVision: Bool = false) throws -> OSAtlasLlamaResourceProfile {
         let snapshot = try resourceSnapshot()
         guard !trainedVision || snapshot.physicalMemoryBytes >= 16 * 1_024 * 1_024 * 1_024 else {
+            logResourceFailure(stage: "launch-physical", snapshot: snapshot,
+                requiredBytes: OSAtlasLlamaResourceProfile.standardPhysicalMemoryBytes)
             throw OSAtlasLlamaRuntimeError.insufficientPhysicalMemory
         }
         guard let hardwareProfile = OSAtlasLlamaResourceProfile.select(
             physicalMemoryBytes: snapshot.physicalMemoryBytes
         ) else {
+            logResourceFailure(stage: "launch-physical", snapshot: snapshot,
+                requiredBytes: OSAtlasLlamaResourceProfile.minimumPhysicalMemoryBytes)
             throw OSAtlasLlamaRuntimeError.insufficientPhysicalMemory
         }
         // Text and memory embedding use compact profiles; this budget is not a
@@ -2369,20 +2378,30 @@ actor OSAtlasLlamaRuntime {
         let profile: OSAtlasLlamaResourceProfile = trainedVision ? visionProfile :
             (nativeText || memoryEmbedding) ? .compact : hardwareProfile
         guard snapshot.reclaimableMemoryBytes >= profile.minimumLaunchMemoryBytes else {
+            logResourceFailure(stage: "launch", snapshot: snapshot,
+                requiredBytes: profile.minimumLaunchMemoryBytes)
             throw OSAtlasLlamaRuntimeError.insufficientAvailableMemory
         }
         return profile
     }
 
-    private func validateResources(minimumReclaimableBytes: UInt64) throws {
+    private func validateResources(minimumReclaimableBytes: UInt64, stage: String = "inference") throws {
         let snapshot = try resourceSnapshot()
         guard snapshot.physicalMemoryBytes >=
                 OSAtlasLlamaResourceProfile.minimumPhysicalMemoryBytes else {
+            logResourceFailure(stage: "\(stage)-physical", snapshot: snapshot,
+                requiredBytes: OSAtlasLlamaResourceProfile.minimumPhysicalMemoryBytes)
             throw OSAtlasLlamaRuntimeError.insufficientPhysicalMemory
         }
         guard snapshot.reclaimableMemoryBytes >= minimumReclaimableBytes else {
+            logResourceFailure(stage: stage, snapshot: snapshot, requiredBytes: minimumReclaimableBytes)
             throw OSAtlasLlamaRuntimeError.insufficientAvailableMemory
         }
+    }
+
+    private func logResourceFailure(stage: String, snapshot: OSAtlasLlamaResourceSnapshot,
+                                    requiredBytes: UInt64) {
+        Self.resourceLog.error("AI resource guard stage=\(stage, privacy: .public) physical_bytes=\(snapshot.physicalMemoryBytes, privacy: .public) reclaimable_bytes=\(snapshot.reclaimableMemoryBytes, privacy: .public) required_bytes=\(requiredBytes, privacy: .public)")
     }
 
     private func resourceSnapshot() throws -> OSAtlasLlamaResourceSnapshot {

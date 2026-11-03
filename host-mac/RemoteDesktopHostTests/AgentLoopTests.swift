@@ -44,6 +44,45 @@ final class AgentLoopTests: XCTestCase {
         XCTAssertEqual(policy.observations[3].history.map(\.result).filter { $0 == rejection }.count, 3)
     }
 
+    func testResourceFailuresStopAfterOnePolicyAttemptWithoutExecuting() async throws {
+        for error in [OSAtlasLlamaRuntimeError.insufficientAvailableMemory,
+                      .insufficientPhysicalMemory, .resourceInspectionFailed] {
+            let environment = TestEnvironment(frames: [webFrame()])
+            let policy = TestPolicy([.failure(error), .action(.done(answer: "Unexpected"))])
+            let recorder = TestRecorder()
+            let loop = try makeLoop(environment: environment, policy: policy, recorder: recorder,
+                                    journal: TestJournal())
+
+            let result = try await loop.run()
+
+            XCTAssertEqual(result, .failed(reason: error.localizedDescription))
+            XCTAssertEqual(policy.observations.count, 1)
+            XCTAssertTrue(environment.executed.isEmpty)
+            XCTAssertEqual(recorder.steps.count, 1)
+            XCTAssertNil(recorder.steps.first?.action)
+            XCTAssertEqual(recorder.steps.first?.execution.status, .notExecuted)
+            XCTAssertEqual(recorder.footer?.outcome, "failed")
+            XCTAssertEqual(recorder.finishCount, 1)
+            XCTAssertEqual(policy.stopCount, 1)
+        }
+    }
+
+    func testOtherPolicyErrorsStillAskAfterThreeRejections() async throws {
+        let environment = TestEnvironment(frames: [webFrame(), webFrame(), webFrame()])
+        let policy = TestPolicy([.failure(.invalidResponse), .failure(.invalidResponse), .failure(.invalidResponse)])
+        let recorder = TestRecorder()
+        let loop = try makeLoop(environment: environment, policy: policy, recorder: recorder,
+                                journal: TestJournal())
+
+        guard case .askUser = try await loop.run() else {
+            return XCTFail("Other policy errors should retain the existing rejection behavior")
+        }
+        XCTAssertEqual(policy.observations.count, 3)
+        XCTAssertEqual(recorder.steps.count, 3)
+        XCTAssertTrue(environment.executed.isEmpty)
+        XCTAssertNil(recorder.footer)
+    }
+
     func testStaleTargetRejectionIsRecordedAndReturnedInTheNextObservation() async throws {
         let environment = TestEnvironment(frames: [webFrame(), webFrame()])
         let policy = TestPolicy([.action(.click(target: .element(id: 99), button: nil, count: nil)),
@@ -807,7 +846,7 @@ final class AgentLoopTests: XCTestCase {
 
 @MainActor
 private final class TestPolicy: AgentPolicy {
-    enum Reply { case action(AgentAction), malformed(String), output(AgentPolicyOutput) }
+    enum Reply { case action(AgentAction), malformed(String), output(AgentPolicyOutput), failure(OSAtlasLlamaRuntimeError) }
     let promptVersion = "test-v1"
     private var replies: [Reply]
     private(set) var observations: [AgentObservation] = []
@@ -820,6 +859,7 @@ private final class TestPolicy: AgentPolicy {
         case .action(let action): return .init(rawOutput: "action:\(action.type)", action: action, rejectionReason: nil)
         case .malformed(let raw): return .init(rawOutput: raw, action: nil, rejectionReason: "Invalid output")
         case .output(let output): return output
+        case .failure(let error): throw error
         }
     }
     func stop() async { stopCount += 1 }

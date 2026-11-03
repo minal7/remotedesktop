@@ -250,6 +250,19 @@ final class AgentLoop {
             catch AgentPolicyTermination.authorizationRevoked {
                 throw AgentPolicyTermination.authorizationRevoked
             }
+            catch let error as OSAtlasLlamaRuntimeError where
+                error == .insufficientAvailableMemory || error == .insufficientPhysicalMemory ||
+                error == .resourceInspectionFailed {
+                try checkBoundary()
+                let reason = "Policy resource error: \(error)"
+                let decision = AgentGateResult(decision: .rejected, reason: reason,
+                    scopeIdentity: frame.scope.identity, riskTier: AgentRiskTier.low.rawValue)
+                try record(frame.observation, raw: "", action: nil, gate: decision,
+                    execution: .init(status: .notExecuted, result: reason), start: start,
+                    observeMS: observeMS, policyMS: ms(policyStart))
+                stepIndex += 1
+                return try await finish(.failed(reason: error.localizedDescription), outcome: "failed")
+            }
             catch {
                 if let result = try recordRejection(frame, raw: "", action: nil, reason: "Policy error: \(error)",
                     start: start, observeMS: observeMS, policyMS: ms(policyStart)) { return result }
