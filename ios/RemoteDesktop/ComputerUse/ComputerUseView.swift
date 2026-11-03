@@ -243,7 +243,10 @@ struct ComputerUseView: View {
     }
 
     private var header: some View {
-        HStack(spacing: 12) {
+        let layout = dynamicTypeSize.isAccessibilitySize
+            ? AnyLayout(VStackLayout(alignment: .leading, spacing: 8))
+            : AnyLayout(HStackLayout(spacing: 12))
+        return layout {
             VStack(alignment: .leading, spacing: 2) {
                 Label("Computer use (Beta)", systemImage: "sparkles")
                     .font(.headline)
@@ -252,7 +255,7 @@ struct ComputerUseView: View {
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
             }
-            Spacer()
+            if !dynamicTypeSize.isAccessibilitySize { Spacer() }
             PersonalMemoryButton(model: model)
             if case .connecting = session.state {
                 ProgressView()
@@ -270,6 +273,7 @@ struct ComputerUseView: View {
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .background(.regularMaterial)
     }
 
@@ -654,62 +658,22 @@ struct ComputerUseView: View {
 
     private func approvalCard(_ request: ComputerUseApprovalRequest) -> some View {
         VStack(spacing: 0) {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 12) {
-                    Label("Approve before AI continues", systemImage: "checkmark.shield.fill")
-                        .font(.headline)
-                        .foregroundStyle(.orange)
-                    Text(terminalOutcomeAccessibilityValue)
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(.orange)
-                        .accessibilityIdentifier(
-                            "computer-use-approval-outcome")
-                    Text(request.message)
-                        .font(.callout)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .accessibilityIdentifier("computer-use-approval-reason")
-                    if let details = request.details, !details.isEmpty {
-                        VStack(alignment: .leading, spacing: 10) {
-                            ForEach(details) { detail in
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(detail.label)
-                                        .font(.caption.weight(.semibold))
-                                        .foregroundStyle(.secondary)
-                                    Text(detail.value.isEmpty ? "None" : detail.value)
-                                        .font(.callout)
-                                        .textSelection(.enabled)
-                                        .fixedSize(horizontal: false, vertical: true)
-                                }
-                                .accessibilityElement(children: .combine)
-                                .accessibilityIdentifier(detail.label == "Action" ? "computer-use-approval-action" : "computer-use-approval-detail")
-                            }
-                        }
-                        .padding(12)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(
-                            Color(uiColor: .secondarySystemGroupedBackground),
-                            in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-                    }
+            if dynamicTypeSize.isAccessibilitySize {
+                ScrollView {
+                    approvalDetails(request)
+                    Divider()
+                    approvalFooter(request)
                 }
-                .padding(14)
-                .frame(maxWidth: .infinity, alignment: .leading)
+                .scrollIndicators(.visible)
+            } else {
+                ScrollView { approvalDetails(request) }
+                    .scrollIndicators(.visible)
+                Divider()
+                approvalFooter(request)
             }
-            .scrollIndicators(.visible)
-
-            Divider()
-
-            VStack(alignment: .leading, spacing: 10) {
-                Text("Nothing in this step will happen unless you approve it.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-
-                approvalActions(request)
-            }
-            .padding(14)
-            .background(.regularMaterial)
         }
         .background(Color.orange.opacity(0.1))
+        .background(Color(uiColor: .secondarySystemGroupedBackground))
         .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
         .overlay {
             RoundedRectangle(cornerRadius: 18, style: .continuous)
@@ -725,6 +689,57 @@ struct ComputerUseView: View {
                 model.respondToApproval(request, approved: false)
             }
         }
+    }
+
+    private func approvalDetails(_ request: ComputerUseApprovalRequest) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Label("Approve before AI continues", systemImage: "checkmark.shield.fill")
+                .font(.headline)
+                .foregroundStyle(.orange)
+            Text(terminalOutcomeAccessibilityValue)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.orange)
+                .accessibilityIdentifier("computer-use-approval-outcome")
+            Text(request.message)
+                .font(.callout)
+                .fixedSize(horizontal: false, vertical: true)
+                .accessibilityIdentifier("computer-use-approval-reason")
+            if let details = request.details, !details.isEmpty {
+                VStack(alignment: .leading, spacing: 10) {
+                    ForEach(details) { detail in
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(detail.label)
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(.secondary)
+                            Text(detail.value.isEmpty ? "None" : detail.value)
+                                .font(.callout)
+                                .textSelection(.enabled)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        .accessibilityElement(children: .combine)
+                        .accessibilityIdentifier(detail.label == "Action" ? "computer-use-approval-action" : "computer-use-approval-detail")
+                    }
+                }
+                .padding(12)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color(uiColor: .secondarySystemGroupedBackground),
+                    in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            }
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func approvalFooter(_ request: ComputerUseApprovalRequest) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Nothing in this step will happen unless you approve it.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            approvalActions(request)
+        }
+        .padding(14)
+        .background(.regularMaterial)
     }
 
     private func approvalActions(_ request: ComputerUseApprovalRequest) -> some View {
