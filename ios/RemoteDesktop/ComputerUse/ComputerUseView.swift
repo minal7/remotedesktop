@@ -762,35 +762,10 @@ struct ComputerUseView: View {
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
-
-            VStack(alignment: .leading, spacing: 8) {
-                suggestion("Open Safari and find my next calendar event")
-                suggestion("Organize the files on my desktop")
-            }
         }
         .padding(16)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-    }
-
-    private func suggestion(_ text: String) -> some View {
-        Button {
-            draft = text
-            composerFocused = true
-        } label: {
-            HStack {
-                Text(text)
-                    .font(.callout)
-                    .multilineTextAlignment(.leading)
-                Spacer()
-                Image(systemName: "arrow.up.left")
-                    .font(.caption.weight(.semibold))
-            }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 10)
-            .background(Color.accentColor.opacity(0.1), in: RoundedRectangle(cornerRadius: 12))
-        }
-        .buttonStyle(.plain)
     }
 
     private func messageBubble(_ message: ComputerUseSessionModel.ChatMessage) -> some View {
