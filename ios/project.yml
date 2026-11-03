@@ -78,8 +78,8 @@ targets:
       base:
         CODE_SIGN_STYLE: Automatic
         DEVELOPMENT_TEAM: V9AX39SPJD
-        MARKETING_VERSION: "1.2"
-        CURRENT_PROJECT_VERSION: "1"
+        MARKETING_VERSION: "1.2.1"
+        CURRENT_PROJECT_VERSION: "2"
         PRODUCT_BUNDLE_IDENTIFIER: com.threadmark.remotedesktop.client
         TARGETED_DEVICE_FAMILY: "1,2"
         SUPPORTS_MACCATALYST: NO
@@ -92,7 +92,6 @@ targets:
       configs:
         Release:
           ICLOUD_CONTAINER_ENVIRONMENT: Production
-          SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) MEMORY_V1_SHIPPING_BETA"
 
   RemoteDesktopTests:
     type: bundle.unit-test
@@ -106,9 +105,6 @@ targets:
         DEVELOPMENT_TEAM: V9AX39SPJD
         PRODUCT_BUNDLE_IDENTIFIER: com.threadmark.remotedesktop.client.tests
         GENERATE_INFOPLIST_FILE: YES
-      configs:
-        Release:
-          SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) MEMORY_V1_SHIPPING_BETA"
 
   RemoteDesktopLiveE2ETests:
     type: bundle.ui-testing
