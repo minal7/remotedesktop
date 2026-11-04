@@ -3795,6 +3795,7 @@ struct ComputerUseSetupRecipientRegistry {
 
 @MainActor
 final class HostComputerUseManager: ObservableObject {
+    private static let interventionLog = Logger(subsystem: "com.threadmark.remotedesktop.host", category: "agent-intervention")
     static let orderedControlsRequiredResponse =
         "AI Computer Use requires an updated iPhone app with ordered task controls. Update Remote Desktop before trying again. No action was taken."
     static let userInterventionGuidance =
@@ -4494,6 +4495,11 @@ final class HostComputerUseManager: ObservableObject {
         }
         injector.releaseHeldInput()
         guard localAuthorizedPeerID == senderID else {
+            switch activity {
+            case .working, .awaitingApproval:
+                Self.interventionLog.notice("cause=sidecar_ended")
+            case .idle, .paused: break
+            }
             revokePeerAuthorization()
             return true
         }
@@ -4502,6 +4508,7 @@ final class HostComputerUseManager: ObservableObject {
         _ = blockActionsForUserIntervention()
         switch activity {
         case .working, .awaitingApproval:
+            Self.interventionLog.notice("cause=sidecar_ended")
             userIntervened()
         case .idle, .paused:
             actionGate.setAllowsActions(false)
@@ -4965,6 +4972,7 @@ final class HostComputerUseManager: ObservableObject {
             if !actionGate.allowsActions {
                 switch activity {
                 case .working, .awaitingApproval:
+                    Self.interventionLog.notice("cause=peer_authorized_gate_closed")
                     userIntervened()
                 case .idle, .paused:
                     break
@@ -4998,6 +5006,7 @@ final class HostComputerUseManager: ObservableObject {
                 _ = blockActionsForUserIntervention()
                 switch activity {
                 case .working, .awaitingApproval:
+                    Self.interventionLog.notice("cause=peer_authorization_lost")
                     userIntervened()
                 case .idle, .paused:
                     break
@@ -5005,6 +5014,11 @@ final class HostComputerUseManager: ObservableObject {
                 authorizedPeerID = senderID
                 authorizedPeerSupportsOrderedComputerUseControls = true
             } else {
+                switch activity {
+                case .working, .awaitingApproval:
+                    Self.interventionLog.notice("cause=peer_authorization_lost")
+                case .idle, .paused: break
+                }
                 revokePeerAuthorization()
             }
         }
@@ -5096,6 +5110,11 @@ final class HostComputerUseManager: ObservableObject {
 
     func applyUserInputIntervention(_ intervention: ComputerUseActionGate.InputIntervention) {
         guard actionGate.consumeInputIntervention(intervention) else { return }
+        switch activity {
+        case .working, .awaitingApproval:
+            Self.interventionLog.notice("cause=physical_or_direct_input")
+        case .idle, .paused: break
+        }
         userIntervened()
     }
 
