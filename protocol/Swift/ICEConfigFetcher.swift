@@ -18,28 +18,18 @@ import os
 /// still work. The Dashboard record is authoritative when reachable.
 public struct ICEConfig: Sendable, Equatable {
     public let stunURLs: [String]
-    public let turnURLs: [String]
-    public let turnUsername: String?
-    public let turnCredential: String?
     public let updatedAt: Date?
 
     public init(
         stunURLs: [String],
-        turnURLs: [String] = [],
-        turnUsername: String? = nil,
-        turnCredential: String? = nil,
         updatedAt: Date? = nil
     ) {
         self.stunURLs = stunURLs
-        self.turnURLs = turnURLs
-        self.turnUsername = turnUsername
-        self.turnCredential = turnCredential
         self.updatedAt = updatedAt
     }
 
     /// Baked-in fallback. Keep short and well-known — these are only
-    /// used when the Public DB fetch fails. STUN-only; TURN requires
-    /// credentials from the CloudKit record.
+    /// used when the Public DB fetch fails.
     public static let fallback = ICEConfig(
         stunURLs: [
             "stun:stun.l.google.com:19302",
@@ -115,7 +105,7 @@ public actor ICEConfigFetcher {
     /// Clears the cached config so the next `get()` re-fetches from
     /// CloudKit. Call when the network topology changes (e.g. VPN
     /// connect/disconnect, Wi-Fi → cellular handoff) and the cached
-    /// STUN/TURN list may no longer be appropriate.
+    /// STUN list may no longer be appropriate.
     public func reset() {
         cached = nil
     }
@@ -131,10 +121,7 @@ public actor ICEConfigFetcher {
 
     private func logConfiguration(_ fetched: FetchedConfig, reused: Bool) {
         let config = fetched.config
-        let usableRelay = !config.turnURLs.isEmpty
-            && !(config.turnUsername ?? "").isEmpty
-            && !(config.turnCredential ?? "").isEmpty
-        log.notice("ICE configuration source=\(fetched.source.rawValue, privacy: .public) cached=\(reused, privacy: .public) stun_count=\(config.stunURLs.count, privacy: .public) turn_count=\(config.turnURLs.count, privacy: .public) usable_relay=\(usableRelay, privacy: .public)")
+        log.notice("ICE configuration source=\(fetched.source.rawValue, privacy: .public) cached=\(reused, privacy: .public) stun_count=\(config.stunURLs.count, privacy: .public)")
     }
 
     private func fetchOrFallback() async -> FetchedConfig {
@@ -142,7 +129,7 @@ public actor ICEConfigFetcher {
         do {
             database = try publicDatabase()
         } catch {
-            log.info("ICEConfig fetch skipped because CloudKit isn't available (\(String(describing: error), privacy: .public)); using fallback")
+            log.info("ICEConfig fetch skipped because CloudKit is unavailable; using fallback")
             return .init(config: .fallback, source: .fallbackUnavailable)
         }
 
@@ -153,25 +140,22 @@ public actor ICEConfigFetcher {
                 withID: recordID,
                 from: database,
                 timeout: 3)
-            let urls = (record["stunURLs"] as? [String]) ?? []
-            guard !urls.isEmpty else {
+            guard let config = Self.config(from: record) else {
                 log.info("ICEConfig record present but stunURLs empty; using fallback")
                 return .init(config: .fallback, source: .fallbackEmpty)
             }
-            let turnURLs = (record["turnURLs"] as? [String]) ?? []
-            let turnUsername = record["turnUsername"] as? String
-            let turnCredential = record["turnCredential"] as? String
-            let updatedAt = record["updatedAt"] as? Date
-            return .init(config: ICEConfig(
-                stunURLs: urls,
-                turnURLs: turnURLs,
-                turnUsername: turnUsername,
-                turnCredential: turnCredential,
-                updatedAt: updatedAt), source: .cloudKit)
+            return .init(config: config, source: .cloudKit)
         } catch {
-            log.info("ICEConfig fetch failed (\(String(describing: error), privacy: .public)); using fallback")
+            log.info("ICEConfig fetch failed; using fallback")
             return .init(config: .fallback, source: .fallbackFetchFailure)
         }
+    }
+
+    static func config(from record: CKRecord) -> ICEConfig? {
+        let urls = (record["stunURLs"] as? [String]) ?? []
+        guard !urls.isEmpty else { return nil }
+        let updatedAt = record["updatedAt"] as? Date
+        return ICEConfig(stunURLs: urls, updatedAt: updatedAt)
     }
 
     private func fetchRecordWithTimeout(

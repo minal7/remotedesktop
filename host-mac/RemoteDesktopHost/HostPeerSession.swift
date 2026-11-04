@@ -6,14 +6,7 @@ import os
 
 extension ICEConfig {
     var iceServers: [RTCIceServer] {
-        var servers = [RTCIceServer(urlStrings: stunURLs)]
-        if !turnURLs.isEmpty, let username = turnUsername, let credential = turnCredential {
-            servers.append(RTCIceServer(
-                urlStrings: turnURLs,
-                username: username,
-                credential: credential))
-        }
-        return servers
+        [RTCIceServer(urlStrings: stunURLs)]
     }
 }
 
