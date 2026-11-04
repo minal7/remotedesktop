@@ -10,6 +10,27 @@ final class WebRTCTransportTests: XCTestCase {
     private let accountBinding = CloudKitAccountBinding(
         rawValue: String(repeating: "c", count: 64))!
 
+    func test_adaptive60RequiresOrdinaryRequestExactAnswerAndSupportedCodec() {
+        XCTAssertTrue(SessionModel.requestsAdaptive60(for: .remoteControl))
+        XCTAssertFalse(SessionModel.requestsAdaptive60(for: .computerUse))
+        var state = WebRTCTransport.AdaptiveVideoSelection()
+        state.applyAnswer(requested: false, answer: ["adaptiveVideo60": "1"], codecSupported: true)
+        XCTAssertFalse(state.selected)
+        for answer in [[:], ["adaptiveVideo60": "60"], ["adaptiveVideo60": "true"]] {
+            state.applyAnswer(requested: true, answer: answer, codecSupported: true)
+            XCTAssertFalse(state.selected)
+        }
+        state.applyAnswer(requested: true, answer: ["adaptiveVideo60": "1"], codecSupported: false)
+        XCTAssertFalse(state.selected)
+        state.applyAnswer(requested: true, answer: ["adaptiveVideo60": "1"], codecSupported: true)
+        XCTAssertTrue(state.selected)
+        state.applyAnswer(requested: false, answer: [:], codecSupported: false, currentPeer: false)
+        XCTAssertTrue(state.selected, "A stale peer cannot overwrite the current selection")
+        state.reset()
+        state.applyAnswer(requested: true, answer: ["adaptiveVideo60": "1"], codecSupported: true, currentPeer: false)
+        XCTAssertFalse(state.selected, "A late answer cannot revive a closed connection")
+    }
+
     func test_lanDiscoveryEnablesPlayoutCapButCloudOnlyDoesNot() {
         XCTAssertTrue(SessionModel.usesLANPlayoutCap(.localNetwork))
         XCTAssertFalse(SessionModel.usesLANPlayoutCap(.cloudKit))
@@ -899,12 +920,98 @@ final class WebRTCTransportTests: XCTestCase {
             "expected the client to retain its level-3.1 interoperability fallback")
     }
 
+    func test_ordinaryAdaptiveOfferIncludesCapabilityAndDisconnectClearsSelection() async throws {
+        let channel = FakeWebRTCSignalingChannel()
+        let transport = WebRTCTransport(signalingFactory: { _, _ in channel },
+                                        iceConfigProvider: { .fallback }, requestAdaptive60: true)
+        try await transport.connect(pairingCode: "123456")
+        XCTAssertEqual(channel.snapshot().sent.first?.payload["adaptiveVideo60"], "1")
+        transport.disconnect(reason: "test")
+        XCTAssertFalse(transport.adaptive60Selected)
+    }
+
+    func test_pairedPeerAnswerValidatesNegotiatedCodecAndReset() async throws {
+        for preference in ["supported", "vp8", "lowerH264"] {
+            let channel = FakeWebRTCSignalingChannel()
+            let transport = WebRTCTransport(signalingFactory: { _, _ in channel },
+                                            iceConfigProvider: { .fallback }, requestAdaptive60: true)
+            try await transport.connect(pairingCode: "123456")
+            let offer = try XCTUnwrap(channel.snapshot().sent.first?.payload["sdp"])
+            let factory = RTCPeerConnectionFactory(audioDeviceModuleType: .platformDefault,
+                bypassVoiceProcessing: true, encoderFactory: DesktopVideoEncoderFactory(),
+                decoderFactory: DesktopVideoDecoderFactory(), audioProcessingModule: nil)
+            let config = RTCConfiguration(); config.sdpSemantics = .unifiedPlan
+            let constraints = RTCMediaConstraints(mandatoryConstraints: nil, optionalConstraints: nil)
+            let peer = try XCTUnwrap(factory.peerConnection(with: config, constraints: constraints, delegate: nil))
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                peer.setRemoteDescription(RTCSessionDescription(type: .offer, sdp: offer)) { error in
+                    if let error { continuation.resume(throwing: error) } else { continuation.resume() }
+                }
+            }
+            let video = factory.videoTrack(with: factory.videoSource(forScreenCast: true), trackId: "synthetic")
+            XCTAssertNotNil(peer.add(video, streamIds: ["synthetic"]))
+            let description: RTCSessionDescription = try await withCheckedThrowingContinuation { continuation in
+                peer.answer(for: constraints) { answer, error in
+                    if let error { continuation.resume(throwing: error) }
+                    else if let answer { continuation.resume(returning: answer) }
+                    else { continuation.resume(throwing: TransportError.negotiationFailed("No test answer")) }
+                }
+            }
+            let ordered = try preferredTestCodec(in: description.sdp, preference: preference)
+            let answer = RTCSessionDescription(type: .answer, sdp: ordered)
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                peer.setLocalDescription(answer) { error in
+                    if let error { continuation.resume(throwing: error) } else { continuation.resume() }
+                }
+            }
+            channel.enqueue(SignalingEnvelope(role: .host, kind: .answer,
+                payload: ["sdp": answer.sdp, "sdpType": "answer", "adaptiveVideo60": "1"], ts: 0))
+            let deadline = ContinuousClock.now + .seconds(8)
+            while !transport.answerApplied {
+                guard ContinuousClock.now < deadline else { return XCTFail("The paired answer was not applied") }
+                try await Task.sleep(for: .milliseconds(20))
+            }
+            XCTAssertEqual(transport.adaptive60Selected, preference == "supported",
+                           "Only the negotiated supported primary codec can enable 60 fps")
+            transport.disconnect(reason: "test")
+            XCTAssertFalse(transport.adaptive60Selected)
+            peer.close()
+            withExtendedLifetime(factory) {}
+        }
+    }
+
+    private func preferredTestCodec(in sdp: String, preference: String) throws -> String {
+        var lines = sdp.components(separatedBy: "\r\n")
+        let fmtp = lines.first { line in
+            line.hasPrefix("a=fmtp:") && line.lowercased().contains("profile-level-id=640c33") && line.contains("packetization-mode=1")
+        }
+        let payload: String
+        if preference == "supported" {
+            payload = try XCTUnwrap(fmtp?.dropFirst("a=fmtp:".count).split(separator: " ").first.map(String.init))
+        } else if preference == "lowerH264" {
+            let lower = try XCTUnwrap(lines.first { $0.hasPrefix("a=fmtp:") && $0.lowercased().contains("profile-level-id=42e01f") && $0.contains("packetization-mode=1") })
+            payload = try XCTUnwrap(lower.dropFirst("a=fmtp:".count).split(separator: " ").first.map(String.init))
+        } else {
+            let vp8 = try XCTUnwrap(lines.first { $0.lowercased().contains(" vp8/90000") })
+            payload = String(vp8.dropFirst("a=rtpmap:".count).split(separator: " ").first!)
+        }
+        let videoIndex = try XCTUnwrap(lines.firstIndex { $0.hasPrefix("m=video ") })
+        var parts = lines[videoIndex].split(separator: " ").map(String.init)
+        guard parts.count > 3, let index = parts.firstIndex(of: payload), index >= 3 else {
+            throw TransportError.negotiationFailed("Test codec absent from answer")
+        }
+        parts.remove(at: index); parts.insert(payload, at: 3)
+        lines[videoIndex] = parts.joined(separator: " ")
+        return lines.joined(separator: "\r\n")
+    }
+
     func test_visualSidecarMediaPolicyOffersVideoWithoutHostAudio() async throws {
         let channel = FakeWebRTCSignalingChannel()
         let transport = WebRTCTransport(
             signalingFactory: { _, _ in channel },
             iceConfigProvider: { .fallback },
-            mediaPolicy: .computerUseVisualSidecar)
+            mediaPolicy: .computerUseVisualSidecar,
+            requestAdaptive60: true)
 
         try await transport.connect(
             pairingCode: "123456",
@@ -916,6 +1023,7 @@ final class WebRTCTransportTests: XCTestCase {
         XCTAssertEqual(snapshot.sent.count, 1)
         let offer = try XCTUnwrap(snapshot.sent.first)
         XCTAssertEqual(offer.kind, .offer)
+        XCTAssertNil(offer.payload["adaptiveVideo60"])
         let sdp = try XCTUnwrap(offer.payload["sdp"])
         XCTAssertTrue(
             sdp.contains("m=video"),
@@ -1862,6 +1970,9 @@ private final class FakeWebRTCSignalingChannel: SignalingChannel, @unchecked Sen
     private let queue = DispatchQueue(label: "FakeWebRTCSignalingChannel")
     private var claimCount = 0
     private var sent: [SignalingEnvelope] = []
+    private var incoming: [SignalingEnvelope] = []
+
+    func enqueue(_ envelope: SignalingEnvelope) { queue.sync { incoming.append(envelope) } }
 
     func claim() async throws {
         queue.sync { claimCount += 1 }
@@ -1872,7 +1983,7 @@ private final class FakeWebRTCSignalingChannel: SignalingChannel, @unchecked Sen
     }
 
     func poll() async throws -> [SignalingEnvelope] {
-        []
+        queue.sync { let result = incoming; incoming.removeAll(); return result }
     }
 
     func snapshot() -> Snapshot {

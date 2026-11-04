@@ -491,6 +491,8 @@ final class SessionModel: ObservableObject, VideoRendererTarget {
         }
     }
 
+    static func requestsAdaptive60(for experience: Experience) -> Bool { experience == .remoteControl }
+
     static func usesLANPlayoutCap(_ source: LocalHostAdvertisement.Source) -> Bool {
         source == .localNetwork
     }
@@ -555,7 +557,8 @@ final class SessionModel: ObservableObject, VideoRendererTarget {
         }
 
         let t = transportFactory?() ?? WebRTCTransport(
-            useLANPlayoutCap: Self.usesLANPlayoutCap(discoverySource))
+            useLANPlayoutCap: Self.usesLANPlayoutCap(discoverySource),
+            requestAdaptive60: Self.requestsAdaptive60(for: experience))
         bind(t)
         transport = t
 
@@ -1124,10 +1127,11 @@ final class SessionModel: ObservableObject, VideoRendererTarget {
             }
             self.state = .connected
             if isInitialHandshake { self.computerUseSession?.start() }
+            let adaptive60 = (t as? WebRTCTransport)?.adaptive60Selected == true
             self.send(.qos(
-                targetFps: DesktopVideoQuality.targetFramesPerSecond,
+                targetFps: adaptive60 ? DesktopVideoQuality.adaptiveFramesPerSecond : DesktopVideoQuality.targetFramesPerSecond,
                 maxBitrateKbps: DesktopVideoQuality.maximumBitrateKbps,
-                prefer: "sharpness"))
+                prefer: adaptive60 ? "fluency" : "sharpness"))
         }
         t.onDisplay = { [weak self, weak t] d in
             guard let self, let t, self.transport === t, self.inputHelloReceived,

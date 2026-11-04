@@ -127,6 +127,19 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
     private let signalingFactory: (String, String?) -> any SignalingChannel
     private let iceConfigProvider: @Sendable () async -> ICEConfig
     private let mediaPolicy: MediaPolicy
+    private let requestAdaptive60: Bool
+    private var adaptiveSelection = AdaptiveVideoSelection()
+    var adaptive60Selected: Bool { adaptiveSelection.selected }
+
+    struct AdaptiveVideoSelection {
+        private(set) var selected = false
+        mutating func reset() { selected = false }
+        mutating func applyAnswer(requested: Bool, answer: [String: String], codecSupported: Bool,
+                                  currentPeer: Bool = true) {
+            guard currentPeer else { return }
+            selected = requested && answer["adaptiveVideo60"] == "1" && codecSupported
+        }
+    }
     private let iceConnectTimeout: Duration = .seconds(25)
     private let connectionRecoveryTimeout: Duration = .seconds(12)
     private let mutedSystemVolumeThreshold: Float = 0.0625
@@ -168,7 +181,7 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
     private var connectedOnce = false
     private var directInputState = DirectInputClientState()
     private var inputHandshakeDeadlineTask: Task<Void, Never>?
-    private var answerApplied = false
+    private(set) var answerApplied = false
     private var isClosing = false
     private var didReportDisconnect = false
     private var pendingRemoteICECandidates: [RTCIceCandidate] = []
@@ -180,10 +193,12 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
         signalingFactory: ((String, String?) -> any SignalingChannel)? = nil,
         iceConfigProvider: (@Sendable () async -> ICEConfig)? = nil,
         mediaPolicy: MediaPolicy = .remoteSession,
-        useLANPlayoutCap: Bool = false
+        useLANPlayoutCap: Bool = false,
+        requestAdaptive60: Bool = false
     ) {
         RTCInitializeSSL()
         self.mediaPolicy = mediaPolicy
+        self.requestAdaptive60 = requestAdaptive60 && mediaPolicy == .remoteSession
         // Field trials are copied into the factory at creation; restore the
         // process setting immediately so later remote factories remain adaptive.
         RTCPeerConnectionFactory.configureFieldTrials(
@@ -225,6 +240,7 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
     }
 
     func connect(pairingCode: String, expectedHostID: String?) async throws {
+        adaptiveSelection.reset()
         localCandidateCounts = .init()
         remoteCandidateCounts = .init()
         diagnosticStateEvents = 0
@@ -291,14 +307,12 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
 
         let offer = try await createOffer(on: peerConnection)
         try await setLocalDescription(offer, on: peerConnection)
+        var offerPayload = ["client": UIDevice.current.name, "sdp": offer.sdp, "sdpType": "offer"]
+        if requestAdaptive60 { offerPayload["adaptiveVideo60"] = "1" }
         try await signaling.send(SignalingEnvelope(
             role: .client,
             kind: .offer,
-            payload: [
-                "client": UIDevice.current.name,
-                "sdp": offer.sdp,
-                "sdpType": "offer",
-            ],
+            payload: offerPayload,
             ts: Date().timeIntervalSince1970))
         log.notice("ICE id=\(self.diagnosticConnectionID, privacy: .public) stage=offer_sent elapsed_ms=\(self.diagnosticElapsed, privacy: .public)")
 
@@ -435,6 +449,7 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
             Task { await signaling.cleanup() }
         }
         signaling = nil
+        adaptiveSelection.reset()
         answerApplied = false
         pendingRemoteICECandidates.removeAll()
         loggedPendingRemoteICE = false
@@ -558,9 +573,15 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
                             continue
                         }
                         log.notice("ICE id=\(self.diagnosticConnectionID, privacy: .public) stage=answer_received elapsed_ms=\(self.diagnosticElapsed, privacy: .public)")
+                        guard let answeringPeer = peerConnection else { continue }
                         try await setRemoteDescription(
                             RTCSessionDescription(type: .answer, sdp: sdp),
-                            on: peerConnection)
+                            on: answeringPeer)
+                        let currentPeer = !isClosing && peerConnection === answeringPeer
+                        adaptiveSelection.applyAnswer(requested: requestAdaptive60, answer: envelope.payload,
+                                                      codecSupported: DesktopVideoQuality.supportsAdaptive60(answerSDP: sdp),
+                                                      currentPeer: currentPeer)
+                        guard currentPeer else { continue }
                         answerApplied = true
                         diagnosticStage = "ice_checking"
                         log.notice("ICE id=\(self.diagnosticConnectionID, privacy: .public) stage=answer_applied elapsed_ms=\(self.diagnosticElapsed, privacy: .public)")

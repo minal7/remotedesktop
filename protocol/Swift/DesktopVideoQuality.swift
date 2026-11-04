@@ -3,11 +3,13 @@ import LiveKitWebRTC
 
 /// Shared desktop-video policy for the Apple host and viewer.
 ///
-/// WebRTC still owns congestion control. These values raise the quality ceiling
-/// and tell its quality scaler to shed frame rate before desktop resolution, so
-/// a constrained link stays responsive instead of building a stale-frame queue.
+/// WebRTC owns congestion control. Legacy sessions retain the 30 fps
+/// sharpness policy; negotiated adaptive sessions prefer frame rate at 60 fps
+/// and allow WebRTC to reduce image quality or resolution when constrained.
 enum DesktopVideoQuality {
     static let targetFramesPerSecond = 30
+    static let adaptiveFramesPerSecond = 60
+    static let adaptiveMaximumMacroblocksPerFrame = 16_384
     static let maximumBitrateBps = 30_000_000
     static let maximumBitrateKbps = maximumBitrateBps / 1_000
     static let captureQueueDepth = 3
@@ -35,14 +37,64 @@ enum DesktopVideoQuality {
         maximumBitrateBps: maximumBitrateBps,
         degradationPreference: .maintainResolution)
 
+    /// The first primary codec must be the validated H.264 profile. Unknown,
+    /// older and software codecs retain their existing capture policy.
+    static func supportsAdaptive60(name: String?, profileLevelID: String?, packetizationMode: String?) -> Bool {
+        name?.uppercased() == "H264" && profileLevelID?.lowercased() == "640c33" && packetizationMode == "1"
+    }
+
+    /// The answer's video m-line carries codec preference order. WebRTC's
+    /// receiver codec parameter array does not necessarily preserve that order.
+    static func supportsAdaptive60(answerSDP: String) -> Bool {
+        guard answerSDP.utf8.count <= 1_000_000 else { return false }
+        let lines = answerSDP.components(separatedBy: .newlines).map {
+            $0.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        let videoSections = lines.indices.filter { lines[$0].hasPrefix("m=video ") }
+        guard videoSections.count == 1, let videoStart = videoSections.first else { return false }
+        let media = lines[videoStart].split(separator: " ")
+        guard media.count > 3, let port = Int(media[1]), port > 0, port <= 65_535,
+              Set(media.dropFirst(3)).count == media.count - 3 else { return false }
+        let end = lines[(videoStart + 1)...].firstIndex(where: { $0.hasPrefix("m=") }) ?? lines.endIndex
+        let section = lines[(videoStart + 1)..<end]
+        guard !section.contains("a=inactive"), !section.contains("a=recvonly") else { return false }
+        for payload in media.dropFirst(3) {
+            let prefix = "a=rtpmap:\(payload) "
+            let mappings = section.filter { $0.hasPrefix(prefix) }
+            guard mappings.count == 1, let mapping = mappings.first else { return false }
+            let name = mapping.dropFirst(prefix.count).split(separator: "/").first.map(String.init) ?? ""
+            if ["RTX", "RED", "ULPFEC", "FLEXFEC-03"].contains(name.uppercased()) { continue }
+            let fmtpPrefix = "a=fmtp:\(payload) "
+            let formatParameters = section.filter { $0.hasPrefix(fmtpPrefix) }
+            guard formatParameters.count == 1, let fmtp = formatParameters.first else { return false }
+            let pairs = fmtp.dropFirst(fmtpPrefix.count).split(separator: ";")
+            var parameters: [String: String] = [:]
+            for pair in pairs {
+                let parts = pair.split(separator: "=", maxSplits: 1).map {
+                    $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+                }
+                guard parts.count == 2, parameters[parts[0]] == nil else { return false }
+                parameters[parts[0]] = parts[1]
+            }
+            return supportsAdaptive60(name: name, profileLevelID: parameters["profile-level-id"],
+                                      packetizationMode: parameters["packetization-mode"])
+        }
+        return false
+    }
+
+    static let adaptivePolicy = SenderPolicy(maximumFramesPerSecond: adaptiveFramesPerSecond,
+                                             maximumBitrateBps: maximumBitrateBps,
+                                             degradationPreference: .maintainFramerate)
+
     static func senderPolicy(
         targetFramesPerSecond requestedFramesPerSecond: Int,
         maximumBitrateKbps requestedBitrateKbps: Int,
-        preference: String
+        preference: String,
+        maximumFramesPerSecond: Int = targetFramesPerSecond
     ) -> SenderPolicy {
         let framesPerSecond = requestedFramesPerSecond > 0
-            ? min(targetFramesPerSecond, max(10, requestedFramesPerSecond))
-            : targetFramesPerSecond
+            ? min(maximumFramesPerSecond, max(10, requestedFramesPerSecond))
+            : maximumFramesPerSecond
         let bitrateKbps = requestedBitrateKbps > 0
             ? min(maximumBitrateKbps, max(1_000, requestedBitrateKbps))
             : maximumBitrateKbps

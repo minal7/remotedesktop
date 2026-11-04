@@ -295,6 +295,9 @@ final class HostPeerSession: NSObject {
     private let injector: InputInjector
     private let iceConfig: ICEConfig
     private let audioEnabled: Bool
+    private let adaptive60Requested: Bool
+    private var adaptive60Selected = false
+    private var captureFramesPerSecond = Int32(DesktopVideoQuality.targetFramesPerSecond)
     private let onUserInput: @Sendable () -> Bool
     private let inputAuthorization: HostPeerInputAuthorization
     private let onEnded: @Sendable (String) -> Void
@@ -341,6 +344,10 @@ final class HostPeerSession: NSObject {
     private var answerSent = false
     private var pendingLocalICEPayloads: [[String: String]] = []
 
+    static func shouldSelectAdaptive60(requested: Bool, codecSupported: Bool) -> Bool {
+        requested && codecSupported
+    }
+
     static func allowsPortMapping(for classification: HostComputerUseManager.WebRTCPeerClassification?) -> Bool {
         classification == .primaryRemoteControl
     }
@@ -372,6 +379,7 @@ final class HostPeerSession: NSObject {
         audioEnabled: Bool,
         peerSenderID: String,
         acceptedOrdinaryPeer: Bool = false,
+        requestAdaptive60: Bool = false,
         onUserInput: @escaping @Sendable () -> Bool,
         onPeerAuthorizationChanged:
             @escaping @Sendable (PeerAuthorization) -> Void,
@@ -383,6 +391,7 @@ final class HostPeerSession: NSObject {
         self.injector = injector
         self.iceConfig = iceConfig
         self.audioEnabled = audioEnabled
+        self.adaptive60Requested = acceptedOrdinaryPeer && requestAdaptive60
         self.onUserInput = onUserInput
         self.inputAuthorization = HostPeerInputAuthorization(injector: injector) { state in
             onPeerAuthorizationChanged(PeerAuthorization(senderID: peerSenderID,
@@ -445,17 +454,16 @@ final class HostPeerSession: NSObject {
         try configureLocalMedia(on: peerConnection)
         let answer = try await createAnswer(on: peerConnection)
         try await setLocalDescription(answer, on: peerConnection)
-        setCaptureMacroblockLimit(DesktopVideoQuality.maximumMacroblocksPerFrame(
-            negotiatedCodecs: videoSender?.parameters.codecs ?? []))
-        applyVideoSenderPolicy(DesktopVideoQuality.sharpnessPolicy)
+        let codecs = videoSender?.parameters.codecs ?? []
+        let selected = try selectInitialCapturePolicy(negotiatedCodecs: codecs, answerSDP: answer.sdp)
+        applyVideoSenderPolicy(selected ? DesktopVideoQuality.adaptivePolicy : DesktopVideoQuality.sharpnessPolicy)
         startAudioRecordingIfNeeded()
+        var answerPayload = ["sdp": answer.sdp, "sdpType": "answer"]
+        if selected { answerPayload["adaptiveVideo60"] = "1" }
         try await signaling.send(SignalingEnvelope(
             role: .host,
             kind: .answer,
-            payload: [
-                "sdp": answer.sdp,
-                "sdpType": "answer",
-            ],
+            payload: answerPayload,
             ts: Date().timeIntervalSince1970))
         log.notice("ICE stage=answer_sent")
         flushBufferedLocalICEAfterAnswer()
@@ -654,11 +662,33 @@ final class HostPeerSession: NSObject {
         return (captureOwner, captureMaximumMacroblocksPerFrame)
     }
 
-    private func setCaptureMacroblockLimit(_ limit: Int) {
+    private func selectInitialCapturePolicy(negotiatedCodecs: [LKRTCRtpCodecParameters], answerSDP: String) throws -> Bool {
+        let supportsAdaptive = DesktopVideoQuality.supportsAdaptive60(answerSDP: answerSDP)
+        let negotiatedLimit = DesktopVideoQuality.maximumMacroblocksPerFrame(negotiatedCodecs: negotiatedCodecs)
         closeStateLock.lock()
         defer { closeStateLock.unlock() }
-        guard !ended else { return }
-        captureMaximumMacroblocksPerFrame = limit
+        guard !ended else { throw CancellationError() }
+        if captureStartupRequested {
+            guard !adaptive60Selected || supportsAdaptive else {
+                throw NSError(domain: "HostPeerSession", code: 2,
+                              userInfo: [NSLocalizedDescriptionKey: "The capture codec changed. Reconnect to continue."])
+            }
+            // Existing legacy behavior keeps its negotiated ceiling; an adaptive
+            // session is frozen for its capture lifetime.
+            if !adaptive60Selected { captureMaximumMacroblocksPerFrame = negotiatedLimit }
+            return adaptive60Selected
+        }
+        adaptive60Selected = Self.shouldSelectAdaptive60(requested: adaptive60Requested, codecSupported: supportsAdaptive)
+        captureMaximumMacroblocksPerFrame = adaptive60Selected
+            ? min(negotiatedLimit, DesktopVideoQuality.adaptiveMaximumMacroblocksPerFrame) : negotiatedLimit
+        captureFramesPerSecond = adaptive60Selected
+            ? Int32(DesktopVideoQuality.adaptiveFramesPerSecond) : Int32(DesktopVideoQuality.targetFramesPerSecond)
+        return adaptive60Selected
+    }
+
+    private var captureFrameRate: Int32 {
+        closeStateLock.lock(); defer { closeStateLock.unlock() }
+        return captureFramesPerSecond
     }
 
     var isEnded: Bool {
@@ -682,7 +712,7 @@ final class HostPeerSession: NSObject {
     private func startCapture() async throws {
         let (owner, limit) = try captureStartParameters()
         try await capture.start(for: owner, audioEnabled: audioEnabled,
-                                maximumMacroblocksPerFrame: limit)
+                                maximumMacroblocksPerFrame: limit, framesPerSecond: captureFrameRate)
         refreshCaptureInputAvailability()
     }
 
@@ -981,7 +1011,7 @@ final class HostPeerSession: NSObject {
             videoSource.adaptOutputFormat(
                 toWidth: Int32(normalizedSize.width),
                 height: Int32(normalizedSize.height),
-                fps: CaptureSizing.targetFramesPerSecond)
+                fps: captureFrameRate)
             adaptedVideoWidth = normalizedSize.width
             adaptedVideoHeight = normalizedSize.height
         }
@@ -1459,7 +1489,7 @@ extension HostPeerSession: RTCDataChannelDelegate {
             applyVideoSenderPolicy(DesktopVideoQuality.senderPolicy(
                 targetFramesPerSecond: targetFps,
                 maximumBitrateKbps: maxBitrateKbps,
-                preference: prefer))
+                preference: prefer, maximumFramesPerSecond: Int(captureFrameRate)))
         }
     }
 }
