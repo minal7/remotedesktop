@@ -401,14 +401,18 @@ private let f3PacerFieldTrial = "WebRTC-ProbingScreenshareBwe/2.5,2875,80,40,-60
     }
     func run() async throws {
         let environment = ProcessInfo.processInfo.environment
-        if let fix = environment["LATENCY_PAIR_FIX"], ["F2", "F3", "F3Pacer"].contains(fix) {
+        if let fix = environment["LATENCY_PAIR_FIX"], ["F1", "F2", "F3", "F3Pacer"].contains(fix) {
             let count = max(4, Int(environment["LATENCY_PAIRS"] ?? "4") ?? 4)
             let prefix = output
             let baseline = LatencyLabConfiguration.current
+            if fix == "F1" && (baseline.f2Encoder || baseline.f3Sender) {
+                throw NSError(domain: "F1 receiver trial requires stock sender settings", code: 1)
+            }
             var paths: [String] = []
             for pair in 1...count {
                 for enabled in [false, true] {
                     var selected = baseline
+                    if fix == "F1" { selected.f1Playout = enabled }
                     if fix == "F2" { selected.f2Encoder = enabled }
                     if fix == "F3" { selected.f3Sender = enabled }
                     LatencyLabConfiguration.setRuntime(selected)
@@ -418,7 +422,7 @@ private let f3PacerFieldTrial = "WebRTC-ProbingScreenshareBwe/2.5,2875,80,40,-60
                     }
                     records = Measurements()
                     sendDelegate = PeerDelegate(); receiveDelegate = PeerDelegate()
-                    try await runTrial(f3Pacer: fix == "F3Pacer" && enabled)
+                    try await runTrial(f3Pacer: fix == "F3Pacer" && enabled, f1Receiver: fix == "F1" && enabled)
                     paths.append(output)
                 }
             }
@@ -432,9 +436,11 @@ private let f3PacerFieldTrial = "WebRTC-ProbingScreenshareBwe/2.5,2875,80,40,-60
         }
         NSApp.terminate(nil)
     }
-    func runTrial(f3Pacer: Bool = false) async throws {
+    func runTrial(f3Pacer: Bool = false, f1Receiver: Bool = false) async throws {
         let lab = LatencyLabConfiguration.current
         let configuredTrial: Any = f3Pacer ? (f3PacerFieldTrial as Any) : NSNull()
+        let f1Trial = "WebRTC-ForcePlayoutDelay/min_ms:0,max_ms:\(lab.f1MaximumDelayMs)/"
+        let configuredF1Trial: Any = f1Receiver ? (f1Trial as Any) : NSNull()
         guard CGPreflightScreenCaptureAccess() else { throw NSError(domain: "Screen recording permission is required for the standalone latency probe", code: 1) }
         guard let screen = NSScreen.screens.first(where: {
             ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value == CGMainDisplayID()
@@ -473,7 +479,13 @@ private let f3PacerFieldTrial = "WebRTC-ProbingScreenshareBwe/2.5,2875,80,40,-60
             defer { LKRTCPeerConnectionFactory.configureFieldTrials(nil) }
             return factory()
         }
-        let sf = makeSenderFactory(), rf = factory(); senderFactory = sf; receiverFactory = rf
+        func makeReceiverFactory() -> LKRTCPeerConnectionFactory {
+            guard f1Receiver else { return factory() }
+            LKRTCPeerConnectionFactory.configureFieldTrials(f1Trial)
+            defer { LKRTCPeerConnectionFactory.configureFieldTrials(nil) }
+            return factory()
+        }
+        let sf = makeSenderFactory(), rf = makeReceiverFactory(); senderFactory = sf; receiverFactory = rf
         let config = LKRTCConfiguration(); config.sdpSemantics = .unifiedPlan; config.iceServers = []
         let constraints = LKRTCMediaConstraints(mandatoryConstraints: nil, optionalConstraints: nil)
         let send = sf.peerConnection(with: config, constraints: constraints, delegate: sendDelegate)!
@@ -535,6 +547,9 @@ private let f3PacerFieldTrial = "WebRTC-ProbingScreenshareBwe/2.5,2875,80,40,-60
                              "configured": f3Pacer, "field_trial": configuredTrial,
                              "effective": "unverified"])
         }
+        receiverTrace.trace(["type": "lab_configuration", "component": "f1_playout_trial", "side": "loopback_receiver",
+                             "time": now(), "scope": "receiver_factory_only", "configured": f1Receiver,
+                             "field_trial": configuredF1Trial, "effective": "unverified"])
         let polling = Task { @MainActor in
             var appliedPath: LatencyLabSenderPolicy.Path?
             while !Task.isCancelled {
@@ -622,6 +637,8 @@ private let f3PacerFieldTrial = "WebRTC-ProbingScreenshareBwe/2.5,2875,80,40,-60
         result["lab_configuration"] = settings
         result["sender_field_trial"] = configuredTrial
         result["sender_field_trial_effective"] = "unverified"
+        result["receiver_field_trial"] = configuredF1Trial
+        result["receiver_field_trial_effective"] = "unverified"
         result["measurement_start_s"] = records.withLock { records.start }
         result["measurement_end_s"] = records.withLock { records.end }
         result["native_text_ssim"] = nativeTextSSIM as Any? ?? NSNull()

@@ -23,10 +23,15 @@ def run_summary(path):
     samples = [e for e in traces if e.get('type') == 'stats' and start <= e.get('time', -1) <= end]
     pacer_events = [event for event in sender_trace if event.get('type') == 'lab_configuration'
                     and event.get('component') == 'f3_pacer_trial' and event.get('side') == 'loopback_sender']
+    f1_events = [event for event in receiver_trace if event.get('type') == 'lab_configuration'
+                 and event.get('component') == 'f1_playout_trial' and event.get('side') == 'loopback_receiver']
     result = {'path': str(path), 'settings': run['lab_configuration'], 'duration_s': end - start,
               'sender_field_trial': run.get('sender_field_trial'),
               'sender_field_trial_effective': run.get('sender_field_trial_effective'),
               'sender_pacer_events': pacer_events,
+              'receiver_field_trial': run.get('receiver_field_trial'),
+              'receiver_field_trial_effective': run.get('receiver_field_trial_effective'),
+              'receiver_f1_events': f1_events,
               'native_text_ssim': run.get('native_text_ssim'), 'video_size': run['video_size'],
               'marker_coverage': [run['viewer_marker_count'], run['source_marker_count']]}
     for key in ('encodeMs', 'packetSendMs', 'jitterBufferMs', 'jitterBufferTargetMs', 'decodeMs'):
@@ -62,7 +67,7 @@ def summarize(manifest):
     runs = [run_summary(path) for path in manifest['runs']]
     if len(runs) < 8 or len(runs) % 2:
         raise ValueError('At least four complete interleaved A/B pairs are required.')
-    fix_key = {'F2': 'f2Encoder', 'F3': 'f3Sender', 'F3Pacer': 'f3Pacer'}[manifest['fix']]
+    fix_key = {'F1': 'f1Playout', 'F2': 'f2Encoder', 'F3': 'f3Sender', 'F3Pacer': 'f3Pacer'}[manifest['fix']]
     paired = []
     fixed_settings = None
     metrics = [key for key in runs[0] if key.endswith(('_p50', '_p95'))]
@@ -84,6 +89,18 @@ def summarize(manifest):
                     or len(events) != 1 or events[0].get('configured') is not (expected is not None)
                     or events[0].get('field_trial') != expected or events[0].get('effective') != 'unverified'):
                     raise ValueError('F3Pacer metadata and sender trace must agree on the configured trial.')
+        if manifest['fix'] == 'F1':
+            maximum = sa.get('f1MaximumDelayMs')
+            if type(maximum) is not int or maximum not in (0, 10, 20) or sa.get('f2Encoder') is not False or sa.get('f3Sender') is not False:
+                raise ValueError('F1 requires a valid maximum and stock sender settings.')
+            trial = f'WebRTC-ForcePlayoutDelay/min_ms:0,max_ms:{maximum}/'
+            for run, expected in ((a, None), (b, trial)):
+                events = run['receiver_f1_events']
+                if (run['receiver_field_trial'] != expected or run['receiver_field_trial_effective'] != 'unverified'
+                    or len(events) != 1 or events[0].get('configured') is not (expected is not None)
+                    or events[0].get('field_trial') != expected or events[0].get('effective') != 'unverified'
+                    or run['jitterBufferTargetMs_p50'] is None):
+                    raise ValueError('F1 requires matching receiver trial metadata and reported jitter targets.')
         differences = {key: b[key] - a[key] if a.get(key) is not None and b.get(key) is not None else None
                        for key in metrics}
         paired.append({'pair': index // 2 + 1, 'B_minus_A': differences})
