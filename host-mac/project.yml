@@ -52,6 +52,7 @@ targets:
     type: application
     platform: macOS
     sources:
+      # Directory sources include HostCursorPublisher and HostPortMapper.
       - path: RemoteDesktopHost
         excludes:
           - Resources/ComputerUseSkills
@@ -68,6 +69,7 @@ targets:
       - path: ../eval/fixtures/files
         type: folder
         buildPhase: resources
+      # Shared protocol sources include ICECandidateDiagnostics.
       - path: ../protocol/Swift
       - path: RemoteDesktopHost/Resources/ComputerUseSkills
         type: folder
@@ -190,6 +192,7 @@ targets:
     type: bundle.unit-test
     platform: macOS
     sources:
+      # Directory sources include HostCursorPublisherTests, HostPortMapperTests and ICEConfigServerTests.
       - path: RemoteDesktopHostTests
     dependencies:
       - target: RemoteDesktopHost
