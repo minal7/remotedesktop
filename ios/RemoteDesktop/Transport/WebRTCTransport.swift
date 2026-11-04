@@ -761,6 +761,16 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
             throw TransportError.disconnected("Peer connection was released.")
         }
         try await peerConnection.add(candidate)
+        guard !pathSupportsIPv4, pathSupportsIPv6 else { return }
+        let sdp = candidate.sdp
+        let synthesized = await Task.detached {
+            NAT64CandidateSynthesizer().candidate(from: sdp, hasIPv4: false, hasIPv6: true)
+        }.value
+        guard let synthesized, self.peerConnection === peerConnection,
+              !pathSupportsIPv4, pathSupportsIPv6 else { return }
+        // Failure to add the optional candidate must not disrupt ordinary ICE.
+        try? await peerConnection.add(RTCIceCandidate(
+            sdp: synthesized, sdpMLineIndex: candidate.sdpMLineIndex, sdpMid: candidate.sdpMid))
     }
 
     private func createOffer(on peerConnection: RTCPeerConnection) async throws -> RTCSessionDescription {
