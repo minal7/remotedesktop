@@ -6,21 +6,8 @@ import UIKit
 import os
 
 extension ICEConfig {
-    /// Configuration completeness only; this does not prove relay reachability.
-    var hasCompleteTURNConfiguration: Bool {
-        turnURLs.contains { $0.lowercased().hasPrefix("turn:") || $0.lowercased().hasPrefix("turns:") }
-            && !(turnUsername ?? "").isEmpty && !(turnCredential ?? "").isEmpty
-    }
-
     var iceServers: [RTCIceServer] {
-        var servers = [RTCIceServer(urlStrings: stunURLs)]
-        if !turnURLs.isEmpty, let username = turnUsername, let credential = turnCredential {
-            servers.append(RTCIceServer(
-                urlStrings: turnURLs,
-                username: username,
-                credential: credential))
-        }
-        return servers
+        [RTCIceServer(urlStrings: stunURLs)]
     }
 }
 
@@ -285,7 +272,6 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
         log.info("ICE id=\(self.diagnosticConnectionID, privacy: .public) stage=signaling_claimed")
 
         let iceConfig = await iceConfigProvider()
-        log.info("ICE id=\(self.diagnosticConnectionID, privacy: .public) stage=configuration turn_config_complete=\(iceConfig.hasCompleteTURNConfiguration, privacy: .public)")
         let peerConnection = try makePeerConnection(iceConfig: iceConfig)
         self.peerConnection = peerConnection
         if mediaPolicy.receivesHostAudio {
