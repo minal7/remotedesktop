@@ -658,7 +658,8 @@ struct PairingView: View {
             hostName: host.hostname,
             localComputerUseEndpoint: host.localEndpoint,
             localCredentialID: host.localCredentialID,
-            localCloudAccountBinding: host.accountBinding)
+            localCloudAccountBinding: host.accountBinding,
+            discoverySource: host.source)
     }
 
     private func hasLocalCredential(

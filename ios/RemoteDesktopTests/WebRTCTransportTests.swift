@@ -10,6 +10,11 @@ final class WebRTCTransportTests: XCTestCase {
     private let accountBinding = CloudKitAccountBinding(
         rawValue: String(repeating: "c", count: 64))!
 
+    func test_lanDiscoveryEnablesPlayoutCapButCloudOnlyDoesNot() {
+        XCTAssertTrue(SessionModel.usesLANPlayoutCap(.localNetwork))
+        XCTAssertFalse(SessionModel.usesLANPlayoutCap(.cloudKit))
+    }
+
     func test_iceDiagnosticsCountOnlyCandidateKindsAndReportCompleteRelayConfiguration() {
         var counts = ICECandidateDiagnosticCounts()
         counts.record("candidate:1 1 udp 1 192.0.2.1 4567 typ host")

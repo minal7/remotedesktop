@@ -167,16 +167,22 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
     init(
         signalingFactory: ((String, String?) -> any SignalingChannel)? = nil,
         iceConfigProvider: (@Sendable () async -> ICEConfig)? = nil,
-        mediaPolicy: MediaPolicy = .remoteSession
+        mediaPolicy: MediaPolicy = .remoteSession,
+        useLANPlayoutCap: Bool = false
     ) {
         RTCInitializeSSL()
         self.mediaPolicy = mediaPolicy
+        // Field trials are copied into the factory at creation; restore the
+        // process setting immediately so later remote factories remain adaptive.
+        RTCPeerConnectionFactory.configureFieldTrials(
+            useLANPlayoutCap ? "WebRTC-ForcePlayoutDelay/min_ms:0,max_ms:10/" : nil)
         self.factory = RTCPeerConnectionFactory(
             audioDeviceModuleType: .platformDefault,
             bypassVoiceProcessing: true,
             encoderFactory: DesktopVideoEncoderFactory(),
             decoderFactory: DesktopVideoDecoderFactory(),
             audioProcessingModule: nil)
+        RTCPeerConnectionFactory.configureFieldTrials(nil)
         self.signalingFactory = signalingFactory ?? { code, expectedHostID in
             CloudKitSignalingClient(
                 containerIdentifier: Config.cloudKitContainerIdentifier,

@@ -256,7 +256,7 @@ final class SessionModel: ObservableObject, VideoRendererTarget {
         }
     }
 
-    private let transportFactory: @MainActor () -> Transport
+    private let transportFactory: (@MainActor () -> Transport)?
     private let computerUseVisualTransportFactory:
         @MainActor () -> Transport
     private let localAccountBindingValidator: LocalAccountBindingValidator
@@ -313,9 +313,7 @@ final class SessionModel: ObservableObject, VideoRendererTarget {
     init(
         initialInputActivity: RemoteInputActivity = .inactive,
         applicationNotificationCenter: NotificationCenter = .default,
-        transportFactory: @escaping @MainActor () -> Transport = {
-            WebRTCTransport()
-        },
+        transportFactory: (@MainActor () -> Transport)? = nil,
         computerUseVisualTransportFactory:
             @escaping @MainActor () -> Transport = {
                 WebRTCTransport(
@@ -451,6 +449,10 @@ final class SessionModel: ObservableObject, VideoRendererTarget {
         }
     }
 
+    static func usesLANPlayoutCap(_ source: LocalHostAdvertisement.Source) -> Bool {
+        source == .localNetwork
+    }
+
     func connect(
         code: String,
         experience: Experience = .remoteControl,
@@ -458,7 +460,8 @@ final class SessionModel: ObservableObject, VideoRendererTarget {
         hostName: String = "Mac",
         localComputerUseEndpoint: LocalComputerUseEndpoint? = nil,
         localCredentialID: String? = nil,
-        localCloudAccountBinding: CloudKitAccountBinding? = nil
+        localCloudAccountBinding: CloudKitAccountBinding? = nil,
+        discoverySource: LocalHostAdvertisement.Source = .cloudKit
     ) {
         guard state == .idle || {
             if case .ended = state { return true } else { return false }
@@ -508,7 +511,8 @@ final class SessionModel: ObservableObject, VideoRendererTarget {
             computerUseSession = nil
         }
 
-        let t = transportFactory()
+        let t = transportFactory?() ?? WebRTCTransport(
+            useLANPlayoutCap: Self.usesLANPlayoutCap(discoverySource))
         bind(t)
         transport = t
 
