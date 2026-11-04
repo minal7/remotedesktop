@@ -3,18 +3,46 @@ import ScreenCaptureKit
 import CoreMedia
 
 // The observer reads only the marker cells and persists only their IDs and times.
+enum LargeChangeCadence {
+    static func isPhoto(elapsed: TimeInterval) -> Bool {
+        Int(max(0, elapsed) / 2) % 2 == 1
+    }
+}
+
 final class Pattern: NSView {
     var id = 1
     let cell: CGFloat
     let optical: Bool
-    init(frame: NSRect, cell: CGFloat, optical: Bool = false) {
-        self.cell = cell; self.optical = optical; super.init(frame: frame)
+    let photo: NSImage?
+    var photoScene = false
+    init(frame: NSRect, cell: CGFloat, optical: Bool = false, photo: NSImage? = nil) {
+        self.cell = cell; self.optical = optical; self.photo = photo; super.init(frame: frame)
     }
     required init?(coder: NSCoder) { fatalError() }
     override var isFlipped: Bool { true }
     override func draw(_ dirtyRect: NSRect) {
         NSColor.darkGray.setFill(); bounds.fill()
-        if optical {
+        if let photo {
+            if photoScene {
+                let scale = max(bounds.width / photo.size.width, bounds.height / photo.size.height)
+                let size = NSSize(width: photo.size.width * scale, height: photo.size.height * scale)
+                let rect = NSRect(x: (bounds.width - size.width) / 2, y: (bounds.height - size.height) / 2,
+                                  width: size.width, height: size.height)
+                photo.draw(in: rect)
+            } else {
+                NSColor.white.setFill(); bounds.fill()
+                let font = NSFont.monospacedSystemFont(ofSize: 14, weight: .regular)
+                let attributes: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: NSColor.black]
+                let line = "Remote desktop fixture 0123456789 ABCDEFGHIJKLMNOPQRSTUVWXYZ !@#$%^&*() "
+                let text = String(repeating: line, count: max(1, Int(bounds.width / 500) + 1))
+                var y: CGFloat = 0
+                while y < bounds.height {
+                    (text as NSString).draw(at: NSPoint(x: 0, y: y), withAttributes: attributes)
+                    y += 18
+                }
+            }
+        }
+        if optical && photo == nil {
             (id % 2 == 0 ? NSColor.white : NSColor.black).setFill()
             NSRect(x: bounds.width * 0.1, y: 450, width: bounds.width * 0.8,
                    height: min(bounds.height * 0.36, bounds.height - 470)).fill()
@@ -41,7 +69,13 @@ final class Observer: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sen
     var rows: [[String: Any]] = []
     var last = 0
     var lastTime: Double?
+    var scenes: [Int: String] = [:]
+    var lastScene: String?
     var stream: SCStream?
+    func registerScene(id: Int, scene: String) {
+        lock.lock(); defer { lock.unlock() }
+        scenes[id] = scene
+    }
     init(x: CGFloat, y: CGFloat, cell: CGFloat, width: CGFloat, height: CGFloat) {
         self.x = x; self.y = y; self.cell = cell; screenWidth = width; screenHeight = height
     }
@@ -85,12 +119,19 @@ final class Observer: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sen
             // ID 1 is warmup. A missing intermediate ID cannot provide a bracket.
             if last != 0 {
                 var row: [String: Any] = ["marker_id": id, "previous_marker_id": last, "host_display_s": time]
+                if let scene = scenes[id] {
+                    row["scene"] = scene
+                    row["scene_transition"] = lastScene != nil && lastScene != scene
+                }
                 if id == (last % 65534) + 1, let oldTime = lastTime, oldTime <= time {
                     row["previous_host_display_s"] = oldTime
                 }
                 rows.append(row)
             }
             last = id
+            if let scene = scenes[id] { lastScene = scene }
+            // A bounded run uses at most 6000 marker IDs; discard older entries.
+            if id > 100 { scenes.removeValue(forKey: id - 100) }
         }
         lastTime = time
     }
@@ -108,12 +149,21 @@ final class Observer: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sen
         guard CGPreflightScreenCaptureAccess() else { throw NSError(domain: "Screen Recording permission required", code: 1) }
         guard let screen = NSScreen.screens.first(where: { ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value == CGMainDisplayID() }), let output = env["LATENCY_HOST_TRACE"], let duration = Double(env["LATENCY_SECONDS"] ?? "60"), duration > 0 else { throw NSError(domain: "Missing output, screen, or duration", code: 1) }
         let optical = env["LATENCY_OPTICAL"] == "1"
+        let photo: NSImage?
+        if let photoPath = env["LATENCY_LARGE_CHANGE_PHOTO"] {
+            guard optical, !photoPath.isEmpty,
+                  let image = NSImage(contentsOfFile: photoPath),
+                  image.size.width > 0, image.size.height > 0 else {
+                throw NSError(domain: "Large-change fixture requires optical mode and a valid licensed photo", code: 1)
+            }
+            photo = image
+        } else { photo = nil }
         if optical && (!duration.isFinite || duration > 600 || screen.frame.height <= 500) {
             throw NSError(domain: "Optical mode requires a duration at most 600 seconds and a display taller than 500 points", code: 1)
         }
         let w = screen.frame.width, h = screen.frame.height, cell = floor(w * 0.42 / 32)
         let frame = optical ? screen.frame : NSRect(x: 20, y: h - 430, width: cell * 32 + 32, height: 100)
-        let pattern = Pattern(frame: NSRect(origin: .zero, size: frame.size), cell: cell, optical: optical)
+        let pattern = Pattern(frame: NSRect(origin: .zero, size: frame.size), cell: cell, optical: optical, photo: photo)
         let window = optical ? OpticalWindow(contentRect: frame, styleMask: [.borderless], backing: .buffered, defer: false)
             : NSWindow(contentRect: frame, styleMask: [.borderless], backing: .buffered, defer: false)
         window.contentView = pattern; window.level = optical ? .screenSaver : .floating
@@ -126,15 +176,28 @@ final class Observer: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sen
         let markerX: CGFloat = optical ? 36 : frame.minX + 16
         let markerY: CGFloat = optical ? 370 : h - frame.maxY + 40
         let observer = Observer(x: markerX, y: markerY, cell: cell, width: w, height: h)
-        self.observer = observer; try await observer.start()
+        self.observer = observer
+        if photo != nil { observer.registerScene(id: pattern.id, scene: "text") }
+        try await observer.start()
         // Establish the initial frame before starting either the timer or the run.
         let deadline = Date().addingTimeInterval(10)
         while !observer.sawInitialMarker() {
             guard Date() < deadline else { throw NSError(domain: "Initial marker not observed", code: 1) }
             try await Task.sleep(for: .milliseconds(10))
         }
+        let fixtureStart = ProcessInfo.processInfo.systemUptime
         timer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { _ in
-            MainActor.assumeIsolated { pattern.id = (pattern.id % 65534) + 1; pattern.needsDisplay = true }
+            MainActor.assumeIsolated {
+                pattern.id = (pattern.id % 65534) + 1
+                if photo != nil {
+                    let nextPhotoScene = LargeChangeCadence.isPhoto(elapsed: ProcessInfo.processInfo.systemUptime - fixtureStart)
+                    let sceneChanged = pattern.photoScene != nextPhotoScene
+                    pattern.photoScene = nextPhotoScene
+                    observer.registerScene(id: pattern.id, scene: pattern.photoScene ? "photo" : "text")
+                    if sceneChanged { pattern.needsDisplay = true }
+                    else { pattern.setNeedsDisplay(NSRect(x: 36, y: 370, width: 32 * cell, height: 40)) }
+                } else { pattern.needsDisplay = true }
+            }
         }
         print("MARKER_READY geometry=\(markerX),\(markerY),\(cell),\(w),\(h)"); fflush(stdout)
         // The paired-session controller ends the source after its final arm.
