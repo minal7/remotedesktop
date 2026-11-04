@@ -21,6 +21,20 @@ final class ICECandidateDiagnosticsTests: XCTestCase {
         XCTAssertEqual(ICECandidateDiagnostics.transport("54321"), "unknown")
     }
 
+    #if DEBUG
+    func testCandidateLifecycleLabelsOnlyExposeTypeAndFamily() {
+        let labels = WebRTCTransport.diagnosticCandidateLabels("candidate:private 1 udp 123 192.0.2.47 54321 typ srflx raddr 10.0.0.2 rport 1234")
+        XCTAssertEqual(labels.type, "srflx")
+        XCTAssertEqual(labels.family, "v4")
+        let malformed = WebRTCTransport.diagnosticCandidateLabels("candidate:private secret")
+        XCTAssertEqual(malformed.type, "unknown")
+        XCTAssertEqual(malformed.family, "unknown")
+        let mdns = WebRTCTransport.diagnosticCandidateLabels("candidate:private 1 udp 1 host.local 1234 typ host")
+        XCTAssertEqual(mdns.type, "host")
+        XCTAssertEqual(mdns.family, "unknown")
+    }
+    #endif
+
     func testAttemptEndIsOneShotAndSuppressedAfterVideo() {
         var attempt = ICEDiagnosticAttemptEnd()
         XCTAssertFalse(attempt.end())

@@ -352,6 +352,9 @@ final class HostPeerSession: NSObject {
     private let diagnosticLock = NSLock()
     private var diagnosticLocal = ICECandidateDiagnostics()
     private var diagnosticRemote = ICECandidateDiagnostics()
+    #if DEBUG
+    private var candidateDiagnosticCount = 0
+    #endif
     private var answerSent = false
     private var pendingLocalICEPayloads: [[String: String]] = []
 
@@ -452,6 +455,9 @@ final class HostPeerSession: NSObject {
                 return defaults.object(forKey: "allowRouterPortMapping") as? Bool ?? true
             }, send: { [weak self] candidate, sdp in
                 guard let self, !self.isEnded else { return }
+                #if DEBUG
+                self.logCandidateLifecycle("mapped_queued", sdp: sdp)
+                #endif
                 self.bufferOrSendLocalICE([
                     "candidate": sdp,
                     "sdpMid": candidate.mid ?? "",
@@ -1399,7 +1405,31 @@ final class HostPeerSession: NSObject {
         }
     }
 
+    #if DEBUG
+    private func candidateLifecycleLabels(_ sdp: String) -> (type: String, family: String) {
+        let fields = sdp.prefix(2048).split(whereSeparator: \.isWhitespace)
+        guard fields.count > 7, let index = fields.firstIndex(of: "typ"), index + 1 < fields.count else {
+            return ("unknown", "unknown")
+        }
+        return (ICECandidateDiagnostics.kind(String(fields[index + 1])),
+                ICECandidateDiagnostics.family(String(fields[4])))
+    }
+
+    private func logCandidateLifecycle(_ stage: String, sdp: String) {
+        guard ProcessInfo.processInfo.environment["CONNECTIVITY_DIAGNOSTICS"] == "1" else { return }
+        let labels = candidateLifecycleLabels(sdp)
+        diagnosticLock.lock()
+        candidateDiagnosticCount += 1
+        let count = candidateDiagnosticCount
+        diagnosticLock.unlock()
+        log.notice("candidate_lifecycle=\(stage, privacy: .public) type=\(labels.type, privacy: .public) family=\(labels.family, privacy: .public) count=\(count, privacy: .public)")
+    }
+    #endif
+
     private func bufferOrSendLocalICE(_ payload: [String: String]) {
+        #if DEBUG
+        if let sdp = payload["candidate"] { logCandidateLifecycle("queued", sdp: sdp) }
+        #endif
         let shouldSendImmediately = signalingStateQueue.sync { () -> Bool in
             guard answerSent else {
                 pendingLocalICEPayloads.append(payload)
@@ -1424,7 +1454,13 @@ final class HostPeerSession: NSObject {
                     kind: .ice,
                     payload: taggedPayload,
                     ts: Date().timeIntervalSince1970))
+                #if DEBUG
+                if let sdp = payload["candidate"] { self.logCandidateLifecycle("saved", sdp: sdp) }
+                #endif
             } catch {
+                #if DEBUG
+                if let sdp = payload["candidate"] { self.logCandidateLifecycle("save_failed", sdp: sdp) }
+                #endif
                 log.error("failed to send local ICE candidate")
             }
         }

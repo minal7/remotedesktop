@@ -196,6 +196,8 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
     #if DEBUG
     private var didEmitConnectivityPresented = false
     private var connectivityCollector: LatencyStatsCollector?
+    private var remoteCandidateReceivedCount = 0
+    private var remoteCandidateAddedCount = 0
     #endif
     private var diagnosticElapsed: Int { Int((ProcessInfo.processInfo.systemUptime - diagnosticStarted) * 1000) }
 
@@ -344,6 +346,8 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
         diagnosticStarted = ProcessInfo.processInfo.systemUptime
         #if DEBUG
         didEmitConnectivityPresented = false
+        remoteCandidateReceivedCount = 0
+        remoteCandidateAddedCount = 0
         if LatencyStatsCollector.enabled && ProcessInfo.processInfo.environment["CONNECTIVITY_DIAGNOSTICS"] == "1" {
             connectivityCollector = LatencyStatsCollector(side: "connectivity", enabled: true)
         } else {
@@ -545,6 +549,22 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
     }
 
     #if DEBUG
+    nonisolated static func diagnosticCandidateLabels(_ sdp: String) -> (type: String, family: String) {
+        let fields = sdp.prefix(2048).split(whereSeparator: \.isWhitespace)
+        guard fields.count > 7, let index = fields.firstIndex(of: "typ"), index + 1 < fields.count else {
+            return ("unknown", "unknown")
+        }
+        return (ICECandidateDiagnostics.kind(String(fields[index + 1])),
+                ICECandidateDiagnostics.family(String(fields[4])))
+    }
+
+    private func recordCandidate(_ candidate: RTCIceCandidate, event: String, count: Int) {
+        guard connectivityCollector != nil else { return }
+        let labels = Self.diagnosticCandidateLabels(candidate.sdp)
+        recordConnectivity(event: event, fields: ["candidateType": labels.type, "family": labels.family,
+                                                    "count": count, "elapsedMs": diagnosticElapsed])
+    }
+
     private func recordConnectivity(event: String, fields: [String: Any] = [:]) {
         guard ProcessInfo.processInfo.environment["CONNECTIVITY_DIAGNOSTICS"] == "1" else { return }
         var row = fields
@@ -1097,6 +1117,10 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
                         guard let candidate = iceCandidate(from: envelope.payload) else {
                             continue
                         }
+                        #if DEBUG
+                        remoteCandidateReceivedCount += 1
+                        recordCandidate(candidate, event: "remote_candidate_received", count: remoteCandidateReceivedCount)
+                        #endif
                         remoteCandidateCounts.record(candidate.sdp)
                         diagnosticRemote.record(candidate.sdp)
                         logCandidateCounts(stage: "remote_candidate_received")
@@ -1323,7 +1347,19 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
         guard let peerConnection else {
             throw TransportError.disconnected("Peer connection was released.")
         }
+        #if DEBUG
+        remoteCandidateAddedCount += 1
+        let candidateCount = remoteCandidateAddedCount
+        do {
+            try await peerConnection.add(candidate)
+            recordCandidate(candidate, event: "remote_candidate_added", count: candidateCount)
+        } catch {
+            recordCandidate(candidate, event: "remote_candidate_add_failed", count: candidateCount)
+            throw error
+        }
+        #else
         try await peerConnection.add(candidate)
+        #endif
         guard !pathSupportsIPv4, pathSupportsIPv6 else { return }
         let sdp = candidate.sdp
         let synthesized = await Task.detached {
