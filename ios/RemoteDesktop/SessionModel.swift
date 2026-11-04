@@ -86,7 +86,13 @@ final class SessionModel: ObservableObject, VideoRendererTarget {
     @Published private(set) var state: State = .idle { didSet { notifyRemoteScreenVisibilityChanged() } }
     @Published private(set) var hostName: String?
     @Published private(set) var display: DisplayInfo? { didSet { notifyRemoteScreenVisibilityChanged() } }
-    @Published private(set) var hasReceivedVideoFrame = false
+    @Published private(set) var hasReceivedVideoFrame = false {
+        didSet {
+            #if DEBUG
+            traceScreenReadiness()
+            #endif
+        }
+    }
     @Published private(set) var softModifierMask: UInt16 = 0
     @Published private(set) var remoteInputGeneration = UUID()
     @Published private(set) var remoteKeyboardFocusGeneration = UUID()
@@ -194,6 +200,41 @@ final class SessionModel: ObservableObject, VideoRendererTarget {
         weak var owner: AnyObject?
         let notify: @MainActor () -> Void
     }
+    #if DEBUG
+    private struct ScreenReadinessTrace: Equatable {
+        let state: String
+        let interactive, frameReady, hello, display, inputAllows, accountShield, obscured: Bool
+    }
+    private var lastScreenReadinessTrace: ScreenReadinessTrace?
+    private weak var lastScreenReadinessCollector: LatencyStatsCollector?
+
+    private func traceScreenReadiness() {
+        guard LatencyStatsCollector.enabled, !LatencyStatsCollector.resourcesOnly,
+              experience == .remoteControl, transport is WebRTCTransport else {
+            lastScreenReadinessTrace = nil; lastScreenReadinessCollector = nil
+            return
+        }
+        let stateName: String
+        switch state {
+        case .idle: stateName = "idle"
+        case .connecting: stateName = "connecting"
+        case .connected: stateName = "connected"
+        case .ended: stateName = "ended"
+        }
+        let snapshot = ScreenReadinessTrace(state: stateName, interactive: hasInteractiveRemoteScreen,
+            frameReady: hasReceivedVideoFrame, hello: inputHelloReceived, display: display != nil,
+            inputAllows: inputActivity.allowsInput, accountShield: isCloudAccountRevalidationPending,
+            obscured: isRemoteScreenObscured)
+        let collector = RemoteVideoLatencyProbe.shared.collector
+        guard snapshot != lastScreenReadinessTrace || collector !== lastScreenReadinessCollector else { return }
+        lastScreenReadinessTrace = snapshot; lastScreenReadinessCollector = collector
+        collector.trace(["type": "screen_readiness", "time": ProcessInfo.processInfo.systemUptime,
+                         "state": snapshot.state, "interactive": snapshot.interactive,
+                         "frameReady": snapshot.frameReady, "hello": snapshot.hello,
+                         "display": snapshot.display, "inputAllows": snapshot.inputAllows,
+                         "accountShield": snapshot.accountShield, "obscured": snapshot.obscured])
+    }
+    #endif
     private var screenVisibilityObservers: [UUID: ScreenVisibilityObserver] = [:]
     private var isNotifyingScreenVisibility = false
     private var screenVisibilityNotificationPending = false
@@ -231,6 +272,9 @@ final class SessionModel: ObservableObject, VideoRendererTarget {
     }
 
     private func notifyRemoteScreenVisibilityChanged() {
+        #if DEBUG
+        traceScreenReadiness()
+        #endif
         screenVisibilityNotificationPending = true
         guard !isNotifyingScreenVisibility else { return }
         isNotifyingScreenVisibility = true

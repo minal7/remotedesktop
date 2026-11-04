@@ -1,6 +1,17 @@
 import Foundation
 #if DEBUG
 import OSLog
+
+extension LatencyLabConfiguration {
+    static func pairedFixes(_ value: String) -> Set<String>? {
+        let parts = value.split(separator: "+", omittingEmptySubsequences: false).map(String.init)
+        let fixes = Set(parts)
+        guard !fixes.isEmpty, fixes.count == parts.count,
+              fixes.isSubset(of: ["F1", "F2", "F3", "F4"]),
+              fixes.sorted().joined(separator: "+") == value else { return nil }
+        return fixes
+    }
+}
 #endif
 
 #if DEBUG && os(macOS)
@@ -52,11 +63,39 @@ final class LatencyStatsCollector: @unchecked Sendable {
     }
     static var resourcesOnly: Bool {
         #if DEBUG
-        return enabled && ProcessInfo.processInfo.arguments.contains("LatencyProbeResourcesOnly")
+        let arguments = ProcessInfo.processInfo.arguments
+        #if os(macOS)
+        return enabled && (arguments.contains("LatencyProbeResourcesOnly") || isolatedHostResourcesOnly(
+            arguments: arguments, environment: ProcessInfo.processInfo.environment))
+        #else
+        return enabled && arguments.contains("LatencyProbeResourcesOnly")
+        #endif
         #else
         return false
         #endif
     }
+    #if DEBUG && os(macOS)
+    /// This environment opt-in is valid only for the isolated latency host;
+    /// ordinary hosts and the separately isolated R0 host cannot inherit it.
+    static func isolatedHostResourcesOnly(arguments: [String], environment: [String: String]) -> Bool {
+        guard Array(arguments.dropFirst()) == ["--debug-latency-host"],
+              environment["LATENCY_LAB_RESOURCES_ONLY"] == "1",
+              environment["REMOTE_DESKTOP_R0_HOST_ID"] == nil,
+              let id = environment["REMOTE_DESKTOP_LATENCY_HOST_ID"],
+              id.utf8.count == 36, UUID(uuidString: id) != nil else { return false }
+        return true
+    }
+    #endif
+    #if DEBUG && os(iOS)
+    static func traceLimit(arguments: [String]) -> Int {
+        // Share validation without depending on the iOS application's runner.
+        guard arguments.contains("LatencyProbe"),
+              let index = arguments.firstIndex(of: "LatencyLabPairFix"),
+              arguments.indices.contains(index + 1),
+              LatencyLabConfiguration.pairedFixes(arguments[index + 1]) != nil else { return 1_000_000 }
+        return 8_000_000
+    }
+    #endif
     private let lock = NSLock()
     private let side: String
     private let active: Bool
@@ -78,12 +117,7 @@ final class LatencyStatsCollector: @unchecked Sendable {
         #if DEBUG && os(iOS)
         // Eight measured windows share one client collector. Keep the normal
         // one-megabyte bound everywhere else, including every host peer.
-        let arguments = ProcessInfo.processInfo.arguments
-        let pairIndex = arguments.firstIndex(of: "LatencyLabPairFix")
-        let paired = arguments.contains("LatencyProbe") && pairIndex.map {
-            arguments.indices.contains($0 + 1) && ["F1", "F2", "F3", "F4"].contains(arguments[$0 + 1])
-        } == true
-        self.limit = paired ? 8_000_000 : 1_000_000
+        self.limit = Self.traceLimit(arguments: ProcessInfo.processInfo.arguments)
         #else
         self.limit = 1_000_000
         #endif
@@ -120,7 +154,13 @@ final class LatencyStatsCollector: @unchecked Sendable {
                      ("jitterBufferTargetDelay", "jitterBufferEmittedCount", "jitterBufferTargetMs"),
                      ("totalDecodeTime", "framesDecoded", "decodeMs"),
                      ("totalProcessingDelay", "framesDecoded", "processingMs")]
-        let relevant = Set(["encoderImplementation", "codecId", "framesEncoded", "totalEncodeTime", "totalPacketSendDelay", "packetsSent", "targetBitrate", "qualityLimitationReason", "frameWidth", "frameHeight", "framesPerSecond", "jitterBufferDelay", "jitterBufferTargetDelay", "jitterBufferEmittedCount", "totalDecodeTime", "totalProcessingDelay", "framesDecoded", "framesDropped", "freezeCount", "totalFreezesDuration", "keyFramesEncoded", "keyFramesDecoded", "jitter", "packetsLost", "nackCount", "pliCount", "currentRoundTripTime", "availableOutgoingBitrate", "localCandidateType", "remoteCandidateType"])
+        #if DEBUG
+        let numericTrafficCounters = Set(["bytesSent", "bytesReceived", "packetsReceived",
+                                          "retransmittedPacketsSent", "retransmittedBytesSent"])
+        #else
+        let numericTrafficCounters = Set<String>()
+        #endif
+        let relevant = numericTrafficCounters.union(["encoderImplementation", "codecId", "framesEncoded", "totalEncodeTime", "totalPacketSendDelay", "packetsSent", "targetBitrate", "qualityLimitationReason", "frameWidth", "frameHeight", "framesPerSecond", "jitterBufferDelay", "jitterBufferTargetDelay", "jitterBufferEmittedCount", "totalDecodeTime", "totalProcessingDelay", "framesDecoded", "framesDropped", "freezeCount", "totalFreezesDuration", "keyFramesEncoded", "keyFramesDecoded", "jitter", "packetsLost", "nackCount", "pliCount", "currentRoundTripTime", "availableOutgoingBitrate", "localCandidateType", "remoteCandidateType"])
         var next: [String: [String: Double]] = [:]
         var weighted: [String: (Double, Double)] = [:]
         var perID: [String: [String: Any]] = [:]
@@ -143,7 +183,7 @@ final class LatencyStatsCollector: @unchecked Sendable {
                 if let number = value as? NSNumber, number.doubleValue.isFinite {
                     numbers[key] = number.doubleValue
                     reportValues[key] = number.doubleValue
-                } else if let string = value as? String { reportValues[key] = string }
+                } else if !numericTrafficCounters.contains(key), let string = value as? String { reportValues[key] = string }
             }
             if let codecID = report.values["codecId"] as? String,
                let codec = byID[codecID], codec.type == "codec" {
@@ -153,7 +193,7 @@ final class LatencyStatsCollector: @unchecked Sendable {
                     }
                 }
             }
-            for key in ["framesEncoded", "packetsSent", "jitterBufferEmittedCount", "framesDecoded", "framesDropped", "freezeCount", "totalFreezesDuration", "keyFramesEncoded", "keyFramesDecoded", "packetsLost", "nackCount", "pliCount"] {
+            for key in ["framesEncoded", "packetsSent", "jitterBufferEmittedCount", "framesDecoded", "framesDropped", "freezeCount", "totalFreezesDuration", "keyFramesEncoded", "keyFramesDecoded", "packetsLost", "nackCount", "pliCount"] + numericTrafficCounters.sorted() {
                 if let current = numbers[key], let old = previous[report.id]?[key], current >= old {
                     reportValues[key + "Delta"] = current - old
                     if ["freezeCount", "keyFramesEncoded", "pliCount"].contains(key), current > old {

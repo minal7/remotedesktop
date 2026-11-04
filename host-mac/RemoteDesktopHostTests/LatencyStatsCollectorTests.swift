@@ -3,6 +3,22 @@ import XCTest
 
 final class LatencyStatsCollectorTests: XCTestCase {
     #if DEBUG
+    func testResourceEnvironmentIsLimitedToIsolatedLatencyHost() {
+        let id = UUID().uuidString
+        let env = ["REMOTE_DESKTOP_LATENCY_HOST_ID": id, "LATENCY_LAB_RESOURCES_ONLY": "1"]
+        let selected = ["host", "--debug-latency-host"]
+        XCTAssertTrue(LatencyStatsCollector.isolatedHostResourcesOnly(arguments: selected, environment: env))
+        XCTAssertFalse(LatencyStatsCollector.isolatedHostResourcesOnly(arguments: ["host"], environment: env))
+        XCTAssertFalse(LatencyStatsCollector.isolatedHostResourcesOnly(arguments: selected + ["extra"], environment: env))
+        XCTAssertFalse(LatencyStatsCollector.isolatedHostResourcesOnly(arguments: selected, environment: [:]))
+        XCTAssertFalse(LatencyStatsCollector.isolatedHostResourcesOnly(arguments: selected,
+            environment: env.merging(["REMOTE_DESKTOP_R0_HOST_ID": id]) { _, new in new }))
+        XCTAssertFalse(LatencyStatsCollector.isolatedHostResourcesOnly(arguments: selected,
+            environment: env.merging(["REMOTE_DESKTOP_LATENCY_HOST_ID": "invalid"]) { _, new in new }))
+    }
+    #endif
+
+    #if DEBUG
     func testProcessCPUUsesMonotonicDeltasAndResets() {
         var sampler = LatencyProcessCPUSampler()
         XCTAssertNil(sampler.percentage(time: 10, cpu: 2))
@@ -32,6 +48,44 @@ final class LatencyStatsCollectorTests: XCTestCase {
         sample("b", 0.2, 2)
         XCTAssertNil(collector.snapshot()["encodeMs"])
     }
+
+    #if DEBUG
+    func testTrafficCountersAreNumericAndDeltasFollowReportIdentityAndResets() throws {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let collector = LatencyStatsCollector(side: "test", enabled: true, traceURL: url)
+        func sample(_ id: String, _ value: Int) {
+            collector.ingest([LatencyStatsReport(id: id, type: "outbound-rtp", values: [
+                "kind": "video", "bytesSent": value, "bytesReceived": value,
+                "packetsReceived": value, "retransmittedPacketsSent": value,
+                "retransmittedBytesSent": value])], at: Double(value))
+        }
+        sample("a", 10); sample("a", 15); sample("b", 30); sample("b", 2); sample("b", 4)
+        collector.ingest([LatencyStatsReport(id: "b", type: "outbound-rtp", values: [
+            "kind": "video", "bytesSent": "do not log this text"])], at: 6)
+        collector.flush()
+        let data = try Data(contentsOf: url)
+        let rows = try String(decoding: data, as: UTF8.self).split(separator: "\n").compactMap { line -> [String: Any]? in
+            guard let object = try JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any],
+                  object["type"] as? String == "stats" else { return nil }
+            return object
+        }
+        func report(_ index: Int, _ id: String) throws -> [String: Any] {
+            let reports = try XCTUnwrap(rows[index]["reports"] as? [String: [String: Any]])
+            return try XCTUnwrap(reports[id])
+        }
+        let first = try report(0, "a"), second = try report(1, "a")
+        let newID = try report(2, "b"), reset = try report(3, "b"), resumed = try report(4, "b")
+        for key in ["bytesSent", "bytesReceived", "packetsReceived", "retransmittedPacketsSent", "retransmittedBytesSent"] {
+            XCTAssertNil(first[key + "Delta"])
+            XCTAssertEqual(second[key + "Delta"] as? Double, 5)
+            XCTAssertNil(newID[key + "Delta"])
+            XCTAssertNil(reset[key + "Delta"])
+            XCTAssertEqual(resumed[key + "Delta"] as? Double, 2)
+        }
+        XCTAssertFalse(String(decoding: data, as: UTF8.self).contains("do not log this text"))
+    }
+    #endif
 
     func testMultipleRTPReportsUseWeightedDeltas() {
         let collector = LatencyStatsCollector(side: "test", enabled: true)
