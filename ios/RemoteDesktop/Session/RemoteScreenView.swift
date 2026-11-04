@@ -144,6 +144,7 @@ final class RemoteScreenUIView: UIView, UIPointerInteractionDelegate, UIGestureR
     private let contentView = UIView(frame: .zero)
     private let videoView = RemoteVideoSurfaceView(frame: .zero)
     private let cursorLayer = TouchCursorLayer()
+    private let clientCursor = CursorOverlayView()
     private var remoteDisplay: DisplayInfo?
     private let rendererBinding = RemoteVideoRendererBinding()
     private var visibilityObserver: UUID?
@@ -191,6 +192,7 @@ final class RemoteScreenUIView: UIView, UIPointerInteractionDelegate, UIGestureR
         videoView.backgroundColor = UIColor(white: 0.05, alpha: 1)
         contentView.addSubview(videoView)
         contentView.layer.addSublayer(cursorLayer)
+        contentView.layer.addSublayer(clientCursor)
         addSubview(contentView)
 
         // Indirect pointer (trackpad / Magic Mouse / Pencil hover).
@@ -241,6 +243,8 @@ final class RemoteScreenUIView: UIView, UIPointerInteractionDelegate, UIGestureR
         contentView.bounds = CGRect(origin: .zero, size: bounds.size)
         applyVideoSurfaceLayout()
         cursorLayer.frame = contentView.bounds
+        clientCursor.frame = contentView.bounds
+        updateCursorScale()
         clampZoomOffset()
         applyZoomTransform()
         cursorLayer.clamp(to: visibleContentRect)
@@ -251,9 +255,13 @@ final class RemoteScreenUIView: UIView, UIPointerInteractionDelegate, UIGestureR
         if changed { retireInputSource() }
         remoteDisplay = d
         applyVideoSurfaceLayout()
+        updateCursorScale()
         setNeedsLayout()
         cursorLayer.clamp(to: visibleContentRect)
-        if changed { synchronizeInputAvailability(allowSourceBinding: true) }
+        if changed {
+            session?.applyCursorState(to: self)
+            synchronizeInputAvailability(allowSourceBinding: true)
+        }
     }
 
     private func applyVideoSurfaceLayout() {
@@ -280,10 +288,12 @@ final class RemoteScreenUIView: UIView, UIPointerInteractionDelegate, UIGestureR
             visibilityOwner = nil
             retireInputSource()
             guard !stopped, sessionBindingRequest == request else { return }
+            setClientCursorEnabled(false)
             self.session = session
             inputOwnershipSession?.releaseRemoteScreenInput(owner: self)
             inputOwnershipSession = session
             session?.claimRemoteScreenInput(owner: self)
+            session?.applyCursorState(to: self)
         }
         if visibilityOwner == nil, let session = self.session {
             let owner = UUID()
@@ -353,6 +363,7 @@ final class RemoteScreenUIView: UIView, UIPointerInteractionDelegate, UIGestureR
         inputOwnershipSession?.releaseRemoteScreenInput(owner: self)
         inputOwnershipSession = nil
         session = nil
+        setClientCursorEnabled(false)
         synchronizeInputAvailability()
         rebindRendererIfNeeded()
         if zoomController?.captureView === self {
@@ -390,6 +401,7 @@ final class RemoteScreenUIView: UIView, UIPointerInteractionDelegate, UIGestureR
         guard !isReconcilingVisibility else {
             let visible = !stopped && window != nil && session?.mayRevealRemoteScreenPixels == true
             videoView.isHidden = !visible
+            clientCursor.setSurfaceVisible(visible)
             if !visible { cursorLayer.hide() }
             // Publish the newest desired target to the binding while its old
             // detach is still joined; don't briefly attach an obsolete owner.
@@ -402,6 +414,7 @@ final class RemoteScreenUIView: UIView, UIPointerInteractionDelegate, UIGestureR
             visibilityReconciliationPending = false
             let visible = !stopped && window != nil && session?.mayRevealRemoteScreenPixels == true
             videoView.isHidden = !visible
+            clientCursor.setSurfaceVisible(visible)
             if !visible { cursorLayer.hide() }
             // The binding joins the old exact detach before installing the
             // latest target. Reveal receives a new native sink/subscription;
@@ -440,6 +453,7 @@ final class RemoteScreenUIView: UIView, UIPointerInteractionDelegate, UIGestureR
                 moveScreenEnabled: zoomController?.moveScreenEnabled ?? false) else {
                 return
             }
+            if RemoteScreenGeometry.contains(point, in: visibleContentRect) { moveCursor(toContentPoint: point) }
             sendPointer(at: point, buttons: lastPointerButtons, allowsNewButtons: false)
         case .ended, .cancelled, .failed:
             accessories?.noteIndirectPointer(active: false)
@@ -583,6 +597,8 @@ final class RemoteScreenUIView: UIView, UIPointerInteractionDelegate, UIGestureR
             lastPointerButtons = 0
             return true
         }
+
+        if RemoteScreenGeometry.contains(location, in: visibleContentRect) { moveCursor(toContentPoint: location) }
 
         let buttons = IndirectPointerClickPolicy.buttons(
             for: event?.buttonMask ?? UIEvent.ButtonMask(),
@@ -824,6 +840,45 @@ final class RemoteScreenUIView: UIView, UIPointerInteractionDelegate, UIGestureR
         rightClickFired = false
     }
 
+    // Cursor points use the same untransformed content coordinates as input.
+    var cursorContentPoint: CGPoint { clientCursor.cursorContentPoint }
+
+    func moveCursor(toContentPoint point: CGPoint) {
+        clientCursor.moveCursor(toContentPoint: point)
+    }
+
+    func setShape(id: String) { clientCursor.setShape(id: id) }
+
+    func setClientCursorEnabled(_ enabled: Bool) {
+        clientCursor.setEnabled(enabled)
+        cursorLayer.opacity = enabled ? 0 : 1
+    }
+
+    func installCursorShape(id: String, png: Data, hotspot: CGPoint, size: CGSize) {
+        clientCursor.installShape(id: id, png: png, hotspot: hotspot, size: size)
+    }
+
+    func moveHostCursor(toRemotePoint point: CGPoint) {
+        guard let display = remoteDisplay, display.w > 0, display.h > 0,
+              point.x.isFinite, point.y.isFinite,
+              point.x >= 0, point.y >= 0,
+              point.x < CGFloat(display.w), point.y < CGFloat(display.h) else { return }
+        let rect = geometry.interactiveRect
+        guard RemoteScreenGeometry.isFiniteRectangle(rect) else { return }
+        let contentPoint = CGPoint(
+            x: rect.minX + point.x * rect.width / CGFloat(display.w),
+            y: rect.minY + point.y * rect.height / CGFloat(display.h))
+        clientCursor.moveHostCursor(toContentPoint: contentPoint)
+    }
+
+    private func updateCursorScale() {
+        guard let display = remoteDisplay, display.w > 0, display.h > 0 else { return }
+        let rect = geometry.interactiveRect
+        guard RemoteScreenGeometry.isFiniteRectangle(rect) else { return }
+        clientCursor.setContentScale(CGSize(width: rect.width / CGFloat(display.w),
+                                            height: rect.height / CGFloat(display.h)))
+    }
+
     // MARK: - Coordinate mapping
 
     private func activateIndirectPointer() {
@@ -843,6 +898,10 @@ final class RemoteScreenUIView: UIView, UIPointerInteractionDelegate, UIGestureR
                 geometry: geometry, viewport: visibleContentRect) else { return }
         if inputRouting.pointerButtons & ~previousButtons != 0, let session, let inputGeneration {
             RemoteHardwareKeyboardCapture.requestFocus(in: session, expectedInputGeneration: inputGeneration)
+        }
+        if accessories?.hasIndirectPointer != true, let p,
+           RemoteScreenGeometry.contains(p, in: visibleContentRect) {
+            moveCursor(toContentPoint: p)
         }
         session?.send(message, from: inputSource)
     }
