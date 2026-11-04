@@ -3,10 +3,19 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from summarize_device_pairs import host_time, read_trace, segments, summarize
+from summarize_device_pairs import host_time, present_interval_p95_ms, read_trace, segments, summarize
 
 
 class DevicePairSummaryTests(unittest.TestCase):
+    def test_present_interval_p95_uses_render_callbacks_only(self):
+        rows = [{'type': 'render', 'presentedTime': value} for value in (1.0, 1.01, 1.03, 1.06)]
+        rows.extend([{'type': 'marker', 'presentedTime': 1.055},
+                     {'type': 'render', 'presentedTime': None},
+                     {'type': 'render', 'presentedTime': True}])
+        self.assertAlmostEqual(present_interval_p95_ms(rows), 30)
+        self.assertIsNone(present_interval_p95_ms(rows[:1]))
+        self.assertIsNone(present_interval_p95_ms([]))
+
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
@@ -42,6 +51,9 @@ class DevicePairSummaryTests(unittest.TestCase):
                 client.append({'type': 'clock', 'time': time, 'offset': 1000.0,
                                'rtt': .01, 'uncertainty': .001, 'samples': 50})
             delay = (a_delays if arm == 'A' else b_delays)[index // 2] / 1000
+            for offset in (1, 1.02, 1.05):
+                client.append({'type': 'render', 'decodeTime': start + offset - .005,
+                               'presentedTime': start + offset})
             for offset in range(1, 13):
                 marker_id += 1
                 host = start + offset + 1000
@@ -80,6 +92,8 @@ class DevicePairSummaryTests(unittest.TestCase):
         self.assertTrue(result['runs'][-1]['wifi_spike'])
         self.assertEqual(result['runs'][-1]['metrics']['rtt_p95_ms'], 200)
         self.assertEqual(result['runs'][0]['marker_coverage'], [12, 12])
+        self.assertAlmostEqual(result['runs'][0]['metrics']['present_interval_p95_ms'], 30)
+        self.assertAlmostEqual(result['median_paired_B_minus_A']['present_interval_p95_ms'], 0)
         self.assertEqual(Path(result['runs'][0]['host_trace']).name, 'host-1.jsonl')
         self.assertEqual(Path(result['runs'][1]['host_trace']).name, 'host-2.jsonl')
 

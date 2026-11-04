@@ -24,6 +24,12 @@ def finite_number(value):
     return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
 
 
+def present_interval_p95_ms(rows):
+    times = sorted(r['presentedTime'] for r in rows
+                   if r.get('type') == 'render' and finite_number(r.get('presentedTime')))
+    return quantile([(b - a) * 1000 for a, b in zip(times, times[1:])], .95)
+
+
 def host_time(rows, client_time):
     clocks = [r for r in rows if r.get('type') == 'clock' and finite_number(r.get('samples'))
               and r['samples'] >= 50 and all(finite_number(r.get(k)) for k in ('time', 'offset', 'rtt', 'uncertainty'))
@@ -128,6 +134,7 @@ def summarize(host_marker, client_trace, host_directory, output_directory):
         reports = [v for r in client_stats for v in r.get('reports', {}).values()]
         freeze_values = [v['freezeCountDelta'] for v in reports if 'freezeCountDelta' in v]
         metrics = {}
+        metrics['present_interval_p95_ms'] = present_interval_p95_ms(selected_client)
         for name, field in [('screen_to_screen', 'screen_to_screen'), ('render', 'all_frame_decode_to_present')]:
             for q in ('p50', 'p95'):
                 metrics[f'{name}_{q}_ms'] = detail[field].get(f'{q}_ms')
