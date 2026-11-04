@@ -21,13 +21,30 @@ class DevicePairSafetyTests(unittest.TestCase):
         host.mkdir(parents=True)
         (host / 'Info.plist').write_bytes(plistlib.dumps({
             'CFBundleIdentifier': 'com.threadmark.remotedesktop.host.debug'}))
+        config = root / 'build/latency/lab-v2/ipad-handoff-config.json'
+        config.parent.mkdir(parents=True)
+        config.write_text(json.dumps({'device_id': 'device'}))
+        handoff = root / 'handoff'
+        handoff.touch()
+        for name, value in (('ROOT', root), ('RELEASE_QA', (root / 'qa').resolve()), ('IPAD_HANDOFF', handoff)):
+            patcher = patch.object(runner, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.install = patch.object(runner, 'install_verified_lab_app', side_effect=self.fake_install)
+        self.install_mock = self.install.start()
+        self.addCleanup(self.install.stop)
         marker = root / 'marker'
         marker.touch()
         self.args = SimpleNamespace(
             not_before='2000-01-01T00:00:00Z', qa_flag=root / 'qa',
             host_app=host.parent, guarded=True, output=root / 'output',
             marker_binary=marker.resolve(), device='device', host_id='host', fix='F1',
-            f1_max_ms=0, bundle_id='client', host_traces=root / 'traces')
+            f1_max_ms=0, bundle_id=runner.CLIENT_BUNDLE, host_traces=root / 'traces',
+            client_app=root / 'lab.app')
+
+    def fake_install(self, device, app):
+        runner.require_selected_ipad(device)
+        self.assertEqual(app, self.args.client_app)
 
     def test_invalid_and_future_handoff_never_launch(self):
         with patch.object(runner.subprocess, 'Popen') as launch:
@@ -72,6 +89,7 @@ class DevicePairSafetyTests(unittest.TestCase):
              patch.object(runner.signal, 'signal'):
             with self.assertRaisesRegex(ValueError, 'Release QA'):
                 runner.run(self.args)
+        self.install_mock.assert_called_once_with(self.args.device, self.args.client_app)
         attached.send_signal.assert_called_once_with(signal.SIGINT)
         command = terminate.call_args.args[0]
         self.assertEqual(command[-2:], ['--pid', '4321'])
@@ -98,6 +116,7 @@ class DevicePairSafetyTests(unittest.TestCase):
              patch.object(runner.signal, 'signal'):
             with self.assertRaisesRegex(RuntimeError, 'cleanup is required'):
                 runner.run(self.args)
+        self.install_mock.assert_called_once_with(self.args.device, self.args.client_app)
         terminate.assert_not_called()
         attached.kill.assert_called_once()
 
@@ -125,6 +144,7 @@ class DevicePairSafetyTests(unittest.TestCase):
              patch.object(runner.signal, 'signal', side_effect=install_handler):
             with self.assertRaises(KeyboardInterrupt):
                 runner.run(self.args)
+        self.install_mock.assert_called_once_with(self.args.device, self.args.client_app)
         attached.send_signal.assert_called_once_with(signal.SIGINT)
         attached.wait.assert_called_once_with(timeout=2)
         terminate.assert_not_called()

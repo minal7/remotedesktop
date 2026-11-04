@@ -14,6 +14,12 @@ final class LatencyQualityLiveE2ETests: XCTestCase {
         guard environment["RUN_LATENCY_QUALITY_E2E"] == "1" else {
             throw XCTSkip("Requires a reserved iPad, Debug host, and synthetic text fixture.")
         }
+        let parts = (environment["LATENCY_QUALITY_FIXES"] ?? "F4").split(separator: ",", omittingEmptySubsequences: false).map(String.init)
+        let fixes = Set(parts)
+        guard !fixes.isEmpty, parts.count == fixes.count, fixes.isSubset(of: ["F1", "F3", "F4"]),
+              let maximum = Int(environment["LATENCY_QUALITY_F1_MAX_MS"] ?? "0"), [0, 10, 20].contains(maximum) else {
+            throw Failure.notReady("Invalid quality experiment selection")
+        }
         let earliest = try XCTUnwrap(environment["LATENCY_QUALITY_NOT_BEFORE"]
             .flatMap { ISO8601DateFormatter().date(from: $0) })
         guard Date() >= earliest else { throw Failure.notReady("Device handoff has not happened") }
@@ -30,10 +36,9 @@ final class LatencyQualityLiveE2ETests: XCTestCase {
             throw Failure.notReady("The controller-owned lab app is not in the foreground")
         }
         try waitForFixture()
-        try selectF4(false)
-        defer { try? selectF4(false) }
+        try selectExperiments([], maximum: maximum, f4Only: fixes == ["F4"])
         let a = try capture("A", crop: nil, referenceSize: referenceSize, referenceCrop: referenceCrop)
-        try selectF4(true)
+        try selectExperiments(fixes, maximum: maximum, f4Only: fixes == ["F4"])
         let b = try capture("B", crop: a.crop, referenceSize: referenceSize, referenceCrop: referenceCrop)
         XCTAssertEqual(a.width, b.width, "Do not rotate or change viewport geometry between arms")
         XCTAssertEqual(a.height, b.height)
@@ -43,8 +48,13 @@ final class LatencyQualityLiveE2ETests: XCTestCase {
             "crop_pixels": [Int(a.crop.minX), Int(a.crop.minY), Int(a.crop.width), Int(a.crop.height)],
             "reference_pixels": referenceSize, "reference_crop_pixels": referenceCrop,
             "a_capture_uptime_s": a.time, "b_capture_uptime_s": b.time,
-            "a_requested_f4": false, "b_requested_f4": true,
-            "requires": "Verify client trace applied settings and F4 render path before interpreting screenshots"
+            "selected_fixes": fixes.sorted(), "f1_maximum_delay_ms": maximum,
+            "a_requested_maximum_delay_ms": 0,
+            "b_requested_maximum_delay_ms": fixes.contains("F1") ? maximum : 0,
+            "a_requested_settings": ["f1Playout": false, "f2Encoder": false, "f3Sender": false, "f4Renderer": false],
+            "b_requested_settings": ["f1Playout": fixes.contains("F1"), "f2Encoder": false,
+                                     "f3Sender": fixes.contains("F3"), "f4Renderer": fixes.contains("F4")],
+            "requires": "Validate applied client settings and current presentation before each capture; verify host F3 policy and F4 Metal path when selected. Acceptance not assessed."
         ]
         let metadata = XCTAttachment(data: try JSONSerialization.data(withJSONObject: record, options: [.sortedKeys]),
                                      uniformTypeIdentifier: "public.json")
@@ -62,7 +72,7 @@ final class LatencyQualityLiveE2ETests: XCTestCase {
         return numbers
     }
 
-    private func selectF4(_ enabled: Bool) throws {
+    private func selectExperiments(_ fixes: Set<String>, maximum: Int, f4Only: Bool) throws {
         // LatencyQuality exposes the existing Debug button at launch. Do not
         // send a multi-touch gesture through the remote-input surface.
         let open = app.buttons["Latency lab"]
@@ -73,24 +83,58 @@ final class LatencyQualityLiveE2ETests: XCTestCase {
         let reset = app.buttons["Reset all experiments"]
         guard reset.waitForExistence(timeout: 5) else { throw Failure.notReady("Lab settings did not open") }
         reset.tap()
-        let toggle = app.switches["Metal rendering at 120 Hz (F4)"]
-        guard toggle.waitForExistence(timeout: 5), toggle.value as? String == "0" else {
-            throw Failure.notReady("Could not establish the all-off baseline")
+        for (fix, title) in [("F1", "Reduce buffering (F1)"), ("F3", "Faster LAN sending (F3)"),
+                             ("F4", "Metal rendering at 120 Hz (F4)")] {
+            let toggle = app.switches[title]
+            guard toggle.waitForExistence(timeout: 5) else { throw Failure.notReady("Missing \(fix) switch") }
+            try waitForSwitch(toggle, value: "0", fix: fix)
+            if fixes.contains(fix) { toggle.tap() }
+            try waitForSwitch(toggle, value: fixes.contains(fix) ? "1" : "0", fix: fix)
         }
-        if enabled { toggle.tap() }
-        guard toggle.value as? String == (enabled ? "1" : "0") else {
-            throw Failure.notReady("Renderer selection did not change")
+        if fixes.contains("F1"), maximum != 0 {
+            let picker = try firstHittable([app.buttons["Maximum playout delay"],
+                                            app.popUpButtons["Maximum playout delay"]],
+                                           message: "Playout-delay picker unavailable")
+            picker.tap()
+            let choice = try firstHittable([app.buttons["\(maximum) ms"], app.menuItems["\(maximum) ms"]],
+                                           message: "Requested playout-delay option unavailable")
+            choice.tap()
         }
         app.buttons["Apply to this session"].tap()
-        let expected = "Quality F4 \(enabled ? "on" : "off"): ready"
-        let status = app.staticTexts["latency-video-statistics"]
-        let ready = NSPredicate { _, _ in status.exists && status.label.contains(expected) }
-        guard XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: ready, object: nil)], timeout: 45) == .completed else {
-            throw Failure.notReady("The requested renderer has not presented a current frame")
+        if f4Only {
+            let expected = "Quality F4 \(fixes.contains("F4") ? "on" : "off"): ready"
+            let status = app.staticTexts["latency-video-statistics"]
+            let ready = NSPredicate { _, _ in status.exists && status.label.contains(expected) }
+            guard XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: ready, object: nil)], timeout: 45) == .completed else {
+                throw Failure.notReady("The requested renderer has not presented a current frame")
+            }
         }
         // Allow static encoder quality to settle outside all timed windows.
         Thread.sleep(forTimeInterval: 5)
         try waitForFixture()
+    }
+
+    private func waitForSwitch(_ toggle: XCUIElement, value: String, fix: String) throws {
+        let predicate = NSPredicate { _, _ in
+            guard toggle.exists, let observed = toggle.value else { return false }
+            if let text = observed as? String { return text == value }
+            if let number = observed as? NSNumber, number.intValue == 0 || number.intValue == 1 {
+                return String(number.intValue) == value
+            }
+            return false
+        }
+        guard XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: predicate, object: nil)], timeout: 8) == .completed else {
+            throw Failure.notReady("\(fix) switch did not reach \(value); observed \(String(describing: toggle.value))")
+        }
+    }
+
+    private func firstHittable(_ elements: [XCUIElement], message: String) throws -> XCUIElement {
+        let predicate = NSPredicate { _, _ in elements.contains { $0.exists && $0.isHittable } }
+        guard XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: predicate, object: nil)], timeout: 8) == .completed,
+              let element = elements.first(where: { $0.exists && $0.isHittable }) else {
+            throw Failure.notReady(message)
+        }
+        return element
     }
 
     private func waitForFixture() throws {
@@ -118,6 +162,7 @@ final class LatencyQualityLiveE2ETests: XCTestCase {
     }
 
     private func capture(_ arm: String, crop previousCrop: CGRect?, referenceSize: [Int], referenceCrop: [Int]) throws -> (width: Int, height: Int, time: Double, crop: CGRect) {
+        let captureStarted = ProcessInfo.processInfo.systemUptime
         let screenshot = XCUIScreen.main.screenshot().image
         guard screenshot.imageOrientation == .up else { throw Failure.notReady("Screenshot orientation is not upright") }
         let image = try XCTUnwrap(screenshot.cgImage)
@@ -168,7 +213,7 @@ final class LatencyQualityLiveE2ETests: XCTestCase {
         let attachment = XCTAttachment(data: png, uniformTypeIdentifier: "public.png")
         attachment.name = "latency-quality-\(arm).png"; attachment.lifetime = .keepAlways
         add(attachment)
-        return (image.width, image.height, ProcessInfo.processInfo.systemUptime, crop)
+        return (image.width, image.height, captureStarted, crop)
     }
 
     private enum Failure: Error { case notReady(String) }

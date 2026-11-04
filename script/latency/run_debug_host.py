@@ -122,6 +122,9 @@ def guarded_run(args):
                     'LATENCY_LAB_F1': '0', 'LATENCY_LAB_F2': '1',
                     'LATENCY_LAB_F3': '1', 'LATENCY_LAB_F4': '0'})
         env.pop('REMOTE_DESKTOP_R0_HOST_ID', None)
+        env.pop('LATENCY_LAB_RESOURCES_ONLY', None)
+        if args.resources_only:
+            env['LATENCY_LAB_RESOURCES_ONLY'] = '1'
         with log_path.open('wb') as log:
             if pending or args.qa_flag.exists():
                 raise RuntimeError('Cancelled before the Debug host started.')
@@ -166,6 +169,7 @@ def main():
     parser.add_argument('--qa-flag', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--timeout', type=float, required=True)
+    parser.add_argument('--resources-only', action='store_true', help='Use bounded resource-only telemetry')
     parser.add_argument('--internal-guarded', action='store_true', help=argparse.SUPPRESS)
     args = parser.parse_args()
     if not 1 <= args.timeout <= 3600:

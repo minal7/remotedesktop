@@ -13,10 +13,12 @@ import plistlib
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 from urllib.parse import unquote, urlparse
 import uuid
 import xml.etree.ElementTree as ET
+from run_device_pairs import RELEASE_QA, install_verified_lab_app, require_device_window, require_selected_ipad
 
 ROOT = Path(__file__).resolve().parents[2]
 TEST_TARGET = 'RemoteDesktopLatencyQualityTests'
@@ -165,6 +167,9 @@ def run(args):
     fixes = selected_fixes(args.fixes)
     handoff_time(args.not_before)
     if args.qa_flag.exists(): raise ValueError('Release QA is active; no device command started.')
+    if args.qa_flag.resolve() != RELEASE_QA: raise ValueError('The QA guard must use the shared release QA flag.')
+    require_device_window()
+    require_selected_ipad(args.device)
     host = args.host_app.resolve(strict=True)
     if not host.is_relative_to((ROOT / 'build/latency').resolve()):
         raise ValueError('Debug host must be in this worktree latency build.')
@@ -195,6 +200,7 @@ def run(args):
     previous = {sig: signal.signal(sig, cancel) for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)}
     def check():
         if pending or args.qa_flag.exists(): raise RuntimeError('Quality run interrupted by QA or cancellation.')
+        require_device_window()
     def logfile(name):
         handle = (args.output / name).open('wb'); logs.append(handle); return handle
     def processes():
@@ -221,10 +227,10 @@ def run(args):
         if processes(): raise ValueError('The exact quality test runner is already running.')
         # Install both exact build products before starting the client. The
         # subsequent xctestrun uses destination artifacts and must not install.
-        for name, app in (('install-client.log', client_path), ('install-runner.log', runner_path)):
-            check()
-            subprocess.run(['xcrun', 'devicectl', 'device', 'install', 'app', '--device', args.device, str(app)],
-                           stdout=logfile(name), stderr=subprocess.STDOUT, check=True, timeout=60)
+        install_verified_lab_app(args.device, client_path)
+        check()
+        subprocess.run(['xcrun', 'devicectl', 'device', 'install', 'app', '--device', args.device, str(runner_path)],
+                       stdout=logfile('install-runner.log'), stderr=subprocess.STDOUT, check=True, timeout=60)
         check()
         fixture_dir = args.output / 'fixture'
         fixture = subprocess.Popen([str(fixture_binary), str(fixture_dir), '600'], stdout=logfile('fixture.log'), stderr=subprocess.STDOUT)
@@ -243,6 +249,20 @@ def run(args):
         use_destination_artifacts(test)
         local_run = args.output / 'quality.xctestrun'
         local_run.write_bytes(plistlib.dumps(test_config))
+        check()
+        # Inventory before launch, so offline review can identify traces created
+        # by this exclusively owned session without choosing the newest file.
+        with tempfile.TemporaryDirectory(prefix='prelaunch-traces-', dir=args.output) as tmp:
+            subprocess.run(['xcrun', 'devicectl', 'device', 'copy', 'from', '--device', args.device,
+                '--domain-type', 'appDataContainer', '--domain-identifier', CLIENT_BUNDLE,
+                '--source', 'Library/Application Support/RemoteDesktopHost/Latency',
+                '--destination', str(Path(tmp) / 'traces')], stdout=logfile('trace-inventory.log'),
+                stderr=subprocess.STDOUT, check=True, timeout=30)
+            check()
+            names = [path.name for path in (Path(tmp) / 'traces').rglob('client-*.jsonl') if path.is_file()]
+            if len(names) != len(set(names)):
+                raise ValueError('Duplicate prelaunch client trace filenames; cannot establish provenance.')
+            (args.output / 'prelaunch-client-filenames.json').write_text(json.dumps(sorted(names)) + '\n')
         check()
         launch_attempted = True
         launch_env = {'LATENCY_LAB_F1': '0', 'LATENCY_LAB_F2': '0', 'LATENCY_LAB_F3': '0', 'LATENCY_LAB_F4': '0'}

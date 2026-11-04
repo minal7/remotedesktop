@@ -13,12 +13,81 @@ import sys
 import time
 import uuid
 
-from summarize_device_pairs import read_trace, summarize
+from summarize_device_pairs import read_trace, selected_fixes, summarize
 
 ROOT = Path(__file__).resolve().parents[2]
+RELEASE_BUILD = Path('/Users/michael/.codex/worktrees/remote-desktop-release/remote desktop/build')
+IPAD_HANDOFF = RELEASE_BUILD / '.ipad-to-latency'
+RELEASE_QA = RELEASE_BUILD / '.release-qa-active'
+CLIENT_BUNDLE = 'com.threadmark.remotedesktop.client'
+
+
+def require_device_window():
+    if RELEASE_QA.exists():
+        raise ValueError('Release QA is active; no device command started.')
+    if not IPAD_HANDOFF.is_file():
+        raise ValueError('The iPad has not been handed to latency.')
+
+
+def verify_installed_lab(data, version, build):
+    if not isinstance(data, dict) or not isinstance(data.get('info'), dict) or not isinstance(data.get('result'), dict):
+        raise ValueError('Installed lab client version could not be verified.')
+    apps = data['result'].get('apps')
+    if data['info'].get('outcome') != 'success' or not isinstance(apps, list):
+        raise ValueError('Installed lab client version could not be verified.')
+    matches = [row for row in apps if isinstance(row, dict) and row.get('bundleIdentifier') == CLIENT_BUNDLE]
+    if (len(matches) != 1 or matches[0].get('bundleVersion') != str(build)
+            or matches[0].get('version') != str(version)):
+        raise ValueError('Installed lab client version could not be verified.')
+
+
+def require_selected_ipad(device):
+    require_device_window()
+    configuration = json.loads((ROOT / 'build/latency/lab-v2/ipad-handoff-config.json').read_text())
+    if not isinstance(configuration, dict) or device != configuration.get('device_id'):
+        raise ValueError('The selected device is not the configured iPad.')
+
+
+def require_lab_bundle(bundle_id):
+    if bundle_id != CLIENT_BUNDLE:
+        raise ValueError('Only the verified lab client bundle may be launched.')
+
+
+def install_verified_lab_app(device, client_app):
+    """Install only the signed Debug lab product; verify the installed version."""
+    require_selected_ipad(device)
+    app = client_app.resolve(strict=True)
+    if not app.is_relative_to((ROOT / 'build/latency').resolve()):
+        raise ValueError('Lab client must be in this worktree latency build.')
+    info = plistlib.loads((app / 'Info.plist').read_bytes())
+    version = info.get('CFBundleShortVersionString')
+    build = info.get('CFBundleVersion')
+    if info.get('CFBundleIdentifier') != CLIENT_BUNDLE or not version or not build:
+        raise ValueError('Lab client identity and version are required.')
+    signed = subprocess.run(['codesign', '-d', '--entitlements', ':-', str(app)],
+                            capture_output=True, check=True, timeout=10)
+    entitlements = plistlib.loads(signed.stdout)
+    if (entitlements.get('get-task-allow') is not True or
+            entitlements.get('com.apple.developer.icloud-container-environment') != 'Development'):
+        raise ValueError('Only a signed Development Debug client may be installed.')
+    require_device_window()
+    require_selected_ipad(device)
+    subprocess.run(['xcrun', 'devicectl', 'device', 'install', 'app', '--device', device, str(app)],
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True, timeout=60)
+    require_device_window()
+    import tempfile
+    with tempfile.TemporaryDirectory(prefix='latency-app-check-') as tmp:
+        result = Path(tmp) / 'apps.json'
+        subprocess.run(['xcrun', 'devicectl', 'device', 'info', 'apps', '--device', device,
+                        '--bundle-id', CLIENT_BUNDLE, '--json-output', str(result)],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True, timeout=30)
+        data = json.loads(result.read_text())
+    verify_installed_lab(data, version, build)
+    require_device_window()
 
 
 def run(args):
+    selected_fixes(args.fix)
     handoff = datetime.fromisoformat(args.not_before.replace('Z', '+00:00'))
     if handoff.tzinfo is None:
         raise ValueError('The device handoff time must include its timezone.')
@@ -26,6 +95,11 @@ def run(args):
         raise ValueError('The physical-device handoff has not happened yet.')
     if args.qa_flag.exists():
         raise ValueError('Release QA is active; no device command started.')
+    if args.qa_flag.resolve() != RELEASE_QA:
+        raise ValueError('The QA guard must use the shared release QA flag.')
+    require_device_window()
+    require_selected_ipad(args.device)
+    require_lab_bundle(args.bundle_id)
     info = plistlib.loads((args.host_app / 'Contents/Info.plist').read_bytes())
     if info.get('CFBundleIdentifier') != 'com.threadmark.remotedesktop.host.debug':
         raise ValueError('Only the separately signed Debug host is allowed.')
@@ -75,6 +149,7 @@ def run(args):
             return result.returncode == 0
 
     try:
+        install_verified_lab_app(args.device, args.client_app)
         # The changing marker is also the warmup content. It stays visible for
         # the whole session, including peer handoffs; IDs never restart.
         spawning = True
@@ -112,7 +187,7 @@ def run(args):
         selected = None
         deadline = time.monotonic() + 570
         while time.monotonic() < deadline:
-            if args.qa_flag.exists():
+            if args.qa_flag.exists() or RELEASE_QA.exists() or not IPAD_HANDOFF.is_file():
                 raise ValueError('Release QA reclaimed the device window.')
             if marker.poll() is not None:
                 raise ValueError('Marker ended before the paired session completed.')
@@ -164,7 +239,12 @@ def run(args):
                 break
             # Only the small atomic status record crosses USB during timing.
             # Copy the bounded full trace after the last measured window.
-            time.sleep(10)
+            next_poll = time.monotonic() + 10
+            while time.monotonic() < next_poll:
+                require_device_window()
+                if args.qa_flag.exists():
+                    raise ValueError('Release QA reclaimed the device window.')
+                time.sleep(min(.2, max(0, next_poll - time.monotonic())))
         if selected is None:
             raise ValueError('No complete four-pair session before the sweep deadline.')
         # Ask the marker to write its complete timestamp file and exit, outside
@@ -224,9 +304,10 @@ if __name__ == '__main__':
     parser.add_argument('--device', required=True)
     parser.add_argument('--host-id', required=True)
     parser.add_argument('--host-app', required=True, type=Path)
+    parser.add_argument('--client-app', required=True, type=Path)
     parser.add_argument('--qa-flag', required=True, type=Path)
     parser.add_argument('--not-before', required=True, help='ISO 8601 device handoff time, with timezone')
-    parser.add_argument('--fix', required=True, choices=['F1', 'F2', 'F3', 'F4'])
+    parser.add_argument('--fix', required=True, help='One fix, or sorted kept fixes joined by + for the combined check')
     parser.add_argument('--f1-max-ms', type=int, choices=[0, 10, 20], default=0)
     parser.add_argument('--marker-binary', required=True, type=Path)
     parser.add_argument('--host-traces', required=True, type=Path)
