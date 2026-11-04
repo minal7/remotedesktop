@@ -36,8 +36,10 @@ struct RemoteDesktopHostApp: App {
         }
 #else
         if CommandLine.arguments.contains("--debug-r0-resident-host")
-            || ProcessInfo.processInfo.environment["REMOTE_DESKTOP_R0_HOST_ID"] != nil {
-            NSLog("RemoteDesktopHost R0 resident mode is unavailable in Release")
+            || ProcessInfo.processInfo.environment["REMOTE_DESKTOP_R0_HOST_ID"] != nil
+            || CommandLine.arguments.contains("--debug-latency-host")
+            || ProcessInfo.processInfo.environment["REMOTE_DESKTOP_LATENCY_HOST_ID"] != nil {
+            NSLog("RemoteDesktopHost Debug resident modes are unavailable in Release")
             Darwin.exit(2)
         }
 #endif
@@ -86,11 +88,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             deviceIdentityProvider: { configuration.hostID },
             advertisedHostName: configuration.hostDisplayName,
             localCredentialStore: LocalComputerUseCredentialStore(
-                service: DebugResidentHostConfiguration.credentialService),
+                service: configuration.credentialServiceName),
             allowsAutomaticComputerUseSetup: false,
             computerUseTaskLedger: ComputerUseTaskLedger(
                 fileURL: configuration.taskLedgerURL),
-            enablePersonalMemory: MemoryFeatureConfiguration.memoryV1CandidateEnabled)
+            allowsExternalComputerUseServices: configuration.allowsExternalComputerUseServices && !HostRuntimeContext.isRunningUnitTests,
+            enablePersonalMemory: configuration.allowsPersonalMemory && MemoryFeatureConfiguration.memoryV1CandidateEnabled)
         hostSession.hideOwnerMemoryWindow = { [weak self] in
             self?.settingsWindowController?.window?.orderOut(nil)
         }
@@ -128,19 +131,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 #if DEBUG
         if DebugResidentHostConfiguration.isSelected() {
             guard let configuration = DebugResidentHostConfiguration.parse() else {
-                NSLog("RemoteDesktopHost R0 resident selector or host UUID is malformed")
+                NSLog("RemoteDesktopHost Debug resident selector or host UUID is malformed")
                 Darwin.exit(2)
             }
             r0Configuration = configuration
             do {
                 guard let lease = try HostSingleInstance.acquire(
                     bundleIdentifier: configuration.lockIdentity) else {
-                    NSLog("RemoteDesktopHost R0 candidate is already running")
+                    NSLog("RemoteDesktopHost Debug resident candidate is already running")
                     Darwin.exit(2)
                 }
                 r0SingleInstanceLease = lease
             } catch {
-                NSLog("RemoteDesktopHost R0 candidate could not acquire its isolated lock: \(error)")
+                NSLog("RemoteDesktopHost Debug resident candidate could not acquire its isolated lock: \(error)")
                 Darwin.exit(2)
             }
 
@@ -148,13 +151,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             let permissions = SystemPermissionsProvider()
             guard permissions.screenRecordingGranted(),
                   permissions.accessibilityGranted() else {
-                NSLog("RemoteDesktopHost R0 candidate requires existing Screen Recording and Accessibility grants; no prompt was requested")
+                NSLog("RemoteDesktopHost Debug resident candidate requires existing Screen Recording and Accessibility grants; no prompt was requested")
                 Darwin.exit(2)
             }
             configureTerminationSignalHandling()
             session.refreshPermissions()
             guard session.permissions.coreReady else {
-                NSLog("RemoteDesktopHost R0 candidate permissions changed during preflight; no prompt was requested")
+                NSLog("RemoteDesktopHost Debug resident candidate permissions changed during preflight; no prompt was requested")
                 Darwin.exit(2)
             }
             session.start()

@@ -4,14 +4,23 @@ import Foundation
 /// Opt-in configuration for a second, headless real HostSession used only by
 /// an explicitly launched Debug candidate. Release builds reject the selector.
 struct DebugResidentHostConfiguration: Equatable, Sendable {
+    enum Mode: Equatable, Sendable { case r0, latency }
     static let argument = "--debug-r0-resident-host"
     static let identityEnvironmentKey = "REMOTE_DESKTOP_R0_HOST_ID"
+    static let latencyArgument = "--debug-latency-host"
+    static let latencyIdentityEnvironmentKey = "REMOTE_DESKTOP_LATENCY_HOST_ID"
     static let credentialService =
         "com.threadmark.remotedesktop.local-computer-use.r0-test.v1"
+    static let latencyCredentialService =
+        "com.threadmark.remotedesktop.local-computer-use.latency-test.v1"
 
+    let mode: Mode
     let hostID: String
     let lockIdentity: String
-    let hostDisplayName = "Remote Desktop R0 Test"
+    var hostDisplayName: String { mode == .r0 ? "Remote Desktop R0 Test" : "Remote Desktop Latency Test" }
+    var credentialServiceName: String { mode == .r0 ? Self.credentialService : Self.latencyCredentialService }
+    var allowsExternalComputerUseServices: Bool { mode == .r0 }
+    var allowsPersonalMemory: Bool { mode == .r0 }
 
     static func isSelected(
         arguments: [String] = CommandLine.arguments,
@@ -19,23 +28,31 @@ struct DebugResidentHostConfiguration: Equatable, Sendable {
     ) -> Bool {
         arguments.dropFirst().contains(argument)
             || environment[identityEnvironmentKey] != nil
+            || arguments.dropFirst().contains(latencyArgument)
+            || environment[latencyIdentityEnvironmentKey] != nil
     }
 
     static func parse(
         arguments: [String] = CommandLine.arguments,
         environment: [String: String] = ProcessInfo.processInfo.environment
     ) -> Self? {
-        guard isSelected(arguments: arguments, environment: environment),
-              Array(arguments.dropFirst()) == [argument],
-              let rawID = environment[identityEnvironmentKey],
+        let mode: Mode
+        let rawID: String?
+        if Array(arguments.dropFirst()) == [argument], environment[latencyIdentityEnvironmentKey] == nil {
+            mode = .r0; rawID = environment[identityEnvironmentKey]
+        } else if Array(arguments.dropFirst()) == [latencyArgument], environment[identityEnvironmentKey] == nil {
+            mode = .latency; rawID = environment[latencyIdentityEnvironmentKey]
+        } else { return nil }
+        guard let rawID,
               rawID.utf8.count == 36,
               let uuid = UUID(uuidString: rawID) else {
             return nil
         }
         let canonicalID = uuid.uuidString
         return Self(
+            mode: mode,
             hostID: canonicalID,
-            lockIdentity: "com.threadmark.remotedesktop.host.r0-test")
+            lockIdentity: mode == .r0 ? "com.threadmark.remotedesktop.host.r0-test" : "com.threadmark.remotedesktop.host.latency-test")
     }
 
     var taskLedgerURL: URL {
@@ -45,7 +62,7 @@ struct DebugResidentHostConfiguration: Equatable, Sendable {
             ?? FileManager.default.homeDirectoryForCurrentUser
                 .appendingPathComponent("Library/Application Support", isDirectory: true)
         return base
-            .appendingPathComponent("Remote Desktop Host R0 Test", isDirectory: true)
+            .appendingPathComponent(mode == .r0 ? "Remote Desktop Host R0 Test" : "Remote Desktop Host Latency Test", isDirectory: true)
             .appendingPathComponent("Computer Use Tasks", isDirectory: true)
             .appendingPathComponent("processed-prompts.json")
     }
