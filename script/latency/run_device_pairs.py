@@ -3,6 +3,8 @@
 import argparse
 from datetime import datetime, timezone
 import json
+import re
+import tempfile
 import os
 from pathlib import Path
 import plistlib
@@ -13,7 +15,7 @@ import sys
 import time
 import uuid
 
-from summarize_device_pairs import read_trace, selected_fixes, summarize
+from summarize_device_pairs import read_trace, segments, selected_fixes, summarize
 
 ROOT = Path(__file__).resolve().parents[2]
 RELEASE_BUILD = Path('/Users/michael/.codex/worktrees/remote-desktop-release/remote desktop/build')
@@ -150,6 +152,62 @@ def client_experiment_environment(args):
     return env
 
 
+# The client's lab collector uses UUID filenames and an 8 MB trace limit.
+TRACE_NAME = re.compile(r'client-[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\.jsonl\Z')
+TRACE_DIRECTORY = 'Library/Application Support/RemoteDesktopHost/Latency'
+
+
+def newest_client_trace(inventory):
+    """Select one bounded filename; content identity must still be verified."""
+    if (not isinstance(inventory, dict) or not isinstance(inventory.get('info'), dict)
+            or inventory['info'].get('outcome') != 'success'):
+        raise ValueError('Device file inventory was not successful.')
+    result = inventory.get('result')
+    files = result.get('files') if isinstance(result, dict) else None
+    if not isinstance(files, list) or len(files) > 2000:
+        raise ValueError('Device file inventory is missing or too large.')
+    candidates, names = [], set()
+    for item in files:
+        if not isinstance(item, dict) or not isinstance(item.get('relativePath'), str):
+            raise ValueError('Malformed device file inventory.')
+        name = item['relativePath']
+        if '/' in name or '\\' in name or name in ('.', '..'):
+            raise ValueError('Unsafe device inventory path.')
+        if not name.startswith('client-'):
+            continue
+        if not TRACE_NAME.fullmatch(name) or name in names:
+            raise ValueError('Ambiguous or invalid client trace name.')
+        names.add(name)
+        metadata, resources = item.get('metadata'), item.get('resources')
+        if (not isinstance(metadata, dict) or not isinstance(resources, dict)
+                or resources.get('isDirectory') is not False or resources.get('isSymbolicLink') is not False):
+            raise ValueError('Malformed client trace inventory entry.')
+        size, raw_date = metadata.get('size'), metadata.get('lastModDate')
+        if type(size) is not int or not 0 < size <= 8_000_000 or not isinstance(raw_date, str):
+            raise ValueError('Invalid client trace size or modification time.')
+        try:
+            modified = datetime.fromisoformat(raw_date.replace('Z', '+00:00'))
+        except ValueError as error:
+            raise ValueError('Invalid client trace modification time.') from error
+        if modified.tzinfo is None or modified.utcoffset() is None:
+            raise ValueError('Client trace modification time lacks timezone.')
+        candidates.append((modified, name))
+    if not candidates:
+        raise ValueError('No bounded client trace in device inventory.')
+    newest = max(date for date, _ in candidates)
+    matches = [name for date, name in candidates if date == newest]
+    if len(matches) != 1:
+        raise ValueError('Newest client trace is ambiguous.')
+    return matches[0]
+
+
+def verify_client_trace(path, run_id, fix):
+    rows = read_trace(path)
+    windows = segments(rows)
+    if len(windows) != 8 or any(begin.get('run') != run_id or begin.get('fix') != fix for begin, _ in windows):
+        raise ValueError('Client trace does not match the completed paired run.')
+
+
 def run(args):
     selected_fixes(args.fix)
     client_experiment_environment(args)  # Reject invalid baselines before any device action.
@@ -211,9 +269,18 @@ def run(args):
     for signum in (signal.SIGINT, signal.SIGTERM):
         signal.signal(signum, stop_requested)
 
-    def command(arguments, name, required=True):
+    def command(arguments, name, required=True, private=False):
         require_selected_ipad(args.device, expected_build)
         require_device_window(minimum_remaining=45)
+        if private:
+            try:
+                result = subprocess.run(arguments, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                        check=False, timeout=40)
+            except (subprocess.SubprocessError, OSError):
+                raise RuntimeError('Private device export failed.') from None
+            if required and result.returncode != 0:
+                raise RuntimeError('Private device export failed.')
+            return result.returncode == 0
         with (args.output / f'{name}.log').open('w') as log:
             result = subprocess.run(arguments, stdout=log, stderr=subprocess.STDOUT, check=required, timeout=40)
             return result.returncode == 0
@@ -285,26 +352,47 @@ def run(args):
                 except (OSError, ValueError, KeyError):
                     status = None
             if status and status.get('stage') in ('complete', 'aborted'):
-                snapshot = args.output / 'client-files'
-                command(['xcrun', 'devicectl', 'device', 'copy', 'from', '--device', args.device,
-                         '--domain-type', 'appDataContainer', '--domain-identifier', args.bundle_id,
-                         '--source', 'Library/Application Support/RemoteDesktopHost/Latency',
-                         '--destination', str(snapshot)], 'copy')
+                if status['stage'] == 'complete':
+                    if not isinstance(status.get('run'), str) or not status['run']:
+                        raise ValueError('Complete status lacks a paired run identity.')
+                    # Preserve the source observations before attempting device export.
+                    # SIGTERM remains the abort path for incomplete measurements.
+                    marker.send_signal(signal.SIGUSR1)
+                    marker_deadline = time.monotonic() + 10
+                    while marker.poll() is None:
+                        require_selected_ipad(args.device, expected_build)
+                        if time.monotonic() >= marker_deadline:
+                            raise ValueError('Marker did not finish.')
+                        time.sleep(.2)
+                    if marker.returncode or not marker_path.is_file():
+                        raise ValueError('Marker did not finish successfully.')
                 if status['stage'] == 'aborted':
-                    raise RuntimeError('The lab could not finish the requested arms; the client trace was retained.')
-                candidates = []
-                for path in snapshot.rglob('client-*.jsonl'):
+                    raise RuntimeError('The lab could not finish the requested arms.')
+                # A private inventory and one bounded file avoid large directory exports.
+                with tempfile.TemporaryDirectory(prefix='.client-export-', dir=args.output) as tmp:
+                    temporary = Path(tmp)
+                    inventory_file = temporary / 'inventory.json'
+                    command(['xcrun', 'devicectl', 'device', 'info', 'files', '--device', args.device,
+                             '--domain-type', 'appDataContainer', '--domain-identifier', args.bundle_id,
+                             '--subdirectory', TRACE_DIRECTORY, '--no-recurse', '--json-output', str(inventory_file)],
+                            'inventory', private=True)
+                    if not inventory_file.is_file() or inventory_file.stat().st_size > 2_000_000:
+                        raise ValueError('Device file inventory is unavailable or too large.')
                     try:
-                        rows = read_trace(path)
-                        if any(r.get('type') == 'lab_pair' and r.get('stage') == 'complete'
-                               and r.get('run') == status.get('run') for r in rows):
-                            candidates.append(path)
-                    except (ValueError, KeyError):
-                        continue
-                if len(candidates) != 1:
-                    raise ValueError('Expected one complete trace matching the current paired run.')
-                selected = args.output / 'client.jsonl'
-                selected.write_bytes(candidates[0].read_bytes())
+                        name = newest_client_trace(json.loads(inventory_file.read_text()))
+                    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+                        raise ValueError('Device file inventory is malformed.') from error
+                    copied_trace = temporary / 'client.jsonl'
+                    command(['xcrun', 'devicectl', 'device', 'copy', 'from', '--device', args.device,
+                             '--domain-type', 'appDataContainer', '--domain-identifier', args.bundle_id,
+                             '--source', TRACE_DIRECTORY + '/' + name, '--destination', str(copied_trace)],
+                            'copy', private=True)
+                    if copied_trace.is_symlink() or not copied_trace.is_file() or not 0 < copied_trace.stat().st_size <= 8_000_000:
+                        raise ValueError('Copied client trace is unavailable or too large.')
+                    copied_trace.chmod(0o600)
+                    verify_client_trace(copied_trace, status['run'], args.fix)
+                    selected = args.output / 'client.jsonl'
+                    copied_trace.replace(selected)
                 break
             # Only the small atomic status record crosses USB during timing.
             # Copy the bounded full trace after the last measured window.
@@ -316,17 +404,6 @@ def run(args):
                 time.sleep(min(.2, max(0, next_poll - time.monotonic())))
         if selected is None:
             raise ValueError('No complete four-pair session before the sweep deadline.')
-        # Ask the marker to write its complete timestamp file and exit, outside
-        # all eight measured windows. SIGTERM remains an abort path.
-        marker.send_signal(signal.SIGUSR1)
-        marker_deadline = time.monotonic() + 10
-        while marker.poll() is None:
-            require_selected_ipad(args.device, expected_build)
-            if time.monotonic() >= marker_deadline:
-                raise ValueError('Marker did not finish.')
-            time.sleep(.2)
-        if marker.returncode:
-            raise ValueError('Marker did not finish successfully.')
         result = summarize(marker_path, selected, args.host_traces, args.output / 'segments')
         (args.output / 'summary.json').write_text(json.dumps(result, indent=2) + '\n')
         print(json.dumps(result['median_paired_B_minus_A'], indent=2))

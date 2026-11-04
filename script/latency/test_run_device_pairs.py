@@ -187,6 +187,183 @@ class DevicePairSafetyTests(unittest.TestCase):
         terminate.assert_not_called()
         marker.terminate.assert_called_once()
 
+    def exercise_completion(self, statuses, *, fail_export=False, trace_run="run-1"):
+        import itertools
+        marker, attached = Mock(), Mock()
+        state = {'marker_done': False, 'console_done': False, 'token': None, 'status': 0, 'copies': 0}
+        marker.poll.side_effect = lambda: 0 if state['marker_done'] else None
+        marker.returncode = 0
+        attached.poll.side_effect = lambda: 0 if state['console_done'] else None
+        def marker_signal(sig):
+            self.assertEqual(sig, signal.SIGUSR1)
+            self.assertEqual(state['copies'], 0, 'Markers must be written before full device export')
+            (self.args.output / 'markers.json').write_text(json.dumps({'markers': [{'marker_id': 1, 'host_display_s': 10}]}))
+            state['marker_done'] = True
+        marker.send_signal.side_effect = marker_signal
+        attached.wait.side_effect = lambda timeout=None: state.update(console_done=True) or 0
+        def popen(command, **kwargs):
+            if command[0] == str(self.args.marker_binary):
+                kwargs['stdout'].write('MARKER_READY yes\n'); kwargs['stdout'].flush()
+                return marker
+            state['token'] = command[command.index('LatencyLabPairToken') + 1]
+            return attached
+        def command(command, **kwargs):
+            if 'info' in command and 'files' in command:
+                self.assertIn('--no-recurse', command)
+                self.assertEqual(command[command.index('--subdirectory') + 1], runner.TRACE_DIRECTORY)
+                self.assertEqual(kwargs.get('stdout'), subprocess.DEVNULL)
+                path = Path(command[command.index('--json-output') + 1])
+                path.write_text(json.dumps({'info': {'outcome': 'success'}, 'result': {'files': [{
+                    'relativePath': 'client-00000000-0000-0000-0000-000000000001.jsonl',
+                    'metadata': {'size': 5000, 'lastModDate': '2026-11-04T15:00:00Z'},
+                    'resources': {'isDirectory': False, 'isSymbolicLink': False}}]}}))
+                return SimpleNamespace(returncode=0)
+            if 'copy' not in command:
+                return SimpleNamespace(returncode=0)
+            source = command[command.index('--source') + 1]
+            destination = Path(command[command.index('--destination') + 1])
+            if source.endswith('pair-status.json'):
+                index = min(state['status'], len(statuses) - 1)
+                status = dict(statuses[index]); state['status'] += 1
+                status.setdefault('launchToken', state['token'])
+                status.setdefault('processIdentifier', 4321)
+                destination.write_text(json.dumps(status))
+            else:
+                self.assertEqual(source, runner.TRACE_DIRECTORY + '/client-00000000-0000-0000-0000-000000000001.jsonl')
+                self.assertEqual(kwargs.get('stdout'), subprocess.DEVNULL)
+                state['copies'] += 1
+                if fail_export: return SimpleNamespace(returncode=1)
+                rows = []
+                for i in range(1, 9):
+                    start = 100 + (i - 1) * 40
+                    event = {'type': 'lab_pair', 'run': trace_run, 'fix': 'F1', 'trial': i,
+                             'pair': (i + 1) // 2, 'arm': 'A' if i % 2 else 'B', 'peerNonce': None,
+                             'settings': {'f1Playout': i % 2 == 0, 'f1MaximumDelayMs': 0,
+                                          'f2Encoder': False, 'f3Sender': False, 'f4Renderer': False}}
+                    rows.extend([{**event, 'stage': 'requested', 'time': start - 6},
+                                 {**event, 'stage': 'begin', 'time': start},
+                                 {**event, 'stage': 'end', 'time': start + 30}])
+                rows.append({**event, 'stage': 'complete', 'time': start + 30})
+                destination.write_text(''.join(json.dumps(row) + '\n' for row in rows))
+            return SimpleNamespace(returncode=0)
+        def summarize(markers, client, traces, output):
+            self.assertEqual(json.loads(markers.read_text())['markers'][0]['host_display_s'], 10)
+            self.assertTrue(client.is_file())
+            from summarize_device_pairs import segments
+            rows = list(map(json.loads, client.read_text().splitlines()))
+            arms = [begin['arm'] for begin, _ in segments(rows)]
+            self.assertEqual(arms, ['A', 'B'] * 4)
+            return {'median_paired_B_minus_A': {}}
+        clock = itertools.count(0, 11)
+        with patch.object(runner.subprocess, 'Popen', side_effect=popen), \
+             patch.object(runner.subprocess, 'run', side_effect=command), \
+             patch.object(runner.signal, 'signal'), \
+             patch.object(runner.time, 'monotonic', side_effect=lambda: next(clock)), \
+             patch.object(runner.time, 'sleep'), \
+             patch.object(runner, 'summarize', side_effect=summarize) as summarizer:
+            try:
+                result = runner.run(self.args)
+                error = None
+            except (ValueError, RuntimeError, subprocess.CalledProcessError) as exc:
+                result, error = None, exc
+        return result, error, marker, attached, state, summarizer
+
+    def test_completed_marker_survives_client_copy_failure_and_owned_cleanup(self):
+        result, error, marker, attached, state, summary = self.exercise_completion(
+            [{'stage': 'complete', 'run': 'run-1'}], fail_export=True)
+        self.assertIsNone(result)
+        self.assertIsInstance(error, RuntimeError)
+        self.assertEqual(str(error), 'Private device export failed.')
+        self.assertEqual(json.loads((self.args.output / 'markers.json').read_text())['markers'][0]['host_display_s'], 10)
+        marker.send_signal.assert_called_once_with(signal.SIGUSR1)
+        marker.terminate.assert_not_called()
+        attached.send_signal.assert_called_once_with(signal.SIGINT)
+        summary.assert_not_called()
+        self.assertFalse((self.args.output / 'summary.json').exists())
+
+    def test_completed_copy_produces_summary_after_marker_flush(self):
+        result, error, marker, attached, state, summary = self.exercise_completion(
+            [{'stage': 'complete', 'run': 'run-1'}])
+        self.assertEqual(result, 0)
+        self.assertIsNone(error)
+        marker.send_signal.assert_called_once_with(signal.SIGUSR1)
+        summary.assert_called_once()
+        self.assertTrue((self.args.output / 'summary.json').exists())
+        self.assertEqual((self.args.output / 'client.jsonl').stat().st_mode & 0o777, 0o600)
+
+    def test_eight_window_trace_with_different_run_is_rejected_and_marker_retained(self):
+        result, error, marker, attached, state, summary = self.exercise_completion(
+            [{'stage': 'complete', 'run': 'run-1'}], trace_run='different-run')
+        self.assertIsNone(result)
+        self.assertIsInstance(error, ValueError)
+        marker.send_signal.assert_called_once_with(signal.SIGUSR1)
+        self.assertTrue((self.args.output / 'markers.json').is_file())
+        self.assertFalse((self.args.output / 'client.jsonl').exists())
+        summary.assert_not_called()
+
+    def test_stale_completion_and_aborted_status_do_not_finalize_marker(self):
+        result, error, marker, attached, state, summary = self.exercise_completion([
+            {'stage': 'complete', 'run': 'other', 'launchToken': 'stale'},
+            {'stage': 'aborted', 'run': 'run-1'}])
+        self.assertIsNone(result)
+        self.assertIsInstance(error, RuntimeError)
+        marker.send_signal.assert_not_called()
+        marker.terminate.assert_called_once()
+        summary.assert_not_called()
+        self.assertFalse((self.args.output / 'summary.json').exists())
+
+    def test_partial_status_then_abort_never_finalizes_or_summarizes(self):
+        result, error, marker, attached, state, summary = self.exercise_completion([
+            {'stage': 'begin', 'run': 'run-1'}, {'stage': 'aborted', 'run': 'run-1'}])
+        self.assertIsNone(result)
+        self.assertIsInstance(error, RuntimeError)
+        marker.send_signal.assert_not_called()
+        marker.terminate.assert_called_once()
+        summary.assert_not_called()
+        self.assertFalse((self.args.output / 'summary.json').exists())
+
+    def test_complete_without_run_identity_does_not_finalize_marker(self):
+        result, error, marker, attached, state, summary = self.exercise_completion([{'stage': 'complete'}])
+        self.assertIsNone(result)
+        self.assertIsInstance(error, ValueError)
+        marker.send_signal.assert_not_called()
+        marker.terminate.assert_called_once()
+        self.assertEqual(state['copies'], 0)
+        summary.assert_not_called()
+
+    def test_inventory_selects_newest_and_rejects_ambiguous_or_unsafe_entries(self):
+        import copy
+        def entry(suffix, date='2026-11-04T15:00:00Z', size=123):
+            return {'relativePath': f'client-00000000-0000-0000-0000-{suffix:012d}.jsonl',
+                    'metadata': {'size': size, 'lastModDate': date}, 'resources': {'isDirectory': False, 'isSymbolicLink': False}}
+        old, newest = entry(1), entry(2, '2026-11-04T15:00:01Z')
+        inv = {'info': {'outcome': 'success'}, 'result': {'files': [old, newest]}}
+        self.assertEqual(runner.newest_client_trace(inv), newest['relativePath'])
+        variants = [None, {}, {'info': [], 'result': {}},
+                    {'info': {'outcome': 'failure'}, 'result': {'files': []}},
+                    {'info': {'outcome': 'success'}, 'result': {'files': 'bad'}},
+                    {'info': {'outcome': 'success'}, 'result': {'files': [old, entry(3)]}},
+                    {'info': {'outcome': 'success'}, 'result': {'files': [old, old]}},
+                    {'info': {'outcome': 'success'}, 'result': {'files': [entry(4, size=8_000_001)]}},
+                    {'info': {'outcome': 'success'}, 'result': {'files': [entry(4, date='2026-11-04T15:00:00')]}},
+                    {'info': {'outcome': 'success'}, 'result': {'files': [{**old, 'relativePath': '../' + old['relativePath']}]}},
+                    {'info': {'outcome': 'success'}, 'result': {'files': [{**old, 'relativePath': 'client-evil.jsonl'}]}},
+                    {'info': {'outcome': 'success'}, 'result': {'files': [{**old, 'resources': {'isDirectory': True, 'isSymbolicLink': False}}]}},
+                    {'info': {'outcome': 'success'}, 'result': {'files': [{**old, 'resources': {'isDirectory': False, 'isSymbolicLink': True}}]}}]
+        for inv in variants:
+            with self.subTest(inventory=type(inv).__name__), self.assertRaises(ValueError):
+                runner.newest_client_trace(copy.deepcopy(inv))
+
+    def test_trace_requires_matching_run_and_all_eight_windows(self):
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / 'client.jsonl'
+            path.write_text(json.dumps({'type': 'lab_pair', 'stage': 'complete', 'run': 'wrong'}) + '\n')
+            with self.assertRaises(ValueError): runner.verify_client_trace(path, 'expected', 'F1')
+            path.write_text('{bad json}\n')
+            with self.assertRaises(ValueError): runner.verify_client_trace(path, 'expected', 'F1')
+
 class StageZeroRunnerTests(unittest.TestCase):
     def test_r60_requires_explicit_baseline_and_keeps_lab_flags(self):
         for f1 in ('on', 'off'):
