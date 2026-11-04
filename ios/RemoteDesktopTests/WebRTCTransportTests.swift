@@ -10,6 +10,31 @@ final class WebRTCTransportTests: XCTestCase {
     private let accountBinding = CloudKitAccountBinding(
         rawValue: String(repeating: "c", count: 64))!
 
+    func test_iceDiagnosticsCountOnlyCandidateKindsAndReportCompleteRelayConfiguration() {
+        var counts = ICECandidateDiagnosticCounts()
+        counts.record("candidate:1 1 udp 1 192.0.2.1 4567 typ host")
+        counts.record("candidate:2 1 udp 1 192.0.2.2 4567 typ srflx")
+        counts.record("candidate:3 1 udp 1 192.0.2.3 4567 typ prflx")
+        counts.record("candidate:4 1 udp 1 192.0.2.4 4567 typ relay")
+        counts.record("candidate:5 1 udp 1 192.0.2.5 4567 typ unrecognized")
+        counts.record("malformed")
+        XCTAssertEqual(counts.host, 1)
+        XCTAssertEqual(counts.serverReflexive, 1)
+        XCTAssertEqual(counts.peerReflexive, 1)
+        XCTAssertEqual(counts.relay, 1)
+        XCTAssertEqual(counts.unknown, 2)
+        XCTAssertFalse(counts.summary.contains("192.0.2"))
+        XCTAssertFalse(counts.summary.contains("4567"))
+
+        XCTAssertFalse(ICEConfig.fallback.hasCompleteTURNConfiguration)
+        XCTAssertFalse(ICEConfig(stunURLs: [], turnURLs: ["turn:example.invalid"],
+            turnUsername: "user", turnCredential: "").hasCompleteTURNConfiguration)
+        XCTAssertFalse(ICEConfig(stunURLs: [], turnURLs: ["stun:example.invalid"],
+            turnUsername: "user", turnCredential: "password").hasCompleteTURNConfiguration)
+        XCTAssertTrue(ICEConfig(stunURLs: [], turnURLs: ["turns:example.invalid"],
+            turnUsername: "user", turnCredential: "password").hasCompleteTURNConfiguration)
+    }
+
     func test_candidatePixelsPrecedeFrameReadinessWithoutGrantingInput() async throws {
         let connected = expectation(description: "candidate pixels transport")
         let transport = RecordingTargetTransport(connected: connected)

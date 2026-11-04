@@ -5,6 +5,12 @@ import UIKit
 import os
 
 extension ICEConfig {
+    /// Configuration completeness only; this does not prove relay reachability.
+    var hasCompleteTURNConfiguration: Bool {
+        turnURLs.contains { $0.lowercased().hasPrefix("turn:") || $0.lowercased().hasPrefix("turns:") }
+            && !(turnUsername ?? "").isEmpty && !(turnCredential ?? "").isEmpty
+    }
+
     var iceServers: [RTCIceServer] {
         var servers = [RTCIceServer(urlStrings: stunURLs)]
         if !turnURLs.isEmpty, let username = turnUsername, let credential = turnCredential {
@@ -15,6 +21,28 @@ extension ICEConfig {
         }
         return servers
     }
+}
+
+/// Counts only candidate kinds; the candidate text and network addresses are never retained.
+struct ICECandidateDiagnosticCounts: Equatable {
+    private(set) var host = 0, serverReflexive = 0, peerReflexive = 0, relay = 0, unknown = 0
+
+    mutating func record(_ candidate: String) {
+        let fields = candidate.prefix(2_048).split(whereSeparator: \.isWhitespace)
+        let kind: Substring? = fields.firstIndex(of: "typ").flatMap { index in
+            let next = fields.index(after: index)
+            return next < fields.endIndex ? fields[next] : nil
+        }
+        switch kind {
+        case "host": host = min(host + 1, 10_000)
+        case "srflx": serverReflexive = min(serverReflexive + 1, 10_000)
+        case "prflx": peerReflexive = min(peerReflexive + 1, 10_000)
+        case "relay": relay = min(relay + 1, 10_000)
+        default: unknown = min(unknown + 1, 10_000)
+        }
+    }
+
+    var summary: String { "host=\(host) srflx=\(serverReflexive) prflx=\(peerReflexive) relay=\(relay) unknown=\(unknown)" }
 }
 
 enum RemoteAudioSessionPolicy {
@@ -99,6 +127,10 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
     private let iceConnectTimeout: Duration = .seconds(25)
     private let connectionRecoveryTimeout: Duration = .seconds(12)
     private let mutedSystemVolumeThreshold: Float = 0.0625
+    private var localCandidateCounts = ICECandidateDiagnosticCounts()
+    private var remoteCandidateCounts = ICECandidateDiagnosticCounts()
+    private var diagnosticStateEvents = 0
+    private var diagnosticConnectionID = UUID().uuidString
 
     private var signaling: (any SignalingChannel)?
     private var peerConnection: RTCPeerConnection?
@@ -175,6 +207,10 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
     }
 
     func connect(pairingCode: String, expectedHostID: String?) async throws {
+        localCandidateCounts = .init()
+        remoteCandidateCounts = .init()
+        diagnosticStateEvents = 0
+        diagnosticConnectionID = UUID().uuidString
         isClosing = false
         didReportDisconnect = false
         connectedOnce = false
@@ -191,8 +227,10 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
         let signaling = signalingFactory(pairingCode, expectedHostID)
         self.signaling = signaling
         try await signaling.claim()
+        log.info("ICE id=\(self.diagnosticConnectionID, privacy: .public) stage=signaling_claimed")
 
         let iceConfig = await iceConfigProvider()
+        log.info("ICE id=\(self.diagnosticConnectionID, privacy: .public) stage=configuration turn_config_complete=\(iceConfig.hasCompleteTURNConfiguration, privacy: .public)")
         let peerConnection = try makePeerConnection(iceConfig: iceConfig)
         self.peerConnection = peerConnection
         if mediaPolicy.receivesHostAudio {
@@ -220,6 +258,7 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
                 "sdpType": "offer",
             ],
             ts: Date().timeIntervalSince1970))
+        log.info("ICE id=\(self.diagnosticConnectionID, privacy: .public) stage=offer_sent")
 
         pollTask?.cancel()
         pollTask = Task { [weak self] in
@@ -233,7 +272,7 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
             await MainActor.run {
                 guard let self, !self.isClosing, !self.connectedOnce else { return }
                 self.iceDeadlineTask = nil
-                self.finishDisconnect(reason: "Can't reach your computer — try putting both devices on the same Wi-Fi.", category: .peerConnection)
+                self.finishDisconnect(reason: "Can’t connect to your computer. Check that both devices are online and the host app is open, then try again.", category: .peerConnection)
             }
         }
     }
@@ -277,9 +316,22 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
         didReportDisconnect = true
         // Never log reason: it can contain remote or signaling-provided text.
         log.notice("transport ended category=\(category.rawValue, privacy: .public) sidecar=\(self.mediaPolicy == .computerUseVisualSidecar, privacy: .public) connectedOnce=\(self.connectedOnce, privacy: .public)")
+        logCandidateCounts(stage: "transport_ended")
         let callback = onDisconnect
         close(reason: reason, notifyRemote: false)
         callback?(reason)
+    }
+
+    private func logCandidateCounts(stage: String) {
+        log.info("ICE id=\(self.diagnosticConnectionID, privacy: .public) stage=\(stage, privacy: .public) local={\(self.localCandidateCounts.summary, privacy: .public)} remote={\(self.remoteCandidateCounts.summary, privacy: .public)}")
+    }
+
+    @discardableResult
+    private func logICEState(kind: String, value: String) -> Bool {
+        guard diagnosticStateEvents < 32 else { return false }
+        diagnosticStateEvents += 1
+        log.info("ICE id=\(self.diagnosticConnectionID, privacy: .public) \(kind, privacy: .public)=\(value, privacy: .public)")
+        return true
     }
 
     private func close(reason: String, notifyRemote: Bool) {
@@ -439,12 +491,14 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
                             RTCSessionDescription(type: .answer, sdp: sdp),
                             on: peerConnection)
                         answerApplied = true
+                        log.info("ICE id=\(self.diagnosticConnectionID, privacy: .public) stage=answer_applied")
                         loggedPendingRemoteICE = false
                         try await flushPendingRemoteICECandidates()
                     case .ice:
                         guard let candidate = iceCandidate(from: envelope.payload) else {
                             continue
                         }
+                        remoteCandidateCounts.record(candidate.sdp)
                         try await handleRemoteICECandidate(candidate)
                     case .bye:
                         finishDisconnect(reason: envelope.payload["reason"] ?? "Disconnected", category: .remoteBye)
@@ -584,7 +638,7 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
             await MainActor.run {
                 guard let self, !self.isClosing, self.connectedOnce else { return }
                 self.connectionRecoveryTask = nil
-                self.finishDisconnect(reason: "Can’t reconnect to your computer. Keep the host app open and check that both devices are on the same Wi-Fi.", category: .peerConnection)
+                self.finishDisconnect(reason: "Can’t reconnect to your computer. Check that both devices are online and the host app is open, then try again.", category: .peerConnection)
             }
         }
     }
@@ -727,8 +781,19 @@ extension WebRTCTransport: RTCPeerConnectionDelegate {
     nonisolated func peerConnection(_ peerConnection: RTCPeerConnection, didChange stateChanged: RTCSignalingState) {}
     nonisolated func peerConnection(_ peerConnection: RTCPeerConnection, didRemove stream: RTCMediaStream) {}
     nonisolated func peerConnectionShouldNegotiate(_ peerConnection: RTCPeerConnection) {}
-    nonisolated func peerConnection(_ peerConnection: RTCPeerConnection, didChange newState: RTCIceConnectionState) {}
-    nonisolated func peerConnection(_ peerConnection: RTCPeerConnection, didChange newState: RTCIceGatheringState) {}
+    nonisolated func peerConnection(_ peerConnection: RTCPeerConnection, didChange newState: RTCIceConnectionState) {
+        Task { @MainActor [weak self] in
+            guard let self, self.peerConnection === peerConnection, !self.isClosing else { return }
+            self.logICEState(kind: "connection_state", value: String(describing: newState))
+        }
+    }
+    nonisolated func peerConnection(_ peerConnection: RTCPeerConnection, didChange newState: RTCIceGatheringState) {
+        Task { @MainActor [weak self] in
+            guard let self, self.peerConnection === peerConnection, !self.isClosing else { return }
+            let logged = self.logICEState(kind: "gathering_state", value: String(describing: newState))
+            if logged && newState == .complete { self.logCandidateCounts(stage: "gathering_complete") }
+        }
+    }
     nonisolated func peerConnection(_ peerConnection: RTCPeerConnection, didRemove candidates: [RTCIceCandidate]) {}
 
     nonisolated func peerConnection(_ peerConnection: RTCPeerConnection, didChange stateChanged: RTCConnectionState) {
@@ -746,9 +811,9 @@ extension WebRTCTransport: RTCPeerConnectionDelegate {
                 sendHelloIfPossible()
             case .failed:
                 if !connectedOnce {
-                    finishDisconnect(reason: "Can't reach your computer — try putting both devices on the same Wi-Fi.", category: .peerConnection)
+                    finishDisconnect(reason: "Can’t connect to your computer. Check that both devices are online and the host app is open, then try again.", category: .peerConnection)
                 } else {
-                    finishDisconnect(reason: "The connection to your computer was lost. Check your Wi-Fi and try again.", category: .peerConnection)
+                    finishDisconnect(reason: "The connection to your computer was lost. Check that both devices are online and try again.", category: .peerConnection)
                 }
             case .disconnected:
                 invalidateInputPresentation()
@@ -773,6 +838,7 @@ extension WebRTCTransport: RTCPeerConnectionDelegate {
             guard let self, let signaling = self.signaling else {
                 return
             }
+            if self.peerConnection === peerConnection { self.localCandidateCounts.record(candidate.sdp) }
             do {
                 try await signaling.send(SignalingEnvelope(
                     role: .client,

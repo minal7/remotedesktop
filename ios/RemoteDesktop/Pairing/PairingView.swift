@@ -149,7 +149,7 @@ struct PairingView: View {
     private var searchingDevicesState: some View {
         ConnectionWaitNotice(
             title: "Searching for hosts…",
-            recovery: "Can't find your computer. Open the host app, use the same Apple Account, and check that both devices are on the same Wi-Fi.",
+            recovery: "Can’t find your computer. Open the host app, use the same Apple Account, and check that both devices are online.",
             retry: {
                 discovery.stop()
                 discovery.start()
