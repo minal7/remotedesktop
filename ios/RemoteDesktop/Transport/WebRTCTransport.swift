@@ -450,7 +450,7 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
         if let original = labPairOriginalConfiguration {
             if labPairRun?.finished == false {
                 latencyCollector?.trace(["type": "lab_pair_cancelled", "time": ProcessInfo.processInfo.systemUptime])
-                Self.writeLabPairStatus(["stage": "aborted", "reason": "transport_closed"])
+                Self.writeLabPairStatus(["stage": "aborted", "reason": "transport_closed"], collector: latencyCollector)
             }
             labPairRun = nil; labPairOriginalConfiguration = nil
             LatencyLabConfiguration.setRuntime(original)
@@ -599,7 +599,7 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
     }
 
     #if DEBUG
-    private static func writeLabPairStatus(_ fields: [String: Any]) {
+    private static func writeLabPairStatus(_ fields: [String: Any], collector: LatencyStatsCollector?) {
         guard let directory = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else { return }
         var status = fields
         status["processIdentifier"] = ProcessInfo.processInfo.processIdentifier
@@ -610,6 +610,9 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
         let record = status
         let url = directory.appendingPathComponent("RemoteDesktopHost/Latency/pair-status.json")
         labPairStatusQueue.async {
+            if let stage = record["stage"] as? String, stage == "complete" || stage == "aborted" {
+                collector?.flush()
+            }
             guard let data = try? JSONSerialization.data(withJSONObject: record) else { return }
             try? data.write(to: url, options: .atomic)
         }
@@ -637,7 +640,7 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
             case .trace(var fields):
                 fields["peerNonce"] = nonce
                 collector.trace(fields)
-                Self.writeLabPairStatus(fields)
+                Self.writeLabPairStatus(fields, collector: collector)
             }
         }
         if run.finished, let original = labPairOriginalConfiguration {
