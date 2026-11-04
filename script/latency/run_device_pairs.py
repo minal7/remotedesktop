@@ -133,7 +133,17 @@ def fixture_environment(photo):
 
 
 def client_experiment_environment(args):
-    env = {'LATENCY_LAB_F1_MAX_MS': str(args.f1_max_ms)}
+    r60_f1 = getattr(args, 'r60_f1', None)
+    fix = getattr(args, 'fix', None)
+    f1_max_ms = args.f1_max_ms
+    if fix == 'R60':
+        if r60_f1 not in ('on', 'off') or f1_max_ms not in (10, 20):
+            raise ValueError('R60 requires --r60-f1 on|off and --f1-max-ms 10|20.')
+    elif r60_f1 is not None:
+        raise ValueError('--r60-f1 is only valid for R60.')
+    env = {'LATENCY_LAB_F1_MAX_MS': str(f1_max_ms if f1_max_ms is not None else 0)}
+    if fix == 'R60':
+        env.update({'LATENCY_LAB': '1', 'LATENCY_LAB_R60_F1': '1' if r60_f1 == 'on' else '0'})
     if args.lab60:
         env.update({'LATENCY_LAB': '1', 'LATENCY_QOS_FPS': '60',
                     'LATENCY_QOS_PREFERENCE': 'fluency'})
@@ -142,6 +152,7 @@ def client_experiment_environment(args):
 
 def run(args):
     selected_fixes(args.fix)
+    client_experiment_environment(args)  # Reject invalid baselines before any device action.
     marker_env = fixture_environment(args.fixture_photo)
     if args.lab60 and args.fixture_photo is None:
         raise ValueError('LAB60 comparable runs require a licensed fixture photo.')
@@ -376,7 +387,8 @@ if __name__ == '__main__':
     parser.add_argument('--qa-flag', required=True, type=Path)
     parser.add_argument('--not-before', required=True, help='ISO 8601 device handoff time, with timezone')
     parser.add_argument('--fix', required=True, help='One fix, or sorted kept fixes joined by + for the combined check')
-    parser.add_argument('--f1-max-ms', type=int, choices=[0, 10, 20], default=0)
+    parser.add_argument('--f1-max-ms', type=int, choices=[0, 10, 20], default=None)
+    parser.add_argument('--r60-f1', choices=['on', 'off'], help='Retained F1 baseline for standalone R60')
     parser.add_argument('--marker-binary', required=True, type=Path)
     parser.add_argument('--fixture-photo', type=Path, help='Licensed photo for the alternating full-screen fixture')
     parser.add_argument('--lab60', action='store_true', help='Use the explicitly prepared 60 fps adaptive baseline')

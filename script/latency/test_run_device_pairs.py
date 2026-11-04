@@ -188,6 +188,22 @@ class DevicePairSafetyTests(unittest.TestCase):
         marker.terminate.assert_called_once()
 
 class StageZeroRunnerTests(unittest.TestCase):
+    def test_r60_requires_explicit_baseline_and_keeps_lab_flags(self):
+        for f1 in ('on', 'off'):
+            for delay in (10, 20):
+                args = SimpleNamespace(fix='R60', r60_f1=f1, f1_max_ms=delay, lab60=True)
+                env = runner.client_experiment_environment(args)
+                self.assertEqual(env['LATENCY_LAB'], '1')
+                self.assertEqual(env['LATENCY_LAB_R60_F1'], '1' if f1 == 'on' else '0')
+                self.assertEqual(env['LATENCY_LAB_F1_MAX_MS'], str(delay))
+                self.assertNotIn('LATENCY_RENDER_HINT_60', env)
+        for f1, delay in [(None, 10), ('on', None), ('off', 0), ('invalid', 10)]:
+            args = SimpleNamespace(fix='R60', r60_f1=f1, f1_max_ms=delay, lab60=False)
+            with self.subTest(f1=f1, delay=delay), self.assertRaises(ValueError):
+                runner.client_experiment_environment(args)
+        args = SimpleNamespace(fix='F1', r60_f1='on', f1_max_ms=10, lab60=False)
+        with self.assertRaises(ValueError): runner.client_experiment_environment(args)
+
     def test_fixture_requires_existing_readable_photo_and_sets_only_fixture_flags(self):
         with tempfile.TemporaryDirectory() as folder:
             photo=Path(folder)/'licensed.jpg'

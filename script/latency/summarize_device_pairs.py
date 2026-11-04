@@ -58,8 +58,10 @@ STATS_NUMERIC = {'rttFloorMs', 'currentRoundTripTime', 'captureWidth', 'captureH
                  'frameWidth', 'frameHeight', 'framesDecodedDelta', 'framesEncodedDelta',
                  'framesDroppedDelta', 'freezeCountDelta', 'packetsLostDelta',
                  'availableOutgoingBitrate', 'targetBitrate', 'packetSendMs', 'encodeMs',
-                 'jitterBufferMs', 'jitterBufferTargetMs', 'decodeMs', 'framesPerSecond'}
-FLAG_KEYS = {'f1Playout', 'f1MaximumDelayMs', 'f2Encoder', 'f3Sender', 'f4Renderer'}
+                 'jitterBufferMs', 'jitterBufferTargetMs', 'decodeMs', 'framesPerSecond',
+                 'bytesSentDelta', 'bytesReceivedDelta', 'packetsSentDelta', 'packetsReceivedDelta',
+                 'jitter'}
+FLAG_KEYS = {'f1Playout', 'f1MaximumDelayMs', 'f2Encoder', 'f3Sender', 'f4Renderer', 'renderHint60'}
 
 
 def safe_implementation(value):
@@ -114,9 +116,19 @@ def sanitize_stage0(rows):
                         **({'decodeTime': row['decodeTime']} if finite_number(row.get('decodeTime')) else {})})
         elif kind == 'clock' and all(finite_number(row.get(k)) for k in ('time', 'offset', 'rtt', 'uncertainty', 'samples')):
             out.append({'type': kind, **{k: row[k] for k in ('time', 'offset', 'rtt', 'uncertainty', 'samples')}})
+        elif kind == 'lab_pair' and row.get('fix') == 'R60' and row.get('stage') in ('requested', 'begin', 'end', 'complete') and isinstance(row.get('settings'), dict):
+            settings = {k: v for k, v in row['settings'].items() if k in FLAG_KEYS and
+                        ((k != 'f1MaximumDelayMs' and type(v) is bool) or
+                         (k == 'f1MaximumDelayMs' and type(v) is int and v in (10, 20)))}
+            if (finite_number(row.get('time')) and row.get('arm') in ('A', 'B') and
+                    type(row.get('trial')) is int and 1 <= row['trial'] <= 8 and
+                    type(row.get('pair')) is int and 1 <= row['pair'] <= 4):
+                out.append({'type': kind, 'fix': 'R60', 'stage': row['stage'], 'time': row['time'],
+                            'arm': row['arm'], 'trial': row['trial'], 'pair': row['pair'], 'settings': settings})
         elif kind == 'lab_configuration' and isinstance(row.get('settings'), dict):
             settings = {k: v for k, v in row['settings'].items() if k in FLAG_KEYS and
-                        (type(v) is bool or (k == 'f1MaximumDelayMs' and type(v) is int and v in (0, 10, 20)))}
+                        ((k != 'f1MaximumDelayMs' and type(v) is bool) or
+                         (k == 'f1MaximumDelayMs' and type(v) is int and v in (0, 10, 20)))}
             if finite_number(row.get('time')): out.append({'type': kind, 'time': row['time'], 'settings': settings})
         elif kind == 'stream_event' and row.get('event') == 'bandwidth_estimate_drop':
             before, after = row.get('beforeBps'), row.get('afterBps')
@@ -140,6 +152,47 @@ def sanitize_fixture_markers(markers):
         if type(row.get('scene_transition')) is bool: item['scene_transition'] = row['scene_transition']
         out.append(item)
     return out
+
+
+def network_intervals(rows, start=None, stop=None):
+    """Observed video RTP deltas per poll; estimates are not link capacity."""
+    stats = sorted((r for r in rows if r.get('type') == 'stats' and finite_number(r.get('time'))),
+                   key=lambda r: r['time'])
+    result = []
+    def nonnegative(value):
+        return value if finite_number(value) and value >= 0 else None
+    for old, current in zip(stats, stats[1:]):
+        dt = current['time'] - old['time']
+        if not 0 < dt <= 5 or (start is not None and old['time'] < start) or (stop is not None and current['time'] >= stop):
+            continue
+        values = current.get('values') if isinstance(current.get('values'), dict) else {}
+        reports = current.get('reports') if isinstance(current.get('reports'), dict) else {}
+        streams = []
+        for report in reports.values():
+            if not isinstance(report, dict): continue
+            sent = nonnegative(report.get('bytesSentDelta'))
+            received = nonnegative(report.get('bytesReceivedDelta'))
+            packets_sent = nonnegative(report.get('packetsSentDelta'))
+            packets_received = nonnegative(report.get('packetsReceivedDelta'))
+            packets_lost = nonnegative(report.get('packetsLostDelta'))
+            jitter = nonnegative(report.get('jitter'))
+            if all(v is None for v in (sent, received, packets_sent, packets_received, packets_lost, jitter)):
+                continue
+            streams.append({'sent_bps': sent * 8 / dt if sent is not None else None,
+                            'received_bps': received * 8 / dt if received is not None else None,
+                            'packets_sent_delta': packets_sent, 'packets_received_delta': packets_received,
+                            'packets_lost_delta': packets_lost,
+                            'rtp_jitter_ms': jitter * 1000 if jitter is not None else None,
+                            'sender_packet_send_ms': nonnegative(report.get('packetSendMs')),
+                            'target_bitrate_estimate_bps': nonnegative(report.get('targetBitrate'))})
+        rtt = nonnegative(values.get('currentRoundTripTime'))
+        result.append({'time': current['time'], 'interval_s': dt, 'streams': streams,
+                       'streams_missing': not streams,
+                       'rtt_ms': rtt * 1000 if rtt is not None else None,
+                       'sender_packet_send_ms': nonnegative(values.get('packetSendMs')),
+                       'target_bitrate_estimate_bps': nonnegative(values.get('targetBitrate')),
+                       'available_outgoing_estimate_bps': nonnegative(values.get('availableOutgoingBitrate'))})
+    return {'intervals': result, 'note': 'Video RTP byte deltas per poll; estimates are not measured capacity. Missing values are null.'}
 
 
 def stage0_window(client, host, begin, end, detail, source_markers):
@@ -217,6 +270,8 @@ def stage0_window(client, host, begin, end, detail, source_markers):
             'rtt_floor_ms': min(window_rtts) if window_rtts else None,
             'lifetime_rtt_floor_ms': min(lifetime_floors) if lifetime_floors else None,
             'flags': {k: v for k, v in begin['settings'].items() if k in FLAG_KEYS},
+            'network_host': network_intervals(host),
+            'network_client': network_intervals(client, start, stop),
             'presented_frames_per_second': per_second, 'decoded_fps_by_interval': decoded,
             'locked_25ms': locked, 'render_split': render_split,
             'presented_window_fps': len(times) / (stop - start) if render_coverage else None,
@@ -233,8 +288,9 @@ def stage0_window(client, host, begin, end, detail, source_markers):
 def selected_fixes(value):
     parts = value.split('+') if isinstance(value, str) else []
     if (not parts or len(set(parts)) != len(parts) or parts != sorted(parts)
-            or any(part not in ('F1', 'F2', 'F3', 'F4') for part in parts)):
-        raise ValueError('Expected one fix or unique, sorted fixes joined by +.')
+            or any(part not in ('F1', 'F2', 'F3', 'F4', 'R60') for part in parts)
+            or ('R60' in parts and len(parts) != 1)):
+        raise ValueError('Expected R60 alone, or unique sorted F1–F4 fixes joined by +.')
     return parts
 
 
@@ -264,11 +320,17 @@ def segments(rows):
     fixes = selected_fixes(fix)
     first_settings = begins[0]['settings']
     f1_delay = fixes == ['F1'] and first_settings.get('f1Playout') is True
-    incremental = fixes != ['F1']
+    r60 = fixes == ['R60']
+    incremental = fixes != ['F1'] and not r60
+    if r60 and (type(first_settings.get('f1Playout')) is not bool or
+                type(first_settings.get('f1MaximumDelayMs')) is not int or
+                first_settings['f1MaximumDelayMs'] not in (10, 20) or
+                any(first_settings.get(k) is not False for k in ('f2Encoder', 'f3Sender', 'f4Renderer'))):
+        raise ValueError('R60 requires an explicit F1 baseline and F2/F3/F4 off.')
     if (incremental or f1_delay) and (first_settings.get('f1Playout') is not True or
                                       first_settings.get('f1MaximumDelayMs') != 10):
         raise ValueError('F1 baseline must use a 10 ms maximum delay.')
-    keys = [{'F1': 'f1Playout', 'F2': 'f2Encoder', 'F3': 'f3Sender', 'F4': 'f4Renderer'}[part]
+    keys = [{'F1': 'f1Playout', 'F2': 'f2Encoder', 'F3': 'f3Sender', 'F4': 'f4Renderer', 'R60': 'renderHint60'}[part]
             for part in fixes if not (part == 'F1' and (incremental or f1_delay))]
     result, fixed = [], None
     for index, (begin, end) in enumerate(zip(begins, ends), 1):
@@ -298,6 +360,8 @@ def segments(rows):
             raise ValueError('A nonselected setting changed during the pairs.')
         fixed = settings
         result.append((begin, end))
+    if r60 and completed[0].get('settings') != result[-1][0]['settings']:
+        raise ValueError('R60 completion does not retain the final measured settings.')
     if (not finite_number(completed[0].get('time')) or completed[0]['time'] != result[-1][1]['time']
             or completed[0].get('trial') != 8 or completed[0].get('pair') != 4 or completed[0].get('arm') != 'B'):
         raise ValueError('Completion does not follow the final measured window.')
@@ -376,7 +440,11 @@ def summarize(host_marker, client_trace, host_directory, output_directory):
         metrics['freezes_per_minute'] = sum(freeze_values) * 2 if freeze_values else None
         selected_host = [r for r in host if hstart <= r.get('time', -1) < hstop]
         stage0 = stage0_window(client, selected_host, begin, end, detail, selected_markers)
+        if begin['fix'] == 'R60':
+            # Requested state is not proof that the display link applied it.
+            stage0['render_hint_application'] = 'unverified'
         missing_evidence = []
+        if begin['fix'] == 'R60': missing_evidence.append('render hint application unverified')
         if stage0['pair_status'] != 'observed': missing_evidence.append('selected pair missing or changed')
         if stage0['rtt_floor_ms'] is None: missing_evidence.append('RTT floor missing')
         if not all(k in stage0['flags'] for k in ('f1Playout', 'f1MaximumDelayMs', 'f2Encoder', 'f3Sender', 'f4Renderer')):

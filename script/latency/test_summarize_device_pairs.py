@@ -175,6 +175,65 @@ class DevicePairSummaryTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 segments(rows)
 
+    def test_r60_all_eight_arms_hold_explicit_f1_and_retain_sanitized_hint(self):
+        from summarize_device_pairs import sanitize_stage0
+        for f1 in (False, True):
+            for delay in (10, 20):
+                rows = self.fixture()
+                for row in rows:
+                    if row.get('type') == 'lab_pair':
+                        row['fix'] = 'R60'
+                        row['settings'] = {'f1Playout': f1, 'f1MaximumDelayMs': delay,
+                                           'f2Encoder': False, 'f3Sender': False,
+                                           'f4Renderer': False, 'renderHint60': row['arm'] == 'B'}
+                windows = segments(rows)
+                self.assertEqual([a['settings']['renderHint60'] for a, _ in windows], [False, True] * 4)
+                self.write_rows(self.client_path, rows)
+                result = self.run_summary()
+                for run in result['runs']:
+                    self.assertEqual(run['stage0']['render_hint_application'], 'unverified')
+                    self.assertIn('render hint application unverified', run['stage0']['missing_comparison_evidence'])
+                    self.assertFalse(run['stage0']['comparison_evidence_complete'])
+                    self.assertEqual(run['stage0']['flags']['renderHint60'], run['arm'] == 'B')
+                    self.assertIn('presented_fps', run['metrics'])
+                    self.assertIn('decoded_fps', run['metrics'])
+                    self.assertAlmostEqual(run['metrics']['present_interval_p95_ms'], 30)
+                safe = sanitize_stage0(rows)
+                events = [r for r in safe if r['type'] == 'lab_pair']
+                self.assertTrue(events)
+                self.assertTrue(all(type(r['settings'].get('renderHint60')) is bool for r in events))
+                self.assertTrue(all('peerNonce' not in r and 'run' not in r for r in events))
+
+    def test_r60_rejects_mixed_fixes_and_inconsistent_or_missing_settings(self):
+        import copy
+        for invalid in ('R60+F1', 'F1+R60', 'R60+F4', 'R60+R60'):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError): selected_fixes(invalid)
+        rows = self.fixture()
+        for row in rows:
+            if row.get('type') == 'lab_pair':
+                row['fix'] = 'R60'
+                row['settings'] = {'f1Playout': False, 'f1MaximumDelayMs': 20,
+                                   'f2Encoder': False, 'f3Sender': False,
+                                   'f4Renderer': False, 'renderHint60': row['arm'] == 'B'}
+        for key, value in [('f1Playout', None), ('f1MaximumDelayMs', 0),
+                           ('f2Encoder', True), ('f3Sender', True), ('f4Renderer', True),
+                           ('renderHint60', None)]:
+            bad = copy.deepcopy(rows)
+            for r in bad:
+                if r.get('type') == 'lab_pair': r['settings'][key] = value
+            with self.subTest(key=key), self.assertRaises(ValueError): segments(bad)
+        bad = copy.deepcopy(rows)
+        for r in bad:
+            if r.get('type') == 'lab_pair' and r['trial'] == 4: r['settings']['f1Playout'] = True
+        with self.assertRaises(ValueError): segments(bad)
+        bad = copy.deepcopy(rows)
+        for r in bad:
+            if r.get('type') == 'lab_pair' and r['trial'] == 6: r['settings']['renderHint60'] = False
+        with self.assertRaises(ValueError): segments(bad)
+        bad = copy.deepcopy(rows)
+        next(r for r in bad if r.get('stage') == 'complete')['settings']['renderHint60'] = False
+        with self.assertRaises(ValueError): segments(bad)
+
     def test_clock_uses_latest_valid_recent_offset_and_rejects_stale_or_invalid(self):
         rows = [{'type': 'clock', 'time': 90, 'offset': 5, 'rtt': .1, 'uncertainty': .01, 'samples': 50},
                 {'type': 'clock', 'time': 99, 'offset': 7, 'rtt': .2, 'uncertainty': .01, 'samples': 50},
@@ -305,6 +364,45 @@ class StageZeroMetricsTests(unittest.TestCase):
         self.assertEqual(out['pair_status'],'unverified')
         self.assertEqual(out['rtt_floor_ms'],60)
         self.assertEqual(out['lifetime_rtt_floor_ms'],1)
+
+    def test_network_interval_reports_actual_deltas_units_missing_and_privacy(self):
+        from summarize_device_pairs import network_intervals, sanitize_stage0
+        rows = [
+            {'type': 'stats', 'side': 'host', 'time': 9, 'values': {}, 'reports': {'old': {'bytesSentDelta': 999}}},
+            {'type': 'stats', 'side': 'host', 'time': 10, 'values': {}, 'reports': {}},
+            {'type': 'stats', 'side': 'host', 'time': 12, 'values': {'currentRoundTripTime': .025,
+                'availableOutgoingBitrate': 1200000, 'targetBitrate': 900000, 'packetSendMs': 8},
+             'reports': {'secret-stream-id': {'bytesSentDelta': 250000, 'packetsSentDelta': 200,
+                'packetsLostDelta': 4, 'jitter': .006, 'packetSendMs': 7, 'targetBitrate': 850000,
+                'candidate': 'private-address'}}},
+            {'type': 'stats', 'side': 'host', 'time': 20, 'values': {}, 'reports': {}},
+            {'type': 'stats', 'side': 'host', 'time': 21, 'values': {}, 'reports': {'another': {
+                'bytesReceivedDelta': 1000, 'packetsReceivedDelta': 10, 'packetsLostDelta': -1, 'jitter': True}}},
+            {'type': 'stats', 'side': 'host', 'time': 22, 'values': {}, 'reports': {'next': {
+                'bytesSentDelta': -1, 'bytesReceivedDelta': True, 'packetsSentDelta': float('nan')}}},
+        ]
+        out = network_intervals(rows, 10, 22)
+        self.assertEqual(len(out['intervals']), 2)  # No boundary-crossing or >5-second gap.
+        first, second = out['intervals']
+        self.assertEqual(first['interval_s'], 2)
+        self.assertEqual(first['streams'][0]['sent_bps'], 1000000)
+        self.assertIsNone(first['streams'][0]['received_bps'])
+        self.assertEqual(first['streams'][0]['packets_sent_delta'], 200)
+        self.assertEqual(first['streams'][0]['packets_lost_delta'], 4)
+        self.assertEqual(first['streams'][0]['rtp_jitter_ms'], 6)
+        self.assertEqual(first['rtt_ms'], 25)
+        self.assertEqual(first['target_bitrate_estimate_bps'], 900000)
+        self.assertEqual(first['available_outgoing_estimate_bps'], 1200000)
+        self.assertEqual(second['streams'][0]['received_bps'], 8000)
+        self.assertIsNone(second['streams'][0]['packets_lost_delta'])
+        self.assertIsNone(second['streams'][0]['rtp_jitter_ms'])
+        self.assertIsNone(second['rtt_ms'])
+        sanitized = sanitize_stage0(rows)
+        text = json.dumps([out, sanitized])
+        self.assertNotIn('secret-stream-id', text)
+        self.assertNotIn('private-address', text)
+        self.assertIn('bytesSentDelta', text)
+        self.assertIn('packetsReceivedDelta', text)
 
     def test_fixture_sanitizer_keeps_scene_transition_without_private_payload(self):
         from summarize_device_pairs import sanitize_fixture_markers
