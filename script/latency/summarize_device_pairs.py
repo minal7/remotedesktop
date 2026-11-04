@@ -30,6 +30,14 @@ def present_interval_p95_ms(rows):
     return quantile([(b - a) * 1000 for a, b in zip(times, times[1:])], .95)
 
 
+def selected_fixes(value):
+    parts = value.split('+') if isinstance(value, str) else []
+    if (not parts or len(set(parts)) != len(parts) or parts != sorted(parts)
+            or any(part not in ('F1', 'F2', 'F3', 'F4') for part in parts)):
+        raise ValueError('Expected one fix or unique, sorted fixes joined by +.')
+    return parts
+
+
 def host_time(rows, client_time):
     clocks = [r for r in rows if r.get('type') == 'clock' and finite_number(r.get('samples'))
               and r['samples'] >= 50 and all(finite_number(r.get(k)) for k in ('time', 'offset', 'rtt', 'uncertainty'))
@@ -53,7 +61,15 @@ def segments(rows):
         raise ValueError('Eight complete windows in one session are required.')
     run = completed[0]['run']
     fix = completed[0]['fix']
-    key = {'F1': 'f1Playout', 'F2': 'f2Encoder', 'F3': 'f3Sender', 'F4': 'f4Renderer'}[fix]
+    fixes = selected_fixes(fix)
+    first_settings = begins[0]['settings']
+    f1_delay = fixes == ['F1'] and first_settings.get('f1Playout') is True
+    incremental = fixes != ['F1']
+    if (incremental or f1_delay) and (first_settings.get('f1Playout') is not True or
+                                      first_settings.get('f1MaximumDelayMs') != 10):
+        raise ValueError('F1 baseline must use a 10 ms maximum delay.')
+    keys = [{'F1': 'f1Playout', 'F2': 'f2Encoder', 'F3': 'f3Sender', 'F4': 'f4Renderer'}[part]
+            for part in fixes if not (part == 'F1' and (incremental or f1_delay))]
     result, fixed = [], None
     for index, (begin, end) in enumerate(zip(begins, ends), 1):
         requested = events[(index - 1) * 3]
@@ -72,8 +88,12 @@ def segments(rows):
         if result and requested['time'] < result[-1][1]['time']:
             raise ValueError('A new trial was requested before the previous window ended.')
         settings = dict(begin['settings'])
-        if settings.pop(key) is not (index % 2 == 0):
-            raise ValueError('The selected toggle must alternate A off, B on.')
+        if f1_delay:
+            if settings.pop('f1MaximumDelayMs', None) != (20 if index % 2 == 0 else 10):
+                raise ValueError('F1 delay comparison must alternate 10 ms and 20 ms.')
+        for key in keys:
+            if settings.pop(key, None) is not (index % 2 == 0):
+                raise ValueError('Every selected toggle must alternate A off, B on.')
         if fixed is not None and settings != fixed:
             raise ValueError('A nonselected setting changed during the pairs.')
         fixed = settings

@@ -16,6 +16,8 @@ struct LatencyLabPairRun {
     }
 
     private let fix: String
+    private let fixes: Set<String>
+    private let f1DelayComparison: Bool
     private let baseline: LatencyLabConfiguration
     private let runID = UUID()
     private var phase: Phase = .initial
@@ -25,10 +27,14 @@ struct LatencyLabPairRun {
     var finished: Bool { if case .finished = phase { return true }; return false }
 
     init?(fix: String, maximumDelayMs: Int) {
-        guard ["F1", "F2", "F3", "F4"].contains(fix), [0, 10, 20].contains(maximumDelayMs) else { return nil }
+        guard let fixes = LatencyLabConfiguration.pairedFixes(fix),
+              [0, 10, 20].contains(maximumDelayMs) else { return nil }
         var baseline = LatencyLabConfiguration()
-        baseline.f1MaximumDelayMs = maximumDelayMs
-        self.fix = fix; self.baseline = baseline; self.configuration = baseline
+        let delayComparison = fixes == ["F1"] && maximumDelayMs == 20
+        baseline.f1Playout = fixes != ["F1"] || delayComparison
+        baseline.f1MaximumDelayMs = baseline.f1Playout ? 10 : maximumDelayMs
+        self.fix = fix; self.fixes = fixes; self.f1DelayComparison = delayComparison
+        self.baseline = baseline; self.configuration = baseline
     }
 
     /// Only the explicitly requested launch argument pair opts in.
@@ -86,13 +92,11 @@ struct LatencyLabPairRun {
     private func requestedConfiguration(for trial: Int) -> LatencyLabConfiguration {
         var result = baseline
         guard trial.isMultiple(of: 2) else { return result }
-        switch fix {
-        case "F1": result.f1Playout = true
-        case "F2": result.f2Encoder = true
-        case "F3": result.f3Sender = true
-        case "F4": result.f4Renderer = true
-        default: break
-        }
+        if fixes.contains("F1") { result.f1Playout = true }
+        if f1DelayComparison { result.f1MaximumDelayMs = 20 }
+        result.f2Encoder = fixes.contains("F2")
+        result.f3Sender = fixes.contains("F3")
+        result.f4Renderer = fixes.contains("F4")
         return result
     }
 

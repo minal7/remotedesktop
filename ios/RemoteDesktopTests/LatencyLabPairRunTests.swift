@@ -3,6 +3,18 @@ import XCTest
 @testable import RemoteDesktop
 
 final class LatencyLabPairRunTests: XCTestCase {
+    func testTraceLimitFollowsPairRunValidation() {
+        for fix in ["F1", "F4", "F1+F4", "F1+F2+F3+F4"] {
+            XCTAssertEqual(LatencyStatsCollector.traceLimit(arguments: ["LatencyProbe", "LatencyLabPairFix", fix]), 8_000_000)
+        }
+        for fix in ["", "F1+", "+F4", "F4+F1", "F1+F1", "F5", "F1,F4"] {
+            XCTAssertEqual(LatencyStatsCollector.traceLimit(arguments: ["LatencyProbe", "LatencyLabPairFix", fix]), 1_000_000)
+        }
+        XCTAssertEqual(LatencyStatsCollector.traceLimit(arguments: ["LatencyLabPairFix", "F1+F4"]), 1_000_000)
+        XCTAssertEqual(LatencyStatsCollector.traceLimit(arguments: ["LatencyProbe", "LatencyLabPairFix"]), 1_000_000)
+        XCTAssertEqual(LatencyStatsCollector.traceLimit(arguments: ["LatencyProbe"]), 1_000_000)
+    }
+
     private func events(_ actions: [LatencyLabPairRun.Action]) -> [[String: Any]] {
         actions.compactMap { if case let .trace(value) = $0 { return value }; return nil }
     }
@@ -26,7 +38,8 @@ final class LatencyLabPairRunTests: XCTestCase {
             let next = run.tick(now: 36, ready: true, currentConfiguration: baseline)
             let selected = try XCTUnwrap(applied(next).first)
             XCTAssertEqual(selected.f1MaximumDelayMs, 10)
-            XCTAssertEqual([selected.f1Playout, selected.f2Encoder, selected.f3Sender, selected.f4Renderer].filter { $0 }.count, 1)
+            XCTAssertTrue(selected.f1Playout)
+            XCTAssertEqual([selected.f1Playout, selected.f2Encoder, selected.f3Sender, selected.f4Renderer].filter { $0 }.count, fix == "F1" ? 1 : 2)
             switch fix {
             case "F1": XCTAssertTrue(selected.f1Playout)
             case "F2": XCTAssertTrue(selected.f2Encoder)
@@ -55,6 +68,49 @@ final class LatencyLabPairRunTests: XCTestCase {
         XCTAssertEqual(events(ended).first?["time"] as? Double, 50)
         XCTAssertEqual(events(ended).last?["time"] as? Double, 53)
         XCTAssertTrue(try XCTUnwrap(applied(ended).first).f1Playout)
+    }
+
+    func testCombinedCheckRequiresCanonicalFixesAndRestoresF1Baseline() throws {
+        for invalid in ["", "F1+", "+F4", "F1+F1", "F4+F1", "F1+F5", "F1,F4"] {
+            XCTAssertNil(LatencyLabPairRun(fix: invalid, maximumDelayMs: 10), invalid)
+        }
+        var run = try XCTUnwrap(LatencyLabPairRun(fix: "F1+F4", maximumDelayMs: 10))
+        _ = run.tick(now: 0, ready: false, currentConfiguration: .init())
+        var now = 0.0
+        for trial in 1...8 {
+            let config = run.configuration
+            XCTAssertTrue(config.f1Playout)
+            XCTAssertEqual(config.f4Renderer, trial.isMultiple(of: 2))
+            XCTAssertFalse(config.f2Encoder)
+            XCTAssertFalse(config.f3Sender)
+            XCTAssertEqual(config.f1MaximumDelayMs, 10)
+            _ = run.tick(now: now + 1, ready: true, currentConfiguration: config)
+            let begin = events(run.tick(now: now + 6, ready: true, currentConfiguration: config))
+            XCTAssertEqual(begin.first?["fix"] as? String, "F1+F4")
+            let end = run.tick(now: now + 36, ready: true, currentConfiguration: config)
+            if trial == 8 {
+                let restored = try XCTUnwrap(applied(end).last)
+                XCTAssertTrue(restored.f1Playout)
+                XCTAssertFalse(restored.f4Renderer)
+                XCTAssertEqual(restored.f1MaximumDelayMs, 10)
+            }
+            now += 36
+        }
+        XCTAssertTrue(run.finished)
+    }
+
+    func testF1DelayComparisonKeepsF1OnAndCompares10To20() throws {
+        var run = try XCTUnwrap(LatencyLabPairRun(fix: "F1", maximumDelayMs: 20))
+        _ = run.tick(now: 0, ready: false, currentConfiguration: .init())
+        let baseline = run.configuration
+        XCTAssertTrue(baseline.f1Playout)
+        XCTAssertEqual(baseline.f1MaximumDelayMs, 10)
+        _ = run.tick(now: 1, ready: true, currentConfiguration: baseline)
+        _ = run.tick(now: 6, ready: true, currentConfiguration: baseline)
+        let next = run.tick(now: 36, ready: true, currentConfiguration: baseline)
+        let candidate = try XCTUnwrap(applied(next).first)
+        XCTAssertTrue(candidate.f1Playout)
+        XCTAssertEqual(candidate.f1MaximumDelayMs, 20)
     }
 
     func testUnsupportedBAbortsAfterWaitingAndRestoresBaseline() throws {

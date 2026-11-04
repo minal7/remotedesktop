@@ -3,7 +3,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from summarize_device_pairs import host_time, present_interval_p95_ms, read_trace, segments, summarize
+from summarize_device_pairs import host_time, present_interval_p95_ms, read_trace, segments, selected_fixes, summarize
 
 
 class DevicePairSummaryTests(unittest.TestCase):
@@ -117,6 +117,56 @@ class DevicePairSummaryTests(unittest.TestCase):
         begin['settings'] = {**begin['settings'], 'f2Encoder': True}
         with self.assertRaises(ValueError):
             segments(bad)
+
+    def test_combined_check_requires_every_selected_toggle_and_canonical_names(self):
+        for invalid in ('', 'F1+', '+F4', 'F1+F1', 'F4+F1', 'F1+F5', 'F1,F4', None):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                selected_fixes(invalid)
+        self.assertEqual(selected_fixes('F1+F4'), ['F1', 'F4'])
+        rows = self.fixture()
+        for row in rows:
+            if row.get('type') == 'lab_pair':
+                row['fix'] = 'F1+F4'
+                row['settings'] = {**row['settings'], 'f1Playout': True, 'f1MaximumDelayMs': 10,
+                                   'f4Renderer': row['arm'] == 'B'}
+        self.assertEqual(len(segments(rows)), 8)
+        self.write_rows(self.client_path, rows)
+        result = self.run_summary()
+        self.assertEqual(result['fix'], 'F1+F4')
+        self.assertEqual(result['pairs'], 4)
+        # A partial application throughout B is not a valid combined arm.
+        for row in rows:
+            if row.get('type') == 'lab_pair' and row.get('trial') == 2:
+                row['settings']['f4Renderer'] = False
+        with self.assertRaises(ValueError):
+            segments(rows)
+
+    def test_f1_delay_comparison_requires_10_vs_20_with_f1_on(self):
+        rows = self.fixture()
+        for row in rows:
+            if row.get('type') == 'lab_pair':
+                row['settings'] = {**row['settings'], 'f1Playout': True,
+                                   'f1MaximumDelayMs': 20 if row['arm'] == 'B' else 10}
+        self.assertEqual(len(segments(rows)), 8)
+        bad = next(row for row in rows if row.get('stage') == 'begin' and row.get('trial') == 2)
+        bad['settings'] = {**bad['settings'], 'f1MaximumDelayMs': 10}
+        with self.assertRaises(ValueError):
+            segments(rows)
+
+    def test_incremental_fix_requires_f1_on_in_both_arms(self):
+        for fix, key in [('F2', 'f2Encoder'), ('F4', 'f4Renderer')]:
+            rows = self.fixture()
+            for row in rows:
+                if row.get('type') == 'lab_pair':
+                    row['fix'] = fix
+                    row['settings'] = {**row['settings'], 'f1Playout': True, 'f1MaximumDelayMs': 10,
+                                       key: row['arm'] == 'B'}
+            self.assertEqual(len(segments(rows)), 8)
+            for row in rows:
+                if row.get('type') == 'lab_pair' and row['arm'] == 'A':
+                    row['settings']['f1Playout'] = False
+            with self.assertRaises(ValueError):
+                segments(rows)
 
     def test_clock_uses_latest_valid_recent_offset_and_rejects_stale_or_invalid(self):
         rows = [{'type': 'clock', 'time': 90, 'offset': 5, 'rtt': .1, 'uncertainty': .01, 'samples': 50},
