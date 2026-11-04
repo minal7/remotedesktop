@@ -2524,6 +2524,70 @@ final class ComputerUseTests: XCTestCase {
         XCTAssertNil(manager.classifyWebRTCPeer(senderID: "OTHER-PEER"))
     }
 
+    func test_initialSidecarAuthorizationPreservesHeldApproval() async throws {
+        try await checkSidecarAuthorizationDuringApproval(interruption: nil)
+    }
+
+    func test_sidecarAuthorizationCannotUndoInputOrRevocationDuringApproval() async throws {
+        try await checkSidecarAuthorizationDuringApproval(interruption: "input")
+        try await checkSidecarAuthorizationDuringApproval(interruption: "revocation")
+    }
+
+    private func checkSidecarAuthorizationDuringApproval(interruption: String?) async throws {
+        let executor = ImmediateComputerUseExecutor(results: [
+            .approvalRequired(message: "Delete the selected item",
+                action: .key(usage: 0x4C, modifiers: 0),
+                continuation: .init(taskID: "", nonce: UUID()))
+        ])
+        let channel = FakeHostComputerUseChannel()
+        let url = temporaryLedgerURL()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        var actions: [ComputerUsePredictedAction] = []
+        let manager = HostComputerUseManager(experimentalEnabled: { true }, injector: InputInjector(),
+            executor: executor, taskLedger: ComputerUseTaskLedger(fileURL: url),
+            allowsExternalServices: false,
+            approvalTargetProvider: { _ in ComputerUseApprovalTargetSnapshot(
+                context: "fixture", applicationID: "com.threadmark.tests.fixture", accessibilityIdentity: "fixture") },
+            actionPerformer: { actions.append($0) }, channelFactory: { _ in channel })
+        defer { manager.stop() }
+        let prompt = makeEnvelope(id: "sidecar-approval-\(interruption ?? "attach")", kind: .prompt, body: "Delete the selected item")
+        XCTAssertTrue(manager.authorizeLocalPeer(senderID: prompt.senderID))
+        XCTAssertTrue(manager.handle(prompt, channel: channel))
+        await waitUntil { if case .awaitingApproval = manager.activity { true } else { false } }
+        await waitUntil { await channel.sentMessages().contains { $0.kind == .approvalRequest } }
+        let messages = await channel.sentMessages()
+        let envelope = try XCTUnwrap(messages.first { $0.kind == .approvalRequest })
+        let approval = try ComputerUseApprovalRequest.decodeBody(envelope.body)
+        XCTAssertNil(manager.classifyWebRTCPeer(senderID: "OTHER-PEER"))
+        XCTAssertTrue(manager.activateWebRTCPeer(senderID: prompt.senderID, generation: 1, classification: .localComputerUseSidecar))
+        if interruption == "input" {
+            let receipt = try XCTUnwrap(manager.recordUserInputForIntervention())
+            manager.applyUserInputIntervention(receipt)
+        } else if interruption == "revocation" {
+            XCTAssertTrue(manager.blockActionsForWebRTCDeauthorization(senderID: prompt.senderID, generation: 1))
+        }
+        manager.applyPeerAuthorization(senderID: prompt.senderID, authorized: true,
+            supportsOrderedComputerUseControls: true, peerGeneration: 1, epoch: manager.nextPeerAuthorizationEpoch())
+        XCTAssertTrue(actions.isEmpty, "Sidecar attachment must never execute the proposed action")
+        if interruption == nil {
+            guard manager.activity == .awaitingApproval(approval.message) else {
+                XCTFail("The initial sidecar must preserve the held approval; got \(manager.activity)")
+                return
+            }
+            let denial = ComputerUseApprovalResponse(requestID: approval.requestID, approved: false)
+            XCTAssertTrue(manager.handle(makeEnvelope(kind: .approvalResponse, body: try denial.encodedBody()), channel: channel))
+            await waitUntil { manager.activity == .idle }
+        } else {
+            XCTAssertEqual(manager.activity, .paused)
+            let stale = ComputerUseApprovalResponse(requestID: approval.requestID, approved: true)
+            XCTAssertTrue(manager.handle(makeEnvelope(kind: .approvalResponse, body: try stale.encodedBody()), channel: channel))
+            await Task.yield()
+            XCTAssertEqual(manager.activity, .paused)
+        }
+        XCTAssertTrue(actions.isEmpty)
+        XCTAssertEqual(executor.callCount, 1)
+    }
+
     func test_sidecarLossPausesTaskAndPreservesLANAuthorization() async {
         let executor = SuspendingComputerUseExecutor()
         let channel = FakeHostComputerUseChannel()

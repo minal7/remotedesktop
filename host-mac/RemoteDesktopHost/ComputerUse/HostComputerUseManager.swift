@@ -3190,6 +3190,11 @@ final class ComputerUseActionGate: @unchecked Sendable {
         lock.withLock { value }
     }
 
+    /// Intervention clears held approval ownership under this same lock.
+    func requiresInterventionOnPeerAuthorization(preservingHeldApproval: Bool) -> Bool {
+        lock.withLock { !value && !(preservingHeldApproval && approvalPending) }
+    }
+
     var hasPendingInputIntervention: Bool {
         lock.withLock { pendingInputIntervention != nil }
     }
@@ -4969,7 +4974,12 @@ final class HostComputerUseManager: ObservableObject {
             // A disconnect closes the gate synchronously off-main. Even if a
             // newer reconnect callback reaches MainActor first, preserve that
             // intervention as a paused task requiring an explicit Resume.
-            if !actionGate.allowsActions {
+            let initialSameOwnerSidecarApproval = activeWebRTCPeer.classification == .localComputerUseSidecar
+                && localAuthorizedPeerID == senderID
+                && webRTCAuthorizedPeerID == nil
+                && supportsOrderedComputerUseControls
+                && pendingApproval?.context.envelope.senderID == senderID
+            if actionGate.requiresInterventionOnPeerAuthorization(preservingHeldApproval: initialSameOwnerSidecarApproval) {
                 switch activity {
                 case .working, .awaitingApproval:
                     Self.interventionLog.notice("cause=peer_authorized_gate_closed")
