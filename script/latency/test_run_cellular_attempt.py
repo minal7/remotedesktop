@@ -20,6 +20,17 @@ class CellularAttemptTests(unittest.TestCase):
             data['device_id'] = runner.guard.IPAD_ID; data['host_id'] = 'invalid'; path.write_text(json.dumps(data))
             with self.assertRaises(ValueError): runner.private_config(path)
 
+    def test_client_environment_pins_all_experiments_for_each_mode(self):
+        for mode in ('baseline', 'mapped', 'wifi'):
+            with self.subTest(mode=mode):
+                env = runner.client_environment(mode)
+                self.assertEqual(env['LATENCY_LAB'], '1')
+                self.assertEqual(env['CONNECTIVITY_DIAGNOSTICS'], '1')
+                self.assertEqual(env['LATENCY_LAB_F1'], '1' if mode == 'wifi' else '0')
+                self.assertEqual(env['LATENCY_LAB_F1_MAX_MS'], '10' if mode == 'wifi' else '0')
+                for key in ('LATENCY_LAB_F2', 'LATENCY_LAB_F3', 'LATENCY_LAB_F4'):
+                    self.assertEqual(env[key], '0')
+
     def test_new_attempt_selected_and_multiple_refused(self):
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder)
@@ -75,8 +86,7 @@ class CellularAttemptTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             marker = root / 'marker'; marker.touch(); marker.chmod(0o700)
-            warmup = root / 'warmup'; warmup.touch(); warmup.chmod(0o700)
-            args = SimpleNamespace(config=root / 'config', marker=marker, warmup=warmup,
+            args = SimpleNamespace(config=root / 'config', marker=marker,
                 client_app=root / 'app', timeout=2, mode='baseline', output=root / 'output')
             process = Mock(); process.poll.return_value = None
             def snapshot(attempt, destination):
@@ -90,19 +100,24 @@ class CellularAttemptTests(unittest.TestCase):
                  patch.object(runner.guard, 'require_selected_ipad'), \
                  patch.object(runner.Attempt, 'install'), \
                  patch.object(runner.Attempt, 'snapshot', autospec=True, side_effect=snapshot), \
-                 patch.object(runner.Attempt, 'spawn', return_value=process), \
+                 patch.object(runner.Attempt, 'spawn', return_value=process) as spawn, \
                  patch.object(runner.Attempt, 'cleanup') as cleanup:
                 result = runner.run(args)
             self.assertEqual(result, {'status': 'partial', 'diagnostics': {'failure_stage': 'ice_checking'}, 'measurement': None})
             cleanup.assert_called_once()
+            spawn.assert_called_once()
+            self.assertEqual(spawn.call_args.args[0][:4], ['xcrun', 'devicectl', 'device', 'process'])
+            self.assertNotIn('LocalUnixClock', str(spawn.call_args))
+            command = spawn.call_args.args[0]
+            launch_env = json.loads(command[command.index('--environment-variables') + 1])
+            self.assertEqual(launch_env, runner.client_environment('baseline'))
 
     def test_wifi_returns_first_video_and_pair_without_clock(self):
         from types import SimpleNamespace
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             marker = root / 'marker'; marker.touch(); marker.chmod(0o700)
-            warmup = root / 'warmup'; warmup.touch(); warmup.chmod(0o700)
-            args = SimpleNamespace(config=root / 'config', marker=marker, warmup=warmup,
+            args = SimpleNamespace(config=root / 'config', marker=marker,
                 client_app=root / 'app', timeout=2, mode='wifi', output=root / 'output')
             process = Mock(); process.poll.return_value = None
             events = [dict(type='connectivity', event='attempt_start', attempt='x', time=1),
@@ -126,6 +141,37 @@ class CellularAttemptTests(unittest.TestCase):
             self.assertEqual(result['diagnostics']['selected_pair']['remoteType'], 'host')
             self.assertIsNone(result['measurement'])
             clock.assert_not_called()
+
+    def test_mapped_attempt_starts_marker_only_after_fresh_protocol_clock(self):
+        from types import SimpleNamespace
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            marker = root / 'marker'; marker.touch(); marker.chmod(0o700)
+            args = SimpleNamespace(config=root / 'config', marker=marker, client_app=root / 'app',
+                                   timeout=2, mode='mapped', output=root / 'output')
+            client = Mock(); client.poll.return_value = None
+            marker_process = Mock(returncode=0); marker_process.poll.return_value = 0
+            clock_trace = root / 'fresh-client.jsonl'
+            def snapshot(attempt, destination):
+                destination.mkdir(parents=True, exist_ok=True)
+            with patch.object(runner, 'private_config', return_value=('ipad', 'private')), \
+                 patch.object(runner.guard, 'require_device_window', return_value=9003), \
+                 patch.object(runner.guard, 'require_selected_ipad'), \
+                 patch.object(runner.Attempt, 'install'), \
+                 patch.object(runner.Attempt, 'snapshot', autospec=True, side_effect=snapshot), \
+                 patch.object(runner.Attempt, 'spawn', side_effect=[client, marker_process]) as spawn, \
+                 patch.object(runner.Attempt, 'cleanup'), \
+                 patch.object(runner, 'current_connectivity', return_value={'time_to_video_ms': 1}), \
+                 patch.object(runner, 'recent_client', return_value=clock_trace) as fresh_clock, \
+                 patch.object(runner.time, 'sleep'):
+                runner.run(args)
+            fresh_clock.assert_called_once()
+            self.assertEqual(spawn.call_count, 2)
+            self.assertEqual(spawn.call_args_list[0].args[0][0], 'xcrun')
+            self.assertEqual(spawn.call_args_list[1].args[0], [str(marker)])
+            command = spawn.call_args_list[0].args[0]
+            launch_env = json.loads(command[command.index('--environment-variables') + 1])
+            self.assertEqual(launch_env, runner.client_environment('mapped'))
 
     def test_already_exited_console_terminates_exact_owned_pid(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -170,7 +216,7 @@ class CellularAttemptTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             binary = root / 'binary'; binary.touch(); binary.chmod(0o700)
-            args = SimpleNamespace(config=root / 'config', marker=binary, warmup=binary, output=root)
+            args = SimpleNamespace(config=root / 'config', marker=binary, output=root)
             with patch.object(runner, 'private_config', return_value=('ipad', 'private')), \
                  patch.object(runner.guard, 'require_device_window', return_value=9003), \
                  patch.object(runner.guard, 'require_selected_ipad'):

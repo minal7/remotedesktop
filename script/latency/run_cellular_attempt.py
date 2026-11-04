@@ -135,7 +135,7 @@ class Attempt:
     def __init__(self, device, build):
         self.device = device
         self.build = build
-        self.client = self.warmup = self.marker = None
+        self.client = self.marker = None
         self.launch_json = None
         self.spawning = False
         self.stop_pending = False
@@ -246,17 +246,23 @@ class Attempt:
             if self.client.poll() is None:
                 self.client.kill(); self.client.wait()
         self.stop_child(self.marker)
-        self.stop_child(self.warmup)
         if failure: raise RuntimeError('Could not confirm client cleanup')
+
+
+def client_environment(mode):
+    lan = mode == 'wifi'
+    return {'LATENCY_LAB': '1', 'CONNECTIVITY_DIAGNOSTICS': '1',
+            'LATENCY_LAB_F1': '1' if lan else '0',
+            'LATENCY_LAB_F1_MAX_MS': '10' if lan else '0',
+            'LATENCY_LAB_F2': '0', 'LATENCY_LAB_F3': '0', 'LATENCY_LAB_F4': '0'}
 
 
 def run(args):
     device, host = private_config(args.config)
     build = guard.require_device_window()
     guard.require_selected_ipad(device, build)
-    for binary in (args.marker, args.warmup):
-        if not binary.is_file() or not os.access(binary, os.X_OK):
-            raise ValueError('Required existing lab binary unavailable')
+    if not args.marker.is_file() or not os.access(args.marker, os.X_OK):
+        raise ValueError('Required existing lab binary unavailable')
     args.output.mkdir(mode=0o700, parents=False, exist_ok=False)
     attempt = Attempt(device, build)
     prior_handlers = {sig: signal.signal(sig, attempt.signal_handler) for sig in (signal.SIGINT, signal.SIGTERM)}
@@ -270,12 +276,10 @@ def run(args):
         previous_connectivity = {p.name for p in before.rglob('connectivity-*.jsonl')}
         previous_clients = {p.name for p in before.rglob('client-*.jsonl')}
         started = time.monotonic()
-        attempt.warmup = attempt.spawn([str(args.warmup)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        attempt.check_deferred()
         attempt.launch_json = root / 'launch.json'
         attempt.client = attempt.spawn(['xcrun', 'devicectl', 'device', 'process', 'launch',
             '--device', device, '--console', '--terminate-existing', '--json-output', str(attempt.launch_json),
-            '--environment-variables', json.dumps({'LATENCY_LAB': '1', 'CONNECTIVITY_DIAGNOSTICS': '1'}),
+            '--environment-variables', json.dumps(client_environment(args.mode)),
             guard.CLIENT_BUNDLE, 'LatencyProbe', 'LatencyProbeHostID', host],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         attempt.check_deferred()
@@ -285,7 +289,7 @@ def run(args):
         snapshot = root / 'snapshot'
         while time.monotonic() < deadline:
             attempt.check()
-            if attempt.client.poll() is not None or attempt.warmup.poll() is not None:
+            if attempt.client.poll() is not None:
                 raise ValueError('Lab process ended before readiness')
             attempt.snapshot(snapshot)
             preserve_snapshot(snapshot, previous_connectivity, previous_clients, args.output)
@@ -307,7 +311,6 @@ def run(args):
                 attempt.check(); time.sleep(.2)
         else:
             return {'status': 'partial', 'diagnostics': evidence or {}, 'measurement': None}
-        attempt.stop_child(attempt.warmup); attempt.warmup = None
         attempt.marker = attempt.spawn([str(args.marker)], env={**os.environ,
             'LATENCY_HOST_TRACE': str(marker_file), 'LATENCY_SECONDS': '60'},
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -352,7 +355,6 @@ def main():
     p.add_argument('--config', type=Path, required=True)
     p.add_argument('--client-app', type=Path, required=True)
     p.add_argument('--marker', type=Path, required=True)
-    p.add_argument('--warmup', type=Path, required=True)
     p.add_argument('--timeout', type=int, default=120, choices=range(1, 181))
     args = p.parse_args()
     try:
