@@ -54,27 +54,37 @@ final class EODStopLiveE2ETests: XCTestCase {
         print("EOD_STOP_BEGIN scenario=\(scenario.rawValue) utc=\(timestamp()) host=\(hostLabel) prompt=\(prompt)")
         send.tap()
         let card = app.descendants(matching: .any)["computer-use-approval-card"]
-        let progress = app.descendants(matching: .any)["computer-use-progress-history"]
         let stop = app.buttons["computer-use-stop-task"]
+        let status = app.staticTexts["computer-use-status"]
+        let resume = app.buttons["computer-use-resume-ai"]
+        func isActiveRunningState() -> Bool {
+            !card.exists && !resume.exists && status.exists
+                && status.label == "Your Mac is working on it…"
+                && stop.exists && stop.label == "Stop current task" && stop.isHittable
+        }
         var observedExactUserMessage = false
         let ready = try wait(seconds: 60, app: app) {
             if userMessages.count == priorUsers + 1 { observedExactUserMessage = true }
             guard observedExactUserMessage else { return false }
             switch scenario {
             case .approval: return card.exists && self.isExactFirstUseApproval(in: app, appName: appName)
-            case .running: return progress.exists && !card.exists && stop.exists && stop.isHittable
+            case .running: return isActiveRunningState()
             }
         }
-        capture(app, label: "\(scenario.rawValue)-before-stop")
-        guard ready else { throw fail("The intended running or approval state was not observed; no Stop was sent.") }
+        guard ready else {
+            capture(app, label: "\(scenario.rawValue)-before-stop")
+            throw fail("The intended running or approval state was not observed; no Stop was sent.")
+        }
         try requireNoRealAlert(app, label: "before-stop")
         guard observedExactUserMessage,
-              (scenario == .approval ? card.exists && isExactFirstUseApproval(in: app, appName: appName) : !card.exists && progress.exists),
+              (scenario == .approval ? card.exists && isExactFirstUseApproval(in: app, appName: appName)
+                  : userMessages.count == priorUsers + 1 && isActiveRunningState()),
               stop.exists && stop.isHittable else {
+            capture(app, label: "\(scenario.rawValue)-state-changed")
             throw fail("The intended state or its Stop control changed; no Stop was sent.")
         }
-        let start = ProcessInfo.processInfo.systemUptime
         let startedUTC = timestamp()
+        let start = ProcessInfo.processInfo.systemUptime
         stop.tap()
         let deadline = start + 2
         var observedAt: TimeInterval?
