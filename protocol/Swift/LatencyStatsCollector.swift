@@ -68,13 +68,25 @@ final class LatencyStatsCollector: @unchecked Sendable {
     private var pending = 0
     private var overflowed = false
     private let writer: DispatchQueue?
-    private let limit = 1_000_000
+    private let limit: Int
     private let url: URL?
 
     init(side: String, enabled: Bool = LatencyStatsCollector.enabled, traceURL: URL? = nil) {
         self.side = side
         self.active = enabled
         self.writer = enabled ? DispatchQueue(label: "latency.trace.writer") : nil
+        #if DEBUG && os(iOS)
+        // Eight measured windows share one client collector. Keep the normal
+        // one-megabyte bound everywhere else, including every host peer.
+        let arguments = ProcessInfo.processInfo.arguments
+        let pairIndex = arguments.firstIndex(of: "LatencyLabPairFix")
+        let paired = arguments.contains("LatencyProbe") && pairIndex.map {
+            arguments.indices.contains($0 + 1) && ["F1", "F2", "F3", "F4"].contains(arguments[$0 + 1])
+        } == true
+        self.limit = paired ? 8_000_000 : 1_000_000
+        #else
+        self.limit = 1_000_000
+        #endif
         #if DEBUG
         if let traceURL { url = traceURL }
         else if enabled, let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first {

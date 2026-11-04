@@ -137,7 +137,15 @@ final class Observer: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sen
             MainActor.assumeIsolated { pattern.id = (pattern.id % 65534) + 1; pattern.needsDisplay = true }
         }
         print("MARKER_READY geometry=\(markerX),\(markerY),\(cell),\(w),\(h)"); fflush(stdout)
-        try await Task.sleep(for: .seconds(duration))
+        // The paired-session controller ends the source after its final arm.
+        // SIGTERM still aborts without turning partial data into a full run.
+        let sleeper = Task { try await Task.sleep(for: .seconds(duration)) }
+        signal(SIGUSR1, SIG_IGN)
+        let finishSignal = DispatchSource.makeSignalSource(signal: SIGUSR1, queue: .main)
+        finishSignal.setEventHandler { sleeper.cancel() }
+        finishSignal.resume()
+        try? await sleeper.value
+        finishSignal.cancel()
         timer?.invalidate(); try await observer.stream?.stopCapture()
         let rows = observer.snapshot()
         let result: [String: Any] = ["kind": "device_host_marker", "clock": "host_monotonic_seconds", "duration_s": duration, "initial_marker_observed_before_timing": true, "geometry": ["x": markerX, "y": markerY, "cell": cell, "screen_width": w, "screen_height": h], "markers": rows]

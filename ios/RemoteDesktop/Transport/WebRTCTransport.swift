@@ -111,6 +111,9 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
     private var labLastHello: HostHello?
     private var labActiveNonce: String?
     private var labObserver: NSObjectProtocol?
+    private var labPairRun: LatencyLabPairRun?
+    private var labPairOriginalConfiguration: LatencyLabConfiguration?
+    private static let labPairStatusQueue = DispatchQueue(label: "latency.pair.status")
 
     func debugVideoStatistics() async -> String {
         guard let peer = peerConnection, !isClosing else { return "Video unavailable" }
@@ -260,6 +263,13 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
         diagnosticStateEvents = 0
         diagnosticConnectionID = UUID().uuidString
         #if DEBUG
+        if mediaPolicy == .remoteSession {
+            let original = LatencyLabConfiguration.current
+            labPairRun = LatencyLabPairRun.make(arguments: ProcessInfo.processInfo.arguments,
+                                               maximumDelayMs: original.f1MaximumDelayMs)
+            labPairOriginalConfiguration = labPairRun == nil ? nil : original
+            if let configuration = labPairRun?.configuration { LatencyLabConfiguration.setRuntime(configuration) }
+        }
         if f1FactoryConfigured {
             // A reused transport must not carry a previous host's trial into
             // the next host's initial, capability-unknown connection.
@@ -437,6 +447,14 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
         #endif
         isClosing = true
         #if DEBUG
+        if let original = labPairOriginalConfiguration {
+            if labPairRun?.finished == false {
+                latencyCollector?.trace(["type": "lab_pair_cancelled", "time": ProcessInfo.processInfo.systemUptime])
+                Self.writeLabPairStatus(["stage": "aborted", "reason": "transport_closed"])
+            }
+            labPairRun = nil; labPairOriginalConfiguration = nil
+            LatencyLabConfiguration.setRuntime(original)
+        }
         previousDebugVideoSample = nil
         latencyTask?.cancel(); latencyTask = nil
         latencyPings.removeAll(); latencySamples.removeAll()
@@ -581,6 +599,53 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
     }
 
     #if DEBUG
+    private static func writeLabPairStatus(_ fields: [String: Any]) {
+        guard let directory = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else { return }
+        var status = fields
+        status["processIdentifier"] = ProcessInfo.processInfo.processIdentifier
+        let arguments = ProcessInfo.processInfo.arguments
+        if let index = arguments.firstIndex(of: "LatencyLabPairToken"), arguments.indices.contains(index + 1) {
+            status["launchToken"] = arguments[index + 1]
+        }
+        let record = status
+        let url = directory.appendingPathComponent("RemoteDesktopHost/Latency/pair-status.json")
+        labPairStatusQueue.async {
+            guard let data = try? JSONSerialization.data(withJSONObject: record) else { return }
+            try? data.write(to: url, options: .atomic)
+        }
+    }
+
+    private func advanceLabPairRun(collector: LatencyStatsCollector) {
+        guard var run = labPairRun, !run.finished else { return }
+        let requested = run.configuration
+        let expected = LatencyLabSelection(f1MaximumDelayMs: requested.f1Playout ? requested.f1MaximumDelayMs : nil,
+                                          f2: requested.f2Encoder, f3: requested.f3Sender, f4: requested.f4Renderer)
+        let supported = labLastHello.map { LatencyF1Policy.selection(configuration: requested, hello: $0) }
+        let ready = answerApplied && directInputState.isReady && dataChannel?.readyState == .open
+            && labPending == nil && labApplied == expected && supported == expected
+            && hasReportedRendererFrame && latencySamples.count == 50
+            && RemoteVideoLatencyProbe.shared.hasRecentMarker()
+        let actions = run.tick(now: ProcessInfo.processInfo.systemUptime, ready: ready,
+                               currentConfiguration: LatencyLabConfiguration.current)
+        labPairRun = run
+        // A handoff can change the nonce only after this synchronous batch.
+        // Bind end/begin events to the peer that actually served that window.
+        let nonce: Any = labActiveNonce as Any? ?? NSNull()
+        for action in actions {
+            switch action {
+            case .apply(let configuration): LatencyLabConfiguration.setRuntime(configuration)
+            case .trace(var fields):
+                fields["peerNonce"] = nonce
+                collector.trace(fields)
+                Self.writeLabPairStatus(fields)
+            }
+        }
+        if run.finished, let original = labPairOriginalConfiguration {
+            labPairOriginalConfiguration = nil
+            LatencyLabConfiguration.setRuntime(original)
+        }
+    }
+
     private func reconcileLabConfiguration() {
         latencyCollector?.trace(["type": "lab_configuration", "time": ProcessInfo.processInfo.systemUptime,
                                  "side": "client", "source": "runtime", "settings": LatencyLabConfiguration.current.traceValues])
@@ -774,6 +839,7 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
             LatencyBatteryMonitoringLease.shared.release(batteryLease)
         }
         while !Task.isCancelled, !isClosing {
+            advanceLabPairRun(collector: collector)
             if (!LatencyStatsCollector.resourcesOnly || cycle % 10 == 0), let peer = peerConnection {
                 peer.statistics { report in
                     let reports = report.statistics.values.map { LatencyStatsReport(id: $0.id, type: $0.type, values: $0.values) }
