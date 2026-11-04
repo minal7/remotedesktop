@@ -193,6 +193,10 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
     private(set) var pathSupportsIPv4 = true
     private(set) var pathSupportsIPv6 = false
     private var diagnosticAttemptEnd = ICEDiagnosticAttemptEnd()
+    #if DEBUG
+    private var didEmitConnectivityPresented = false
+    private var connectivityCollector: LatencyStatsCollector?
+    #endif
     private var diagnosticElapsed: Int { Int((ProcessInfo.processInfo.systemUptime - diagnosticStarted) * 1000) }
 
     private var signaling: (any SignalingChannel)?
@@ -338,6 +342,15 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
                                  "configured": false, "effective": "unverified", "stage": "initial"])
         #endif
         diagnosticStarted = ProcessInfo.processInfo.systemUptime
+        #if DEBUG
+        didEmitConnectivityPresented = false
+        if LatencyStatsCollector.enabled && ProcessInfo.processInfo.environment["CONNECTIVITY_DIAGNOSTICS"] == "1" {
+            connectivityCollector = LatencyStatsCollector(side: "connectivity", enabled: true)
+        } else {
+            connectivityCollector = nil
+        }
+        recordConnectivity(event: "attempt_start")
+        #endif
         diagnosticStage = "signaling"
         pathSupportsIPv4 = true
         pathSupportsIPv6 = false
@@ -355,6 +368,9 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
                 guard let self, self.diagnosticConnectionID == attempt, self.diagnosticPathMonitor != nil else { return }
                 self.pathSupportsIPv4 = v4
                 self.pathSupportsIPv6 = v6
+                #if DEBUG
+                self.recordConnectivity(event: "path", fields: ["interface": kind, "hasIPv4": v4, "hasIPv6": v6])
+                #endif
                 self.log.notice("ICE id=\(attempt, privacy: .public) path=\(kind, privacy: .public) hasIPv4=\(v4, privacy: .public) hasIPv6=\(v6, privacy: .public)")
                 self.diagnosticPathMonitor?.cancel()
                 self.diagnosticPathMonitor = nil
@@ -415,6 +431,9 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
             ],
             ts: Date().timeIntervalSince1970))
         log.notice("ICE id=\(self.diagnosticConnectionID, privacy: .public) stage=offer_sent elapsed_ms=\(self.diagnosticElapsed, privacy: .public)")
+        #if DEBUG
+        recordConnectivity(event: "stage", fields: ["stage": "offer_sent"])
+        #endif
 
         #if DEBUG
         if labInstrumentation && LatencyStatsCollector.enabled {
@@ -492,6 +511,9 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
 
     private func logSelectedPair(_ peer: RTCPeerConnection) {
         let attempt = diagnosticConnectionID
+        #if DEBUG
+        let collector = connectivityCollector
+        #endif
         peer.statistics { [log] report in
             guard let id = report.statistics.values.first(where: { $0.type == "transport" })?.values["selectedCandidatePairId"] as? String,
                   let pair = report.statistics[id],
@@ -504,6 +526,11 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
             let rf = ICECandidateDiagnostics.family(remote.values["address"] as? String ?? remote.values["ip"] as? String ?? "")
             let proto = ICECandidateDiagnostics.transport(local.values["protocol"] as? String)
             log.notice("ICE id=\(attempt, privacy: .public) selected local=\(lt, privacy: .public)/\(lf, privacy: .public) remote=\(rt, privacy: .public)/\(rf, privacy: .public) protocol=\(proto, privacy: .public)")
+            #if DEBUG
+            collector?.trace(["type": "connectivity", "event": "selected_pair", "attempt": attempt, "time": ProcessInfo.processInfo.systemUptime,
+                              "localType": lt, "localFamily": lf, "remoteType": rt, "remoteFamily": rf, "protocol": proto])
+            collector?.flush()
+            #endif
         }
     }
 
@@ -517,10 +544,26 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
         return true
     }
 
+    #if DEBUG
+    private func recordConnectivity(event: String, fields: [String: Any] = [:]) {
+        guard ProcessInfo.processInfo.environment["CONNECTIVITY_DIAGNOSTICS"] == "1" else { return }
+        var row = fields
+        row["type"] = "connectivity"
+        row["event"] = event
+        row["attempt"] = diagnosticConnectionID
+        row["time"] = ProcessInfo.processInfo.systemUptime
+        connectivityCollector?.trace(row)
+        connectivityCollector?.flush()
+    }
+    #endif
+
     private func endDiagnosticAttempt() {
         diagnosticPathMonitor?.cancel()
         diagnosticPathMonitor = nil
         if diagnosticAttemptEnd.end() {
+            #if DEBUG
+            recordConnectivity(event: "failure", fields: ["stage": diagnosticStage])
+            #endif
             log.notice("ICE id=\(self.diagnosticConnectionID, privacy: .public) failure_stage=\(self.diagnosticStage, privacy: .public) elapsed_ms=\(self.diagnosticElapsed, privacy: .public)")
         }
     }
@@ -1013,6 +1056,9 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
                             continue
                         }
                         log.notice("ICE id=\(self.diagnosticConnectionID, privacy: .public) stage=answer_received elapsed_ms=\(self.diagnosticElapsed, privacy: .public)")
+                        #if DEBUG
+                        recordConnectivity(event: "stage", fields: ["stage": "answer_received"])
+                        #endif
                         do {
                             try await setRemoteDescription(
                                 RTCSessionDescription(type: .answer, sdp: sdp),
@@ -1029,6 +1075,9 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
                         #endif
                         answerApplied = true
                         diagnosticStage = "ice_checking"
+                        #if DEBUG
+                        recordConnectivity(event: "stage", fields: ["stage": "answer_applied"])
+                        #endif
                         log.notice("ICE id=\(self.diagnosticConnectionID, privacy: .public) stage=answer_applied elapsed_ms=\(self.diagnosticElapsed, privacy: .public)")
                         loggedPendingRemoteICE = false
                         try await flushPendingRemoteICECandidates()
@@ -1093,9 +1142,14 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
             return
         }
         log.info("WebRTC control data channel opened; sending client hello")
+        #if DEBUG
+        let useClientCursor = mediaPolicy == .remoteSession && !CursorAcceptanceTrace.capabilityOff
+        #else
+        let useClientCursor = mediaPolicy == .remoteSession
+        #endif
         let data = ControlMessage.hello(proto: Config.protocolVersion).encoded(seq: 0,
             ts: UInt64(DispatchTime.now().uptimeNanoseconds / 1_000), inputHello: hello,
-            clientCursor: mediaPolicy == .remoteSession)
+            clientCursor: useClientCursor)
         guard dataChannel.sendData(RTCDataBuffer(data: data, isBinary: false)),
               directInputState.markHelloSent(hello) else {
             finishDisconnect(reason: "The input handshake could not be sent.", category: .input)
@@ -1182,6 +1236,12 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
                     guard !self.hasReportedRendererFrame else { return }
                     self.hasReportedRendererFrame = true
                     self.diagnosticAttemptEnd.didRender()
+                    #if DEBUG
+                    if !self.didEmitConnectivityPresented {
+                        self.didEmitConnectivityPresented = true
+                        self.recordConnectivity(event: "first_presented")
+                    }
+                    #endif
                     self.onFirstVideoFrame?()
                 case .waiting, .retired:
                     let reported = self.hasReportedRendererFrame
@@ -1376,6 +1436,9 @@ extension WebRTCTransport: RTCPeerConnectionDelegate {
             self.logICEState(kind: "connection_state", value: String(describing: newState))
             if newState == .connected || newState == .completed {
                 if !self.connectedOnce { self.diagnosticStage = "dtls" }
+                #if DEBUG
+                self.recordConnectivity(event: "stage", fields: ["stage": "ice_connected"])
+                #endif
                 self.logSelectedPair(peerConnection)
             }
         }
@@ -1627,7 +1690,13 @@ extension WebRTCTransport: RTCDataChannelDelegate {
                 }
             case .cursorShape, .cursorShapeRef, .cursorPosition:
                 guard directInputState.isReady else { return }
-                if let message = HostMessage.decode(buffer.data) { onCursorMessage?(message) }
+                if let message = HostMessage.decode(buffer.data) {
+                    #if DEBUG
+                    CursorAcceptanceTrace.arrival = latencyReceivedAt
+                    defer { CursorAcceptanceTrace.arrival = nil }
+                    #endif
+                    onCursorMessage?(message)
+                }
             case .bye(let reason):
                 finishDisconnect(reason: reason, category: .remoteBye)
             case nil:

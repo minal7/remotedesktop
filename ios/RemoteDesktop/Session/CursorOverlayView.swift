@@ -3,6 +3,40 @@ import UIKit
 import os.signpost
 #endif
 
+#if DEBUG
+/// Synthetic acceptance runs only; no image, shape ID, or user data is stored.
+enum CursorAcceptanceTrace {
+    static var arrival: CFTimeInterval?
+    private static let collector = LatencyStatsCollector(side: "cursor-acceptance", enabled: enabled)
+    static var enabled: Bool {
+        LatencyStatsCollector.enabled && ProcessInfo.processInfo.environment["CURSOR_DIAGNOSTICS"] == "1"
+    }
+    static var capabilityOff: Bool {
+        capabilityOff(labEnabled: LatencyStatsCollector.enabled, environment: ProcessInfo.processInfo.environment)
+    }
+    static func capabilityOff(labEnabled: Bool, environment: [String: String]) -> Bool {
+        labEnabled && environment["CURSOR_CAPABILITY_OFF"] == "1"
+    }
+    static func sample(event: String, point: CGPoint?, startedAt: CFTimeInterval?, completedAt: CFTimeInterval) -> [String: Any] {
+        var row: [String: Any] = ["type": "cursor", "event": event, "time": completedAt]
+        if let point, point.x.isFinite, point.y.isFinite { row["x"] = point.x; row["y"] = point.y }
+        if let startedAt, startedAt.isFinite, completedAt >= startedAt { row["elapsedMs"] = (completedAt - startedAt) * 1000 }
+        return row
+    }
+    static func recordGeometry(rect: CGRect, display: DisplayInfo) {
+        guard enabled, RemoteScreenGeometry.isFiniteRectangle(rect), display.w > 0, display.h > 0 else { return }
+        collector.trace(["type": "cursor", "event": "geometry", "time": CACurrentMediaTime(),
+                         "x": rect.minX, "y": rect.minY, "width": rect.width, "height": rect.height,
+                         "displayWidth": display.w, "displayHeight": display.h])
+    }
+    static func record(event: String, point: CGPoint? = nil, startedAt: CFTimeInterval? = nil, completedAt: CFTimeInterval? = nil) {
+        guard enabled else { return }
+        let row = sample(event: event, point: point, startedAt: startedAt, completedAt: completedAt ?? CACurrentMediaTime())
+        collector.trace(row)
+    }
+}
+#endif
+
 /// Host shape IDs are unique only within one transport session. The host may
 /// refer to an earlier shape after an input-handshake renewal on that session.
 struct CursorShapeCache {
@@ -107,28 +141,33 @@ final class CursorOverlayView: CALayer {
         pendingHostMove = nil
         guard enabled else { cursorContentPoint = point; return }
         lastLocalMove = now
-        move(to: point, signpost: true)
+        move(to: point, signpost: true, startedAt: now)
     }
 
     func moveHostCursor(toContentPoint point: CGPoint, now: CFTimeInterval = CACurrentMediaTime()) {
         guard enabled, point.x.isFinite, point.y.isFinite else { return }
         pendingHostMove?.cancel()
         pendingHostMove = nil
+        #if DEBUG
+        let arrival = CursorAcceptanceTrace.arrival ?? now
+        #else
+        let arrival = now
+        #endif
         let delay = lastLocalMove.map { max(0, 0.150 - (now - $0)) } ?? 0
         guard delay > 0 else {
-            move(to: point, signpost: false)
+            move(to: point, signpost: false, startedAt: arrival)
             return
         }
         let work = DispatchWorkItem { [weak self] in
             guard let self, self.enabled else { return }
             self.pendingHostMove = nil
-            self.move(to: point, signpost: false)
+            self.move(to: point, signpost: false, startedAt: arrival)
         }
         pendingHostMove = work
         DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
     }
 
-    private func move(to point: CGPoint, signpost: Bool) {
+    private func move(to point: CGPoint, signpost: Bool, startedAt: CFTimeInterval) {
         #if DEBUG
         let signpostID = OSSignpostID(log: signpostLog)
         if signpost { os_signpost(.begin, log: signpostLog, name: "InputToCursorCommit", signpostID: signpostID) }
@@ -136,9 +175,19 @@ final class CursorOverlayView: CALayer {
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         #if DEBUG
-        if signpost {
-            let log = signpostLog
-            CATransaction.setCompletionBlock { os_signpost(.end, log: log, name: "InputToCursorCommit", signpostID: signpostID) }
+        let log = signpostLog
+        let shouldTrace = CursorAcceptanceTrace.enabled
+        if signpost || shouldTrace {
+            CATransaction.setCompletionBlock {
+                if signpost { os_signpost(.end, log: log, name: "InputToCursorCommit", signpostID: signpostID) }
+                if shouldTrace {
+                    let completedAt = CACurrentMediaTime()
+                    Task { @MainActor in
+                        CursorAcceptanceTrace.record(event: signpost ? "input_commit" : "host_commit",
+                                                     point: point, startedAt: startedAt, completedAt: completedAt)
+                    }
+                }
+            }
         }
         #endif
         cursorContentPoint = point
@@ -159,6 +208,14 @@ final class CursorOverlayView: CALayer {
         guard let shape = selectedID.flatMap({ shapes[$0] }) ?? fallback else { return }
         CATransaction.begin()
         CATransaction.setDisableActions(true)
+        #if DEBUG
+        if CursorAcceptanceTrace.enabled, let arrival = CursorAcceptanceTrace.arrival {
+            CATransaction.setCompletionBlock {
+                let completedAt = CACurrentMediaTime()
+                Task { @MainActor in CursorAcceptanceTrace.record(event: "shape_commit", startedAt: arrival, completedAt: completedAt) }
+            }
+        }
+        #endif
         artwork.contents = shape.image
         artwork.bounds = CGRect(origin: .zero, size: CGSize(width: shape.size.width * contentScale.width,
                                                            height: shape.size.height * contentScale.height))

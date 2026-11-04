@@ -961,6 +961,11 @@ final class RemoteScreenUIView: UIView, UIPointerInteractionDelegate, UIGestureR
     var cursorContentPoint: CGPoint { clientCursor.cursorContentPoint }
 
     func moveCursor(toContentPoint point: CGPoint) {
+        #if DEBUG
+        if let remote = geometry.localToRemote(point) {
+            CursorAcceptanceTrace.record(event: "local_position", point: CGPoint(x: CGFloat(remote.x), y: CGFloat(remote.y)))
+        }
+        #endif
         clientCursor.moveCursor(toContentPoint: point)
     }
 
@@ -995,6 +1000,9 @@ final class RemoteScreenUIView: UIView, UIPointerInteractionDelegate, UIGestureR
         guard let display = remoteDisplay, display.w > 0, display.h > 0 else { return }
         let rect = geometry.interactiveRect
         guard RemoteScreenGeometry.isFiniteRectangle(rect) else { return }
+        #if DEBUG
+        CursorAcceptanceTrace.recordGeometry(rect: rect, display: display)
+        #endif
         clientCursor.setContentScale(CGSize(width: rect.width / CGFloat(display.w),
                                             height: rect.height / CGFloat(display.h)))
     }

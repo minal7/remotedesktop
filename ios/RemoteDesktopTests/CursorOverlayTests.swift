@@ -3,6 +3,27 @@ import UIKit
 @testable import RemoteDesktop
 
 final class CursorOverlayTests: XCTestCase {
+    #if DEBUG
+    @MainActor
+    func testAcceptanceCapabilitySwitchRequiresLabOptIn() {
+        XCTAssertFalse(CursorAcceptanceTrace.capabilityOff(labEnabled: false, environment: ["CURSOR_CAPABILITY_OFF": "1"]))
+        XCTAssertFalse(CursorAcceptanceTrace.capabilityOff(labEnabled: true, environment: [:]))
+        XCTAssertTrue(CursorAcceptanceTrace.capabilityOff(labEnabled: true, environment: ["CURSOR_CAPABILITY_OFF": "1"]))
+    }
+
+    @MainActor
+    func testCursorTraceMeasuresActualCompletionAndOnlyHasTypedFields() {
+        let row = CursorAcceptanceTrace.sample(event: "host_commit", point: CGPoint(x: 10, y: 20),
+                                               startedAt: 10, completedAt: 10.125)
+        XCTAssertEqual(row["type"] as? String, "cursor")
+        XCTAssertEqual(row["event"] as? String, "host_commit")
+        XCTAssertEqual(row["elapsedMs"] as? Double, 125)
+        XCTAssertEqual(Set(row.keys), Set(["type", "event", "time", "x", "y", "elapsedMs"]))
+        let invalid = CursorAcceptanceTrace.sample(event: "shape_commit", point: nil, startedAt: 5, completedAt: 4)
+        XCTAssertNil(invalid["elapsedMs"])
+    }
+    #endif
+
     func testLegacyPeerDoesNotShowOverlay() {
         let overlay = CursorOverlayView()
         overlay.setSurfaceVisible(true)

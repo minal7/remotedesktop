@@ -266,6 +266,9 @@ final class SessionModel: ObservableObject, VideoRendererTarget {
             cursorShapeCache.select(id)
             view?.setShape(id: id)
         case .cursorPosition(let point):
+            #if DEBUG
+            CursorAcceptanceTrace.record(event: "host_position", point: point)
+            #endif
             clientCursorPosition = point
             view?.moveHostCursor(toRemotePoint: point)
         default: break
