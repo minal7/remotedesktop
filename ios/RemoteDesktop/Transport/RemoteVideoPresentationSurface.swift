@@ -24,12 +24,17 @@ final class RemoteVideoPresentationSurface: NSObject, RTCVideoRenderer {
     private var f4: RemoteVideoF4Renderer?
     private var f4EventSerial: UInt64 = 0
     private var highRefreshLink: CADisplayLink?
+    private var highRefreshMode: LabHintMode?
+    private var labHintTraceForTesting: (([String: Any]) -> Void)?
     private let highRefreshTarget = RemoteVideoHighRefreshTarget()
     private var labRefreshEnvironmentOverride: [String: String]?
     var labRefreshLinkIdentityForTesting: ObjectIdentifier? { highRefreshLink.map(ObjectIdentifier.init) }
     var labRefreshRangeForTesting: CAFrameRateRange? { highRefreshLink?.preferredFrameRateRange }
     func setLabRefreshEnvironmentForTesting(_ environment: [String: String]) {
         labRefreshEnvironmentOverride = environment
+    }
+    func setLabHintTraceForTesting(_ trace: @escaping ([String: Any]) -> Void) {
+        labHintTraceForTesting = trace
     }
     #endif
     private var active = true
@@ -223,6 +228,37 @@ final class RemoteVideoPresentationSurface: NSObject, RTCVideoRenderer {
     }
 
     enum LabRefreshHintAction: Equatable { case start, keep, stop }
+    enum LabHintMode: String { case fixed60, f4 }
+    enum LabHintState: String { case started, stopped }
+
+    static func labHintRecord(state: LabHintState, mode: LabHintMode, time: Double,
+                              range: CAFrameRateRange? = nil, screenMaximumFps: Int? = nil) -> [String: Any]? {
+        guard time.isFinite, time >= 0 else { return nil }
+        var record: [String: Any] = ["type": "render_hint", "state": state.rawValue,
+                                     "mode": mode.rawValue, "time": time]
+        if state == .started {
+            guard let range, let preferred = range.preferred, let screenMaximumFps, (1...1000).contains(screenMaximumFps),
+                  range.minimum.isFinite, range.maximum.isFinite, preferred.isFinite,
+                  range.minimum > 0, range.minimum <= range.maximum,
+                  range.maximum <= Float(screenMaximumFps),
+                  preferred >= range.minimum, preferred <= range.maximum else { return nil }
+            record["minimumFps"] = Double(range.minimum)
+            record["maximumFps"] = Double(range.maximum)
+            record["preferredFps"] = Double(preferred)
+            record["screenMaximumFps"] = screenMaximumFps
+        }
+        return record
+    }
+
+    private func traceLabHint(state: LabHintState, mode: LabHintMode,
+                              range: CAFrameRateRange? = nil, screenMaximumFps: Int? = nil) {
+        let environment = labRefreshEnvironmentOverride ?? ProcessInfo.processInfo.environment
+        guard labInstrumentation, environment["LATENCY_LAB"] == "1",
+              let record = Self.labHintRecord(state: state, mode: mode, time: CACurrentMediaTime(),
+                                              range: range, screenMaximumFps: screenMaximumFps) else { return }
+        labHintTraceForTesting?(record)
+        if LatencyStatsCollector.enabled { RemoteVideoLatencyProbe.shared.collector.trace(record) }
+    }
 
     static func labRefreshHintAction(labAdmitted: Bool, visible: Bool, hasLink: Bool,
                                      environment: [String: String]) -> LabRefreshHintAction {
@@ -253,11 +289,18 @@ final class RemoteVideoPresentationSurface: NSObject, RTCVideoRenderer {
         link.preferredFrameRateRange = range
         link.add(to: .main, forMode: .common)
         highRefreshLink = link
+        let mode: LabHintMode = isF4 ? .f4 : .fixed60
+        highRefreshMode = mode
+        traceLabHint(state: .started, mode: mode, range: link.preferredFrameRateRange,
+                     screenMaximumFps: screen.maximumFramesPerSecond)
     }
 
     private func stopHighRefresh() {
-        highRefreshLink?.invalidate()
+        guard let link = highRefreshLink else { return }
+        link.invalidate()
         highRefreshLink = nil
+        if let mode = highRefreshMode { traceLabHint(state: .stopped, mode: mode) }
+        highRefreshMode = nil
     }
     #endif
 

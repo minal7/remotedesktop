@@ -61,6 +61,41 @@ final class RemoteVideoPresentationSurfaceTests: XCTestCase {
         XCTAssertEqual(action(true, false, false, enabled), .stop)
     }
 
+    func testLabHintRecordContainsOnlyClosedEnumsAndValidRequestedRange() throws {
+        let range = CAFrameRateRange(minimum: 60, maximum: 60, preferred: 60)
+        let started = try XCTUnwrap(RemoteVideoPresentationSurface.labHintRecord(
+            state: .started, mode: .fixed60, time: 4, range: range, screenMaximumFps: 120))
+        XCTAssertEqual(started["type"] as? String, "render_hint")
+        XCTAssertEqual(started["state"] as? String, "started")
+        XCTAssertEqual(started["mode"] as? String, "fixed60")
+        XCTAssertEqual(started["minimumFps"] as? Double, 60)
+        XCTAssertEqual(started["maximumFps"] as? Double, 60)
+        XCTAssertEqual(started["preferredFps"] as? Double, 60)
+        XCTAssertEqual(started["screenMaximumFps"] as? Int, 120)
+        XCTAssertEqual(Set(started.keys), Set(["type", "state", "mode", "time", "minimumFps", "maximumFps", "preferredFps", "screenMaximumFps"]))
+        let stopped = try XCTUnwrap(RemoteVideoPresentationSurface.labHintRecord(state: .stopped, mode: .f4, time: 5))
+        XCTAssertEqual(stopped["mode"] as? String, "f4")
+        XCTAssertEqual(Set(stopped.keys), Set(["type", "state", "mode", "time"]))
+        XCTAssertNil(RemoteVideoPresentationSurface.labHintRecord(state: .started, mode: .fixed60, time: .nan, range: range, screenMaximumFps: 120))
+        XCTAssertNil(RemoteVideoPresentationSurface.labHintRecord(state: .started, mode: .fixed60, time: 1, range: range, screenMaximumFps: 30))
+        XCTAssertNil(RemoteVideoPresentationSurface.labHintRecord(state: .started, mode: .fixed60, time: 1))
+    }
+
+    func testHintTraceCannotBeEnabledForNonLabSurface() throws {
+        let host = try RemoteKeyboardTestWindow()
+        defer { host.close() }
+        let surface = try XCTUnwrap(RemoteVideoPresentationSurface.make())
+        defer { surface.retire() }
+        var events: [[String: Any]] = []
+        surface.setLabHintTraceForTesting { events.append($0) }
+        surface.setLabRefreshEnvironmentForTesting(["LATENCY_LAB": "1", "LATENCY_RENDER_HINT_60": "1"])
+        surface.view.frame = CGRect(x: 0, y: 0, width: 64, height: 64)
+        try XCTUnwrap(host.window.rootViewController?.view).addSubview(surface.view)
+        surface.configure(mode: .aspectFit, viewport: surface.view.bounds)
+        XCTAssertNil(surface.labRefreshLinkIdentityForTesting)
+        XCTAssertTrue(events.isEmpty)
+    }
+
     func testNormalLabRefreshLinkIsIdempotentAndRetires() throws {
         let old = LatencyLabConfiguration.current
         defer { LatencyLabConfiguration.setRuntime(old) }
@@ -70,10 +105,14 @@ final class RemoteVideoPresentationSurfaceTests: XCTestCase {
         defer { host.close() }
         let surface = try XCTUnwrap(RemoteVideoPresentationSurface.make(allowF4: true))
         surface.setLabRefreshEnvironmentForTesting(["LATENCY_LAB": "1", "LATENCY_RENDER_HINT_60": "1"])
+        var hintEvents: [[String: Any]] = []
+        surface.setLabHintTraceForTesting { hintEvents.append($0) }
         surface.view.frame = CGRect(x: 0, y: 0, width: 64, height: 64)
         try XCTUnwrap(host.window.rootViewController?.view).addSubview(surface.view)
         surface.configure(mode: .aspectFit, viewport: surface.view.bounds)
         let first = try XCTUnwrap(surface.labRefreshLinkIdentityForTesting)
+        XCTAssertEqual(hintEvents.compactMap { $0["state"] as? String }, ["started"])
+        XCTAssertEqual(hintEvents.first?["mode"] as? String, "fixed60")
         let range = try XCTUnwrap(surface.labRefreshRangeForTesting)
         let expected = Float(max(1, min(60, host.window.screen.maximumFramesPerSecond)))
         XCTAssertEqual(range.minimum, expected)
@@ -81,12 +120,15 @@ final class RemoteVideoPresentationSurfaceTests: XCTestCase {
         XCTAssertEqual(range.preferred, expected)
         surface.configure(mode: .aspectFit, viewport: surface.view.bounds)
         XCTAssertEqual(surface.labRefreshLinkIdentityForTesting, first)
+        XCTAssertEqual(hintEvents.count, 1, "Repeated layout must not duplicate a start event")
         surface.view.isHidden = true
         XCTAssertNil(surface.labRefreshLinkIdentityForTesting)
         surface.view.isHidden = false
         XCTAssertNotNil(surface.labRefreshLinkIdentityForTesting)
         surface.retire()
         XCTAssertNil(surface.labRefreshLinkIdentityForTesting)
+        XCTAssertEqual(hintEvents.compactMap { $0["state"] as? String }, ["started", "stopped", "started", "stopped"])
+        XCTAssertTrue(hintEvents.allSatisfy { $0["mode"] as? String == "fixed60" })
     }
 
     /// The coordinator captures the actual Simulator screen during the ready
