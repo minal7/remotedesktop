@@ -81,7 +81,9 @@ struct SessionView: View {
                         if session.inputActivity.allowsInput {
                             ConnectionWaitNotice(
                                 title: session.state == .connecting ? "Connecting to your computer…" : "Restoring the remote screen…",
-                                recovery: "Can’t connect to your computer. Check that both devices are online and the host app is open, then try again.",
+                                recovery: session.state == .connecting
+                                    ? "Still connecting to your computer. Check that both devices are online and the host app is open."
+                                    : "Still restoring the remote screen. Check that both devices are online and the host app is open.",
                                 retry: { session.reset() })
                         } else {
                             Text("Return to this window to control your Mac.")
