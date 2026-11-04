@@ -308,6 +308,11 @@ final class HostPeerSession: NSObject {
     private let log = Logger(subsystem: "com.threadmark.remotedesktop.host", category: "webrtc")
     private let signalingStateQueue = DispatchQueue(label: "com.threadmark.remotedesktop.host.webrtc.signaling")
     private let closeStateLock = NSRecursiveLock()
+    // Cursor transitions are ordered separately from capture and peer locks.
+    private var cursorTransition: Task<Void, Never>?
+    private var cursorEpoch = UUID()
+    private var cursorRequested = false
+    private var cursorPublisher: HostCursorPublisher? // main queue only
 
     private let factory: RTCPeerConnectionFactory
     private let audioBridge: SystemAudioBridge
@@ -472,6 +477,9 @@ final class HostPeerSession: NSObject {
         }) {
             self.closeStateLock.lock()
             self.ended = true
+            self.cursorRequested = false
+            self.cursorEpoch = UUID()
+            DispatchQueue.main.async { [weak self] in self?.stopCursorPublisher() }
             let restartTask = self.captureRestartTask
             self.captureRestartTask = nil
             self.captureRestartID = nil
@@ -1007,15 +1015,60 @@ final class HostPeerSession: NSObject {
 
     private func sendHelloAckAndDisplay() {
         closeStateLock.lock()
+        guard !ended, let channel = dataChannel, channel.readyState == .open,
+              let ready = inputAuthorization.readyAcknowledgement(for: ObjectIdentifier(channel)),
+              let display = ready.session.display, let owner = captureOwner else {
+            closeStateLock.unlock(); return
+        }
+        guard cursorRequested else {
+            closeStateLock.unlock()
+            _ = sendHelloAckAndDisplay(clientCursor: false)
+            return
+        }
+        let epoch = cursorEpoch
+        let previous = cursorTransition
+        cursorTransition = Task { [weak self] in
+            await previous?.value
+            guard let self else { return }
+            var enabled = false
+            do {
+                try await self.capture.setCursorVisible(false, for: owner)
+                enabled = true
+            } catch {
+                // An unconfirmed hide must never result in an overlay-only cursor.
+                try? await self.capture.setCursorVisible(true, for: owner)
+            }
+            self.closeStateLock.lock()
+            let current = !self.ended && self.cursorRequested && self.cursorEpoch == epoch
+                && self.dataChannel === channel && channel.readyState == .open
+            self.closeStateLock.unlock()
+            guard current else { return }
+            let acknowledged = self.sendHelloAckAndDisplay(clientCursor: enabled, epoch: epoch)
+            if !enabled {
+                DispatchQueue.main.async { [weak self] in self?.stopCursorPublisher() }
+            }
+            if enabled && acknowledged {
+                let bounds = CGRect(x: display.state.originX, y: display.state.originY,
+                                    width: display.state.width, height: display.state.height)
+                DispatchQueue.main.async { [weak self] in self?.startCursorPublisher(bounds: bounds, epoch: epoch) }
+            }
+        }
+        closeStateLock.unlock()
+    }
+
+    @discardableResult
+    private func sendHelloAckAndDisplay(clientCursor: Bool, epoch: UUID? = nil) -> Bool {
+        closeStateLock.lock()
         defer { closeStateLock.unlock() }
+        guard epoch == nil || (cursorRequested && cursorEpoch == epoch) else { return false }
         guard !ended, let dataChannel, dataChannel.readyState == .open,
               let ready = inputAuthorization.readyAcknowledgement(for: ObjectIdentifier(dataChannel)) else {
-            return
+            return false
         }
         guard let captureDisplay = ready.session.display else {
             inputAuthorization.close()
             scheduleCaptureTerminalFailure("The captured screen layout is unavailable. Reconnect to restore control.")
-            return
+            return false
         }
 
         let timestamp = UInt64(DispatchTime.now().uptimeNanoseconds / 1_000)
@@ -1029,11 +1082,12 @@ final class HostPeerSession: NSObject {
             seq: hostSeq,
             ts: timestamp,
             inputSession: ready.wire,
-            inputInvalidation: ready.inputInvalidation)
+            inputInvalidation: ready.inputInvalidation,
+            clientCursor: clientCursor)
         guard dataChannel.sendData(RTCDataBuffer(data: hello, isBinary: false)) else {
             inputAuthorization.close()
             scheduleCaptureTerminalFailure("The input handshake could not be sent. Reconnect to restore control.")
-            return
+            return false
         }
 
         hostSeq &+= 1
@@ -1045,8 +1099,52 @@ final class HostPeerSession: NSObject {
         guard dataChannel.sendData(RTCDataBuffer(data: display, isBinary: false)) else {
             inputAuthorization.close()
             scheduleCaptureTerminalFailure("The screen layout could not be sent. Reconnect to restore control.")
+            return false
+        }
+        return true
+    }
+
+    private func startCursorPublisher(bounds: CGRect, epoch: UUID) {
+        dispatchPrecondition(condition: .onQueue(.main))
+        closeStateLock.lock()
+        let current = !ended && cursorRequested && cursorEpoch == epoch
+        closeStateLock.unlock()
+        guard current else { return }
+        if let cursorPublisher {
+            cursorPublisher.updateDisplayBounds(bounds)
             return
         }
+        let publisher = HostCursorPublisher(displayBounds: bounds) { [weak self] payload in
+            guard let self else { return }
+            self.closeStateLock.lock()
+            defer { self.closeStateLock.unlock() }
+            guard !self.ended, self.cursorEpoch == epoch, self.cursorRequested,
+                  let channel = self.dataChannel, channel.readyState == .open,
+                  self.inputAuthorization.ownsChannel(ObjectIdentifier(channel)) else { return }
+            _ = channel.sendData(RTCDataBuffer(data: payload, isBinary: false))
+        }
+        cursorPublisher = publisher
+        publisher.start()
+    }
+
+    private func stopCursorPublisher() {
+        dispatchPrecondition(condition: .onQueue(.main))
+        cursorPublisher?.stop()
+        cursorPublisher = nil
+    }
+
+    private func stopClientCursor() {
+        closeStateLock.lock()
+        cursorRequested = false
+        cursorEpoch = UUID()
+        let previous = cursorTransition
+        let owner = captureOwner
+        cursorTransition = Task { [weak self] in
+            await previous?.value
+            if let self, let owner { try? await self.capture.setCursorVisible(true, for: owner) }
+        }
+        closeStateLock.unlock()
+        DispatchQueue.main.async { [weak self] in self?.stopCursorPublisher() }
     }
 
     private func invalidateChangedCaptureDisplay() {
@@ -1275,7 +1373,12 @@ extension HostPeerSession: RTCPeerConnectionDelegate {
 extension HostPeerSession: RTCDataChannelDelegate {
     func dataChannelDidChangeState(_ dataChannel: RTCDataChannel) {
         if dataChannel.readyState == .closed || dataChannel.readyState == .closing {
+            closeStateLock.lock()
+            let isCurrentChannel = self.dataChannel === dataChannel
+            closeStateLock.unlock()
+            guard isCurrentChannel else { return }
             inputAuthorization.closeChannel(ObjectIdentifier(dataChannel))
+            stopClientCursor()
         }
     }
 
@@ -1299,6 +1402,11 @@ extension HostPeerSession: RTCDataChannelDelegate {
             guard inputAuthorization.acceptHello(channel: ObjectIdentifier(dataChannel),
                 orderedControls: orderedComputerUseControls, inputHello: packet.inputHello,
                 inputInvalidation: packet.inputInvalidation) else { return }
+            if !packet.clientCursor { stopClientCursor() }
+            closeStateLock.lock()
+            if packet.clientCursor && !cursorRequested { cursorEpoch = UUID() }
+            cursorRequested = packet.clientCursor
+            closeStateLock.unlock()
             sendHelloAckAndDisplay()
         case .bye(let reason):
             if inputAuthorization.close(ifChannel: ObjectIdentifier(dataChannel)) {
@@ -1311,6 +1419,11 @@ extension HostPeerSession: RTCDataChannelDelegate {
                   Self.acceptsDirectInput(message, helloAuthenticated: true) else {
                 log.warning("dropping remote input without a current authorized input session")
                 return
+            }
+            if case let .pointer(x, y, _) = message {
+                DispatchQueue.main.async { [weak self] in
+                    self?.cursorPublisher?.recordClientPosition(CGPoint(x: x, y: y))
+                }
             }
             if !injector.applyDirectInput(message, session: session, interruptAutomation: onUserInput) {
                 if let display = injector.takeDisplayInvalidation(for: session),
