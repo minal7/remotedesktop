@@ -25,6 +25,7 @@ final class ScreenCaptureSizingTests: XCTestCase {
         XCTAssertFalse(HostPeerSession.lab60OfferRequested(["latencyLab60": "60"]))
         XCTAssertTrue(allowed(env))
         XCTAssertTrue(allowed(env.merging(["LATENCY_CAPTURE_MACROBLOCKS": "8192"]) { _, new in new }))
+        XCTAssertTrue(allowed(env.merging(["LATENCY_CAPTURE_MACROBLOCKS": "16384"]) { _, new in new }))
         XCTAssertFalse(allowed(env, lab: false))
         XCTAssertFalse(allowed(env, ordinary: false))
         XCTAssertFalse(allowed(env, client: false))
@@ -38,12 +39,23 @@ final class ScreenCaptureSizingTests: XCTestCase {
             var missing = env; missing.removeValue(forKey: key)
             XCTAssertFalse(allowed(missing), key)
         }
-        for (key, value) in [("LATENCY_CAPTURE_FPS", "30"), ("LATENCY_CAPTURE_MACROBLOCKS", "16384")] {
+        for (key, value) in [("LATENCY_CAPTURE_FPS", "30"), ("LATENCY_CAPTURE_MACROBLOCKS", "16385")] {
             var bad = env; bad[key] = value; XCTAssertFalse(allowed(bad), key)
         }
         var mixed = env; mixed[DebugResidentHostConfiguration.identityEnvironmentKey] = env[DebugResidentHostConfiguration.latencyIdentityEnvironmentKey]
         XCTAssertFalse(allowed(mixed))
-        for limit in [3_600, 8_192] { XCTAssertLessThanOrEqual(limit * 60, 983_040) }
+        for limit in [3_600, 8_192, 16_384] { XCTAssertLessThanOrEqual(limit * 60, 983_040) }
+    }
+
+    func testLab60CeilingRequiresEligibleSessionAndNeverExceedsCodec() {
+        let env = ["LATENCY_LAB": "1", "LATENCY_CAPTURE_MACROBLOCKS": "16384"]
+        let limit = HostPeerSession.lab60CaptureMacroblockLimit
+        XCTAssertEqual(limit(32_768, true, env, true), 16_384)
+        XCTAssertEqual(limit(8_192, true, env, true), 8_192)
+        XCTAssertEqual(limit(32_768, true, env, false), 32_768)
+        XCTAssertEqual(limit(32_768, false, env, true), 32_768)
+        XCTAssertEqual(limit(32_768, true, ["LATENCY_CAPTURE_MACROBLOCKS": "16384"], true), 32_768)
+        XCTAssertEqual(limit(32_768, true, ["LATENCY_LAB": "1", "LATENCY_CAPTURE_MACROBLOCKS": "16385"], true), 32_768)
     }
 
     func testLab60QoSOverrideNeverExceedsOptedCapture() {

@@ -520,8 +520,9 @@ final class HostPeerSession: NSObject {
         #if DEBUG
         latencyStats.trace(["type": "f2_capture_policy", "time": ProcessInfo.processInfo.systemUptime,
                            "authorized": latencyF2Enabled, "framesPerSecond": lab60 ? 60 : capturePolicy.framesPerSecond,
-                           "macroblocks": Self.labCaptureMacroblockLimit(negotiated: capturePolicy.maximumMacroblocksPerFrame,
-                               labInstrumentation: labInstrumentation, environment: ProcessInfo.processInfo.environment),
+                           "macroblocks": Self.lab60CaptureMacroblockLimit(negotiated: capturePolicy.maximumMacroblocksPerFrame,
+                               labInstrumentation: labInstrumentation, environment: ProcessInfo.processInfo.environment,
+                               lab60: lab60),
                            "lowLatencyRequested": capturePolicy.lowLatencyEncoder])
         #endif
         applyVideoSenderPolicy(DesktopVideoQuality.sharpnessPolicy, isDefault: true)
@@ -817,13 +818,23 @@ final class HostPeerSession: NSObject {
               rawID.utf8.count == 36, UUID(uuidString: rawID) != nil,
               environment[DebugResidentHostConfiguration.identityEnvironmentKey] == nil,
               environment["LATENCY_LAB"] == "1", environment["LATENCY_CAPTURE_FPS"] == "60",
-              ["3600", "8192"].contains(environment["LATENCY_CAPTURE_MACROBLOCKS"] ?? "") else { return false }
+              ["3600", "8192", "16384"].contains(environment["LATENCY_CAPTURE_MACROBLOCKS"] ?? "") else { return false }
         return DesktopVideoQuality.supportsExperimentalEncoder(name: codecName ?? "",
             profileLevelID: profileLevelID, packetizationMode: packetizationMode)
     }
 
     static func lab60SenderRate(requested: Int, captureRate: Int32, lab60: Bool) -> Int? {
         lab60 && captureRate == 60 && requested == 60 ? 60 : nil
+    }
+
+    static func lab60CaptureMacroblockLimit(negotiated: Int, labInstrumentation: Bool,
+                                           environment: [String: String], lab60: Bool) -> Int {
+        if lab60, labInstrumentation, environment["LATENCY_LAB"] == "1",
+           environment["LATENCY_CAPTURE_MACROBLOCKS"] == "16384" {
+            return min(negotiated, 16_384)
+        }
+        return labCaptureMacroblockLimit(negotiated: negotiated, labInstrumentation: labInstrumentation,
+                                        environment: environment)
     }
 
     static func labCaptureMacroblockLimit(negotiated: Int, labInstrumentation: Bool,
@@ -840,11 +851,13 @@ final class HostPeerSession: NSObject {
         defer { closeStateLock.unlock() }
         guard !ended else { return }
         #if DEBUG
-        let selectedLimit = Self.labCaptureMacroblockLimit(negotiated: limit,
-            labInstrumentation: labInstrumentation, environment: ProcessInfo.processInfo.environment)
+        let environment = ProcessInfo.processInfo.environment
+        let selectedLimit = Self.lab60CaptureMacroblockLimit(negotiated: limit,
+            labInstrumentation: labInstrumentation, environment: environment, lab60: lab60)
+        let ceilingRequested = ["3600", "8192"].contains(environment["LATENCY_CAPTURE_MACROBLOCKS"] ?? "") ||
+            (lab60 && environment["LATENCY_CAPTURE_MACROBLOCKS"] == "16384")
         // Do not apply an experimental ceiling to an already running stream.
-        if labInstrumentation, ProcessInfo.processInfo.environment["LATENCY_LAB"] == "1",
-           ["3600", "8192"].contains(ProcessInfo.processInfo.environment["LATENCY_CAPTURE_MACROBLOCKS"] ?? ""),
+        if labInstrumentation, environment["LATENCY_LAB"] == "1", ceilingRequested,
            captureStartupRequested, captureMaximumMacroblocksPerFrame != selectedLimit {
             throw NSError(domain: "LatencyLab", code: 2,
                           userInfo: [NSLocalizedDescriptionKey: "Capture sizing changed. Reconnect to continue."])
@@ -856,8 +869,7 @@ final class HostPeerSession: NSObject {
             throw NSError(domain: "LatencyLab", code: 1,
                           userInfo: [NSLocalizedDescriptionKey: "The latency capture policy changed. Reconnect to continue."])
         }
-        if labInstrumentation, ProcessInfo.processInfo.environment["LATENCY_LAB"] == "1",
-           ["3600", "8192"].contains(ProcessInfo.processInfo.environment["LATENCY_CAPTURE_MACROBLOCKS"] ?? "") {
+        if labInstrumentation, environment["LATENCY_LAB"] == "1", ceilingRequested {
             latencyStats.trace(["type": "capture_ceiling", "time": ProcessInfo.processInfo.systemUptime,
                                 "negotiatedMacroblocks": limit, "appliedMacroblocks": selectedLimit,
                                 "framesPerSecond": framesPerSecond])
