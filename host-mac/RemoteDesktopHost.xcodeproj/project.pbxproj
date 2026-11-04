@@ -63,6 +63,7 @@
 		3429236596E52F2EBF64A1A1 /* LocalComputerUseCredentials.swift in Sources */ = {isa = PBXBuildFile; fileRef = 883356287E3F636BF4AD3816 /* LocalComputerUseCredentials.swift */; };
 		364135666955DFE187CC5BB7 /* AgentNativeFilePickerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3C03A9B3E180859866934D35 /* AgentNativeFilePickerTests.swift */; };
 		36D721C5C6B2CCB4E6382C1C /* LocalComputerUseRPC.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3F438D95AC83572EEB7DDCE5 /* LocalComputerUseRPC.swift */; };
+		39BAC18D362E117CCADF27B0 /* HostPortMapper.swift in Sources */ = {isa = PBXBuildFile; fileRef = A81790BA27B5C9FE80A555CC /* HostPortMapper.swift */; };
 		3A103AE01DDA33D31C2962B5 /* PixelEnvironment.swift in Sources */ = {isa = PBXBuildFile; fileRef = 05DE94E98B7329186B2A4358 /* PixelEnvironment.swift */; };
 		3B9AEF83B5724F6727539748 /* HostMemoryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 93E387ACDC6CFA7E8E8E2637 /* HostMemoryView.swift */; };
 		3BA5BE06B0CEBADBED38C754 /* PersonalMemoryEmptyContextTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 861113AEDF386C6C4D3F5CE3 /* PersonalMemoryEmptyContextTests.swift */; };
@@ -134,6 +135,7 @@
 		7F38EEA49C234B1F45290B35 /* ComputerUseCapabilityExecutor.swift in Sources */ = {isa = PBXBuildFile; fileRef = D462BD3E942537670E346BD3 /* ComputerUseCapabilityExecutor.swift */; };
 		80A0D4DB4E327F9F767D96DB /* UiTarsPolicyAdapterTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2C8F4DDA787B60AE0A7DBCD2 /* UiTarsPolicyAdapterTests.swift */; };
 		82C7714459A140DD1C7F4739 /* AgentEvalApprovalPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = D126E8A7329440FB81BC5C93 /* AgentEvalApprovalPolicy.swift */; };
+		842583A09A75DA6A699BB209 /* HostCursorPublisher.swift in Sources */ = {isa = PBXBuildFile; fileRef = B87BB248B71DAC45077C9EBE /* HostCursorPublisher.swift */; };
 		866AD4205CA3EBAE48A41E10 /* DebugResidentHostConfigurationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 936BD11FA31D4BAB6D5B8D7B /* DebugResidentHostConfigurationTests.swift */; };
 		871E246E4A8D3DFF0F94D23D /* AgentServices.swift in Sources */ = {isa = PBXBuildFile; fileRef = 33EC9BB94559DCF3C1596E01 /* AgentServices.swift */; };
 		8A37A3B49D4108FD8664CB63 /* LLAMA-CPP-MIT-LICENSE.txt in Resources */ = {isa = PBXBuildFile; fileRef = 07BE29E09643E04555FE686A /* LLAMA-CPP-MIT-LICENSE.txt */; };
@@ -171,8 +173,10 @@
 		A10A72B4D66C71164C9E7898 /* PersonalMemoryCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = CE4AFF22F6F0248BA9E18DD8 /* PersonalMemoryCoordinator.swift */; };
 		A1467B0B63AFB7DD837A262F /* AgentInputSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E4B9BE5C9B91430B8093D05 /* AgentInputSupport.swift */; };
 		A1AD1DF5F32B1BFE7CBE7FC1 /* OSAtlasRuntimeInstallationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BAD30262E2C7207F3FCF5E54 /* OSAtlasRuntimeInstallationTests.swift */; };
+		A36724EA0881661CDE924916 /* HostPortMapperTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1BC6E287CFE850011342EE1C /* HostPortMapperTests.swift */; };
 		A428574B4E145DFCED463A12 /* ComputerUseAXLifecycle.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9BB250AF77CA11C42722EEE0 /* ComputerUseAXLifecycle.swift */; };
 		A4E2434F2E3645A7EDE26C1A /* ComputerUseDefaultBrowserExecutorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A8FEE48EBBBFFC4A6645228C /* ComputerUseDefaultBrowserExecutorTests.swift */; };
+		A57ADDD2CEE99252D80E25F8 /* ICECandidateDiagnostics.swift in Sources */ = {isa = PBXBuildFile; fileRef = 04887EADBAD5EA7F03A39C23 /* ICECandidateDiagnostics.swift */; };
 		A5C947D58155D734355C1166 /* ComputerUseSkills in Resources */ = {isa = PBXBuildFile; fileRef = DFC8D46153DA4A0E1DE49C6C /* ComputerUseSkills */; };
 		A6A26B5A6D5A486889610180 /* ComputerUseFaraActionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F9EE96302A4190081C49E1DF /* ComputerUseFaraActionTests.swift */; };
 		A7671C90705166F18F91B6FE /* ICEConfigFetcher.swift in Sources */ = {isa = PBXBuildFile; fileRef = 48B0DBDEE13640A9F60DC878 /* ICEConfigFetcher.swift */; };
@@ -203,11 +207,13 @@
 		C4A3677697DDF58EC2E1BA02 /* ComputerUseSessionModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 31B6128CD23689A80D1872D8 /* ComputerUseSessionModel.swift */; };
 		C5D4C49EF3645CB93B426447 /* ComputerUseGUIOwlModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 789418DDA1CBDDDFF36922D5 /* ComputerUseGUIOwlModel.swift */; };
 		C5F37D9E73DB5A1D74366902 /* AgentJournal.swift in Sources */ = {isa = PBXBuildFile; fileRef = 02692A58A7618D23A79EED1C /* AgentJournal.swift */; };
+		C6CE13CC7832F521ED5621B7 /* ICECandidateDiagnostics.swift in Sources */ = {isa = PBXBuildFile; fileRef = 04887EADBAD5EA7F03A39C23 /* ICECandidateDiagnostics.swift */; };
 		C89FEA72FDD1B9C79632EAE6 /* AgentSharedSupportTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E39928443C364FAB048B8ED0 /* AgentSharedSupportTests.swift */; };
 		C90476214B9BEF6C1D0D53FA /* HostSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 63433D0B8027A723A9C0090E /* HostSettingsView.swift */; };
 		CB2A90ECC2A231DD704DCD9B /* CloudKitSignalingClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 52A5F8DD3C3DABAB92FCAE68 /* CloudKitSignalingClient.swift */; };
 		CC164586642D7F9D81B39D7F /* DeviceIdentity.swift in Sources */ = {isa = PBXBuildFile; fileRef = 073BFD6F71D2AA688EF7F69E /* DeviceIdentity.swift */; };
 		CD546D6573C209DD85CADC24 /* ComputerUseDefaultBrowserPageReader.swift in Sources */ = {isa = PBXBuildFile; fileRef = 02FAB72004A9299AA7EC1F08 /* ComputerUseDefaultBrowserPageReader.swift */; };
+		CF81021247A0EE7A9AFFCD13 /* HostCursorPublisherTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 40CCDA054879ED390238BE44 /* HostCursorPublisherTests.swift */; };
 		D184F2F3A70A20D0AE2C6A95 /* ComputerUseArtifactManifest.swift in Sources */ = {isa = PBXBuildFile; fileRef = B7196F80FEC0A28B03B3D49A /* ComputerUseArtifactManifest.swift */; };
 		D19E030AF6236E31265434DD /* RemoteDesktopClientCore.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 85DE1AFFBBE056CA75117395 /* RemoteDesktopClientCore.framework */; };
 		D25BF53665F7066A9E7A1BAE /* ComputerUseGUIOwlModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2316219C43CE95DE019E8B57 /* ComputerUseGUIOwlModelTests.swift */; };
@@ -243,6 +249,7 @@
 		F0D6F4109ECA5C2815EB06CE /* ComputerUseNativeTextIntegrationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 54D37720BBBF3A87027E61FA /* ComputerUseNativeTextIntegrationTests.swift */; };
 		F0FD96B8F481DA49104A8876 /* AgentEvalFaraExchangeEvidence.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4DED58324B608B94D5E39592 /* AgentEvalFaraExchangeEvidence.swift */; };
 		F1A081E79358ED4E2BBB152C /* AgentFiles.swift in Sources */ = {isa = PBXBuildFile; fileRef = 12DDF56F4FB65E1F21A69814 /* AgentFiles.swift */; };
+		F1C7DB9F285A10138E4BF68A /* ICEConfigServerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 165EEC2BEFFFDBE9B22AA0CE /* ICEConfigServerTests.swift */; };
 		F35191B20E8FC8F76558D872 /* SignalingEnvelope.swift in Sources */ = {isa = PBXBuildFile; fileRef = AFD149FEBF7D38FE05DBBC37 /* SignalingEnvelope.swift */; };
 		F375AA74E45E8269C36F228D /* AgentEvalPolicyReplay.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2F6CCD5E6FB7536A6EE441AF /* AgentEvalPolicyReplay.swift */; };
 		F430A6C7583A8BC79AD4DDB6 /* AgentActionGateTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E7639956FF98B1B319FD8D67 /* AgentActionGateTests.swift */; };
@@ -299,6 +306,7 @@
 		02692A58A7618D23A79EED1C /* AgentJournal.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentJournal.swift; sourceTree = "<group>"; };
 		02FAB72004A9299AA7EC1F08 /* ComputerUseDefaultBrowserPageReader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseDefaultBrowserPageReader.swift; sourceTree = "<group>"; };
 		037B0683983EF3DD797F9355 /* ScreenCaptureSizingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScreenCaptureSizingTests.swift; sourceTree = "<group>"; };
+		04887EADBAD5EA7F03A39C23 /* ICECandidateDiagnostics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ICECandidateDiagnostics.swift; sourceTree = "<group>"; };
 		05DE94E98B7329186B2A4358 /* PixelEnvironment.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PixelEnvironment.swift; sourceTree = "<group>"; };
 		073BFD6F71D2AA688EF7F69E /* DeviceIdentity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceIdentity.swift; sourceTree = "<group>"; };
 		07BE29E09643E04555FE686A /* LLAMA-CPP-MIT-LICENSE.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = "LLAMA-CPP-MIT-LICENSE.txt"; sourceTree = "<group>"; };
@@ -313,6 +321,7 @@
 		12DDF56F4FB65E1F21A69814 /* AgentFiles.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentFiles.swift; sourceTree = "<group>"; };
 		138F44F93B9F279F9495A485 /* ScreenCapture.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScreenCapture.swift; sourceTree = "<group>"; };
 		140CB2849F037763267610E0 /* ComputerUseFaraAction.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseFaraAction.swift; sourceTree = "<group>"; };
+		165EEC2BEFFFDBE9B22AA0CE /* ICEConfigServerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ICEConfigServerTests.swift; sourceTree = "<group>"; };
 		16CB73E4E41BE0E7586E4129 /* OSAtlasRuntimeInstallation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OSAtlasRuntimeInstallation.swift; sourceTree = "<group>"; };
 		173FB9F8EB3974A89C80AE69 /* LocalComputerUseBrokerServer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalComputerUseBrokerServer.swift; sourceTree = "<group>"; };
 		178543C74F742896058F900E /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
@@ -320,6 +329,7 @@
 		199B8A0D8EBEE0F556692058 /* WebRTCAliases.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebRTCAliases.swift; sourceTree = "<group>"; };
 		1A57E2ED9808C6573BEC0737 /* LocalComputerUseBrokerClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalComputerUseBrokerClient.swift; sourceTree = "<group>"; };
 		1A8EC4B3DE7A1C8535CB24A7 /* JSONValue.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JSONValue.swift; sourceTree = "<group>"; };
+		1BC6E287CFE850011342EE1C /* HostPortMapperTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HostPortMapperTests.swift; sourceTree = "<group>"; };
 		1F9F1D16E4DD65536276896D /* PersonalMemoryRuntimeResolver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PersonalMemoryRuntimeResolver.swift; sourceTree = "<group>"; };
 		1FDAD0CCA04F6601347F37EE /* RemoteDesktopHostTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = RemoteDesktopHostTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		20118017B94FB2B4B16D1B53 /* AgentTargetOCRTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentTargetOCRTests.swift; sourceTree = "<group>"; };
@@ -359,6 +369,7 @@
 		3C03A9B3E180859866934D35 /* AgentNativeFilePickerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentNativeFilePickerTests.swift; sourceTree = "<group>"; };
 		3D9944BB9B1B07F17F56861A /* AgentTaskExecutorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentTaskExecutorTests.swift; sourceTree = "<group>"; };
 		3F438D95AC83572EEB7DDCE5 /* LocalComputerUseRPC.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalComputerUseRPC.swift; sourceTree = "<group>"; };
+		40CCDA054879ED390238BE44 /* HostCursorPublisherTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HostCursorPublisherTests.swift; sourceTree = "<group>"; };
 		41894D4AB757A2EB2C0649F4 /* FARA-NOTICE.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = "FARA-NOTICE.txt"; sourceTree = "<group>"; };
 		4280AA9E9EA51BA56F4BF420 /* ComputerUseTaskControls.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseTaskControls.swift; sourceTree = "<group>"; };
 		437B336B94FC717184FBF119 /* LocalHostComputerUseChannel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalHostComputerUseChannel.swift; sourceTree = "<group>"; };
@@ -457,6 +468,7 @@
 		A32DAD9823044E2EF0FD600B /* AgentEvalFaraExchangeEvidenceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentEvalFaraExchangeEvidenceTests.swift; sourceTree = "<group>"; };
 		A3C0746CA0F2BAE3C6FC54CD /* AgentCapabilityAdapter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentCapabilityAdapter.swift; sourceTree = "<group>"; };
 		A63823C807F0408A2ABE123F /* DirectInputSessionProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DirectInputSessionProtocol.swift; sourceTree = "<group>"; };
+		A81790BA27B5C9FE80A555CC /* HostPortMapper.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HostPortMapper.swift; sourceTree = "<group>"; };
 		A8FEE48EBBBFFC4A6645228C /* ComputerUseDefaultBrowserExecutorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseDefaultBrowserExecutorTests.swift; sourceTree = "<group>"; };
 		AA444AE41530A4BE4AC5A759 /* ComputerUseSignInNavigation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseSignInNavigation.swift; sourceTree = "<group>"; };
 		AA88DFBD74BE006B886FAA2B /* SystemBarriers.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SystemBarriers.swift; sourceTree = "<group>"; };
@@ -470,6 +482,7 @@
 		B4ED10853C8206B02332A1EB /* PersonalMemoryRuntimeInputs.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PersonalMemoryRuntimeInputs.swift; sourceTree = "<group>"; };
 		B7196F80FEC0A28B03B3D49A /* ComputerUseArtifactManifest.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseArtifactManifest.swift; sourceTree = "<group>"; };
 		B7462CA4FB362B0AAF17FD52 /* ComputerUseLocalFileCatalog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseLocalFileCatalog.swift; sourceTree = "<group>"; };
+		B87BB248B71DAC45077C9EBE /* HostCursorPublisher.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HostCursorPublisher.swift; sourceTree = "<group>"; };
 		BAB832354576083416CE5899 /* ComputerUseDefaultBrowserSessionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseDefaultBrowserSessionTests.swift; sourceTree = "<group>"; };
 		BAD30262E2C7207F3FCF5E54 /* OSAtlasRuntimeInstallationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OSAtlasRuntimeInstallationTests.swift; sourceTree = "<group>"; };
 		BC55D53B5583E78C31BC90B5 /* MemoryFeatureConfiguration.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MemoryFeatureConfiguration.swift; sourceTree = "<group>"; };
@@ -606,6 +619,7 @@
 				79AA547898300FA9722FBDFC /* DesktopVideoQuality.swift */,
 				073BFD6F71D2AA688EF7F69E /* DeviceIdentity.swift */,
 				A63823C807F0408A2ABE123F /* DirectInputSessionProtocol.swift */,
+				04887EADBAD5EA7F03A39C23 /* ICECandidateDiagnostics.swift */,
 				48B0DBDEE13640A9F60DC878 /* ICEConfigFetcher.swift */,
 				883356287E3F636BF4AD3816 /* LocalComputerUseCredentials.swift */,
 				3F438D95AC83572EEB7DDCE5 /* LocalComputerUseRPC.swift */,
@@ -807,9 +821,12 @@
 				936BD11FA31D4BAB6D5B8D7B /* DebugResidentHostConfigurationTests.swift */,
 				96CF5920816C4ECAAD177BC4 /* GUIOwlPolicyAdapterTests.swift */,
 				21AA8449441EA6B2D9F913A1 /* HostAgentLifecycleTests.swift */,
+				40CCDA054879ED390238BE44 /* HostCursorPublisherTests.swift */,
+				1BC6E287CFE850011342EE1C /* HostPortMapperTests.swift */,
 				9B1DAF90A32ED728B525762F /* HostSessionTests.swift */,
 				194F025F41B49A01DBE09654 /* HostSetupPreferencesTests.swift */,
 				8EBF3C4852E1299BEE267119 /* HostSingleInstanceTests.swift */,
+				165EEC2BEFFFDBE9B22AA0CE /* ICEConfigServerTests.swift */,
 				9998D2A9BBCC15FA929764EA /* LocalComputerUseTransportTests.swift */,
 				5F659E7E28C3C01632A6838F /* MemoryFeatureConfigurationTests.swift */,
 				5420CDBF7C04AA9EB6330CC3 /* OSAtlasAcceptanceFixtureRenderer.swift */,
@@ -913,8 +930,10 @@
 				FC26EE65BC584A891CDF9054 /* HIDUsage.swift */,
 				B104C1229A29AC3A660D5AE2 /* HostCommandLine.swift */,
 				76B373BE70CB02CAA21FB9F8 /* HostConfig.swift */,
+				B87BB248B71DAC45077C9EBE /* HostCursorPublisher.swift */,
 				93E387ACDC6CFA7E8E8E2637 /* HostMemoryView.swift */,
 				5409F40C641B07FBB4D367EC /* HostPeerSession.swift */,
+				A81790BA27B5C9FE80A555CC /* HostPortMapper.swift */,
 				36D33B9A52084CF7EABFA298 /* HostRelaunch.swift */,
 				6A562826435AA2C8F7C5977E /* HostRuntimeContext.swift */,
 				7893923A36DECAC9886D28EF /* HostSession.swift */,
@@ -1213,9 +1232,12 @@
 				866AD4205CA3EBAE48A41E10 /* DebugResidentHostConfigurationTests.swift in Sources */,
 				DAF36F7B8D29F77D04ED9E03 /* GUIOwlPolicyAdapterTests.swift in Sources */,
 				7446454631452FF99911A910 /* HostAgentLifecycleTests.swift in Sources */,
+				CF81021247A0EE7A9AFFCD13 /* HostCursorPublisherTests.swift in Sources */,
+				A36724EA0881661CDE924916 /* HostPortMapperTests.swift in Sources */,
 				18A1BC70ECAA283CF2368B53 /* HostSessionTests.swift in Sources */,
 				9BB42771CBD13E408EC806A3 /* HostSetupPreferencesTests.swift in Sources */,
 				90F08C568FDDAFAB41C32AE8 /* HostSingleInstanceTests.swift in Sources */,
+				F1C7DB9F285A10138E4BF68A /* ICEConfigServerTests.swift in Sources */,
 				304E0EE72F59C9714A1B7FD2 /* LocalComputerUseTransportTests.swift in Sources */,
 				2B27A6B9261B7AAC593A9E5E /* MemoryFeatureConfigurationTests.swift in Sources */,
 				995F760AD6681463EF52E953 /* OSAtlasAcceptanceFixtureRenderer.swift in Sources */,
@@ -1333,14 +1355,17 @@
 				69E1EB52E6F06EABED9B9163 /* HostCommandLine.swift in Sources */,
 				171058C690276E55ABCDE63A /* HostComputerUseManager.swift in Sources */,
 				7E9180D7DA2E0B106F51AAAE /* HostConfig.swift in Sources */,
+				842583A09A75DA6A699BB209 /* HostCursorPublisher.swift in Sources */,
 				3B9AEF83B5724F6727539748 /* HostMemoryView.swift in Sources */,
 				453DCAD598997A2C642D501A /* HostPeerSession.swift in Sources */,
+				39BAC18D362E117CCADF27B0 /* HostPortMapper.swift in Sources */,
 				FC63485E7AEDAFFAB62E0DF7 /* HostRelaunch.swift in Sources */,
 				3D308D821D8A3C6BEFF51771 /* HostRuntimeContext.swift in Sources */,
 				0A2E96270BBA27C6B9005085 /* HostSession.swift in Sources */,
 				C90476214B9BEF6C1D0D53FA /* HostSettingsView.swift in Sources */,
 				FCA720672E14ABB217211ED5 /* HostSetupView.swift in Sources */,
 				AD4A727E592C8F2EDBA679BB /* HostSingleInstance.swift in Sources */,
+				A57ADDD2CEE99252D80E25F8 /* ICECandidateDiagnostics.swift in Sources */,
 				A7671C90705166F18F91B6FE /* ICEConfigFetcher.swift in Sources */,
 				63A185B24B8A07ABEC2DD9FC /* InputInjector.swift in Sources */,
 				064622BC20E058554FCD6495 /* JSONValue.swift in Sources */,
@@ -1400,6 +1425,7 @@
 				DEB5E75BDF659EC38CD729F6 /* ComputerUseTaskMemoryPolicy.swift in Sources */,
 				CC164586642D7F9D81B39D7F /* DeviceIdentity.swift in Sources */,
 				60DB2047FFB87F44F284F528 /* DirectInputSessionProtocol.swift in Sources */,
+				C6CE13CC7832F521ED5621B7 /* ICECandidateDiagnostics.swift in Sources */,
 				E7503A18526116026AB02681 /* ICEConfigFetcher.swift in Sources */,
 				67FB3417C339B1D410680D10 /* LocalComputerUseBrokerClient.swift in Sources */,
 				1A4815474AE79C53AAECF11A /* LocalComputerUseCredentials.swift in Sources */,

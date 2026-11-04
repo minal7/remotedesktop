@@ -21,11 +21,13 @@ targets:
     type: application
     platform: iOS
     sources:
+      # Directory sources include the cursor overlay, trackpad controller and NAT64 synthesizer.
       - path: RemoteDesktop
         excludes:
           - PrivacyInfo.xcprivacy
       - path: ../shared/PersonalMemory
       - path: RemoteDesktop/Transport/WebRTCAliases.swift
+      # Shared protocol sources include ICECandidateDiagnostics.
       - path: ../protocol/Swift
       - path: RemoteDesktop/PrivacyInfo.xcprivacy
         buildPhase: resources
@@ -97,6 +99,7 @@ targets:
     type: bundle.unit-test
     platform: iOS
     sources:
+      # Directory sources include the ICE, cursor, trackpad and NAT64 tests.
       - path: RemoteDesktopTests
     dependencies:
       - target: RemoteDesktop
