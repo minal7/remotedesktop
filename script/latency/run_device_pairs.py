@@ -121,8 +121,30 @@ def install_verified_lab_app(device, client_app):
     require_device_window()
 
 
+def fixture_environment(photo):
+    env = dict(os.environ)
+    if photo is None:
+        return env
+    photo = photo.resolve(strict=True)
+    if not photo.is_file() or not os.access(photo, os.R_OK):
+        raise ValueError('A readable licensed fixture photo is required.')
+    env.update({'LATENCY_OPTICAL': '1', 'LATENCY_LARGE_CHANGE_PHOTO': str(photo)})
+    return env
+
+
+def client_experiment_environment(args):
+    env = {'LATENCY_LAB_F1_MAX_MS': str(args.f1_max_ms)}
+    if args.lab60:
+        env.update({'LATENCY_LAB': '1', 'LATENCY_QOS_FPS': '60',
+                    'LATENCY_QOS_PREFERENCE': 'fluency'})
+    return env
+
+
 def run(args):
     selected_fixes(args.fix)
+    marker_env = fixture_environment(args.fixture_photo)
+    if args.lab60 and args.fixture_photo is None:
+        raise ValueError('LAB60 comparable runs require a licensed fixture photo.')
     handoff = datetime.fromisoformat(args.not_before.replace('Z', '+00:00'))
     if handoff.tzinfo is None:
         raise ValueError('The device handoff time must include its timezone.')
@@ -191,7 +213,7 @@ def run(args):
         # the whole session, including peer handoffs; IDs never restart.
         spawning = True
         try:
-            marker = subprocess.Popen([str(marker_binary)], env={**os.environ,
+            marker = subprocess.Popen([str(marker_binary)], env={**marker_env,
                 'LATENCY_SECONDS': '600', 'LATENCY_HOST_TRACE': str(marker_path)},
                 stdout=marker_log, stderr=subprocess.STDOUT)
         finally:
@@ -213,7 +235,7 @@ def run(args):
             launch_process = subprocess.Popen(['xcrun', 'devicectl', 'device', 'process', 'launch', '--device', args.device,
                  '--console',
                  '--terminate-existing', '--json-output', str(launch_json),
-                 '--environment-variables', json.dumps({'LATENCY_LAB_F1_MAX_MS': str(args.f1_max_ms)}), args.bundle_id,
+                 '--environment-variables', json.dumps(client_experiment_environment(args)), args.bundle_id,
                  'LatencyProbe', 'LatencyProbeHostID', args.host_id,
                  'LatencyLabPairFix', args.fix, 'LatencyLabPairToken', launch_token],
                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -356,6 +378,8 @@ if __name__ == '__main__':
     parser.add_argument('--fix', required=True, help='One fix, or sorted kept fixes joined by + for the combined check')
     parser.add_argument('--f1-max-ms', type=int, choices=[0, 10, 20], default=0)
     parser.add_argument('--marker-binary', required=True, type=Path)
+    parser.add_argument('--fixture-photo', type=Path, help='Licensed photo for the alternating full-screen fixture')
+    parser.add_argument('--lab60', action='store_true', help='Use the explicitly prepared 60 fps adaptive baseline')
     parser.add_argument('--host-traces', required=True, type=Path)
     parser.add_argument('--output', required=True, type=Path)
     parser.add_argument('--bundle-id', default='com.threadmark.remotedesktop.client')

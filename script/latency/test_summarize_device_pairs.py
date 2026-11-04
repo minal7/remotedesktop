@@ -92,6 +92,13 @@ class DevicePairSummaryTests(unittest.TestCase):
         self.assertTrue(result['runs'][-1]['wifi_spike'])
         self.assertEqual(result['runs'][-1]['metrics']['rtt_p95_ms'], 200)
         self.assertEqual(result['runs'][0]['marker_coverage'], [12, 12])
+        self.assertFalse(result['runs'][0]['stage0']['comparison_evidence_complete'])
+        self.assertIn('selected pair missing or changed', result['runs'][0]['stage0']['missing_comparison_evidence'])
+        self.assertIn('decoded coverage incomplete', result['runs'][0]['stage0']['missing_comparison_evidence'])
+        self.assertIn('codec missing', result['runs'][0]['stage0']['missing_comparison_evidence'])
+        self.assertIn('encoder implementation missing', result['runs'][0]['stage0']['missing_comparison_evidence'])
+        self.assertIn('capture size missing', result['runs'][0]['stage0']['missing_comparison_evidence'])
+        self.assertIn('encoded frame byte coverage incomplete', result['runs'][0]['stage0']['missing_comparison_evidence'])
         self.assertAlmostEqual(result['runs'][0]['metrics']['present_interval_p95_ms'], 30)
         self.assertAlmostEqual(result['median_paired_B_minus_A']['present_interval_p95_ms'], 0)
         self.assertEqual(Path(result['runs'][0]['host_trace']).name, 'host-1.jsonl')
@@ -212,6 +219,101 @@ class DevicePairSummaryTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             read_trace(incomplete)
 
+class StageZeroMetricsTests(unittest.TestCase):
+    def test_locked_runs_require_twenty_consecutive_near_25ms_gaps(self):
+        from summarize_device_pairs import locked_25ms_runs
+        def render(gaps):
+            t=0; out=[{'type':'render','presentedTime':t}]
+            for gap in gaps:
+                t+=gap/1000; out.append({'type':'render','presentedTime':t})
+            return out
+        self.assertEqual(locked_25ms_runs(render([25]*19))['observed_runs'], 0)
+        self.assertEqual(locked_25ms_runs(render([25]*20))['observed_runs'], 1)
+        self.assertEqual(locked_25ms_runs(render([25]*19+[33]+[25]*19))['observed_runs'], 0)
+        self.assertEqual(locked_25ms_runs(render([25]*21+[33]+[25]*20))['observed_runs'], 2)
+        self.assertEqual(locked_25ms_runs(render([33.3]*40))['observed_runs'], 0)
+
+    def test_sanitizer_retains_stage_zero_fields_without_ids_or_untyped_values(self):
+        from summarize_device_pairs import sanitize_stage0
+        rows=[{'type':'stats','time':1,'values':{'localCandidateType':'host','localCandidateFamily':'v4',
+            'remoteCandidateType':'srflx','remoteCandidateFamily':'v4','candidateProtocol':'udp','rttFloorMs':4,
+            'captureWidth':2544,'captureHeight':1644,'encoderImplementation':'VideoToolbox','codec_mimeType':'video/H264',
+            'address':'secret'},'reports':{'private-id':{'framesEncodedDelta':10,'encoderImplementation':'VideoToolbox','address':'secret'}}},
+            {'type':'encoded_frame_sizes','time':2,'count':4,'p50Bytes':10,'p95Bytes':20,'maxBytes':30,'complete':True,'private':'secret'},
+            {'type':'stream_event','time':3,'event':'bandwidth_estimate_drop','metric':'targetBitrate','beforeBps':100,'afterBps':49,'private':'secret'},
+            {'type':'stream_event','time':4,'event':'bandwidth_estimate_drop','metric':'targetBitrate','beforeBps':100,'afterBps':50},
+            {'type':'render','decodeTime':1,'submittedTime':2,'presentedTime':3,'receiptDeliveryTime':4,'private':'secret'},
+            {'type':'lab_configuration','time':1,'settings':{'f1Playout':True,'f1MaximumDelayMs':10,'f2Encoder':False,'private':'secret'}}]
+        out=sanitize_stage0(rows); text=json.dumps(out)
+        self.assertNotIn('secret',text); self.assertNotIn('private-id',text)
+        self.assertEqual(out[0]['values']['rttFloorMs'],4)
+        self.assertEqual(out[0]['streams'][0]['framesEncodedDelta'],10)
+        self.assertEqual(out[1]['p95Bytes'],20)
+        self.assertEqual(sum(r['type']=='stream_event' for r in out),1)
+        self.assertEqual(next(r for r in out if r['type']=='render')['receiptDeliveryTime'],4)
+        self.assertEqual(next(r for r in out if r['type']=='lab_configuration')['settings']['f1MaximumDelayMs'],10)
+
+    def test_window_reports_path_rates_transition_and_missing_as_unverified(self):
+        from summarize_device_pairs import stage0_window
+        begin={'time':10,'settings':{'f1Playout':False,'f1MaximumDelayMs':10}}; end={'time':40}
+        pair={'localCandidateType':'host','localCandidateFamily':'v4','remoteCandidateType':'host',
+              'remoteCandidateFamily':'v4','candidateProtocol':'udp','rttFloorMs':3.5,'currentRoundTripTime':.04,'captureWidth':2544,'captureHeight':1644,
+              'codec_mimeType':'video/H264','encoderImplementation':'VideoToolbox'}
+        host=[{'type':'stats','time':1011,'values':pair},{'type':'encoded_frame_sizes','time':1011,
+               'count':2,'p50Bytes':100,'p95Bytes':200,'maxBytes':200,'complete':True}]
+        client=[{'type':'stats','side':'client','time':10,'values':{}},
+                {'type':'stats','side':'client','time':11,'values':{'framesDecodedDelta':55}},
+                {'type':'render','decodeTime':10,'submittedTime':10.01,'presentedTime':10.03,'receiptDeliveryTime':10.04}]
+        detail={'samples':[{'marker_id':1,'screen_to_screen_ms':80}], 'screen_to_screen':{'p50_ms':80}}
+        marker=[{'marker_id':1,'scene':'text','scene_transition':True}]
+        out=stage0_window(client,host,begin,end,detail,marker)
+        self.assertEqual(out['pair_status'],'observed'); self.assertEqual(out['rtt_floor_ms'],40)
+        self.assertEqual(out['lifetime_rtt_floor_ms'],3.5)
+        self.assertEqual(out['decoded_fps_by_interval'][0]['fps'],55)
+        self.assertEqual(out['presented_frames_per_second'][0]['presented_frames'],1)
+        self.assertEqual(out['large_change_first_frame_ms']['p50'],80)
+        self.assertEqual(out['capture_sizes'],[{'width':2544,'height':1644}])
+        self.assertAlmostEqual(out['render_split']['submitted_to_presented']['p50_ms'],20)
+        missing=stage0_window([],[],begin,end,{'samples':[]},[])
+        self.assertEqual(missing['pair_status'],'unverified'); self.assertIsNone(missing['rtt_floor_ms'])
+        self.assertIsNone(missing['large_change_first_frame_ms']['p50'])
+
+    def test_missing_markers_remain_unverified_not_a_false_pass(self):
+        from summarize_device_pairs import summarize
+        from unittest.mock import patch
+        # An unavailable marker match is explicitly represented rather than treated as zero latency.
+        with patch('summarize_device_pairs.device_summary', side_effect=ValueError('No matched markers with a recent clock estimate')):
+            fixture=DevicePairSummaryTests(methodName='test_eight_windows_use_paired_median_and_keep_freezes_and_wifi_spikes')
+            fixture.setUp()
+            try:
+                fixture.fixture()
+                out=fixture.run_summary()
+                self.assertIsNone(out['median_paired_B_minus_A']['screen_to_screen_p50_ms'])
+                self.assertTrue(all(r['marker_caveat'] for r in out['runs']))
+                self.assertTrue(all(r['metrics']['screen_to_screen_p50_ms'] is None for r in out['runs']))
+            finally:fixture.doCleanups()
+
+    def test_rtt_floor_uses_current_window_and_unknown_pair_is_unverified(self):
+        from summarize_device_pairs import stage0_window
+        begin={'time':10,'settings':{}}; end={'time':40}
+        unknown={'localCandidateType':'unknown','localCandidateFamily':'unknown',
+                 'remoteCandidateType':'unknown','remoteCandidateFamily':'unknown','candidateProtocol':'unknown',
+                 'rttFloorMs':1,'currentRoundTripTime':.08}
+        host=[{'type':'stats','time':11,'values':unknown},
+              {'type':'stats','time':12,'values':{'rttFloorMs':1,'currentRoundTripTime':.06}}]
+        out=stage0_window([],host,begin,end,{'samples':[]},[])
+        self.assertEqual(out['pair_status'],'unverified')
+        self.assertEqual(out['rtt_floor_ms'],60)
+        self.assertEqual(out['lifetime_rtt_floor_ms'],1)
+
+    def test_fixture_sanitizer_keeps_scene_transition_without_private_payload(self):
+        from summarize_device_pairs import sanitize_fixture_markers
+        rows=[{'marker_id':1,'host_display_s':2.0,'scene':'photo','scene_transition':True,'photo_path':'private'},
+              {'marker_id':2,'host_display_s':3.0,'scene':'private','scene_transition':'yes'}]
+        result=sanitize_fixture_markers(rows)
+        self.assertEqual(result[0]['scene'],'photo'); self.assertTrue(result[0]['scene_transition'])
+        self.assertNotIn('private',json.dumps(result))
+        self.assertNotIn('scene',result[1]); self.assertNotIn('scene_transition',result[1])
 
 if __name__ == '__main__':
     unittest.main()

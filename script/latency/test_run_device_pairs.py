@@ -45,7 +45,7 @@ class DevicePairSafetyTests(unittest.TestCase):
             host_app=host.parent, guarded=True, output=root / 'output',
             marker_binary=marker.resolve(), device='device', host_id='host', fix='F1',
             f1_max_ms=0, bundle_id=runner.CLIENT_BUNDLE, host_traces=root / 'traces',
-            client_app=root / 'lab.app')
+            client_app=root / 'lab.app', fixture_photo=None, lab60=False)
 
     def fake_install(self, device, app):
         runner.require_selected_ipad(device)
@@ -187,6 +187,24 @@ class DevicePairSafetyTests(unittest.TestCase):
         terminate.assert_not_called()
         marker.terminate.assert_called_once()
 
+class StageZeroRunnerTests(unittest.TestCase):
+    def test_fixture_requires_existing_readable_photo_and_sets_only_fixture_flags(self):
+        with tempfile.TemporaryDirectory() as folder:
+            photo=Path(folder)/'licensed.jpg'
+            with self.assertRaises(FileNotFoundError): runner.fixture_environment(photo)
+            photo.write_bytes(b'fixture')
+            env=runner.fixture_environment(photo)
+            self.assertEqual(env['LATENCY_OPTICAL'],'1')
+            self.assertEqual(env['LATENCY_LARGE_CHANGE_PHOTO'],str(photo.resolve()))
+
+    def test_lab60_sets_explicit_fps_and_baseline_qos(self):
+        args=SimpleNamespace(f1_max_ms=10, lab60=True)
+        env=runner.client_experiment_environment(args)
+        self.assertEqual(env['LATENCY_LAB_F1_MAX_MS'],'10')
+        self.assertEqual(env['LATENCY_QOS_FPS'],'60')
+        self.assertEqual(env['LATENCY_QOS_PREFERENCE'],'fluency')
+        args.lab60=False
+        self.assertNotIn('LATENCY_QOS_FPS',runner.client_experiment_environment(args))
 
 if __name__ == '__main__':
     unittest.main()
