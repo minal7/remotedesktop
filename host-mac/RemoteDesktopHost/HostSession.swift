@@ -1071,6 +1071,7 @@ final class HostSession: ObservableObject {
                                 audioEnabled: permissions.audioEnabled,
                                 peerSenderID: offerSenderID,
                                 acceptedOrdinaryPeer: HostPeerSession.allowsPortMapping(for: offeredClassification),
+                                requestAdaptive60: env.payload["adaptiveVideo60"] == "1",
                                 onUserInput: { [weak computerUse] in
                                     guard let intervention = computerUse?.recordUserInputInInjectionTransaction() else { return false }
                                     Task { @MainActor [weak computerUse] in

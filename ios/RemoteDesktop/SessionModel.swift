@@ -538,6 +538,8 @@ final class SessionModel: ObservableObject, VideoRendererTarget {
         }
     }
 
+    static func requestsAdaptive60(for experience: Experience) -> Bool { experience == .remoteControl }
+
     static func usesLANPlayoutCap(_ source: LocalHostAdvertisement.Source) -> Bool {
         source == .localNetwork
     }
@@ -602,7 +604,8 @@ final class SessionModel: ObservableObject, VideoRendererTarget {
         }
 
         let t = transportFactory?() ?? WebRTCTransport(
-            useLANPlayoutCap: Self.usesLANPlayoutCap(discoverySource))
+            useLANPlayoutCap: Self.usesLANPlayoutCap(discoverySource),
+            requestAdaptive60: Self.requestsAdaptive60(for: experience))
         bind(t)
         transport = t
 
@@ -1185,13 +1188,17 @@ final class SessionModel: ObservableObject, VideoRendererTarget {
             }
             self.state = .connected
             if isInitialHandshake { self.computerUseSession?.start() }
+            let adaptive60 = (t as? WebRTCTransport)?.adaptive60Selected == true
             #if DEBUG
-            let preference = Self.labQualityPreference(environment: ProcessInfo.processInfo.environment)
-            let targetFps = Self.labQoSFrameRate(environment: ProcessInfo.processInfo.environment,
-                                                ordinarySession: self.experience == .remoteControl)
+            let labPreference = Self.labQualityPreference(environment: ProcessInfo.processInfo.environment)
+            let explicitlySetPreference = ProcessInfo.processInfo.environment["LATENCY_LAB"] == "1" && ProcessInfo.processInfo.environment["LATENCY_QOS_PREFERENCE"] != nil
+            let preference = explicitlySetPreference ? labPreference : (adaptive60 ? "fluency" : "sharpness")
+            let labRate = Self.labQoSFrameRate(environment: ProcessInfo.processInfo.environment,
+                                               ordinarySession: self.experience == .remoteControl)
+            let targetFps = adaptive60 ? DesktopVideoQuality.adaptiveFramesPerSecond : labRate
             #else
-            let preference = "sharpness"
-            let targetFps = DesktopVideoQuality.targetFramesPerSecond
+            let preference = adaptive60 ? "fluency" : "sharpness"
+            let targetFps = adaptive60 ? DesktopVideoQuality.adaptiveFramesPerSecond : DesktopVideoQuality.targetFramesPerSecond
             #endif
             self.send(.qos(
                 targetFps: targetFps,

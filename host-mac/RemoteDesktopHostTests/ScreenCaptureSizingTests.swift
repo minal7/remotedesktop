@@ -82,6 +82,52 @@ final class ScreenCaptureSizingTests: XCTestCase {
 
     /// One passive initial-frame observation; no pixels are saved or encoded.
     /// This tests native metadata admission, not stationary recovery or remote presentation.
+    func testAdaptive60RequiresExactSupportedPrimaryH264Codec() {
+        XCTAssertTrue(HostPeerSession.shouldSelectAdaptive60(requested: true, codecSupported: true))
+        XCTAssertFalse(HostPeerSession.shouldSelectAdaptive60(requested: false, codecSupported: true))
+        XCTAssertFalse(HostPeerSession.shouldSelectAdaptive60(requested: true, codecSupported: false))
+        XCTAssertTrue(DesktopVideoQuality.supportsAdaptive60(name: "H264", profileLevelID: "640c33", packetizationMode: "1"))
+        XCTAssertFalse(DesktopVideoQuality.supportsAdaptive60(name: "VP8", profileLevelID: "640c33", packetizationMode: "1"))
+        XCTAssertFalse(DesktopVideoQuality.supportsAdaptive60(name: "H264", profileLevelID: "42e01f", packetizationMode: "1"))
+        XCTAssertFalse(DesktopVideoQuality.supportsAdaptive60(name: "H264", profileLevelID: "640c33", packetizationMode: "0"))
+        XCTAssertFalse(DesktopVideoQuality.supportsAdaptive60(name: nil, profileLevelID: nil, packetizationMode: nil))
+    }
+
+    func testAdaptive60CaptureSizeAndSenderRateRemainBounded() {
+        let size = CaptureSizing.encoderSafe(width: 3456, height: 2234,
+            maximumMacroblocksPerFrame: DesktopVideoQuality.adaptiveMaximumMacroblocksPerFrame)
+        let macroblocks = CaptureSizing.macroblockCount(width: size.width, height: size.height)
+        XCTAssertLessThanOrEqual(macroblocks, 16_384)
+        XCTAssertLessThanOrEqual(macroblocks * 60, 983_040)
+        XCTAssertEqual(size.width % 2, 0)
+        XCTAssertEqual(size.height % 2, 0)
+        let configuration = ScreenCapture.streamConfiguration(width: size.width, height: size.height,
+                                                                 audioEnabled: false, framesPerSecond: 60)
+        XCTAssertEqual(configuration.minimumFrameInterval, CMTime(value: 1, timescale: 60))
+        let legacy = DesktopVideoQuality.senderPolicy(targetFramesPerSecond: 60, maximumBitrateKbps: 30_000,
+                                                       preference: "fluency")
+        XCTAssertEqual(legacy.maximumFramesPerSecond, 30)
+        let adaptive = DesktopVideoQuality.senderPolicy(targetFramesPerSecond: 120, maximumBitrateKbps: 30_000,
+                                                         preference: "fluency", maximumFramesPerSecond: 60)
+        XCTAssertEqual(adaptive.maximumFramesPerSecond, 60)
+        XCTAssertEqual(adaptive.degradationPreference, .maintainFramerate)
+    }
+
+
+    /// One passive initial-frame observation; no pixels are saved or encoded.
+    /// This tests native metadata admission, not stationary recovery or remote presentation.
+    func testAdaptive60UsesAnswerPrimaryCodecAndRejectsMalformedSDP() {
+        let h264 = "m=video 9 UDP/TLS/RTP/SAVPF 96 97\r\na=rtpmap:96 H264/90000\r\na=fmtp:96 profile-level-id=640c33;packetization-mode=1\r\na=rtpmap:97 VP8/90000\r\n"
+        XCTAssertTrue(DesktopVideoQuality.supportsAdaptive60(answerSDP: h264))
+        XCTAssertFalse(DesktopVideoQuality.supportsAdaptive60(answerSDP: h264.replacingOccurrences(of: "96 97", with: "97 96")))
+        XCTAssertFalse(DesktopVideoQuality.supportsAdaptive60(answerSDP: h264.replacingOccurrences(of: "packetization-mode=1", with: "packetization-mode=0")))
+        XCTAssertFalse(DesktopVideoQuality.supportsAdaptive60(answerSDP: h264.replacingOccurrences(of: "m=video 9", with: "m=video 0")))
+        XCTAssertFalse(DesktopVideoQuality.supportsAdaptive60(answerSDP: h264 + "a=inactive\r\n"))
+        XCTAssertFalse(DesktopVideoQuality.supportsAdaptive60(answerSDP: h264 + "a=fmtp:96 profile-level-id=640c33;packetization-mode=1\r\n"))
+        XCTAssertFalse(DesktopVideoQuality.supportsAdaptive60(answerSDP: h264.replacingOccurrences(of: "640c33", with: "42e01f")))
+        XCTAssertFalse(DesktopVideoQuality.supportsAdaptive60(answerSDP: ""))
+    }
+
     func test_optInNativeInitialFrameMetadata() async throws {
         guard ProcessInfo.processInfo.environment["RUN_SINGLE_CAPTURE_METADATA"] == "1" else {
             throw XCTSkip("Opt-in: one passive display frame, no audio, input or inference")
