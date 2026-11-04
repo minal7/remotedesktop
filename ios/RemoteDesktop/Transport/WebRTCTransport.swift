@@ -74,6 +74,7 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
     var onDisconnect: (@MainActor (String) -> Void)?
 
     #if DEBUG
+    nonisolated private let labInstrumentation: Bool
     private struct DebugVideoSample: Sendable {
         let id: String
         let bytes: Double
@@ -147,7 +148,7 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
         let mbps = max(0, sample.bytes - previous.sample.bytes) * 8 / seconds / 1_000_000
         var text = String(format: "%.0f fps · %.1f Mbps · %d×%d · RTT %@", fps, mbps,
                           sample.width, sample.height, rtt)
-        if LatencyStatsCollector.enabled {
+        if labInstrumentation && LatencyStatsCollector.enabled {
             let stats = RemoteVideoLatencyProbe.shared.collector.snapshot()
             for (key, label) in [("jitterBufferMs", "Jitter"), ("decodeMs", "Decode"), ("processingMs", "Processing")] {
                 if let value = stats[key] { text += String(format: "\n%@: %.1f ms", label, value) }
@@ -212,6 +213,9 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
     ) {
         RTCInitializeSSL()
         self.mediaPolicy = mediaPolicy
+        #if DEBUG
+        self.labInstrumentation = mediaPolicy == .remoteSession
+        #endif
         self.factory = RTCPeerConnectionFactory(
             audioDeviceModuleType: .platformDefault,
             bypassVoiceProcessing: true,
@@ -279,7 +283,7 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
                 audioProcessingModule: nil)
             f1FactoryConfigured = false
         }
-        if LatencyStatsCollector.enabled {
+        if labInstrumentation && LatencyStatsCollector.enabled {
             latencyTask?.cancel(); latencyTask = nil
             latencyPings.removeAll(); latencySamples.removeAll()
             peerLatencyCollector = nil
@@ -358,7 +362,7 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
         log.info("ICE id=\(self.diagnosticConnectionID, privacy: .public) stage=offer_sent")
 
         #if DEBUG
-        if LatencyStatsCollector.enabled {
+        if labInstrumentation && LatencyStatsCollector.enabled {
             latencyTask?.cancel()
             if let collector = latencyCollector {
                 latencyTask = Task { [weak self, collector] in await self?.latencyLoop(collector: collector) }
@@ -1433,7 +1437,7 @@ extension WebRTCTransport: RTCDataChannelDelegate {
 
     nonisolated func dataChannel(_ dataChannel: RTCDataChannel, didReceiveMessageWith buffer: RTCDataBuffer) {
         #if DEBUG
-        let latencyReceivedAt = LatencyStatsCollector.enabled ? ProcessInfo.processInfo.systemUptime : nil
+        let latencyReceivedAt = labInstrumentation && LatencyStatsCollector.enabled ? ProcessInfo.processInfo.systemUptime : nil
         #endif
         Task { @MainActor [weak self] in
             guard let self, !self.isClosing, self.dataChannel === dataChannel,
@@ -1508,7 +1512,7 @@ extension WebRTCTransport: RTCDataChannelDelegate {
                     guard !isClosing, self.dataChannel === dataChannel,
                           currentDisplay == display, inputPresentation.matches(display.inputSession) else { return }
                     #if DEBUG
-                    if LatencyStatsCollector.enabled { RemoteVideoLatencyProbe.shared.setDisplay(display) }
+                    if self.labInstrumentation && LatencyStatsCollector.enabled { RemoteVideoLatencyProbe.shared.setDisplay(display) }
                     #endif
                     onDisplay?(display)
                 }

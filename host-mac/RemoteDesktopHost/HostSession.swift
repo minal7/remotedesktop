@@ -1096,6 +1096,7 @@ final class HostSession: ObservableObject {
                                             epoch: epoch)
                                     }
                                 },
+                                labInstrumentation: offeredClassification == .primaryRemoteControl,
                                 latencyF1Nonce: labNonce,
                                 latencyF2Enabled: labF2,
                                 latencyF3Enabled: labF3,

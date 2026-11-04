@@ -327,7 +327,8 @@ final class HostPeerSession: NSObject {
     private var f3AppliedPath: LatencyLabSenderPolicy.Path?
     private var f3OriginalPriorities: [(LKRTCPriority, Double)]?
     #endif
-    private let latencyStats = LatencyStatsCollector(side: "host")
+    private let latencyStats: LatencyStatsCollector
+    private let labInstrumentation: Bool
     private var latencyTimer: DispatchSourceTimer?
     private var peerConnection: RTCPeerConnection?
     private var dataChannel: RTCDataChannel?
@@ -377,6 +378,7 @@ final class HostPeerSession: NSObject {
         onUserInput: @escaping @Sendable () -> Bool,
         onPeerAuthorizationChanged:
             @escaping @Sendable (PeerAuthorization) -> Void,
+        labInstrumentation: Bool = true,
         latencyF1Nonce: String? = nil,
         latencyF2Enabled: Bool = false,
         latencyF3Enabled: Bool = false,
@@ -395,6 +397,8 @@ final class HostPeerSession: NSObject {
                 authorized: state.authorized, orderedComputerUseControls: state.orderedComputerUseControls))
         }
         self.onEnded = onEnded
+        self.labInstrumentation = labInstrumentation
+        self.latencyStats = LatencyStatsCollector(side: "host", enabled: labInstrumentation && LatencyStatsCollector.enabled)
         #if DEBUG
         self.onLatencyF1RestartRequest = onLatencyF1RestartRequest
         self.latencyF1Nonce = latencyF1Nonce
@@ -485,7 +489,7 @@ final class HostPeerSession: NSObject {
     }
 
     private func startLatencyPolling(_ connection: RTCPeerConnection) {
-        guard LatencyStatsCollector.enabled, latencyTimer == nil else { return }
+        guard labInstrumentation, LatencyStatsCollector.enabled, latencyTimer == nil else { return }
         let timer = DispatchSource.makeTimerSource(queue: DispatchQueue(label: "host.latency.stats"))
         timer.schedule(deadline: .now(), repeating: 1)
         var count = 0
@@ -1069,7 +1073,7 @@ final class HostPeerSession: NSObject {
     }
 
     private func pushVideoFrame(_ captured: CapturedVideoFrame) {
-        if LatencyStatsCollector.enabled {
+        if labInstrumentation && LatencyStatsCollector.enabled {
             let display = CMTimeGetSeconds(CMClockMakeHostTimeFromSystemUnits(captured.metadata.displayTimeHostTicks))
             let now = CMTimeGetSeconds(CMClockGetTime(CMClockGetHostTimeClock()))
             if display.isFinite, now >= display {
@@ -1433,11 +1437,11 @@ extension HostPeerSession: RTCDataChannelDelegate {
 
     func dataChannel(_ dataChannel: RTCDataChannel, didReceiveMessageWith buffer: RTCDataBuffer) {
         #if DEBUG
-        let receiveTime = LatencyStatsCollector.enabled ? ProcessInfo.processInfo.systemUptime : nil
+        let receiveTime = labInstrumentation && LatencyStatsCollector.enabled ? ProcessInfo.processInfo.systemUptime : nil
         #endif
         guard inputAuthorization.ownsChannel(ObjectIdentifier(dataChannel)), dataChannel.readyState == .open else { return }
         #if DEBUG
-        if inputAuthorization.inputSession(for: ObjectIdentifier(dataChannel)) != nil,
+        if labInstrumentation, inputAuthorization.inputSession(for: ObjectIdentifier(dataChannel)) != nil,
            let object = (try? JSONSerialization.jsonObject(with: buffer.data)) as? [String: Any],
            object["type"] as? String == "latencyF1RestartRequest" {
             guard let nonce = object["nonce"] as? String, nonce.count == 36,
@@ -1497,7 +1501,7 @@ extension HostPeerSession: RTCDataChannelDelegate {
                 return
             }
             #if DEBUG
-            let clientTime = LatencyStatsCollector.enabled ? ((try? JSONSerialization.jsonObject(with: buffer.data)) as? [String: Any])?["ts"] as? NSNumber : nil
+            let clientTime = labInstrumentation && LatencyStatsCollector.enabled ? ((try? JSONSerialization.jsonObject(with: buffer.data)) as? [String: Any])?["ts"] as? NSNumber : nil
             let onPost: ((TimeInterval) -> Void)? = clientTime.flatMap { timestamp in
                 guard let receiveTime else { return nil }
                 return { [latencyStats] postTime in

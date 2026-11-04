@@ -16,6 +16,7 @@ final class RemoteVideoPresentationSurface: NSObject, RTCVideoRenderer {
     nonisolated private let mailbox = RemoteVideoLatestFrameMailbox<RTCVideoFrame>()
     #if DEBUG
     private var submittedLatency: (frame: UUID, sample: RemoteVideoLatencyProbe.FrameSample)?
+    nonisolated private let labInstrumentation: Bool
     #endif
     #if DEBUG
     private var f4: RemoteVideoF4Renderer?
@@ -58,12 +59,15 @@ final class RemoteVideoPresentationSurface: NSObject, RTCVideoRenderer {
 
     static func make(allowF4: Bool = false) -> RemoteVideoPresentationSurface? {
         let view = RemoteVideoMetalView(frame: .zero)
-        guard let producer = RemoteVideoPresentationProducer(layer: view.metalLayer) else { return nil }
+        guard let producer = RemoteVideoPresentationProducer(layer: view.metalLayer, labAdmission: allowF4) else { return nil }
         return RemoteVideoPresentationSurface(view: view, producer: producer, allowF4: allowF4)
     }
 
     private init?(view: RemoteVideoMetalView, producer: RemoteVideoPresentationProducer, allowF4: Bool) {
         self.view = view; self.producer = producer
+        #if DEBUG
+        self.labInstrumentation = allowF4
+        #endif
         presentation = RemoteVideoSurfacePresentation(context: producer.contextID)
         super.init()
         view.isUserInteractionEnabled = false
@@ -96,7 +100,7 @@ final class RemoteVideoPresentationSurface: NSObject, RTCVideoRenderer {
     nonisolated func renderFrame(_ frame: RTCVideoFrame?) {
         if let frame {
             #if DEBUG
-            if LatencyStatsCollector.enabled {
+            if labInstrumentation && LatencyStatsCollector.enabled {
                 let decodedTime = CACurrentMediaTime()
                 let sample = RemoteVideoLatencyProbe.shared.capture(frame, decodedAt: decodedTime)
                 mailbox.offer(frame, latency: sample)

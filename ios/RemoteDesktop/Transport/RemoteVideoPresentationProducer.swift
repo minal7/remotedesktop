@@ -28,6 +28,7 @@ final class RemoteVideoPresentationProducer {
     private(set) var contextID = UUID()
     #if DEBUG
     var onLatencySubmit: (() -> Void)?
+    private let labAdmission: Bool
     #endif
     private var active = true
     private var lastDrawableID: Int?
@@ -35,11 +36,14 @@ final class RemoteVideoPresentationProducer {
     private var lastReceiptDrawableID: Int?
     private var layout: (size: CGSize, contentMode: ContentMode)?
 
-    init?(layer: CAMetalLayer) {
+    init?(layer: CAMetalLayer, labAdmission: Bool = false) {
         guard let device = layer.device ?? MTLCreateSystemDefaultDevice(),
               let queue = device.makeCommandQueue(),
               let colorSpace = CGColorSpace(name: CGColorSpace.sRGB) else { return nil }
         self.layer = layer
+        #if DEBUG
+        self.labAdmission = labAdmission
+        #endif
         self.device = device
         self.queue = queue
         self.colorSpace = colorSpace
@@ -110,12 +114,13 @@ final class RemoteVideoPresentationProducer {
                 onResult(frameID, result)
             }) else { return .busy }
         #if DEBUG
-        guard let gpuPermit = RemoteVideoGPUAdmission.shared.acquire() else {
+        let gpuPermit = labAdmission ? RemoteVideoGPUAdmission.shared.acquire() : nil
+        guard !labAdmission || gpuPermit != nil else {
             budget.abandonUncommitted(ticket)
             return .busy
         }
         var gpuCommitted = false
-        defer { if !gpuCommitted { gpuPermit.release() } }
+        defer { if !gpuCommitted { gpuPermit?.release() } }
         #endif
         let prepared: RemoteVideoFrameImage
         switch RemoteVideoFrameImage.prepare(frame) {
@@ -156,7 +161,7 @@ final class RemoteVideoPresentationProducer {
         let resources = FrameResources(frame: frame, prepared: prepared, image: output, task: renderTask, context: imageContext)
         command.addCompletedHandler { command in
             #if DEBUG
-            gpuPermit.release()
+            gpuPermit?.release()
             #endif
             withExtendedLifetime(resources) {
                 let succeeded = command.status == .completed
