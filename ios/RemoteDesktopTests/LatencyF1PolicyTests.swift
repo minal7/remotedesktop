@@ -12,6 +12,32 @@ final class LatencyF1PolicyTests: XCTestCase {
         XCTAssertNil(LatencyF1Policy.initialSelection(lanPlayoutCap: false, f4: false).f1MaximumDelayMs)
     }
 
+    func testExplicitLabF1OffStartsAdaptiveEvenForNearbyHost() {
+        var configuration = LatencyLabConfiguration()
+        configuration.f1Playout = false
+        let initial = LatencyF1Policy.initialSelection(lanPlayoutCap: true, f4: false,
+                                                       labOptedIn: true, configuration: configuration)
+        var hello = HostHello(app: "Fixture", version: "1", hostname: "Mac", os: "macOS", audio: false, monitors: 1)
+        hello.latencyF1Playout = 1
+        let requested = LatencyF1Policy.selection(configuration: configuration, hello: hello)
+        XCTAssertNil(initial.f1MaximumDelayMs)
+        XCTAssertEqual(initial, requested, "No startup handoff when lab F1 is explicitly off")
+    }
+
+    func testInitialFactoryHonorsOrdinaryPathsAndExplicitLabF1On() {
+        var configuration = LatencyLabConfiguration()
+        configuration.f1Playout = true
+        configuration.f1MaximumDelayMs = 10
+        XCTAssertEqual(LatencyF1Policy.initialSelection(lanPlayoutCap: true, f4: false).f1MaximumDelayMs, 10)
+        XCTAssertNil(LatencyF1Policy.initialSelection(lanPlayoutCap: false, f4: false).f1MaximumDelayMs)
+        let lab = LatencyF1Policy.initialSelection(lanPlayoutCap: false, f4: false,
+                                                   labOptedIn: true, configuration: configuration)
+        XCTAssertEqual(lab.f1MaximumDelayMs, 10)
+        var hello = HostHello(app: "Fixture", version: "1", hostname: "Mac", os: "macOS", audio: false, monitors: 1)
+        hello.latencyF1Playout = 1
+        XCTAssertEqual(lab, LatencyF1Policy.selection(configuration: configuration, hello: hello))
+    }
+
     func testRuntimeFactoryChangesAndSignalingGenerationIsolation() {
         XCTAssertFalse(LatencyF1Policy.needsNewFactory(currentMaximumMs: nil, desiredMaximumMs: nil))
         XCTAssertTrue(LatencyF1Policy.needsNewFactory(currentMaximumMs: nil, desiredMaximumMs: 0))

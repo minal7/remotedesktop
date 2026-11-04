@@ -78,6 +78,8 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
 
     #if DEBUG
     nonisolated private let labInstrumentation: Bool
+    private let initialFactoryDelay: Int?
+    private var labControlsActive: Bool
     private struct DebugVideoSample: Sendable {
         let id: String
         let bytes: Double
@@ -244,11 +246,18 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
         #if DEBUG
         self.labInstrumentation = mediaPolicy == .remoteSession
         self.initialLANPlayoutCap = useLANPlayoutCap
+        let labOptedIn = mediaPolicy == .remoteSession && LatencyStatsCollector.enabled
+        self.labControlsActive = labOptedIn
+        self.initialFactoryDelay = LatencyF1Policy.initialSelection(
+            lanPlayoutCap: useLANPlayoutCap, f4: false, labOptedIn: labOptedIn,
+            configuration: LatencyLabConfiguration.current).f1MaximumDelayMs
+        let initialTrial = initialFactoryDelay.map { "WebRTC-ForcePlayoutDelay/min_ms:0,max_ms:\($0)/" }
+        #else
+        let initialTrial = useLANPlayoutCap ? "WebRTC-ForcePlayoutDelay/min_ms:0,max_ms:10/" : nil
         #endif
         // Field trials are copied into the factory at creation; restore the
         // process setting immediately so later remote factories remain adaptive.
-        RTCPeerConnectionFactory.configureFieldTrials(
-            useLANPlayoutCap ? "WebRTC-ForcePlayoutDelay/min_ms:0,max_ms:10/" : nil)
+        RTCPeerConnectionFactory.configureFieldTrials(initialTrial)
         self.factory = RTCPeerConnectionFactory(
             audioDeviceModuleType: .platformDefault,
             bypassVoiceProcessing: true,
@@ -275,7 +284,10 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
         labObserver = NotificationCenter.default.addObserver(
             forName: .latencyLabConfigurationDidChange, object: nil, queue: nil
         ) { [weak self] _ in
-            Task { @MainActor [weak self] in self?.reconcileLabConfiguration() }
+            Task { @MainActor [weak self] in
+                self?.labControlsActive = true
+                self?.reconcileLabConfiguration()
+            }
         }
         #endif
         if mediaPolicy.receivesHostAudio {
@@ -312,7 +324,7 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
             // A reused transport must not carry a previous host's trial into
             // the next host's initial, capability-unknown connection.
             RTCPeerConnectionFactory.configureFieldTrials(
-                initialLANPlayoutCap ? "WebRTC-ForcePlayoutDelay/min_ms:0,max_ms:10/" : nil)
+                initialFactoryDelay.map { "WebRTC-ForcePlayoutDelay/min_ms:0,max_ms:\($0)/" })
             factory = RTCPeerConnectionFactory(
                 audioDeviceModuleType: .platformDefault, bypassVoiceProcessing: true,
                 encoderFactory: DesktopVideoEncoderFactory(), decoderFactory: DesktopVideoDecoderFactory(),
@@ -337,7 +349,8 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
         f1RestartTask?.cancel(); f1RestartTask = nil
         f1ApplyToReplacement = false; f2ApplyToReplacement = false
         f3ApplyToReplacement = false; labPending = nil; labLastHello = nil; labActiveNonce = nil
-        labApplied = LatencyF1Policy.initialSelection(lanPlayoutCap: initialLANPlayoutCap, f4: f1Configuration.f4Renderer)
+        labApplied = LatencyLabSelection(f1MaximumDelayMs: initialFactoryDelay, f2: false, f3: false,
+                                         f4: f1Configuration.f4Renderer)
         latencyCollector?.trace(["type": "f1_playout", "time": ProcessInfo.processInfo.systemUptime,
                                  "requested": f1Configuration.f1Playout,
                                  "maximumDelayMs": f1Configuration.f1MaximumDelayMs,
@@ -812,7 +825,7 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
     }
 
     private func startF1IfSupported(_ hello: HostHello, channel: RTCDataChannel) {
-        guard answerApplied, mediaPolicy == .remoteSession else { return }
+        guard labControlsActive, answerApplied, mediaPolicy == .remoteSession else { return }
         switch f1State {
         case .requested, .restarting: return
         case .idle, .active, .unavailable: break
@@ -899,7 +912,7 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
         }
         factory = replacementFactory
         f1FactoryConfigured = LatencyF1Policy.needsNewFactory(
-            currentMaximumMs: initialLANPlayoutCap ? 10 : nil, desiredMaximumMs: labPending?.f1MaximumDelayMs)
+            currentMaximumMs: initialFactoryDelay, desiredMaximumMs: labPending?.f1MaximumDelayMs)
         do {
             guard !isClosing, case .restarting(let current) = f1State, current == nonce else { return }
             let replacement = try makePeerConnection(iceConfig: iceConfig)
