@@ -323,6 +323,7 @@ final class HostPeerSession: NSObject {
     private var lastCaptureMarker: Int?
     private let latencyF1Nonce: String?
     private let onLatencyF1RestartRequest: (@Sendable (String, @escaping @Sendable () -> Void) -> Void)?
+    private let latencyCapabilities: LatencyLabConfiguration
     private var f3AppliedPath: LatencyLabSenderPolicy.Path?
     private var f3OriginalPriorities: [(LKRTCPriority, Double)]?
     #endif
@@ -397,8 +398,10 @@ final class HostPeerSession: NSObject {
         #if DEBUG
         self.onLatencyF1RestartRequest = onLatencyF1RestartRequest
         self.latencyF1Nonce = latencyF1Nonce
-        let enableF2 = latencyF2Enabled && LatencyLabConfiguration.current.f2Encoder
-        let enableF3 = latencyF3Enabled && LatencyLabConfiguration.current.f3Sender
+        let labConfiguration = LatencyLabConfiguration.current
+        self.latencyCapabilities = labConfiguration
+        let enableF2 = latencyF2Enabled && labConfiguration.f2Encoder
+        let enableF3 = latencyF3Enabled && labConfiguration.f3Sender
         #else
         let enableF2 = false
         let enableF3 = false
@@ -423,6 +426,11 @@ final class HostPeerSession: NSObject {
         self.videoTrack = factory.videoTrack(with: videoSource, trackId: "screen")
         self.videoCapturer = RTCVideoCapturer(delegate: videoSource)
         super.init()
+        #if DEBUG
+        latencyStats.trace(["type": "lab_peer", "time": ProcessInfo.processInfo.systemUptime,
+                           "peerNonce": latencyF1Nonce as Any? ?? NSNull(),
+                           "f2Configured": enableF2, "f3Configured": enableF3])
+        #endif
         log.info("host audio ADM voiceProcessingEnabled=false status=\(voiceProcessingStatus, privacy: .public)")
         if audioEnabled {
             audioBridge.attach(to: factory.audioDeviceModule)
@@ -1135,6 +1143,18 @@ final class HostPeerSession: NSObject {
         return dataChannel.sendData(RTCDataBuffer(data: payload, isBinary: false))
     }
 
+    #if DEBUG
+    /// Bind the advertised lab capabilities to the same immutable host
+    /// configuration that selected this peer's encoder and sender policy.
+    static func pinLatencyCapabilities(_ data: Data, configuration: LatencyLabConfiguration) -> Data? {
+        guard var object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              var caps = object["caps"] as? [String: Any] else { return nil }
+        for (key, value) in HostMessageEncoder.latencyCapabilities(configuration) { caps[key] = value }
+        object["caps"] = caps
+        return try? JSONSerialization.data(withJSONObject: object)
+    }
+    #endif
+
     private func sendHelloAckAndDisplay() {
         closeStateLock.lock()
         defer { closeStateLock.unlock() }
@@ -1150,7 +1170,7 @@ final class HostPeerSession: NSObject {
 
         let timestamp = UInt64(DispatchTime.now().uptimeNanoseconds / 1_000)
         hostSeq &+= 1
-        let hello = HostMessageEncoder.helloAck(
+        let encodedHello = HostMessageEncoder.helloAck(
             proto: HostConfig.protocolVersion,
             hostname: Host.current().localizedName ?? ProcessInfo.processInfo.hostName,
             os: ProcessInfo.processInfo.operatingSystemVersionString,
@@ -1160,6 +1180,15 @@ final class HostPeerSession: NSObject {
             ts: timestamp,
             inputSession: ready.wire,
             inputInvalidation: ready.inputInvalidation)
+        #if DEBUG
+        guard let hello = Self.pinLatencyCapabilities(encodedHello, configuration: latencyCapabilities) else {
+            inputAuthorization.close()
+            scheduleCaptureTerminalFailure("The input handshake could not be sent. Reconnect to restore control.")
+            return
+        }
+        #else
+        let hello = encodedHello
+        #endif
         guard dataChannel.sendData(RTCDataBuffer(data: hello, isBinary: false)) else {
             inputAuthorization.close()
             scheduleCaptureTerminalFailure("The input handshake could not be sent. Reconnect to restore control.")
