@@ -9,6 +9,24 @@ TYPES = {'host', 'srflx', 'prflx'}
 FAMILIES = {'v4', 'v6', 'ipv4', 'ipv6'}
 PROTOCOLS = {'udp', 'tcp'}
 MAPPINGS = {'requested', 'mapped', 'double_nat', 'unavailable', 'released'}
+SIGNALING_STAGES = {'offer_sent', 'answer_received', 'answer_applied', 'ice_connected'}
+CANDIDATE_EVENTS = {'remote_candidate_received', 'remote_candidate_added', 'remote_candidate_add_failed'}
+CANDIDATE_TYPES = {'host', 'srflx', 'prflx', 'unknown'}
+CANDIDATE_FAMILIES = {'v4', 'v6', 'unknown'}
+
+
+def clean_candidate_event(row):
+    kind = row.get('event')
+    candidate_type, family = row.get('candidateType'), row.get('family')
+    count, elapsed = row.get('count'), row.get('elapsedMs')
+    if (isinstance(kind, str) and kind in CANDIDATE_EVENTS
+            and isinstance(candidate_type, str) and candidate_type in CANDIDATE_TYPES
+            and isinstance(family, str) and family in CANDIDATE_FAMILIES
+            and type(count) is int and 0 <= count <= 10_000
+            and type(elapsed) in (int, float) and math.isfinite(elapsed) and elapsed >= 0):
+        return {'event': kind, 'candidateType': candidate_type, 'family': family,
+                'count': count, 'elapsedMs': elapsed}
+    return None
 
 
 def clean_client(rows):
@@ -28,7 +46,13 @@ def clean_client(rows):
     start = timestamp(starts[0]); out = {}
     for row in events:
         kind = row.get('event')
-        if kind == 'failure' and row.get('stage') in STAGES:
+        if isinstance(kind, str) and kind in CANDIDATE_EVENTS:
+            candidate = clean_candidate_event(row)
+            if candidate is not None:
+                out.setdefault('candidate_events', []).append(candidate)
+        elif kind == 'stage' and row.get('stage') in SIGNALING_STAGES:
+            out.setdefault('signaling_stages', []).append(row['stage'])
+        elif kind == 'failure' and row.get('stage') in STAGES:
             out['failure_stage'] = row['stage']
         elif kind == 'first_presented':
             elapsed = timestamp(row) - start

@@ -186,6 +186,21 @@ class CellularAttemptTests(unittest.TestCase):
             self.assertEqual(terminate.call_args.args[0][-2:], ['--pid', '777'])
             attempt.client.send_signal.assert_not_called()
 
+    def test_export_preserves_only_valid_candidate_and_stage_events(self):
+        token = 'c4e48f89-5be4-487d-acbb-640715d8bbca'
+        rows = [dict(type='connectivity', event='attempt_start', attempt=token, time=1),
+                dict(type='connectivity', event='stage', attempt=token, time=2, stage='answer_received'),
+                dict(type='connectivity', event='remote_candidate_added', attempt=token, time=3,
+                     candidateType='prflx', family='v6', count=1, elapsedMs=20, candidate='secret'),
+                dict(type='connectivity', event='remote_candidate_added', attempt=token, time=4,
+                     candidateType='relay', family='v6', count=2, elapsedMs=30)]
+        result = runner.sanitized_connectivity(rows)
+        self.assertEqual(len(result), 3)
+        self.assertEqual(result[1]['stage'], 'answer_received')
+        self.assertEqual(result[2]['candidateType'], 'prflx')
+        self.assertNotIn('secret', str(result))
+        self.assertNotIn('relay', str(result))
+
     def test_evidence_whitelist_and_stale_exclusion(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder); snapshot = root / 'snapshot'; snapshot.mkdir()

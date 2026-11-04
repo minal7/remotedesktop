@@ -14,7 +14,7 @@ import time
 import uuid
 
 import run_device_pairs as guard
-from cellular_evidence import clean_client, measurement
+from cellular_evidence import CANDIDATE_EVENTS, SIGNALING_STAGES, clean_candidate_event, clean_client, measurement
 from device_trace_tools import recent_client
 from select_device_trace import select
 
@@ -55,7 +55,7 @@ def finite(value):
 
 def sanitized_connectivity(rows):
     clean_client(rows)  # Reject mixed or ambiguous attempts before retaining anything.
-    events = {'attempt_start', 'path', 'stage', 'selected_pair', 'failure', 'first_presented'}
+    events = {'attempt_start', 'path', 'stage', 'selected_pair', 'failure', 'first_presented'} | CANDIDATE_EVENTS
     allowed = {'interface': {'wifi', 'cellular', 'wired', 'unknown'},
                'localType': {'host', 'srflx', 'prflx'}, 'remoteType': {'host', 'srflx', 'prflx'},
                'localFamily': {'v4', 'v6', 'unknown'}, 'remoteFamily': {'v4', 'v6', 'unknown'},
@@ -64,12 +64,18 @@ def sanitized_connectivity(rows):
     for r in rows:
         if r.get('type') != 'connectivity' or r.get('event') not in events or not finite(r.get('time')): continue
         item = {'type': 'connectivity', 'event': r['event'], 'time': r['time']}
+        if r['event'] in CANDIDATE_EVENTS:
+            candidate = clean_candidate_event(r)
+            if candidate is None: continue
+            item.update(candidate)
         # The ephemeral attempt token allows the existing parser to recheck attribution.
         if isinstance(r.get('attempt'), str):
             try: item['attempt'] = str(uuid.UUID(r['attempt']))
             except ValueError: raise ValueError('Invalid local attempt token')
         for key, values in allowed.items():
             if r.get(key) in values: item[key] = r[key]
+        if r['event'] == 'stage' and r.get('stage') in SIGNALING_STAGES:
+            item['stage'] = r['stage']
         for key in ('hasIPv4', 'hasIPv6'):
             if type(r.get(key)) is bool: item[key] = r[key]
         out.append(item)

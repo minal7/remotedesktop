@@ -14,6 +14,29 @@ class CellularEvidenceTests(unittest.TestCase):
         self.assertNotIn('hidden', str(result))
         self.assertEqual(clean_host(['port_mapping=mapped ms=10', 'port_mapping=unexpected']), {'mapping_statuses': ['mapped']})
 
+    def test_candidate_events_and_signaling_stages_are_strictly_sanitized(self):
+        start = dict(type='connectivity', event='attempt_start', attempt='opaque', time=0)
+        def event(kind, **fields):
+            return dict(type='connectivity', event=kind, attempt='opaque', time=1, **fields)
+        rows = [start, event('stage', stage='offer_sent'), event('stage', stage='answer_received'),
+                event('stage', stage='answer_applied'), event('stage', stage='ice_connected'),
+                event('stage', stage='secret'),
+                event('remote_candidate_received', candidateType='host', family='v4', count=1, elapsedMs=3, address='secret'),
+                event('remote_candidate_added', candidateType='srflx', family='v6', count=2, elapsedMs=4.5),
+                event('remote_candidate_add_failed', candidateType='unknown', family='unknown', count=3, elapsedMs=5),
+                event('remote_candidate_added', candidateType='relay', family='v4', count=4, elapsedMs=1),
+                event('remote_candidate_added', candidateType='host', family='secret', count=4, elapsedMs=1),
+                event('remote_candidate_added', candidateType='host', family='v4', count=True, elapsedMs=1),
+                event('remote_candidate_added', candidateType='host', family='v4', count=10001, elapsedMs=1),
+                event('remote_candidate_added', candidateType='host', family='v4', count=1, elapsedMs=float('nan')),
+                event('remote_candidate_added', candidateType='host', family='v4', count=1, elapsedMs=-1)]
+        result = clean_client(rows)
+        self.assertEqual(result['signaling_stages'], ['offer_sent', 'answer_received', 'answer_applied', 'ice_connected'])
+        self.assertEqual(len(result['candidate_events']), 3)
+        self.assertEqual(result['candidate_events'][0], dict(event='remote_candidate_received', candidateType='host', family='v4', count=1, elapsedMs=3))
+        self.assertNotIn('secret', str(result))
+        self.assertNotIn('opaque', str(result))
+
     def test_missing_mixed_or_injected_values_fail_closed(self):
         with self.assertRaises(ValueError): clean_client([])
         with self.assertRaises(ValueError): clean_client([dict(type='connectivity', event='attempt_start', attempt='x', time=1), dict(type='connectivity', event='failure', attempt='y', time=2)])
