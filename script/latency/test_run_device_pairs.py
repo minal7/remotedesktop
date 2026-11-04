@@ -21,12 +21,17 @@ class DevicePairSafetyTests(unittest.TestCase):
         host.mkdir(parents=True)
         (host / 'Info.plist').write_bytes(plistlib.dumps({
             'CFBundleIdentifier': 'com.threadmark.remotedesktop.host.debug'}))
-        config = root / 'build/latency/lab-v2/ipad-handoff-config.json'
-        config.parent.mkdir(parents=True)
-        config.write_text(json.dumps({'device_id': 'device'}))
-        handoff = root / 'handoff'
-        handoff.touch()
-        for name, value in (('ROOT', root), ('RELEASE_QA', (root / 'qa').resolve()), ('IPAD_HANDOFF', handoff)):
+        lease = root / 'lease.json'
+        from datetime import datetime, timedelta
+        now = datetime.now().astimezone().replace(second=0, microsecond=0)
+        lease.write_text(json.dumps({'holder': 'B', 'purpose': 'F1', 'app_build': '9003',
+                                     'started': now.strftime('%H:%M'),
+                                     'expires': (now + timedelta(minutes=20)).strftime('%H:%M')}))
+        log = root / 'log.md'
+        log.write_text('test checkpoint\n')
+        for name, value in (('ROOT', root), ('RELEASE_QA', (root / 'qa').resolve()),
+                            ('LEASE', lease), ('COORDINATION_LOG', log),
+                            ('IPAD_QUEUE', root / 'queue'), ('IPAD_ID', 'device')):
             patcher = patch.object(runner, name, value)
             patcher.start()
             self.addCleanup(patcher.stop)
@@ -45,6 +50,35 @@ class DevicePairSafetyTests(unittest.TestCase):
     def fake_install(self, device, app):
         runner.require_selected_ipad(device)
         self.assertEqual(app, self.args.client_app)
+
+    def test_lease_refuses_expired_wrong_holder_build_and_queue(self):
+        from datetime import datetime, timedelta
+        lease = json.loads(runner.LEASE.read_text())
+        now = datetime.now().astimezone().replace(second=0, microsecond=0)
+        self.assertEqual(runner.require_device_window(now), 9003)
+        for key, value in [('holder', 'A'), ('app_build', '7'), ('purpose', '')]:
+            bad = dict(lease, **{key: value})
+            runner.LEASE.write_text(json.dumps(bad))
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                runner.require_device_window(now)
+        lease['expires'] = now.strftime('%H:%M')
+        lease['started'] = (now - timedelta(minutes=20)).strftime('%H:%M')
+        runner.LEASE.write_text(json.dumps(lease))
+        with self.assertRaises(ValueError): runner.require_device_window(now)
+        lease['started'] = now.strftime('%H:%M')
+        lease['expires'] = (now + timedelta(minutes=20)).strftime('%H:%M')
+        runner.LEASE.write_text(json.dumps(lease))
+        runner.IPAD_QUEUE.write_text('A waiting\n')
+        with self.assertRaisesRegex(ValueError, 'queued'): runner.require_device_window(now)
+
+    def test_wrong_device_and_changed_lease_build_refused(self):
+        with self.assertRaises(ValueError): runner.require_selected_ipad('other')
+        with self.assertRaises(ValueError): runner.require_selected_ipad('device', 9004)
+
+    def test_verify_installed_build_mismatch_refused(self):
+        data = {'info': {'outcome': 'success'}, 'result': {'apps': [
+            {'bundleIdentifier': runner.CLIENT_BUNDLE, 'bundleVersion': '7', 'version': '1.2.1'}]}}
+        with self.assertRaises(ValueError): runner.verify_installed_lab(data, '1.2.1', '9003')
 
     def test_invalid_and_future_handoff_never_launch(self):
         with patch.object(runner.subprocess, 'Popen') as launch:
@@ -77,6 +111,9 @@ class DevicePairSafetyTests(unittest.TestCase):
                 kwargs['stdout'].flush()
                 return marker
             self.assertIn('--console', command)
+            self.assertEqual(kwargs['stdout'], subprocess.DEVNULL)
+            self.assertEqual(kwargs['stderr'], subprocess.DEVNULL)
+            self.assertFalse((self.args.output / 'launch.log').exists())
             self.assertIn('LatencyLabPairToken', command)
             index = command.index('--json-output')
             Path(command[index + 1]).write_text(json.dumps(

@@ -17,16 +17,46 @@ from summarize_device_pairs import read_trace, selected_fixes, summarize
 
 ROOT = Path(__file__).resolve().parents[2]
 RELEASE_BUILD = Path('/Users/michael/.codex/worktrees/remote-desktop-release/remote desktop/build')
-IPAD_HANDOFF = RELEASE_BUILD / '.ipad-to-latency'
+COORDINATION = Path('/Users/michael/.codex/worktrees/coordination')
+LEASE = COORDINATION / 'ipad.lock' / 'lease.json'
+IPAD_QUEUE = COORDINATION / 'ipad.queue'
+COORDINATION_LOG = COORDINATION / 'log.md'
+IPAD_ID = '00008103-001869493A53001E'
 RELEASE_QA = RELEASE_BUILD / '.release-qa-active'
 CLIENT_BUNDLE = 'com.threadmark.remotedesktop.client'
 
 
-def require_device_window():
+def read_coordination_log():
+    # Read the current record before each device action, including cleanup.
+    try:
+        return COORDINATION_LOG.read_text().splitlines()[-20:]
+    except (OSError, UnicodeError) as error:
+        raise ValueError('Coordination log unavailable; device action refused.') from error
+
+
+def require_device_window(now=None, minimum_remaining=0):
+    read_coordination_log()
     if RELEASE_QA.exists():
         raise ValueError('Release QA is active; no device command started.')
-    if not IPAD_HANDOFF.is_file():
-        raise ValueError('The iPad has not been handed to latency.')
+    try:
+        lease = json.loads(LEASE.read_text())
+        now = now or datetime.now().astimezone()
+        started = datetime.strptime(lease['started'], '%H:%M').time()
+        expires = datetime.strptime(lease['expires'], '%H:%M').time()
+        start = now.replace(hour=started.hour, minute=started.minute, second=0, microsecond=0)
+        end = now.replace(hour=expires.hour, minute=expires.minute, second=0, microsecond=0)
+        build = str(lease['app_build'])
+        if (lease['holder'] != 'B' or not isinstance(lease['purpose'], str)
+                or not lease['purpose'].strip() or not build.isascii() or not build.isdecimal()
+                or int(build) < 9000 or not start <= now < end
+                or (end - start).total_seconds() > 1800
+                or (end - now).total_seconds() <= minimum_remaining):
+            raise ValueError('Invalid or expired B device lease.')
+        if IPAD_QUEUE.exists() and any(line.split()[:1] == ['A'] for line in IPAD_QUEUE.read_text().splitlines()):
+            raise ValueError('Chat A is queued; release at this safe point.')
+        return int(build)
+    except (OSError, KeyError, TypeError, json.JSONDecodeError, UnicodeError) as error:
+        raise ValueError('Valid B device lease required.') from error
 
 
 def verify_installed_lab(data, version, build):
@@ -41,11 +71,12 @@ def verify_installed_lab(data, version, build):
         raise ValueError('Installed lab client version could not be verified.')
 
 
-def require_selected_ipad(device):
-    require_device_window()
-    configuration = json.loads((ROOT / 'build/latency/lab-v2/ipad-handoff-config.json').read_text())
-    if not isinstance(configuration, dict) or device != configuration.get('device_id'):
-        raise ValueError('The selected device is not the configured iPad.')
+def require_selected_ipad(device, expected_build=None):
+    lease_build = require_device_window()
+    if expected_build is not None and lease_build != expected_build:
+        raise ValueError('Lease build changed; device action refused.')
+    if device != IPAD_ID:
+        raise ValueError('Only the designated iPad is allowed.')
 
 
 def require_lab_bundle(bundle_id):
@@ -62,7 +93,9 @@ def install_verified_lab_app(device, client_app):
     info = plistlib.loads((app / 'Info.plist').read_bytes())
     version = info.get('CFBundleShortVersionString')
     build = info.get('CFBundleVersion')
-    if info.get('CFBundleIdentifier') != CLIENT_BUNDLE or not version or not build:
+    if (info.get('CFBundleIdentifier') != CLIENT_BUNDLE or not version or not build
+            or not str(build).isascii() or not str(build).isdecimal()
+            or int(build) != require_device_window()):
         raise ValueError('Lab client identity and version are required.')
     signed = subprocess.run(['codesign', '-d', '--entitlements', ':-', str(app)],
                             capture_output=True, check=True, timeout=10)
@@ -72,12 +105,14 @@ def install_verified_lab_app(device, client_app):
         raise ValueError('Only a signed Development Debug client may be installed.')
     require_device_window()
     require_selected_ipad(device)
+    require_device_window(minimum_remaining=65)
     subprocess.run(['xcrun', 'devicectl', 'device', 'install', 'app', '--device', device, str(app)],
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True, timeout=60)
     require_device_window()
     import tempfile
     with tempfile.TemporaryDirectory(prefix='latency-app-check-') as tmp:
         result = Path(tmp) / 'apps.json'
+        require_device_window(minimum_remaining=35)
         subprocess.run(['xcrun', 'devicectl', 'device', 'info', 'apps', '--device', device,
                         '--bundle-id', CLIENT_BUNDLE, '--json-output', str(result)],
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True, timeout=30)
@@ -99,6 +134,7 @@ def run(args):
         raise ValueError('The QA guard must use the shared release QA flag.')
     require_device_window()
     require_selected_ipad(args.device)
+    expected_build = require_device_window()
     require_lab_bundle(args.bundle_id)
     info = plistlib.loads((args.host_app / 'Contents/Info.plist').read_bytes())
     if info.get('CFBundleIdentifier') != 'com.threadmark.remotedesktop.host.debug':
@@ -116,7 +152,6 @@ def run(args):
     marker_log = (args.output / 'marker.log').open('w')
     marker = None
     launch_process = None
-    launch_log = None
     device_pid = None
     launch_json = None
     launch_attempted = False
@@ -144,6 +179,8 @@ def run(args):
         signal.signal(signum, stop_requested)
 
     def command(arguments, name, required=True):
+        require_selected_ipad(args.device, expected_build)
+        require_device_window(minimum_remaining=45)
         with (args.output / f'{name}.log').open('w') as log:
             result = subprocess.run(arguments, stdout=log, stderr=subprocess.STDOUT, check=required, timeout=40)
             return result.returncode == 0
@@ -168,9 +205,9 @@ def run(args):
             time.sleep(.1)
         launch_json = args.output / 'launch.json'
         launch_attempted = True
-        launch_log = (args.output / 'launch.log').open('w')
         # Keep devicectl attached: its documented --console contract forwards
         # catchable signals to the app even before a PID result is available.
+        require_selected_ipad(args.device, expected_build)
         spawning = True
         try:
             launch_process = subprocess.Popen(['xcrun', 'devicectl', 'device', 'process', 'launch', '--device', args.device,
@@ -179,7 +216,7 @@ def run(args):
                  '--environment-variables', json.dumps({'LATENCY_LAB_F1_MAX_MS': str(args.f1_max_ms)}), args.bundle_id,
                  'LatencyProbe', 'LatencyProbeHostID', args.host_id,
                  'LatencyLabPairFix', args.fix, 'LatencyLabPairToken', launch_token],
-                 stdout=launch_log, stderr=subprocess.STDOUT)
+                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         finally:
             spawning = False
         if stop_pending:
@@ -187,8 +224,7 @@ def run(args):
         selected = None
         deadline = time.monotonic() + 570
         while time.monotonic() < deadline:
-            if args.qa_flag.exists() or RELEASE_QA.exists() or not IPAD_HANDOFF.is_file():
-                raise ValueError('Release QA reclaimed the device window.')
+            require_selected_ipad(args.device, expected_build)
             if marker.poll() is not None:
                 raise ValueError('Marker ended before the paired session completed.')
             if launch_process.poll() is not None:
@@ -241,7 +277,7 @@ def run(args):
             # Copy the bounded full trace after the last measured window.
             next_poll = time.monotonic() + 10
             while time.monotonic() < next_poll:
-                require_device_window()
+                require_selected_ipad(args.device, expected_build)
                 if args.qa_flag.exists():
                     raise ValueError('Release QA reclaimed the device window.')
                 time.sleep(min(.2, max(0, next_poll - time.monotonic())))
@@ -250,7 +286,14 @@ def run(args):
         # Ask the marker to write its complete timestamp file and exit, outside
         # all eight measured windows. SIGTERM remains an abort path.
         marker.send_signal(signal.SIGUSR1)
-        marker.wait(timeout=10)
+        marker_deadline = time.monotonic() + 10
+        while marker.poll() is None:
+            require_selected_ipad(args.device, expected_build)
+            if time.monotonic() >= marker_deadline:
+                raise ValueError('Marker did not finish.')
+            time.sleep(.2)
+        if marker.returncode:
+            raise ValueError('Marker did not finish successfully.')
         result = summarize(marker_path, selected, args.host_traces, args.output / 'segments')
         (args.output / 'summary.json').write_text(json.dumps(result, indent=2) + '\n')
         print(json.dumps(result['median_paired_B_minus_A'], indent=2))
@@ -261,8 +304,13 @@ def run(args):
         for signum in (signal.SIGINT, signal.SIGTERM):
             signal.signal(signum, signal.SIG_IGN)
         console_stopped = False
+        cleanup_error = False
         if launch_process is not None:
             if launch_process.poll() is None:
+                try:
+                    read_coordination_log()
+                except ValueError:
+                    cleanup_error = True
                 launch_process.send_signal(signal.SIGINT)
             try:
                 launch_process.wait(timeout=2)
@@ -272,22 +320,20 @@ def run(args):
         # Launch may have completed just before an interrupt reached this
         # controller. Recover only its returned PID, never guess by app name.
         device_pid = device_pid or launched_pid()
-        cleanup_error = False
         if not console_stopped and device_pid is not None:
             try:
+                read_coordination_log()
                 stopped = subprocess.run(['xcrun', 'devicectl', 'device', 'process', 'terminate',
                                 '--device', args.device, '--pid', str(device_pid)],
                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
                 if stopped.returncode:
                     cleanup_error = True
-            except subprocess.SubprocessError:
+            except (subprocess.SubprocessError, ValueError):
                 cleanup_error = True
         elif launch_attempted and not console_stopped:
             cleanup_error = True
         if launch_process is not None and launch_process.poll() is None:
             launch_process.kill(); launch_process.wait()
-        if launch_log is not None:
-            launch_log.close()
         if marker is not None and marker.poll() is None:
             marker.terminate()
             try:

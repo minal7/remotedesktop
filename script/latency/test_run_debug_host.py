@@ -107,82 +107,88 @@ class DebugHostLauncherTests(unittest.TestCase):
 
 
 class DeviceWindowSafetyTests(unittest.TestCase):
-    def test_handoff_required_and_qa_blocks_even_with_handoff(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            handoff, qa = root / 'handoff', root / 'qa'
-            with patch.object(device_runner, 'IPAD_HANDOFF', handoff), patch.object(device_runner, 'RELEASE_QA', qa):
-                with self.assertRaisesRegex(ValueError, 'not been handed'):
-                    device_runner.require_device_window()
-                handoff.touch()
-                device_runner.require_device_window()
-                qa.touch()
-                with self.assertRaisesRegex(ValueError, 'Release QA'):
-                    device_runner.require_device_window()
-                qa.unlink(); handoff.unlink()
-                with self.assertRaisesRegex(ValueError, 'not been handed'):
-                    device_runner.require_device_window()
+    def setUp(self):
+        from datetime import datetime, timedelta
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.qa = self.root / 'qa'
+        self.lease = self.root / 'lease.json'
+        now = datetime.now().astimezone().replace(second=0, microsecond=0)
+        self.lease_data = {'holder': 'B', 'purpose': 'test', 'app_build': '9003',
+                           'started': now.strftime('%H:%M'),
+                           'expires': (now + timedelta(minutes=20)).strftime('%H:%M')}
+        log = self.root / 'coordination.log'
+        log.write_text('test checkpoint\n')
+        for name, value in [('ROOT', self.root), ('RELEASE_QA', self.qa),
+                            ('LEASE', self.lease), ('COORDINATION_LOG', log),
+                            ('IPAD_QUEUE', self.root / 'queue'), ('IPAD_ID', 'fixture-device')]:
+            patcher = patch.object(device_runner, name, value)
+            patcher.start(); self.addCleanup(patcher.stop)
+
+    def grant_lease(self):
+        self.lease.write_text(json.dumps(self.lease_data))
+
+    def test_lease_required_and_qa_blocks_even_with_lease(self):
+        with self.assertRaisesRegex(ValueError, 'lease required'):
+            device_runner.require_device_window()
+        self.grant_lease()
+        self.assertEqual(device_runner.require_device_window(), 9003)
+        self.qa.touch()
+        with self.assertRaisesRegex(ValueError, 'Release QA'):
+            device_runner.require_device_window()
+        self.qa.unlink(); self.lease.unlink()
+        with self.assertRaisesRegex(ValueError, 'lease required'):
+            device_runner.require_device_window()
 
     def test_installed_client_identity_and_version_fail_closed(self):
         device_runner.require_lab_bundle(device_runner.CLIENT_BUNDLE)
-        with self.assertRaises(ValueError):
-            device_runner.require_lab_bundle('other.bundle')
-        row = {'bundleIdentifier': device_runner.CLIENT_BUNDLE, 'bundleVersion': '9', 'version': '1.2.1'}
+        with self.assertRaises(ValueError): device_runner.require_lab_bundle('other.bundle')
+        row = {'bundleIdentifier': device_runner.CLIENT_BUNDLE, 'bundleVersion': '9003', 'version': '1.2.1'}
         result = {'info': {'outcome': 'success'}, 'result': {'apps': [row]}}
-        device_runner.verify_installed_lab(result, '1.2.1', '9')
+        device_runner.verify_installed_lab(result, '1.2.1', '9003')
         device_runner.verify_installed_lab({'info': {'outcome': 'success'},
-            'result': {'apps': [{'bundleIdentifier': 'unrelated'}, row]}}, '1.2.1', '9')
+            'result': {'apps': [{'bundleIdentifier': 'unrelated'}, row]}}, '1.2.1', '9003')
         for bad in ({}, {'info': {'outcome': 'success'}, 'result': {'apps': [row, row]}},
-                    {'info': {'outcome': 'success'}, 'result': {'apps': [{**row, 'bundleVersion': '8'}]}},
+                    {'info': {'outcome': 'success'}, 'result': {'apps': [{**row, 'bundleVersion': '9'}]}},
                     {'info': {'outcome': 'success'}, 'result': {'apps': [{**row, 'bundleIdentifier': 'other'}]}}):
             with self.subTest(bad=bad), self.assertRaises(ValueError):
-                device_runner.verify_installed_lab(bad, '1.2.1', '9')
+                device_runner.verify_installed_lab(bad, '1.2.1', '9003')
 
     def test_install_precedes_installed_version_check(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            app = root / 'build/latency/client.app'
-            app.mkdir(parents=True)
-            config = root / 'build/latency/lab-v2/ipad-handoff-config.json'
-            config.parent.mkdir()
-            config.write_text(json.dumps({'device_id': 'fixture-device'}))
-            (app / 'Info.plist').write_bytes(plistlib.dumps({'CFBundleIdentifier': device_runner.CLIENT_BUNDLE,
-                'CFBundleVersion': '9', 'CFBundleShortVersionString': '1.2.1'}))
-            handoff, qa = root / 'handoff', root / 'qa'
-            handoff.touch()
-            calls = []
-            def command(args, **_kwargs):
-                calls.append(args)
-                if args[0] == 'codesign':
-                    return SimpleNamespace(stdout=plistlib.dumps({'get-task-allow': True,
-                        'com.apple.developer.icloud-container-environment': 'Development'}))
-                if 'info' in args:
-                    Path(args[args.index('--json-output') + 1]).write_text(json.dumps({
-                        'info': {'outcome': 'success'}, 'result': {'apps': [{
-                            'bundleIdentifier': device_runner.CLIENT_BUNDLE,
-                            'bundleVersion': '9', 'version': '1.2.1'}]}}))
-                return SimpleNamespace(returncode=0)
-            with patch.object(device_runner, 'ROOT', root), patch.object(device_runner, 'IPAD_HANDOFF', handoff), \
-                 patch.object(device_runner, 'RELEASE_QA', qa), patch.object(device_runner.subprocess, 'run', side_effect=command):
-                with self.assertRaisesRegex(ValueError, 'not the configured iPad'):
-                    device_runner.install_verified_lab_app('wrong-device', app)
-                self.assertEqual(calls, [])
-                device_runner.install_verified_lab_app('fixture-device', app)
-            self.assertEqual(['codesign', 'install', 'info'],
-                [args[0] if args[0] == 'codesign' else ('install' if 'install' in args else 'info') for args in calls])
+        self.grant_lease()
+        app = self.root / 'build/latency/client.app'
+        app.mkdir(parents=True)
+        (app / 'Info.plist').write_bytes(plistlib.dumps({'CFBundleIdentifier': device_runner.CLIENT_BUNDLE,
+            'CFBundleVersion': '9003', 'CFBundleShortVersionString': '1.2.1'}))
+        calls = []
+        def command(args, **_kwargs):
+            calls.append(args)
+            if args[0] == 'codesign':
+                return SimpleNamespace(stdout=plistlib.dumps({'get-task-allow': True,
+                    'com.apple.developer.icloud-container-environment': 'Development'}))
+            if 'info' in args:
+                Path(args[args.index('--json-output') + 1]).write_text(json.dumps({
+                    'info': {'outcome': 'success'}, 'result': {'apps': [{
+                        'bundleIdentifier': device_runner.CLIENT_BUNDLE,
+                        'bundleVersion': '9003', 'version': '1.2.1'}]}}))
+            return SimpleNamespace(returncode=0)
+        with patch.object(device_runner.subprocess, 'run', side_effect=command):
+            with self.assertRaisesRegex(ValueError, 'designated iPad'):
+                device_runner.install_verified_lab_app('wrong-device', app)
+            self.assertEqual(calls, [])
+            device_runner.install_verified_lab_app('fixture-device', app)
+        self.assertEqual(['codesign', 'install', 'info'],
+            [args[0] if args[0] == 'codesign' else ('install' if 'install' in args else 'info') for args in calls])
 
-    def test_install_never_starts_without_handoff_or_while_qa_active(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            handoff, qa = root / 'handoff', root / 'qa'
-            with patch.object(device_runner, 'IPAD_HANDOFF', handoff), patch.object(device_runner, 'RELEASE_QA', qa), \
-                 patch.object(device_runner.subprocess, 'run') as command:
-                with self.assertRaises(ValueError):
-                    device_runner.install_verified_lab_app('fixture-device', root / 'missing.app')
-                handoff.touch(); qa.touch()
-                with self.assertRaises(ValueError):
-                    device_runner.install_verified_lab_app('fixture-device', root / 'missing.app')
-                command.assert_not_called()
+    def test_install_never_starts_without_lease_or_while_qa_active(self):
+        with patch.object(device_runner.subprocess, 'run') as command:
+            with self.assertRaises(ValueError):
+                device_runner.install_verified_lab_app('fixture-device', self.root / 'missing.app')
+            self.grant_lease(); self.qa.touch()
+            with self.assertRaises(ValueError):
+                device_runner.install_verified_lab_app('fixture-device', self.root / 'missing.app')
+            command.assert_not_called()
 
 
 if __name__ == '__main__':
