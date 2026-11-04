@@ -17,7 +17,7 @@ struct DebugResidentHostConfiguration: Equatable, Sendable {
     let mode: Mode
     let hostID: String
     let lockIdentity: String
-    var hostDisplayName: String { mode == .r0 ? "Remote Desktop R0 Test" : "Remote Desktop Latency Test" }
+    var hostDisplayName: String { mode == .r0 ? "Remote Desktop R0 Test" : (Host.current().localizedName ?? ProcessInfo.processInfo.hostName) }
     var credentialServiceName: String { mode == .r0 ? Self.credentialService : Self.latencyCredentialService }
     var allowsExternalComputerUseServices: Bool { mode == .r0 }
     var allowsPersonalMemory: Bool { mode == .r0 }

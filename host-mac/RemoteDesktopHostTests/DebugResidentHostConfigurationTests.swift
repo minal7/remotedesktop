@@ -60,7 +60,7 @@ final class DebugResidentHostConfigurationTests: XCTestCase {
         let config = try XCTUnwrap(DebugResidentHostConfiguration.parse(arguments: ["host", argument], environment: environment))
         XCTAssertEqual(config.hostID, "8F8F6C31-7BF6-4C51-AE04-5B94B01A59A2")
         XCTAssertEqual(config.mode, .latency)
-        XCTAssertEqual(config.hostDisplayName, "Remote Desktop Latency Test")
+        XCTAssertEqual(config.hostDisplayName, Host.current().localizedName ?? ProcessInfo.processInfo.hostName)
         XCTAssertEqual(config.lockIdentity, "com.threadmark.remotedesktop.host.latency-test")
         XCTAssertNotEqual(config.credentialServiceName, DebugResidentHostConfiguration.credentialService)
         XCTAssertNotEqual(config.credentialServiceName, LocalComputerUseCredentialStore.defaultService)
