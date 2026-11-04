@@ -7,13 +7,14 @@ import shutil
 import subprocess
 import tempfile
 
-TEST_ID = 'LatencyQualityLiveE2ETests/testCaptureF4AAndB'
+TEST_ID = 'LatencyQualityLiveE2ETests/testCaptureF4AAndB()'
 TARGET = 'RemoteDesktopLatencyQualityTests'
 ATTACHMENTS = ('latency-quality-A.png', 'latency-quality-B.png', 'latency-quality-geometry.json')
 
 
 def accepted_identifier(value):
-    return value in (TEST_ID, TARGET + '/' + TEST_ID)
+    bare = TEST_ID.removesuffix('()')
+    return value in (TEST_ID, bare, TARGET + '/' + TEST_ID, TARGET + '/' + bare)
 
 
 def select_attachment(manifest, directory, expected_name, device_id):

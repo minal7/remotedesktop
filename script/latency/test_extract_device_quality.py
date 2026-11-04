@@ -23,6 +23,10 @@ class QualityAttachmentTests(unittest.TestCase):
 
     def test_selects_exact_test_name_and_device(self):
         self.assertEqual(self.select(), self.directory / 'artifact.png')
+        self.manifest[0]['testIdentifier'] = extract.TEST_ID.removesuffix('()')
+        self.assertEqual(self.select(), self.directory / 'artifact.png')
+        self.manifest[0]['testIdentifier'] = extract.TEST_ID.replace('()', '(other)')
+        with self.assertRaises(ValueError): self.select()
 
     def test_rejects_duplicates_other_devices_and_unexpected_names(self):
         self.manifest[0]['attachments'].append(dict(self.attachment))
