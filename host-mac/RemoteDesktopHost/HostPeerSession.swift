@@ -336,6 +336,9 @@ final class HostPeerSession: NSObject {
     private var lastVideoAttempt: CaptureAttemptLease?
     private let closeCoordinator = PeerCloseCoordinator()
     private var hostSeq: UInt32 = 0
+    private let diagnosticLock = NSLock()
+    private var diagnosticLocal = ICECandidateDiagnostics()
+    private var diagnosticRemote = ICECandidateDiagnostics()
     private var answerSent = false
     private var pendingLocalICEPayloads: [[String: String]] = []
 
@@ -404,6 +407,7 @@ final class HostPeerSession: NSObject {
     }
 
     func acceptOffer(sdp: String) async throws {
+        log.notice("ICE stage=offer_received")
         resetBufferedLocalICE()
         if peerConnection == nil {
             peerConnection = try makePeerConnection()
@@ -433,6 +437,7 @@ final class HostPeerSession: NSObject {
                 "sdpType": "answer",
             ],
             ts: Date().timeIntervalSince1970))
+        log.notice("ICE stage=answer_sent")
         flushBufferedLocalICEAfterAnswer()
 
         // Capture discovery/start and first-frame delivery have their own
@@ -445,9 +450,14 @@ final class HostPeerSession: NSObject {
               let candidate = iceCandidate(from: payload) else {
             return
         }
+        diagnosticLock.lock()
+        diagnosticRemote.record(candidate.sdp)
+        let remoteSummary = diagnosticRemote.summary
+        diagnosticLock.unlock()
+        log.notice("ICE remote={\(remoteSummary, privacy: .public)}")
         peerConnection.add(candidate) { [log] error in
-            if let error {
-                log.error("failed to add remote ICE candidate: \(String(describing: error), privacy: .public)")
+            if error != nil {
+                log.error("failed to add remote ICE candidate")
             }
         }
     }
@@ -1105,7 +1115,7 @@ final class HostPeerSession: NSObject {
                     payload: payload,
                     ts: Date().timeIntervalSince1970))
             } catch {
-                log.error("failed to send local ICE candidate: \(String(describing: error), privacy: .public)")
+                log.error("failed to send local ICE candidate")
             }
         }
     }
@@ -1188,11 +1198,40 @@ extension HostPeerSession: RTCPeerConnectionDelegate {
     func peerConnection(_ peerConnection: RTCPeerConnection, didAdd stream: RTCMediaStream) {}
     func peerConnection(_ peerConnection: RTCPeerConnection, didRemove stream: RTCMediaStream) {}
     func peerConnectionShouldNegotiate(_ peerConnection: RTCPeerConnection) {}
-    func peerConnection(_ peerConnection: RTCPeerConnection, didChange newState: RTCIceConnectionState) {}
-    func peerConnection(_ peerConnection: RTCPeerConnection, didChange newState: RTCIceGatheringState) {}
+    func peerConnection(_ peerConnection: RTCPeerConnection, didChange newState: RTCIceConnectionState) {
+        log.notice("ICE connection_state=\(String(describing: newState), privacy: .public)")
+        if newState == .connected || newState == .completed { logSelectedPair(peerConnection) }
+    }
+    func peerConnection(_ peerConnection: RTCPeerConnection, didChange newState: RTCIceGatheringState) {
+        guard newState == .complete else { return }
+        diagnosticLock.lock()
+        let summary = diagnosticLocal.summary
+        let global = diagnosticLocal.globalIPv6Host
+        diagnosticLock.unlock()
+        log.notice("ICE local={\(summary, privacy: .public)} global_ipv6_host=\(global, privacy: .public)")
+    }
+
+    private func logSelectedPair(_ peer: RTCPeerConnection) {
+        peer.statistics { [log] report in
+            guard let id = report.statistics.values.first(where: { $0.type == "transport" })?.values["selectedCandidatePairId"] as? String,
+                  let pair = report.statistics[id],
+                  let localID = pair.values["localCandidateId"] as? String,
+                  let remoteID = pair.values["remoteCandidateId"] as? String,
+                  let local = report.statistics[localID], let remote = report.statistics[remoteID] else { return }
+            let lt = ICECandidateDiagnostics.kind(local.values["candidateType"] as? String)
+            let rt = ICECandidateDiagnostics.kind(remote.values["candidateType"] as? String)
+            let lf = ICECandidateDiagnostics.family(local.values["address"] as? String ?? local.values["ip"] as? String ?? "")
+            let rf = ICECandidateDiagnostics.family(remote.values["address"] as? String ?? remote.values["ip"] as? String ?? "")
+            let proto = ICECandidateDiagnostics.transport(local.values["protocol"] as? String)
+            log.notice("ICE selected local=\(lt, privacy: .public)/\(lf, privacy: .public) remote=\(rt, privacy: .public)/\(rf, privacy: .public) protocol=\(proto, privacy: .public)")
+        }
+    }
     func peerConnection(_ peerConnection: RTCPeerConnection, didRemove candidates: [RTCIceCandidate]) {}
 
     func peerConnection(_ peerConnection: RTCPeerConnection, didGenerate candidate: RTCIceCandidate) {
+        diagnosticLock.lock()
+        diagnosticLocal.record(candidate.sdp)
+        diagnosticLock.unlock()
         bufferOrSendLocalICE(signalingPayload(for: candidate))
     }
 

@@ -1,6 +1,7 @@
 import AVFAudio
 import Foundation
 import LiveKitWebRTC
+import Network
 import UIKit
 import os
 
@@ -43,6 +44,20 @@ struct ICECandidateDiagnosticCounts: Equatable {
     }
 
     var summary: String { "host=\(host) srflx=\(serverReflexive) prflx=\(peerReflexive) relay=\(relay) unknown=\(unknown)" }
+}
+
+/// Tracks whether an attempt ended before its first rendered frame.
+struct ICEDiagnosticAttemptEnd {
+    private var active = false
+    private var rendered = false
+
+    mutating func begin() { active = true; rendered = false }
+    mutating func didRender() { rendered = true }
+    mutating func end() -> Bool {
+        guard active else { return false }
+        active = false
+        return !rendered
+    }
 }
 
 enum RemoteAudioSessionPolicy {
@@ -131,6 +146,15 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
     private var remoteCandidateCounts = ICECandidateDiagnosticCounts()
     private var diagnosticStateEvents = 0
     private var diagnosticConnectionID = UUID().uuidString
+    private var diagnosticStarted = ProcessInfo.processInfo.systemUptime
+    private var diagnosticStage = "signaling"
+    private var diagnosticLocal = ICECandidateDiagnostics()
+    private var diagnosticRemote = ICECandidateDiagnostics()
+    private var diagnosticPathMonitor: NWPathMonitor?
+    private(set) var pathSupportsIPv4 = true
+    private(set) var pathSupportsIPv6 = false
+    private var diagnosticAttemptEnd = ICEDiagnosticAttemptEnd()
+    private var diagnosticElapsed: Int { Int((ProcessInfo.processInfo.systemUptime - diagnosticStarted) * 1000) }
 
     private var signaling: (any SignalingChannel)?
     private var peerConnection: RTCPeerConnection?
@@ -217,6 +241,30 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
         remoteCandidateCounts = .init()
         diagnosticStateEvents = 0
         diagnosticConnectionID = UUID().uuidString
+        diagnosticStarted = ProcessInfo.processInfo.systemUptime
+        diagnosticStage = "signaling"
+        pathSupportsIPv4 = true
+        pathSupportsIPv6 = false
+        diagnosticAttemptEnd.begin()
+        diagnosticLocal = .init()
+        diagnosticRemote = .init()
+        diagnosticPathMonitor?.cancel()
+        let monitor = NWPathMonitor()
+        diagnosticPathMonitor = monitor
+        let attempt = diagnosticConnectionID
+        monitor.pathUpdateHandler = { [weak self] path in
+            let kind = path.usesInterfaceType(.wifi) ? "wifi" : path.usesInterfaceType(.cellular) ? "cellular" : path.usesInterfaceType(.wiredEthernet) ? "wired" : "unknown"
+            let v4 = path.supportsIPv4, v6 = path.supportsIPv6
+            Task { @MainActor [weak self] in
+                guard let self, self.diagnosticConnectionID == attempt, self.diagnosticPathMonitor != nil else { return }
+                self.pathSupportsIPv4 = v4
+                self.pathSupportsIPv6 = v6
+                self.log.notice("ICE id=\(attempt, privacy: .public) path=\(kind, privacy: .public) hasIPv4=\(v4, privacy: .public) hasIPv6=\(v6, privacy: .public)")
+                self.diagnosticPathMonitor?.cancel()
+                self.diagnosticPathMonitor = nil
+            }
+        }
+        monitor.start(queue: DispatchQueue(label: "com.threadmark.remotedesktop.path-diagnostics"))
         isClosing = false
         didReportDisconnect = false
         connectedOnce = false
@@ -230,6 +278,7 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
         pendingRemoteICECandidates.removeAll()
         loggedPendingRemoteICE = false
 
+        do {
         let signaling = signalingFactory(pairingCode, expectedHostID)
         self.signaling = signaling
         try await signaling.claim()
@@ -264,7 +313,7 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
                 "sdpType": "offer",
             ],
             ts: Date().timeIntervalSince1970))
-        log.info("ICE id=\(self.diagnosticConnectionID, privacy: .public) stage=offer_sent")
+        log.notice("ICE id=\(self.diagnosticConnectionID, privacy: .public) stage=offer_sent elapsed_ms=\(self.diagnosticElapsed, privacy: .public)")
 
         pollTask?.cancel()
         pollTask = Task { [weak self] in
@@ -280,6 +329,10 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
                 self.iceDeadlineTask = nil
                 self.finishDisconnect(reason: "Can’t connect to your computer. Check that both devices are online and the host app is open, then try again.", category: .peerConnection)
             }
+        }
+        } catch {
+            endDiagnosticAttempt()
+            throw error
         }
     }
 
@@ -328,19 +381,43 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
         callback?(reason)
     }
 
+    private func logSelectedPair(_ peer: RTCPeerConnection) {
+        let attempt = diagnosticConnectionID
+        peer.statistics { [log] report in
+            guard let id = report.statistics.values.first(where: { $0.type == "transport" })?.values["selectedCandidatePairId"] as? String,
+                  let pair = report.statistics[id],
+                  let localID = pair.values["localCandidateId"] as? String,
+                  let remoteID = pair.values["remoteCandidateId"] as? String,
+                  let local = report.statistics[localID], let remote = report.statistics[remoteID] else { return }
+            let lt = ICECandidateDiagnostics.kind(local.values["candidateType"] as? String)
+            let rt = ICECandidateDiagnostics.kind(remote.values["candidateType"] as? String)
+            let lf = ICECandidateDiagnostics.family(local.values["address"] as? String ?? local.values["ip"] as? String ?? "")
+            let rf = ICECandidateDiagnostics.family(remote.values["address"] as? String ?? remote.values["ip"] as? String ?? "")
+            let proto = ICECandidateDiagnostics.transport(local.values["protocol"] as? String)
+            log.notice("ICE id=\(attempt, privacy: .public) selected local=\(lt, privacy: .public)/\(lf, privacy: .public) remote=\(rt, privacy: .public)/\(rf, privacy: .public) protocol=\(proto, privacy: .public)")
+        }
+    }
+
     private func logCandidateCounts(stage: String) {
-        log.info("ICE id=\(self.diagnosticConnectionID, privacy: .public) stage=\(stage, privacy: .public) local={\(self.localCandidateCounts.summary, privacy: .public)} remote={\(self.remoteCandidateCounts.summary, privacy: .public)}")
+        log.notice("ICE id=\(self.diagnosticConnectionID, privacy: .public) stage=\(stage, privacy: .public) local={\(self.diagnosticLocal.summary, privacy: .public)} remote={\(self.diagnosticRemote.summary, privacy: .public)}")
     }
 
     @discardableResult
     private func logICEState(kind: String, value: String) -> Bool {
-        guard diagnosticStateEvents < 32 else { return false }
-        diagnosticStateEvents += 1
-        log.info("ICE id=\(self.diagnosticConnectionID, privacy: .public) \(kind, privacy: .public)=\(value, privacy: .public)")
+        log.notice("ICE id=\(self.diagnosticConnectionID, privacy: .public) \(kind, privacy: .public)=\(value, privacy: .public) elapsed_ms=\(self.diagnosticElapsed, privacy: .public)")
         return true
     }
 
+    private func endDiagnosticAttempt() {
+        diagnosticPathMonitor?.cancel()
+        diagnosticPathMonitor = nil
+        if diagnosticAttemptEnd.end() {
+            log.notice("ICE id=\(self.diagnosticConnectionID, privacy: .public) failure_stage=\(self.diagnosticStage, privacy: .public) elapsed_ms=\(self.diagnosticElapsed, privacy: .public)")
+        }
+    }
+
     private func close(reason: String, notifyRemote: Bool) {
+        endDiagnosticAttempt()
         isClosing = true
         #if DEBUG
         previousDebugVideoSample = nil
@@ -493,11 +570,13 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
                               let sdp = envelope.payload["sdp"] else {
                             continue
                         }
+                        log.notice("ICE id=\(self.diagnosticConnectionID, privacy: .public) stage=answer_received elapsed_ms=\(self.diagnosticElapsed, privacy: .public)")
                         try await setRemoteDescription(
                             RTCSessionDescription(type: .answer, sdp: sdp),
                             on: peerConnection)
                         answerApplied = true
-                        log.info("ICE id=\(self.diagnosticConnectionID, privacy: .public) stage=answer_applied")
+                        diagnosticStage = "ice_checking"
+                        log.notice("ICE id=\(self.diagnosticConnectionID, privacy: .public) stage=answer_applied elapsed_ms=\(self.diagnosticElapsed, privacy: .public)")
                         loggedPendingRemoteICE = false
                         try await flushPendingRemoteICECandidates()
                     case .ice:
@@ -505,6 +584,8 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
                             continue
                         }
                         remoteCandidateCounts.record(candidate.sdp)
+                        diagnosticRemote.record(candidate.sdp)
+                        logCandidateCounts(stage: "remote_candidate_received")
                         try await handleRemoteICECandidate(candidate)
                     case .bye:
                         finishDisconnect(reason: envelope.payload["reason"] ?? "Disconnected", category: .remoteBye)
@@ -621,6 +702,7 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
                     // drawable; physical devices require the presentation callback.
                     guard !self.hasReportedRendererFrame else { return }
                     self.hasReportedRendererFrame = true
+                    self.diagnosticAttemptEnd.didRender()
                     self.onFirstVideoFrame?()
                 case .waiting, .retired:
                     let reported = self.hasReportedRendererFrame
@@ -791,6 +873,10 @@ extension WebRTCTransport: RTCPeerConnectionDelegate {
         Task { @MainActor [weak self] in
             guard let self, self.peerConnection === peerConnection, !self.isClosing else { return }
             self.logICEState(kind: "connection_state", value: String(describing: newState))
+            if newState == .connected || newState == .completed {
+                if !self.connectedOnce { self.diagnosticStage = "dtls" }
+                self.logSelectedPair(peerConnection)
+            }
         }
     }
     nonisolated func peerConnection(_ peerConnection: RTCPeerConnection, didChange newState: RTCIceGatheringState) {
@@ -811,6 +897,7 @@ extension WebRTCTransport: RTCPeerConnectionDelegate {
             case .connected:
                 guard directInputState.connectionChanged(connected: true) else { return }
                 connectedOnce = true
+                diagnosticStage = "hello"
                 iceDeadlineTask?.cancel()
                 iceDeadlineTask = nil
                 cancelConnectionRecoveryTimeout()
@@ -844,7 +931,10 @@ extension WebRTCTransport: RTCPeerConnectionDelegate {
             guard let self, let signaling = self.signaling else {
                 return
             }
-            if self.peerConnection === peerConnection { self.localCandidateCounts.record(candidate.sdp) }
+            if self.peerConnection === peerConnection {
+                self.localCandidateCounts.record(candidate.sdp)
+                self.diagnosticLocal.record(candidate.sdp)
+            }
             do {
                 try await signaling.send(SignalingEnvelope(
                     role: .client,
@@ -856,7 +946,7 @@ extension WebRTCTransport: RTCPeerConnectionDelegate {
                     ],
                     ts: Date().timeIntervalSince1970))
             } catch {
-                self.log.error("failed to send local ICE candidate: \(String(describing: error), privacy: .public)")
+                self.log.error("failed to send local ICE candidate")
             }
         }
     }
@@ -939,6 +1029,7 @@ extension WebRTCTransport: RTCDataChannelDelegate {
                     return
                 case .accepted: break
                 }
+                diagnosticStage = "video"
                 inputHandshakeDeadlineTask?.cancel()
                 inputHandshakeDeadlineTask = nil
                 if inputPresentation.matches(hello.inputSession) { return }
