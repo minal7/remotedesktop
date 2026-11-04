@@ -201,6 +201,23 @@ def newest_client_trace(inventory):
     return matches[0]
 
 
+def verify_owned_pid_absent(data, pid):
+    if not isinstance(data, dict) or 'error' in data or not isinstance(data.get('result'), dict):
+        raise ValueError('Device process listing is malformed.')
+    info = data.get('info')
+    if info is not None and (not isinstance(info, dict) or
+                             ('outcome' in info and info['outcome'] != 'success')):
+        raise ValueError('Device process listing was not successful.')
+    processes = data['result'].get('runningProcesses')
+    if not isinstance(processes, list) or len(processes) > 10000:
+        raise ValueError('Device process listing is malformed.')
+    if any(not isinstance(row, dict) or type(row.get('processIdentifier')) is not int
+           or row['processIdentifier'] <= 0 for row in processes):
+        raise ValueError('Device process listing is malformed.')
+    if any(row['processIdentifier'] == pid for row in processes):
+        raise RuntimeError('The owned client process has not stopped.')
+
+
 def verify_client_trace(path, run_id, fix):
     rows = read_trace(path)
     windows = segments(rows)
@@ -246,6 +263,7 @@ def run(args):
     device_pid = None
     launch_json = None
     launch_attempted = False
+    client_confirmed_stopped = False
     launch_token = str(uuid.uuid4())
     spawning = False
     stop_pending = False
@@ -284,6 +302,35 @@ def run(args):
         with (args.output / f'{name}.log').open('w') as log:
             result = subprocess.run(arguments, stdout=log, stderr=subprocess.STDOUT, check=required, timeout=40)
             return result.returncode == 0
+
+    def stop_completed_client():
+        nonlocal client_confirmed_stopped
+        # The status token identifies this process; compare the launch PID when available.
+        reported_pid = launched_pid()
+        if device_pid is None or (reported_pid is not None and reported_pid != device_pid):
+            raise RuntimeError('The owned client identity could not be verified.')
+        require_selected_ipad(args.device, expected_build)
+        require_device_window(minimum_remaining=45)
+        read_coordination_log()
+        if launch_process.poll() is None:
+            launch_process.send_signal(signal.SIGINT)
+        try:
+            launch_process.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            # Fall back only to the PID returned by this launch and matched status.
+            command(['xcrun', 'devicectl', 'device', 'process', 'terminate',
+                     '--device', args.device, '--pid', str(device_pid)], 'stop', private=True)
+        with tempfile.TemporaryDirectory(prefix='.process-check-', dir=args.output) as tmp:
+            listing = Path(tmp) / 'processes.json'
+            command(['xcrun', 'devicectl', 'device', 'info', 'processes', '--device', args.device,
+                     '--json-output', str(listing)], 'process-check', private=True)
+            if not listing.is_file() or listing.stat().st_size > 2_000_000:
+                raise ValueError('Device process listing is unavailable or too large.')
+            try:
+                verify_owned_pid_absent(json.loads(listing.read_text()), device_pid)
+            except (OSError, UnicodeError, json.JSONDecodeError) as error:
+                raise ValueError('Device process listing is malformed.') from error
+        client_confirmed_stopped = True
 
     try:
         install_verified_lab_app(args.device, args.client_app)
@@ -368,6 +415,8 @@ def run(args):
                         raise ValueError('Marker did not finish successfully.')
                 if status['stage'] == 'aborted':
                     raise RuntimeError('The lab could not finish the requested arms.')
+                # Stop and verify this exact client before exporting its completed trace.
+                stop_completed_client()
                 # A private inventory and one bounded file avoid large directory exports.
                 with tempfile.TemporaryDirectory(prefix='.client-export-', dir=args.output) as tmp:
                     temporary = Path(tmp)
@@ -413,9 +462,9 @@ def run(args):
         # exact PID returned by this sweep; never an installed host process.
         for signum in (signal.SIGINT, signal.SIGTERM):
             signal.signal(signum, signal.SIG_IGN)
-        console_stopped = False
+        console_stopped = client_confirmed_stopped
         cleanup_error = False
-        if launch_process is not None:
+        if launch_process is not None and not client_confirmed_stopped:
             if launch_process.poll() is None:
                 try:
                     read_coordination_log()

@@ -187,10 +187,10 @@ class DevicePairSafetyTests(unittest.TestCase):
         terminate.assert_not_called()
         marker.terminate.assert_called_once()
 
-    def exercise_completion(self, statuses, *, fail_export=False, trace_run="run-1"):
+    def exercise_completion(self, statuses, *, fail_export=False, trace_run="run-1", process_data=None, stop_timeout=False, stop_failure=False, launch_pid=None):
         import itertools
         marker, attached = Mock(), Mock()
-        state = {'marker_done': False, 'console_done': False, 'token': None, 'status': 0, 'copies': 0}
+        state = {'marker_done': False, 'console_done': False, 'token': None, 'status': 0, 'copies': 0, 'process_checks': 0, 'inventories': 0, 'waits': 0, 'terminations': 0}
         marker.poll.side_effect = lambda: 0 if state['marker_done'] else None
         marker.returncode = 0
         attached.poll.side_effect = lambda: 0 if state['console_done'] else None
@@ -200,15 +200,41 @@ class DevicePairSafetyTests(unittest.TestCase):
             (self.args.output / 'markers.json').write_text(json.dumps({'markers': [{'marker_id': 1, 'host_display_s': 10}]}))
             state['marker_done'] = True
         marker.send_signal.side_effect = marker_signal
-        attached.wait.side_effect = lambda timeout=None: state.update(console_done=True) or 0
+        def wait_console(timeout=None):
+            state['waits'] += 1
+            if stop_timeout and state['waits'] == 1:
+                raise subprocess.TimeoutExpired('devicectl', timeout)
+            state['console_done'] = True
+            return 0
+        attached.wait.side_effect = wait_console
         def popen(command, **kwargs):
             if command[0] == str(self.args.marker_binary):
                 kwargs['stdout'].write('MARKER_READY yes\n'); kwargs['stdout'].flush()
                 return marker
             state['token'] = command[command.index('LatencyLabPairToken') + 1]
+            if launch_pid is not None:
+                Path(command[command.index('--json-output') + 1]).write_text(json.dumps(
+                    {'result': {'process': {'processIdentifier': launch_pid}}}))
             return attached
         def command(command, **kwargs):
+            if 'process' in command and 'terminate' in command:
+                self.assertEqual(command[command.index('--pid') + 1], '4321')
+                self.assertTrue(state['marker_done'])
+                state['terminations'] += 1
+                return SimpleNamespace(returncode=1 if stop_failure else 0)
+            if 'info' in command and 'processes' in command:
+                self.assertTrue(state['marker_done'], 'Marker must flush before stopping and verifying the client')
+                self.assertTrue(state['console_done'] or state['terminations'] == 1,
+                                'Stop must precede verification')
+                state['process_checks'] += 1
+                path = Path(command[command.index('--json-output') + 1])
+                listing = process_data if process_data is not None else {
+                    'info': {'outcome': 'success'}, 'result': {'runningProcesses': [{'processIdentifier': 17}]}}
+                path.write_text(json.dumps(listing))
+                return SimpleNamespace(returncode=0)
             if 'info' in command and 'files' in command:
+                self.assertEqual(state['process_checks'], 1, 'Verify the stopped client before inventory')
+                state['inventories'] += 1
                 self.assertIn('--no-recurse', command)
                 self.assertEqual(command[command.index('--subdirectory') + 1], runner.TRACE_DIRECTORY)
                 self.assertEqual(kwargs.get('stdout'), subprocess.DEVNULL)
@@ -290,6 +316,62 @@ class DevicePairSafetyTests(unittest.TestCase):
         summary.assert_called_once()
         self.assertTrue((self.args.output / 'summary.json').exists())
         self.assertEqual((self.args.output / 'client.jsonl').stat().st_mode & 0o777, 0o600)
+
+    def test_console_timeout_uses_only_owned_pid_then_verifies_before_export(self):
+        result, error, marker, attached, state, summary = self.exercise_completion(
+            [{'stage': 'complete', 'run': 'run-1'}], stop_timeout=True)
+        self.assertEqual(result, 0)
+        self.assertIsNone(error)
+        self.assertEqual(state['terminations'], 1)
+        self.assertEqual(state['process_checks'], 1)
+        self.assertEqual(state['inventories'], 1)
+        summary.assert_called_once()
+
+    def test_stop_failure_blocks_inventory_and_retains_marker(self):
+        result, error, marker, attached, state, summary = self.exercise_completion(
+            [{'stage': 'complete', 'run': 'run-1'}], stop_timeout=True, stop_failure=True)
+        self.assertIsNone(result)
+        self.assertIsInstance(error, RuntimeError)
+        self.assertEqual(state['terminations'], 1)
+        self.assertEqual(state['process_checks'], 0)
+        self.assertEqual(state['inventories'], 0)
+        self.assertEqual(state['copies'], 0)
+        self.assertTrue((self.args.output / 'markers.json').is_file())
+        summary.assert_not_called()
+
+    def test_conflicting_launched_pid_blocks_export(self):
+        result, error, marker, attached, state, summary = self.exercise_completion(
+            [{'stage': 'complete', 'run': 'run-1'}], launch_pid=4322)
+        self.assertIsNone(result)
+        self.assertIsInstance(error, RuntimeError)
+        self.assertEqual(state['inventories'], 0)
+        self.assertEqual(state['copies'], 0)
+        self.assertTrue((self.args.output / 'markers.json').is_file())
+        summary.assert_not_called()
+
+    def test_client_still_running_blocks_inventory_and_preserves_marker(self):
+        live = {'info': {'outcome': 'success'}, 'result': {'runningProcesses': [{'processIdentifier': 4321}]}}
+        result, error, marker, attached, state, summary = self.exercise_completion(
+            [{'stage': 'complete', 'run': 'run-1'}], process_data=live)
+        self.assertIsNone(result)
+        self.assertIsInstance(error, RuntimeError)
+        self.assertTrue((self.args.output / 'markers.json').is_file())
+        self.assertEqual(state['inventories'], 0)
+        self.assertEqual(state['copies'], 0)
+        summary.assert_not_called()
+        self.assertFalse((self.args.output / 'summary.json').exists())
+
+    def test_unverifiable_process_list_blocks_export(self):
+        for data in ({}, {'error': {}, 'result': {'runningProcesses': []}},
+                     {'info': {'outcome': 'failure'}, 'result': {'runningProcesses': []}},
+                     {'info': {'outcome': 'success'}, 'result': {'runningProcesses': [{}]}},
+                     {'info': {'outcome': 'success'}, 'result': {'runningProcesses': 'invalid'}}):
+            with self.subTest(data=data), self.assertRaises((ValueError, RuntimeError)):
+                runner.verify_owned_pid_absent(data, 4321)
+        self.assertIsNone(runner.verify_owned_pid_absent(
+            {'info': {'outcome': 'success'}, 'result': {'runningProcesses': [{'processIdentifier': 17}]}}, 4321))
+        self.assertIsNone(runner.verify_owned_pid_absent(
+            {'result': {'runningProcesses': [{'processIdentifier': 17}]}}, 4321))
 
     def test_eight_window_trace_with_different_run_is_rejected_and_marker_retained(self):
         result, error, marker, attached, state, summary = self.exercise_completion(
