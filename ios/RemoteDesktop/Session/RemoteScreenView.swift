@@ -22,12 +22,14 @@ struct RemoteScreenView: UIViewRepresentable {
     @EnvironmentObject private var session: SessionModel
     @ObservedObject var accessories: AccessoryMonitor
     @ObservedObject var zoom: RemoteScreenZoomController
+    var touchMode: TouchInputMode = .direct
 
     func makeUIView(context: Context) -> RemoteScreenUIView {
         let v = RemoteScreenUIView()
         v.bindSession(session)
         v.bindZoomController(zoom)
         v.accessories = accessories
+        v.setTouchMode(touchMode)
         return v
     }
 
@@ -35,6 +37,7 @@ struct RemoteScreenView: UIViewRepresentable {
         uiView.bindSession(session)
         uiView.bindZoomController(zoom)
         uiView.accessories = accessories
+        uiView.setTouchMode(touchMode)
         uiView.applyDisplay(session.display)
     }
 
@@ -160,6 +163,9 @@ final class RemoteScreenUIView: UIView, UIPointerInteractionDelegate, UIGestureR
     private let zoomPan = UIPanGestureRecognizer()
     private let pinch = UIPinchGestureRecognizer()
     private let longPress = UILongPressGestureRecognizer()
+    private let twoFingerTap = UITapGestureRecognizer()
+    private var touchMode: TouchInputMode = .direct
+    private var trackpad = TrackpadGestureController()
     private var zoomScale: CGFloat = 1
     private var zoomOffset: CGPoint = .zero
     private var pinchStartScale: CGFloat = 1
@@ -233,6 +239,12 @@ final class RemoteScreenUIView: UIView, UIPointerInteractionDelegate, UIGestureR
         longPress.allowableMovement = 10
         longPress.delegate = self
         addGestureRecognizer(longPress)
+
+        twoFingerTap.numberOfTouchesRequired = 2
+        twoFingerTap.addTarget(self, action: #selector(onTwoFingerTap(_:)))
+        twoFingerTap.delegate = self
+        twoFingerTap.cancelsTouchesInView = false
+        addGestureRecognizer(twoFingerTap)
 
         isMultipleTouchEnabled = true
     }
@@ -486,6 +498,39 @@ final class RemoteScreenUIView: UIView, UIPointerInteractionDelegate, UIGestureR
         sendScroll(at: lastPointerContentPoint, dx: t.x, dy: t.y, phase: phase, source: .indirect)
     }
 
+    func setTouchMode(_ mode: TouchInputMode) {
+        guard mode != touchMode else { return }
+        cancelActiveTouch()
+        touchMode = mode
+        trackpad = TrackpadGestureController()
+        cursorLayer.hide()
+        applyInteractionMode(moveScreenEnabled: zoomController?.moveScreenEnabled ?? false)
+    }
+
+    private func trackpadInitialPoint() -> CGPoint {
+        let rect = geometry.interactiveRect
+        return RemoteScreenGeometry.contains(cursorContentPoint, in: rect) ? cursorContentPoint
+            : CGPoint(x: rect.midX, y: rect.midY)
+    }
+
+    private func panToTrackpadCursor(_ point: CGPoint) {
+        guard RemoteZoomPolicy.isZoomed(zoomScale) else { return }
+        let adjustment = TrackpadGestureController.edgePan(cursor: contentView.convert(point, to: self), viewport: bounds)
+        zoomOffset.x += adjustment.x; zoomOffset.y += adjustment.y
+        clampZoomOffset()
+        applyZoomTransform()
+    }
+
+    @objc private func onTwoFingerTap(_ gesture: UITapGestureRecognizer) {
+        guard gesture.state == .ended, touchMode == .trackpad, synchronizeInputAvailability(),
+              accessories?.hasIndirectPointer != true,
+              zoomController?.moveScreenEnabled != true else { return }
+        let point = trackpadInitialPoint()
+        trackpad.setCursor(point, bounds: geometry.interactiveRect)
+        panToTrackpadCursor(point)
+        for buttons in trackpad.endTwoFingerTap() { sendPointer(at: point, buttons: buttons) }
+    }
+
     // MARK: - Touch cursor mode
 
     private var activeTouch: UITouch?
@@ -500,6 +545,11 @@ final class RemoteScreenUIView: UIView, UIPointerInteractionDelegate, UIGestureR
             return
         }
 
+        if touchMode == .trackpad, activeTouch != nil || touches.count > 1 {
+            for buttons in trackpad.secondFingerBegan() { sendPointer(at: trackpad.cursor, buttons: buttons) }
+            activeTouch = nil
+            return
+        }
         guard accessories?.hasIndirectPointer != true,
               RemoteTouchRoutingPolicy.routesTouchesToComputer(
                 moveScreenEnabled: zoomController?.moveScreenEnabled ?? false),
@@ -509,6 +559,13 @@ final class RemoteScreenUIView: UIView, UIPointerInteractionDelegate, UIGestureR
             return
         }
         activeTouch = t
+        if touchMode == .trackpad {
+            let point = trackpadInitialPoint()
+            trackpad.begin(at: t.timestamp, cursor: point, bounds: geometry.interactiveRect)
+            moveCursor(toContentPoint: point)
+            panToTrackpadCursor(point)
+            return
+        }
         touchStart = t.location(in: self)
         touchStartedAt = CACurrentMediaTime()
         isDragging = TouchCursorPolicy.beginsDrag(tapCount: t.tapCount)
@@ -526,7 +583,21 @@ final class RemoteScreenUIView: UIView, UIPointerInteractionDelegate, UIGestureR
             return
         }
 
-        guard let t = activeTouch, touches.contains(t), touchStart != nil else { return }
+        guard let t = activeTouch, touches.contains(t) else { return }
+        if touchMode == .trackpad {
+            let prev = t.previousLocation(in: self), now = t.location(in: self)
+            let old = trackpad.cursor ?? trackpadInitialPoint()
+            let buttons = trackpad.move(delta: CGPoint(x: now.x - prev.x, y: now.y - prev.y),
+                                        timestamp: t.timestamp, scale: zoomScale, bounds: geometry.interactiveRect)
+            if buttons != 0 && inputRouting.pointerButtons == 0 { sendPointer(at: old, buttons: buttons) }
+            if let point = trackpad.cursor {
+                moveCursor(toContentPoint: point)
+                panToTrackpadCursor(point)
+                sendPointer(at: point, buttons: buttons, allowsNewButtons: false)
+            }
+            return
+        }
+        guard touchStart != nil else { return }
         let prev = t.previousLocation(in: self)
         let now = t.location(in: self)
         let delta = CGPoint(x: now.x - prev.x, y: now.y - prev.y)
@@ -544,6 +615,12 @@ final class RemoteScreenUIView: UIView, UIPointerInteractionDelegate, UIGestureR
         }
 
         guard let t = activeTouch, touches.contains(t) else { return }
+        if touchMode == .trackpad {
+            let point = trackpad.cursor ?? trackpadInitialPoint()
+            for buttons in trackpad.end(at: t.timestamp) { sendPointer(at: point, buttons: buttons) }
+            activeTouch = nil
+            return
+        }
         let duration = CACurrentMediaTime() - touchStartedAt
         let cursor = cursorLayer.cursorCenter
         for buttons in TouchCursorPolicy.endButtonSequence(
@@ -565,7 +642,9 @@ final class RemoteScreenUIView: UIView, UIPointerInteractionDelegate, UIGestureR
             return
         }
 
-        if isDragging {
+        if touchMode == .trackpad {
+            for buttons in trackpad.cancel() { sendPointer(at: trackpad.cursor, buttons: buttons) }
+        } else if isDragging {
             sendPointer(at: cursorLayer.cursorCenter, buttons: 0)
         }
         activeTouch = nil
@@ -654,8 +733,12 @@ final class RemoteScreenUIView: UIView, UIPointerInteractionDelegate, UIGestureR
             default: return .changed
             }
         }()
-        if phase == .begin { positionTouchCursor() }
-        sendScroll(at: cursorLayer.cursorCenter, dx: t.x, dy: t.y, phase: phase, source: .touch)
+        if phase == .begin {
+            if touchMode == .direct { positionTouchCursor() }
+            else { trackpad.twoFingerScrollBegan() }
+        }
+        let point = touchMode == .trackpad ? (trackpad.cursor ?? trackpadInitialPoint()) : cursorLayer.cursorCenter
+        sendScroll(at: point, dx: t.x, dy: t.y, phase: phase, source: .touch)
     }
 
     // MARK: - UIGestureRecognizerDelegate
@@ -780,7 +863,8 @@ final class RemoteScreenUIView: UIView, UIPointerInteractionDelegate, UIGestureR
         }
         if moveScreenEnabled { scrollGenerations.removeAll() }
         touchScroll.isEnabled = !moveScreenEnabled && inputAvailable
-        longPress.isEnabled = !moveScreenEnabled && inputAvailable
+        longPress.isEnabled = !moveScreenEnabled && inputAvailable && touchMode == .direct
+        twoFingerTap.isEnabled = !moveScreenEnabled && inputAvailable && touchMode == .trackpad
         hover.isEnabled = !moveScreenEnabled && inputAvailable
         indirectScroll.isEnabled = !moveScreenEnabled && inputAvailable
         pinch.isEnabled = moveScreenEnabled
@@ -831,7 +915,9 @@ final class RemoteScreenUIView: UIView, UIPointerInteractionDelegate, UIGestureR
     }
 
     private func cancelActiveTouch() {
-        if isDragging {
+        if touchMode == .trackpad {
+            for buttons in trackpad.cancel() { sendPointer(at: trackpad.cursor, buttons: buttons) }
+        } else if isDragging {
             sendPointer(at: cursorLayer.cursorCenter, buttons: 0)
         }
         activeTouch = nil
@@ -869,6 +955,9 @@ final class RemoteScreenUIView: UIView, UIPointerInteractionDelegate, UIGestureR
             x: rect.minX + point.x * rect.width / CGFloat(display.w),
             y: rect.minY + point.y * rect.height / CGFloat(display.h))
         clientCursor.moveHostCursor(toContentPoint: contentPoint)
+        if touchMode == .trackpad && activeTouch == nil {
+            trackpad.setCursor(clientCursor.cursorContentPoint, bounds: rect)
+        }
     }
 
     private func updateCursorScale() {

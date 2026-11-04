@@ -85,6 +85,7 @@ final class SessionModel: ObservableObject, VideoRendererTarget {
 
     @Published private(set) var state: State = .idle { didSet { notifyRemoteScreenVisibilityChanged() } }
     @Published private(set) var hostName: String?
+    @Published private(set) var touchPreferenceHostID: String?
     @Published private(set) var display: DisplayInfo? { didSet { notifyRemoteScreenVisibilityChanged() } }
     @Published private(set) var hasReceivedVideoFrame = false
     @Published private(set) var softModifierMask: UInt16 = 0
@@ -513,6 +514,7 @@ final class SessionModel: ObservableObject, VideoRendererTarget {
         error = nil
         invalidateRemoteInput()
         self.experience = experience
+        touchPreferenceHostID = computerUseHostID.flatMap { $0.isEmpty ? nil : $0 }
         sessionAccountBinding = localCloudAccountBinding
         computerUseConnectionMode = .liveScreen
 
@@ -810,6 +812,7 @@ final class SessionModel: ObservableObject, VideoRendererTarget {
         state = .idle
         error = nil
         hostName = nil
+        touchPreferenceHostID = nil
         display = nil
         invalidateRemoteInput()
         experience = .remoteControl
