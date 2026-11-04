@@ -213,9 +213,9 @@ final class RemoteVideoF4Renderer: @unchecked Sendable {
             let object = ObjectIdentifier(drawable), time = drawable.presentedTime
             guard let self, let id = Int(exactly: drawable.drawableID) else { return }
             Self.queue.async { [self] in
-                if current(ticket.context) { retryID = nil }
-                apply(Self.ledger.presented(ticket, drawable: object, drawableID: id, time: time))
-                drain()
+                if self.current(ticket.context) { self.retryID = nil }
+                self.apply(Self.ledger.presented(ticket, drawable: object, drawableID: id, time: time))
+                self.drain()
             }
         }
         #endif
