@@ -2,11 +2,132 @@ import XCTest
 import CoreGraphics
 import CoreVideo
 import LiveKitWebRTC
+import Metal
 import QuartzCore
+import UIKit
 @testable import RemoteDesktop
 
 @MainActor
 final class RemoteVideoPresentationSurfaceTests: XCTestCase {
+    #if DEBUG
+    /// The coordinator captures the actual Simulator screen during the ready
+    /// interval; UIKit snapshots do not reliably include CAMetalLayer pixels.
+    func test_optInNV12ColorScreenshot() async throws {
+        #if targetEnvironment(simulator)
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["RUN_SINGLE_SIMULATOR_FRAME"] == "1" else {
+            throw XCTSkip("Opt-in: isolated Simulator surface test")
+        }
+        guard let phase = environment["F4_SCREENSHOT_PHASE"], phase == "A" || phase == "B" else {
+            throw XCTSkip("Set F4_SCREENSHOT_PHASE to A or B")
+        }
+        let previous = LatencyLabConfiguration.current
+        defer { LatencyLabConfiguration.setRuntime(previous) }
+        var configuration = previous
+        configuration.f4Renderer = phase == "B"
+        LatencyLabConfiguration.setRuntime(configuration)
+
+        let host = try RemoteKeyboardTestWindow()
+        defer { host.close() }
+        let surface = try XCTUnwrap(RemoteVideoPresentationSurface.make(allowF4: phase == "B"))
+        defer { surface.retire() }
+        surface.view.frame = CGRect(x: 24, y: 96, width: 256, height: 256)
+        let root = try XCTUnwrap(host.window.rootViewController?.view)
+        root.addSubview(surface.view)
+        let marker = UILabel(frame: CGRect(x: 24, y: 48, width: 256, height: 32))
+        marker.text = "NV12 COLOR PHASE \(phase)"
+        marker.textColor = .white; marker.backgroundColor = .black
+        root.addSubview(marker)
+        root.layoutIfNeeded()
+        surface.configure(mode: .aspectFit, viewport: surface.view.bounds)
+        XCTAssertTrue(surface.view.window === host.window)
+
+        var pixels: CVPixelBuffer?
+        let attributes: [CFString: Any] = [kCVPixelBufferMetalCompatibilityKey: true,
+            kCVPixelBufferIOSurfacePropertiesKey: [:] as [String: Any]]
+        XCTAssertEqual(CVPixelBufferCreate(kCFAllocatorDefault, 256, 256,
+            kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange, attributes as CFDictionary, &pixels), kCVReturnSuccess)
+        let buffer = try XCTUnwrap(pixels)
+        CVBufferSetAttachment(buffer, kCVImageBufferYCbCrMatrixKey, kCVImageBufferYCbCrMatrix_ITU_R_709_2, .shouldPropagate)
+        CVBufferSetAttachment(buffer, kCVImageBufferColorPrimariesKey, kCVImageBufferColorPrimaries_ITU_R_709_2, .shouldPropagate)
+        CVBufferSetAttachment(buffer, kCVImageBufferTransferFunctionKey, kCVImageBufferTransferFunction_sRGB, .shouldPropagate)
+        CVBufferSetAttachment(buffer, kCVImageBufferChromaLocationTopFieldKey, kCVImageBufferChromaLocation_Center, .shouldPropagate)
+        XCTAssertEqual(CVPixelBufferLockBaseAddress(buffer, []), kCVReturnSuccess)
+        do {
+            defer { CVPixelBufferUnlockBaseAddress(buffer, []) }
+            let y = try XCTUnwrap(CVPixelBufferGetBaseAddressOfPlane(buffer, 0)).assumingMemoryBound(to: UInt8.self)
+            let uv = try XCTUnwrap(CVPixelBufferGetBaseAddressOfPlane(buffer, 1)).assumingMemoryBound(to: UInt8.self)
+            let ys = CVPixelBufferGetBytesPerRowOfPlane(buffer, 0), uvs = CVPixelBufferGetBytesPerRowOfPlane(buffer, 1)
+            // Eight vertical video-range patches, identical in both phases.
+            let patches: [(UInt8, UInt8, UInt8)] = [
+                (16, 128, 128), (235, 128, 128), (126, 128, 128), (63, 102, 240),
+                (32, 240, 118), (173, 42, 26), (110, 155, 100), (70, 128, 128)
+            ]
+            for row in 0..<256 { for column in 0..<256 { y[row * ys + column] = patches[column / 32].0 } }
+            for row in 0..<128 { for column in 0..<128 {
+                let patch = patches[column / 16]
+                uv[row * uvs + column * 2] = patch.1; uv[row * uvs + column * 2 + 1] = patch.2
+            } }
+        }
+        let frame = RTCVideoFrame(buffer: RTCCVPixelBuffer(pixelBuffer: buffer), rotation: ._0, timeStampNs: 1)
+        if phase == "B" {
+            // The exact prepared frame must be eligible for the direct NV12
+            // path; otherwise a visually correct CI fallback is inconclusive.
+            guard case .ready(let prepared) = RemoteVideoFrameImage.prepare(frame) else {
+                return XCTFail("Unable to prepare NV12 fixture")
+            }
+            let device = try XCTUnwrap(surface.view.metalLayer.device)
+            let renderer = try XCTUnwrap(RemoteVideoF4Metal(device: device))
+            let queue = try XCTUnwrap(device.makeCommandQueue())
+            let command = try XCTUnwrap(queue.makeCommandBuffer())
+            let descriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .bgra8Unorm, width: 256, height: 256, mipmapped: false)
+            descriptor.usage = .renderTarget; descriptor.storageMode = .shared
+            let destination = try XCTUnwrap(device.makeTexture(descriptor: descriptor))
+            let resources = try XCTUnwrap(renderer.encode(prepared: prepared, destination: destination, command: command, mode: .aspectFit),
+                                          "The F4 fixture must use the NV12 Metal path")
+            command.commit(); command.waitUntilCompleted()
+            withExtendedLifetime(resources) {}
+            XCTAssertEqual(command.status, .completed)
+            var bytes = [UInt8](repeating: 0, count: 256 * 256 * 4)
+            bytes.withUnsafeMutableBytes { storage in
+                if let base = storage.baseAddress {
+                    destination.getBytes(base, bytesPerRow: 256 * 4, from: MTLRegionMake2D(0, 0, 256, 256), mipmapLevel: 0)
+                }
+            }
+            func pixel(_ column: Int) -> (UInt8, UInt8, UInt8) {
+                let offset = (128 * 256 + column) * 4
+                return (bytes[offset + 2], bytes[offset + 1], bytes[offset])
+            }
+            let black = pixel(16), white = pixel(48), gray = pixel(80), red = pixel(112), blue = pixel(144)
+            XCTAssertLessThan(black.0, 8); XCTAssertLessThan(black.1, 8); XCTAssertLessThan(black.2, 8)
+            XCTAssertGreaterThan(white.0, 247); XCTAssertGreaterThan(white.1, 247); XCTAssertGreaterThan(white.2, 247)
+            XCTAssertTrue((110...145).contains(Int(gray.0)) && (110...145).contains(Int(gray.1)) && (110...145).contains(Int(gray.2)))
+            XCTAssertGreaterThan(red.0, 230); XCTAssertLessThan(red.1, 20); XCTAssertLessThan(red.2, 20)
+            XCTAssertGreaterThan(blue.2, 230); XCTAssertLessThan(blue.0, 20); XCTAssertLessThan(blue.1, 20)
+        }
+        let finished = expectation(description: "NV12 surface ready")
+        var receipt: RemoteVideoSurfacePresentation.State?
+        surface.presentation.observe { state in
+            switch state {
+            case .rendered, .presented, .failed:
+                guard receipt == nil else { return }
+                receipt = state; finished.fulfill()
+            case .waiting, .retired: break
+            }
+        }
+        surface.renderFrame(frame)
+        await fulfillment(of: [finished], timeout: 5)
+        guard case .rendered = receipt else {
+            return XCTFail("Expected Simulator GPU completion, received \(String(describing: receipt))")
+        }
+        NSLog("NV12_SCREENSHOT_READY phase=%@ rect=24,96,256,256 points", phase)
+        try await Task.sleep(nanoseconds: 30_000_000_000)
+        #else
+        throw XCTSkip("This experiment targets the Simulator rendering path")
+        #endif
+    }
+    #endif
+
     /// One synthetic frame through the real mailbox, drawable acquirer and GPU.
     /// A rendering receipt is not a pixel comparison or hardware display proof.
     func test_optInSingleNativeSimulatorFrameReachesRenderedSurface() async throws {
