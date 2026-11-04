@@ -68,6 +68,7 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
         }
     }
 
+    var onCursorMessage: (@MainActor (HostMessage) -> Void)?
     var onHostHello: (@MainActor (HostHello) -> Void)?
     var onDisplay: (@MainActor (DisplayInfo) -> Void)?
     var onInputUnavailable: (@MainActor () -> Void)?
@@ -602,7 +603,8 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
         }
         log.info("WebRTC control data channel opened; sending client hello")
         let data = ControlMessage.hello(proto: Config.protocolVersion).encoded(seq: 0,
-            ts: UInt64(DispatchTime.now().uptimeNanoseconds / 1_000), inputHello: hello)
+            ts: UInt64(DispatchTime.now().uptimeNanoseconds / 1_000), inputHello: hello,
+            clientCursor: mediaPolicy == .remoteSession)
         guard dataChannel.sendData(RTCDataBuffer(data: data, isBinary: false)),
               directInputState.markHelloSent(hello) else {
             finishDisconnect(reason: "The input handshake could not be sent.", category: .input)
@@ -1047,6 +1049,9 @@ extension WebRTCTransport: RTCDataChannelDelegate {
                           currentDisplay == display, inputPresentation.matches(display.inputSession) else { return }
                     onDisplay?(display)
                 }
+            case .cursorShape, .cursorShapeRef, .cursorPosition:
+                guard directInputState.isReady else { return }
+                if let message = HostMessage.decode(buffer.data) { onCursorMessage?(message) }
             case .bye(let reason):
                 finishDisconnect(reason: reason, category: .remoteBye)
             case nil:

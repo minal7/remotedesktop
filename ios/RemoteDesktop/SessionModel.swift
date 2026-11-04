@@ -198,6 +198,43 @@ final class SessionModel: ObservableObject, VideoRendererTarget {
     private var isNotifyingScreenVisibility = false
     private var screenVisibilityNotificationPending = false
     private weak var remoteScreenInputOwner: AnyObject?
+    private var clientCursorEnabled = false
+    private var cursorShapeCache = CursorShapeCache()
+    private var clientCursorPosition: CGPoint?
+
+    func applyCursorState(to view: RemoteScreenUIView) {
+        guard remoteScreenInputOwner === view else { return }
+        view.setClientCursorEnabled(clientCursorEnabled)
+        guard clientCursorEnabled else { return }
+        for shape in cursorShapeCache.shapes.values {
+            view.installCursorShape(id: shape.id, png: shape.png, hotspot: shape.hotspot, size: shape.size)
+        }
+        if let id = cursorShapeCache.selectedID { view.setShape(id: id) }
+        if let point = clientCursorPosition { view.moveHostCursor(toRemotePoint: point) }
+    }
+
+    private func receiveCursor(_ message: HostMessage) {
+        guard clientCursorEnabled, inputHelloReceived, state == .connected else { return }
+        let view = remoteScreenInputOwner as? RemoteScreenUIView
+        switch message {
+        case .cursorShape(let shape):
+            cursorShapeCache.store(shape)
+            view?.installCursorShape(id: shape.id, png: shape.png, hotspot: shape.hotspot, size: shape.size)
+        case .cursorShapeRef(let id):
+            cursorShapeCache.select(id)
+            view?.setShape(id: id)
+        case .cursorPosition(let point):
+            clientCursorPosition = point
+            view?.moveHostCursor(toRemotePoint: point)
+        default: break
+        }
+    }
+
+    private func resetClientCursor() {
+        clientCursorEnabled = false
+        clientCursorPosition = nil
+        (remoteScreenInputOwner as? RemoteScreenUIView)?.setClientCursorEnabled(false)
+    }
 
     /// Only the most recently bound remote-screen view may acquire the shared
     /// pointer input source. A displaced view can still receive SwiftUI updates,
@@ -277,7 +314,10 @@ final class SessionModel: ObservableObject, VideoRendererTarget {
     private var keyboardTaskInputPermitted = true
     private let videoRendererBinding = RemoteVideoRendererBinding()
     private var transport: Transport? {
-        didSet { updateVideoRendererTarget() }
+        didSet {
+            cursorShapeCache.bindPeer(transport.map { $0 as AnyObject })
+            updateVideoRendererTarget()
+        }
     }
     private var computerUseVisualSidecar: ComputerUseVisualSidecar? {
         didSet { updateVideoRendererTarget() }
@@ -301,6 +341,7 @@ final class SessionModel: ObservableObject, VideoRendererTarget {
     private func invalidateRemoteInput() {
         // Transport/host teardown owns release of the previous lifetime. Local
         // controls discard their state instead of releasing into its successor.
+        resetClientCursor()
         inputHelloReceived = false
         hasReceivedVideoFrame = false
         display = nil
@@ -1041,6 +1082,12 @@ final class SessionModel: ObservableObject, VideoRendererTarget {
     }
 
     private func bind(_ t: Transport) {
+        if let cursorTransport = t as? WebRTCTransport {
+            cursorTransport.onCursorMessage = { [weak self, weak t] message in
+                guard let self, let t, self.transport === t else { return }
+                self.receiveCursor(message)
+            }
+        }
         t.onVideoFrameUnavailable = { [weak self, weak t] in
             guard let self, let t else { return }
             self.retireRenderedInput { self.transport === t }
@@ -1055,6 +1102,10 @@ final class SessionModel: ObservableObject, VideoRendererTarget {
                   !self.isCloudAccountRevalidationPending else { return }
             let isInitialHandshake = self.state == .connecting
             self.invalidateRemoteInput()
+            self.clientCursorEnabled = h.clientCursor == 1
+            if let view = self.remoteScreenInputOwner as? RemoteScreenUIView {
+                self.applyCursorState(to: view)
+            }
             self.inputHelloReceived = true
             self.hostName = h.hostname
             if self.experience == .computerUse,
