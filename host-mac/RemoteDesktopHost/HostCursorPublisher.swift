@@ -51,6 +51,9 @@ final class HostCursorPublisher {
     private var positionState: HostCursorPositionState
     private var timer: Timer?
     private var shapeHistory = HostCursorShapeHistory()
+    #if DEBUG
+    var debugTrace: ((String, CGPoint?, String?) -> Void)?
+    #endif
 
     init(displayBounds: CGRect, send: @escaping Send) {
         self.positionState = HostCursorPositionState(bounds: displayBounds)
@@ -80,12 +83,24 @@ final class HostCursorPublisher {
     func recordClientPosition(_ point: CGPoint) {
         dispatchPrecondition(condition: .onQueue(.main))
         positionState.recordClient(point)
+        #if DEBUG
+        debugTrace?("client_position", point, nil)
+        #endif
     }
 
     private func poll() {
         publishShape(NSCursor.currentSystem ?? .arrow)
-        guard let global = CGEvent(source: nil)?.location,
-              let position = positionState.positionToPublish(global: global) else { return }
+        guard let global = CGEvent(source: nil)?.location else { return }
+        #if DEBUG
+        if positionState.bounds.contains(global) {
+            debugTrace?("host_position", CGPoint(x: global.x - positionState.bounds.minX,
+                                                y: global.y - positionState.bounds.minY), nil)
+        }
+        #endif
+        guard let position = positionState.positionToPublish(global: global) else { return }
+        #if DEBUG
+        debugTrace?("position_publish", position, nil)
+        #endif
         sendObject(["t": "cursorPosition", "x": position.x, "y": position.y])
     }
 
@@ -100,13 +115,28 @@ final class HostCursorPublisher {
         switch shapeHistory.update(shape.id) {
         case .none: break
         case .reference:
+            #if DEBUG
+            debugTrace?("shape_publish", nil, Self.debugShapeName(cursor))
+            #endif
             sendObject(["t": "cursorShapeRef", "id": shape.id])
         case .shape:
+            #if DEBUG
+            debugTrace?("shape_publish", nil, Self.debugShapeName(cursor))
+            #endif
             sendObject(["t": "cursorShape", "id": shape.id, "png": shape.png.base64EncodedString(),
                         "hotspotX": shape.hotspot.x, "hotspotY": shape.hotspot.y,
                         "widthPt": shape.size.width, "heightPt": shape.size.height])
         }
     }
+
+    #if DEBUG
+    static func debugShapeName(_ cursor: NSCursor) -> String {
+        if cursor === NSCursor.arrow { return "arrow" }
+        if cursor === NSCursor.iBeam { return "ibeam" }
+        if cursor === NSCursor.pointingHand { return "pointing_hand" }
+        return "other"
+    }
+    #endif
 
     private func sendObject(_ object: [String: Any]) {
         guard let data = try? JSONSerialization.data(withJSONObject: object) else { return }

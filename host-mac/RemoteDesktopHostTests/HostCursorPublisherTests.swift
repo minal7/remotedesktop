@@ -17,6 +17,21 @@ final class HostCursorPublisherTests: XCTestCase {
         }
     }
 
+    #if DEBUG
+    func testLabCursorCapabilityOffRequiresBothOptInAndLabSession() {
+        XCTAssertTrue(HostPeerSession.cursorCapabilityAllowed(requested: true, labInstrumentation: true, environment: [:]))
+        XCTAssertFalse(HostPeerSession.cursorCapabilityAllowed(requested: true, labInstrumentation: true, environment: ["CURSOR_CAPABILITY_OFF": "1"]))
+        XCTAssertTrue(HostPeerSession.cursorCapabilityAllowed(requested: true, labInstrumentation: false, environment: ["CURSOR_CAPABILITY_OFF": "1"]))
+        XCTAssertFalse(HostPeerSession.cursorCapabilityAllowed(requested: false, labInstrumentation: true, environment: [:]))
+    }
+
+    func testCursorTraceUsesAllowlistedShapeNames() {
+        XCTAssertEqual(HostCursorPublisher.debugShapeName(.arrow), "arrow")
+        XCTAssertEqual(HostCursorPublisher.debugShapeName(.iBeam), "ibeam")
+        XCTAssertEqual(HostCursorPublisher.debugShapeName(.pointingHand), "pointing_hand")
+    }
+    #endif
+
     func testCaptureRestoresCursorAfterSession() async throws {
         actor Recorder {
             var values: [Bool] = []

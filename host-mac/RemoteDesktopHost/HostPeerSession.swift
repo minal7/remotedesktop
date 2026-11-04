@@ -1195,6 +1195,13 @@ final class HostPeerSession: NSObject {
     }
     #endif
 
+    #if DEBUG
+    static func cursorCapabilityAllowed(requested: Bool, labInstrumentation: Bool,
+                                        environment: [String: String]) -> Bool {
+        requested && !(labInstrumentation && environment["CURSOR_CAPABILITY_OFF"] == "1")
+    }
+    #endif
+
     private func sendHelloAckAndDisplay() {
         closeStateLock.lock()
         guard !ended, let channel = dataChannel, channel.readyState == .open,
@@ -1314,6 +1321,19 @@ final class HostPeerSession: NSObject {
                   self.inputAuthorization.ownsChannel(ObjectIdentifier(channel)) else { return }
             _ = channel.sendData(RTCDataBuffer(data: payload, isBinary: false))
         }
+        #if DEBUG
+        if labInstrumentation && LatencyStatsCollector.enabled &&
+            ProcessInfo.processInfo.environment["CURSOR_DIAGNOSTICS"] == "1" {
+            publisher.debugTrace = { [weak self] event, position, shape in
+                guard let self else { return }
+                var record: [String: Any] = ["type": "cursor", "event": event,
+                                              "time": ProcessInfo.processInfo.systemUptime]
+                if let position { record["x"] = position.x; record["y"] = position.y }
+                if let shape { record["shape"] = shape }
+                self.latencyStats.trace(record)
+            }
+        }
+        #endif
         cursorPublisher = publisher
         publisher.start()
     }
@@ -1649,10 +1669,16 @@ extension HostPeerSession: RTCDataChannelDelegate {
             guard inputAuthorization.acceptHello(channel: ObjectIdentifier(dataChannel),
                 orderedControls: orderedComputerUseControls, inputHello: packet.inputHello,
                 inputInvalidation: packet.inputInvalidation) else { return }
-            if !packet.clientCursor { stopClientCursor() }
+            #if DEBUG
+            let wantsCursor = Self.cursorCapabilityAllowed(requested: packet.clientCursor,
+                labInstrumentation: labInstrumentation, environment: ProcessInfo.processInfo.environment)
+            #else
+            let wantsCursor = packet.clientCursor
+            #endif
+            if !wantsCursor { stopClientCursor() }
             closeStateLock.lock()
-            if packet.clientCursor && !cursorRequested { cursorEpoch = UUID() }
-            cursorRequested = packet.clientCursor
+            if wantsCursor && !cursorRequested { cursorEpoch = UUID() }
+            cursorRequested = wantsCursor
             closeStateLock.unlock()
             sendHelloAckAndDisplay()
         case .bye(let reason):
