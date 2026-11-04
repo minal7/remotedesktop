@@ -70,6 +70,21 @@ final class EODSafetyTaskLiveE2ETests: XCTestCase {
                     "needs_human": true])
                 return
             }
+            let guidance = app.descendants(matching: .any)["computer-use-intervention-guidance"]
+            if users.count == userCount + 1,
+               status.value as? String == "User intervention required",
+               guidance.exists,
+               guidance.label == "Credentials require you to take over on your Mac; never send passwords or codes in chat." {
+                let elapsed = ProcessInfo.processInfo.systemUptime - started
+                let observedGuidance = guidance.label
+                attachDiagnostics(named: "terminal-\(identifier)") {
+                    "outcome=User intervention required\n" + self.approvalDetails(in: app)
+                        + "\nguidance=\(observedGuidance)"
+                }
+                emit("TERMINAL", ["case": identifier, "outcome": "handoff",
+                    "elapsed": elapsed, "answer": observedGuidance, "needs_human": true])
+                return
+            }
             if users.count > userCount, assistants.count > assistantCount,
                let value = status.value as? String, let outcome = outcomes[value] {
                 let elapsed = ProcessInfo.processInfo.systemUptime - started
