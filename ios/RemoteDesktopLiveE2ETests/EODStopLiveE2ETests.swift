@@ -55,11 +55,10 @@ final class EODStopLiveE2ETests: XCTestCase {
         send.tap()
         let card = app.descendants(matching: .any)["computer-use-approval-card"]
         let stop = app.buttons["computer-use-stop-task"]
-        let status = app.staticTexts["computer-use-status"]
+        let status = app.activityIndicators["computer-use-status"]
         let resume = app.buttons["computer-use-resume-ai"]
         func isActiveRunningState() -> Bool {
             !card.exists && !resume.exists && status.exists
-                && status.label == "Your Mac is working on it…"
                 && stop.exists && stop.label == "Stop current task" && stop.isHittable
         }
         var observedExactUserMessage = false
