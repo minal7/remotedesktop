@@ -843,6 +843,42 @@ struct CaptureRecoveryEpisode {
     }
 }
 
+/// Serializes configuration updates with teardown, including a failed hide.
+final class CaptureCursorVisibilityUpdates: @unchecked Sendable {
+    private let lock = NSLock()
+    private let update: @Sendable (Bool) async throws -> Void
+    private var pending: Task<Void, Error>?
+    private var restoreNeeded = false
+
+    init(update: @escaping @Sendable (Bool) async throws -> Void) { self.update = update }
+
+    func setVisible(_ visible: Bool) -> Task<Void, Error> {
+        lock.withLock {
+            if !visible { restoreNeeded = true }
+            return enqueue(visible)
+        }
+    }
+
+    func restoreIfNeeded() -> Task<Void, Error>? {
+        lock.withLock {
+            guard restoreNeeded else { return nil }
+            restoreNeeded = false
+            return enqueue(true)
+        }
+    }
+
+    private func enqueue(_ visible: Bool) -> Task<Void, Error> {
+        let previous = pending
+        let update = self.update
+        let task = Task {
+            _ = try? await previous?.value
+            try await update(visible)
+        }
+        pending = task
+        return task
+    }
+}
+
 /// Captures the main display as validated video frames and, when opted in,
 /// system audio as sample buffers. Consumers handle their own encoder
 /// marshalling on the capture queues.
@@ -855,8 +891,13 @@ final class ScreenCapture: NSObject, @unchecked Sendable {
         let filter: SCContentFilter
         let configuration: SCStreamConfiguration
         let display: CaptureDisplayGeometry
+        let cursorUpdates: CaptureCursorVisibilityUpdates
         init(stream: SCStream, filter: SCContentFilter, configuration: SCStreamConfiguration, display: CaptureDisplayGeometry) {
             self.stream = stream; self.filter = filter; self.configuration = configuration; self.display = display
+            cursorUpdates = CaptureCursorVisibilityUpdates { visible in
+                configuration.showsCursor = visible
+                try await stream.updateConfiguration(configuration)
+            }
         }
     }
 
@@ -893,6 +934,8 @@ final class ScreenCapture: NSObject, @unchecked Sendable {
     }
 
     private let lifecycle = CaptureStreamLifecycle<NativeStream, Callbacks> { native in
+        // Serialize restoration behind any in-flight hide before native teardown.
+        try? await native.cursorUpdates.restoreIfNeeded()?.value
         do { try await native.stream.stopCapture() }
         catch {
             guard !ScreenCapture.isAlreadyStopped(error) else { return }
@@ -908,6 +951,22 @@ final class ScreenCapture: NSObject, @unchecked Sendable {
 
     func endSession(_ owner: CaptureOwnerLease) -> Task<Void, Never> {
         lifecycle.endOwner(owner)
+    }
+
+    /// Updates only the stream owned by this session; callers must not advertise
+    /// the capability until this succeeds and the owner is still current.
+    func setCursorVisible(_ visible: Bool, for owner: CaptureOwnerLease) async throws {
+        var selected: NativeStream?
+        var update: Task<Void, Error>?
+        lifecycle.withRunningStream(owner) { _, native in
+            selected = native
+            update = native.cursorUpdates.setVisible(visible)
+        }
+        guard let selected, let update else { throw CancellationError() }
+        try await update.value
+        var stillCurrent = false
+        lifecycle.withRunningStream(owner) { _, native in stillCurrent = native === selected }
+        guard stillCurrent else { throw CancellationError() }
     }
 
     @discardableResult

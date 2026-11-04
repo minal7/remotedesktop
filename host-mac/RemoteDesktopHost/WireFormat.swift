@@ -10,6 +10,7 @@ struct ControlPacket {
     let inputHello: DirectInputHello?
     let inputStamp: DirectInputStamp?
     let inputInvalidation: Int
+    let clientCursor: Bool
 
     static func decode(_ data: Data) -> ControlPacket? {
         guard let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
@@ -27,15 +28,17 @@ struct ControlPacket {
             }
         }
         var inputInvalidation = 0
+        var clientCursor = false
         if case .hello = message {
             let caps = object["caps"] as? [String: Any]
             guard object["caps"] == nil || caps != nil,
                   let version = DirectInputWire.invalidationCapability(in: caps),
                   version == 0 || hello != nil else { return nil }
             inputInvalidation = version
+            clientCursor = (caps?["clientCursor"] as? Int) == 1
         }
         return .init(message: message, inputHello: hello, inputStamp: stamp,
-                     inputInvalidation: inputInvalidation)
+                     inputInvalidation: inputInvalidation, clientCursor: clientCursor)
     }
 }
 
@@ -125,7 +128,8 @@ enum HostMessageEncoder {
         seq: UInt32,
         ts: UInt64,
         inputSession: DirectInputAcknowledgement? = nil,
-        inputInvalidation: Int = 0
+        inputInvalidation: Int = 0,
+        clientCursor: Bool = false
     ) -> Data {
         var obj: [String: Any] = [
             "t": "hello_ack",
@@ -148,6 +152,7 @@ enum HostMessageEncoder {
                     HostConfig.orderedComputerUseControlsVersion,
                 "inputSessions": DirectInputWire.version,
                 "inputInvalidation": inputInvalidation,
+                "clientCursor": clientCursor ? 1 : 0,
             ],
         ]
         #if DEBUG

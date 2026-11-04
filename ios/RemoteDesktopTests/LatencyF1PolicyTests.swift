@@ -3,6 +3,15 @@ import XCTest
 @testable import RemoteDesktop
 
 final class LatencyF1PolicyTests: XCTestCase {
+    func testInitialLANFactoryTransitionsBetweenShippedCapAndAdaptiveBaseline() {
+        let initial = LatencyF1Policy.initialSelection(lanPlayoutCap: true, f4: false)
+        XCTAssertEqual(initial.f1MaximumDelayMs, 10)
+        XCTAssertTrue(LatencyF1Policy.needsNewFactory(currentMaximumMs: initial.f1MaximumDelayMs, desiredMaximumMs: nil))
+        XCTAssertTrue(LatencyF1Policy.needsNewFactory(currentMaximumMs: nil, desiredMaximumMs: initial.f1MaximumDelayMs))
+        XCTAssertFalse(LatencyF1Policy.needsNewFactory(currentMaximumMs: initial.f1MaximumDelayMs, desiredMaximumMs: 10))
+        XCTAssertNil(LatencyF1Policy.initialSelection(lanPlayoutCap: false, f4: false).f1MaximumDelayMs)
+    }
+
     func testRuntimeFactoryChangesAndSignalingGenerationIsolation() {
         XCTAssertFalse(LatencyF1Policy.needsNewFactory(currentMaximumMs: nil, desiredMaximumMs: nil))
         XCTAssertTrue(LatencyF1Policy.needsNewFactory(currentMaximumMs: nil, desiredMaximumMs: 0))

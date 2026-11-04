@@ -17,6 +17,10 @@ enum LatencyF1Policy {
         enabled && ordinaryRemoteSession && handoffCapability == 1 && hostF2Capability == 1
     }
 
+    static func initialSelection(lanPlayoutCap: Bool, f4: Bool) -> LatencyLabSelection {
+        LatencyLabSelection(f1MaximumDelayMs: lanPlayoutCap ? 10 : nil, f2: false, f3: false, f4: f4)
+    }
+
     static func needsNewFactory(currentMaximumMs: Int?, desiredMaximumMs: Int?) -> Bool {
         currentMaximumMs != desiredMaximumMs
     }

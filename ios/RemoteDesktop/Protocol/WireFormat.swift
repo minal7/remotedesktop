@@ -18,7 +18,7 @@ enum ControlMessage: Equatable {
     case bye(reason: String)
 
     func encoded(seq: UInt32, ts: UInt64, inputHello: DirectInputHello? = nil,
-                 inputStamp: DirectInputStamp? = nil) -> Data {
+                 inputStamp: DirectInputStamp? = nil, clientCursor: Bool = false) -> Data {
         var obj: [String: Any] = ["s": seq, "ts": ts]
         switch self {
         case .hello(let p):
@@ -33,7 +33,9 @@ enum ControlMessage: Equatable {
             ]
             if let inputHello {
                 obj["inputSession"] = DirectInputWire.object(inputHello)
-                obj["caps"] = ["inputInvalidation": DirectInputWire.inputInvalidationVersion]
+                var caps = ["inputInvalidation": DirectInputWire.inputInvalidationVersion]
+                if clientCursor { caps["clientCursor"] = 1 }
+                obj["caps"] = caps
             }
         case let .pointer(x, y, b):
             obj["t"] = "pointer"
@@ -82,6 +84,7 @@ struct HostHello: Equatable {
     var latencyF2Encoder: Int = 0
     var latencyF3Sender: Int = 0
     #endif
+    let clientCursor: Int
 
     init(
         app: String,
@@ -93,7 +96,8 @@ struct HostHello: Equatable {
         orderedComputerUseControls: Int = 0,
         inputSessions: Int = 0,
         inputSession: DirectInputAcknowledgement? = nil,
-        inputInvalidation: Int = 0
+        inputInvalidation: Int = 0,
+        clientCursor: Int = 0
     ) {
         self.app = app
         self.version = version
@@ -105,6 +109,7 @@ struct HostHello: Equatable {
         self.inputSessions = inputSessions
         self.inputSession = inputSession
         self.inputInvalidation = inputInvalidation
+        self.clientCursor = clientCursor
     }
 }
 
@@ -122,10 +127,20 @@ struct DisplayInfo: Equatable {
     }
 }
 
+struct HostCursorShape: Equatable {
+    let id: String
+    let png: Data
+    let hotspot: CGPoint
+    let size: CGSize
+}
+
 enum HostMessage: Equatable {
     case helloAck(HostHello)
     case display(DisplayInfo)
     case inputUnavailable(DirectInputAcknowledgement)
+    case cursorShape(HostCursorShape)
+    case cursorShapeRef(String)
+    case cursorPosition(CGPoint)
     case bye(String)
 
     static func decode(_ data: Data) -> HostMessage? {
@@ -176,13 +191,30 @@ enum HostMessage: Equatable {
                     caps?["orderedComputerUseControls"]),
                 inputSessions: inputSessions,
                 inputSession: inputSession,
-                inputInvalidation: inputInvalidation)
+                inputInvalidation: inputInvalidation,
+                clientCursor: cursorCapability(caps?["clientCursor"]))
             #if DEBUG
             hello.latencyF1Playout = supportsF1 ? 1 : 0
             hello.latencyF2Encoder = supportsF2 ? 1 : 0
             hello.latencyF3Sender = supportsF3 ? 1 : 0
             #endif
             return .helloAck(hello)
+        case "cursorShape":
+            guard let id = obj["id"] as? String, !id.isEmpty, id.utf8.count <= 256,
+                  let encoded = obj["png"] as? String, encoded.utf8.count <= 87384,
+                  let png = Data(base64Encoded: encoded), png.count <= 64 * 1024,
+                  let x = cursorNumber(obj["hotspotX"]), let y = cursorNumber(obj["hotspotY"]),
+                  let width = cursorNumber(obj["widthPt"]), let height = cursorNumber(obj["heightPt"]),
+                  width > 0, height > 0, width <= 1024, height <= 1024,
+                  x >= 0, y >= 0, x <= width, y <= height else { return nil }
+            return .cursorShape(HostCursorShape(id: id, png: png,
+                hotspot: CGPoint(x: x, y: y), size: CGSize(width: width, height: height)))
+        case "cursorShapeRef":
+            guard let id = obj["id"] as? String, !id.isEmpty, id.utf8.count <= 256 else { return nil }
+            return .cursorShapeRef(id)
+        case "cursorPosition":
+            guard let x = cursorNumber(obj["x"]), let y = cursorNumber(obj["y"]) else { return nil }
+            return .cursorPosition(CGPoint(x: x, y: y))
         case "input_unavailable":
             guard let metadata = obj["inputSession"],
                   let scope = DirectInputWire.decode(metadata, as: DirectInputAcknowledgement.self), scope.isValid else {
@@ -213,6 +245,18 @@ enum HostMessage: Equatable {
         default:
             return nil
         }
+    }
+
+    private static func cursorCapability(_ raw: Any?) -> Int {
+        guard let value = raw as? NSNumber, CFGetTypeID(value) != CFBooleanGetTypeID(),
+              value == NSNumber(value: 1) else { return 0 }
+        return 1
+    }
+
+    private static func cursorNumber(_ raw: Any?) -> Double? {
+        guard let number = raw as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID(),
+              number.doubleValue.isFinite else { return nil }
+        return number.doubleValue
     }
 
     private static func displayDimension(_ raw: Any?) -> Int? {

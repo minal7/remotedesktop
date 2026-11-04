@@ -1068,6 +1068,7 @@ final class HostSession: ObservableObject {
                                 iceConfig: iceConfig,
                                 audioEnabled: permissions.audioEnabled,
                                 peerSenderID: offerSenderID,
+                                acceptedOrdinaryPeer: HostPeerSession.allowsPortMapping(for: offeredClassification),
                                 onUserInput: { [weak computerUse] in
                                     guard let intervention = computerUse?.recordUserInputInInjectionTransaction() else { return false }
                                     Task { @MainActor [weak computerUse] in

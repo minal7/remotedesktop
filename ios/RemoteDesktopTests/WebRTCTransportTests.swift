@@ -10,7 +10,12 @@ final class WebRTCTransportTests: XCTestCase {
     private let accountBinding = CloudKitAccountBinding(
         rawValue: String(repeating: "c", count: 64))!
 
-    func test_iceDiagnosticsCountOnlyCandidateKindsAndReportCompleteRelayConfiguration() {
+    func test_lanDiscoveryEnablesPlayoutCapButCloudOnlyDoesNot() {
+        XCTAssertTrue(SessionModel.usesLANPlayoutCap(.localNetwork))
+        XCTAssertFalse(SessionModel.usesLANPlayoutCap(.cloudKit))
+    }
+
+    func test_iceDiagnosticsCountOnlyCandidateKinds() {
         var counts = ICECandidateDiagnosticCounts()
         counts.record("candidate:1 1 udp 1 192.0.2.1 4567 typ host")
         counts.record("candidate:2 1 udp 1 192.0.2.2 4567 typ srflx")
@@ -25,14 +30,22 @@ final class WebRTCTransportTests: XCTestCase {
         XCTAssertEqual(counts.unknown, 2)
         XCTAssertFalse(counts.summary.contains("192.0.2"))
         XCTAssertFalse(counts.summary.contains("4567"))
+    }
 
-        XCTAssertFalse(ICEConfig.fallback.hasCompleteTURNConfiguration)
-        XCTAssertFalse(ICEConfig(stunURLs: [], turnURLs: ["turn:example.invalid"],
-            turnUsername: "user", turnCredential: "").hasCompleteTURNConfiguration)
-        XCTAssertFalse(ICEConfig(stunURLs: [], turnURLs: ["stun:example.invalid"],
-            turnUsername: "user", turnCredential: "password").hasCompleteTURNConfiguration)
-        XCTAssertTrue(ICEConfig(stunURLs: [], turnURLs: ["turns:example.invalid"],
-            turnUsername: "user", turnCredential: "password").hasCompleteTURNConfiguration)
+    func test_iceServersContainExactlyTheConfiguredSTUNURLs() {
+        let urls = ["stun:one.example.invalid", "stun:two.example.invalid"]
+        let servers = ICEConfig(stunURLs: urls).iceServers
+        XCTAssertEqual(servers.count, 1)
+        XCTAssertEqual(servers[0].urlStrings, urls)
+    }
+
+    func test_cloudKitSTUNOverridesAreApplied() throws {
+        let record = CKRecord(recordType: "ICEConfig", recordID: CKRecord.ID(recordName: "default"))
+        let urls = ["stun:override.example.invalid"]
+        record["stunURLs"] = urls as CKRecordValue
+        let config = try XCTUnwrap(ICEConfigFetcher.config(from: record))
+        XCTAssertEqual(config.stunURLs, urls)
+        XCTAssertEqual(config.iceServers[0].urlStrings, urls)
     }
 
     func test_candidatePixelsPrecedeFrameReadinessWithoutGrantingInput() async throws {

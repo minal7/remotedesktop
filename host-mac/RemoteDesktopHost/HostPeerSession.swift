@@ -6,14 +6,7 @@ import os
 
 extension ICEConfig {
     var iceServers: [RTCIceServer] {
-        var servers = [RTCIceServer(urlStrings: stunURLs)]
-        if !turnURLs.isEmpty, let username = turnUsername, let credential = turnCredential {
-            servers.append(RTCIceServer(
-                urlStrings: turnURLs,
-                username: username,
-                credential: credential))
-        }
-        return servers
+        [RTCIceServer(urlStrings: stunURLs)]
     }
 }
 
@@ -310,6 +303,11 @@ final class HostPeerSession: NSObject {
     private let log = Logger(subsystem: "com.threadmark.remotedesktop.host", category: "webrtc")
     private let signalingStateQueue = DispatchQueue(label: "com.threadmark.remotedesktop.host.webrtc.signaling")
     private let closeStateLock = NSRecursiveLock()
+    // Cursor transitions are ordered separately from capture and peer locks.
+    private var cursorTransition: Task<Void, Never>?
+    private var cursorEpoch = UUID()
+    private var cursorRequested = false
+    private var cursorPublisher: HostCursorPublisher? // main queue only
 
     private let factory: RTCPeerConnectionFactory
     private let audioBridge: SystemAudioBridge
@@ -349,9 +347,21 @@ final class HostPeerSession: NSObject {
     private var captureRecoveryDeadlineTask: Task<Void, Never>?
     private var lastVideoAttempt: CaptureAttemptLease?
     private let closeCoordinator = PeerCloseCoordinator()
+    private var portMappingSession: HostPortMappingSession?
     private var hostSeq: UInt32 = 0
+    private let diagnosticLock = NSLock()
+    private var diagnosticLocal = ICECandidateDiagnostics()
+    private var diagnosticRemote = ICECandidateDiagnostics()
     private var answerSent = false
     private var pendingLocalICEPayloads: [[String: String]] = []
+
+    static func allowsPortMapping(for classification: HostComputerUseManager.WebRTCPeerClassification?) -> Bool {
+        classification == .primaryRemoteControl
+    }
+
+    static func handlePortMappingICEState(_ state: RTCIceConnectionState, session: HostPortMappingSession?) {
+        if state == .failed || state == .closed { session?.closeAsync() }
+    }
 
     /// Message-kind/protocol classification only. Dispatch also requires the
     /// current channel's exact connected input session, rechecked by the injector.
@@ -375,6 +385,7 @@ final class HostPeerSession: NSObject {
         iceConfig: ICEConfig,
         audioEnabled: Bool,
         peerSenderID: String,
+        acceptedOrdinaryPeer: Bool = false,
         onUserInput: @escaping @Sendable () -> Bool,
         onPeerAuthorizationChanged:
             @escaping @Sendable (PeerAuthorization) -> Void,
@@ -435,6 +446,18 @@ final class HostPeerSession: NSObject {
                            "peerNonce": latencyF1Nonce as Any? ?? NSNull(),
                            "f2Configured": enableF2, "f3Configured": enableF3])
         #endif
+        portMappingSession = HostPortMappingSession(acceptedOrdinaryPeer: acceptedOrdinaryPeer,
+            enabled: {
+                let defaults = UserDefaults.standard
+                return defaults.object(forKey: "allowRouterPortMapping") as? Bool ?? true
+            }, send: { [weak self] candidate, sdp in
+                guard let self, !self.isEnded else { return }
+                self.bufferOrSendLocalICE([
+                    "candidate": sdp,
+                    "sdpMid": candidate.mid ?? "",
+                    "sdpMLineIndex": "\(candidate.lineIndex)",
+                ])
+            })
         log.info("host audio ADM voiceProcessingEnabled=false status=\(voiceProcessingStatus, privacy: .public)")
         if audioEnabled {
             audioBridge.attach(to: factory.audioDeviceModule)
@@ -443,6 +466,7 @@ final class HostPeerSession: NSObject {
     }
 
     func acceptOffer(sdp: String) async throws {
+        log.notice("ICE stage=offer_received")
         resetBufferedLocalICE()
         if peerConnection == nil {
             peerConnection = try makePeerConnection()
@@ -480,6 +504,7 @@ final class HostPeerSession: NSObject {
                 "sdpType": "answer",
             ]),
             ts: Date().timeIntervalSince1970))
+        log.notice("ICE stage=answer_sent")
         flushBufferedLocalICEAfterAnswer()
         startLatencyPolling(peerConnection)
 
@@ -562,9 +587,14 @@ final class HostPeerSession: NSObject {
               let candidate = iceCandidate(from: payload) else {
             return
         }
+        diagnosticLock.lock()
+        diagnosticRemote.record(candidate.sdp)
+        let remoteSummary = diagnosticRemote.summary
+        diagnosticLock.unlock()
+        log.notice("ICE remote={\(remoteSummary, privacy: .public)}")
         peerConnection.add(candidate) { [log] error in
-            if let error {
-                log.error("failed to add remote ICE candidate: \(String(describing: error), privacy: .public)")
+            if error != nil {
+                log.error("failed to add remote ICE candidate")
             }
         }
     }
@@ -577,10 +607,14 @@ final class HostPeerSession: NSObject {
         return closeCoordinator.close(revokeInput: {
             self.inputAuthorization.close()
         }) {
+            self.portMappingSession?.close()
             self.closeStateLock.lock()
             self.ended = true
             self.latencyTimer?.cancel()
             self.latencyTimer = nil
+            self.cursorRequested = false
+            self.cursorEpoch = UUID()
+            DispatchQueue.main.async { [weak self] in self?.stopCursorPublisher() }
             let restartTask = self.captureRestartTask
             self.captureRestartTask = nil
             self.captureRestartID = nil
@@ -1163,15 +1197,60 @@ final class HostPeerSession: NSObject {
 
     private func sendHelloAckAndDisplay() {
         closeStateLock.lock()
+        guard !ended, let channel = dataChannel, channel.readyState == .open,
+              let ready = inputAuthorization.readyAcknowledgement(for: ObjectIdentifier(channel)),
+              let display = ready.session.display, let owner = captureOwner else {
+            closeStateLock.unlock(); return
+        }
+        guard cursorRequested else {
+            closeStateLock.unlock()
+            _ = sendHelloAckAndDisplay(clientCursor: false)
+            return
+        }
+        let epoch = cursorEpoch
+        let previous = cursorTransition
+        cursorTransition = Task { [weak self] in
+            await previous?.value
+            guard let self else { return }
+            var enabled = false
+            do {
+                try await self.capture.setCursorVisible(false, for: owner)
+                enabled = true
+            } catch {
+                // An unconfirmed hide must never result in an overlay-only cursor.
+                try? await self.capture.setCursorVisible(true, for: owner)
+            }
+            self.closeStateLock.lock()
+            let current = !self.ended && self.cursorRequested && self.cursorEpoch == epoch
+                && self.dataChannel === channel && channel.readyState == .open
+            self.closeStateLock.unlock()
+            guard current else { return }
+            let acknowledged = self.sendHelloAckAndDisplay(clientCursor: enabled, epoch: epoch)
+            if !enabled {
+                DispatchQueue.main.async { [weak self] in self?.stopCursorPublisher() }
+            }
+            if enabled && acknowledged {
+                let bounds = CGRect(x: display.state.originX, y: display.state.originY,
+                                    width: display.state.width, height: display.state.height)
+                DispatchQueue.main.async { [weak self] in self?.startCursorPublisher(bounds: bounds, epoch: epoch) }
+            }
+        }
+        closeStateLock.unlock()
+    }
+
+    @discardableResult
+    private func sendHelloAckAndDisplay(clientCursor: Bool, epoch: UUID? = nil) -> Bool {
+        closeStateLock.lock()
         defer { closeStateLock.unlock() }
+        guard epoch == nil || (cursorRequested && cursorEpoch == epoch) else { return false }
         guard !ended, let dataChannel, dataChannel.readyState == .open,
               let ready = inputAuthorization.readyAcknowledgement(for: ObjectIdentifier(dataChannel)) else {
-            return
+            return false
         }
         guard let captureDisplay = ready.session.display else {
             inputAuthorization.close()
             scheduleCaptureTerminalFailure("The captured screen layout is unavailable. Reconnect to restore control.")
-            return
+            return false
         }
 
         let timestamp = UInt64(DispatchTime.now().uptimeNanoseconds / 1_000)
@@ -1185,12 +1264,13 @@ final class HostPeerSession: NSObject {
             seq: hostSeq,
             ts: timestamp,
             inputSession: ready.wire,
-            inputInvalidation: ready.inputInvalidation)
+            inputInvalidation: ready.inputInvalidation,
+            clientCursor: clientCursor)
         #if DEBUG
         guard let hello = Self.pinLatencyCapabilities(encodedHello, configuration: latencyCapabilities) else {
             inputAuthorization.close()
             scheduleCaptureTerminalFailure("The input handshake could not be sent. Reconnect to restore control.")
-            return
+            return false
         }
         #else
         let hello = encodedHello
@@ -1198,7 +1278,7 @@ final class HostPeerSession: NSObject {
         guard dataChannel.sendData(RTCDataBuffer(data: hello, isBinary: false)) else {
             inputAuthorization.close()
             scheduleCaptureTerminalFailure("The input handshake could not be sent. Reconnect to restore control.")
-            return
+            return false
         }
 
         hostSeq &+= 1
@@ -1210,8 +1290,52 @@ final class HostPeerSession: NSObject {
         guard dataChannel.sendData(RTCDataBuffer(data: display, isBinary: false)) else {
             inputAuthorization.close()
             scheduleCaptureTerminalFailure("The screen layout could not be sent. Reconnect to restore control.")
+            return false
+        }
+        return true
+    }
+
+    private func startCursorPublisher(bounds: CGRect, epoch: UUID) {
+        dispatchPrecondition(condition: .onQueue(.main))
+        closeStateLock.lock()
+        let current = !ended && cursorRequested && cursorEpoch == epoch
+        closeStateLock.unlock()
+        guard current else { return }
+        if let cursorPublisher {
+            cursorPublisher.updateDisplayBounds(bounds)
             return
         }
+        let publisher = HostCursorPublisher(displayBounds: bounds) { [weak self] payload in
+            guard let self else { return }
+            self.closeStateLock.lock()
+            defer { self.closeStateLock.unlock() }
+            guard !self.ended, self.cursorEpoch == epoch, self.cursorRequested,
+                  let channel = self.dataChannel, channel.readyState == .open,
+                  self.inputAuthorization.ownsChannel(ObjectIdentifier(channel)) else { return }
+            _ = channel.sendData(RTCDataBuffer(data: payload, isBinary: false))
+        }
+        cursorPublisher = publisher
+        publisher.start()
+    }
+
+    private func stopCursorPublisher() {
+        dispatchPrecondition(condition: .onQueue(.main))
+        cursorPublisher?.stop()
+        cursorPublisher = nil
+    }
+
+    private func stopClientCursor() {
+        closeStateLock.lock()
+        cursorRequested = false
+        cursorEpoch = UUID()
+        let previous = cursorTransition
+        let owner = captureOwner
+        cursorTransition = Task { [weak self] in
+            await previous?.value
+            if let self, let owner { try? await self.capture.setCursorVisible(true, for: owner) }
+        }
+        closeStateLock.unlock()
+        DispatchQueue.main.async { [weak self] in self?.stopCursorPublisher() }
     }
 
     private func invalidateChangedCaptureDisplay() {
@@ -1281,7 +1405,7 @@ final class HostPeerSession: NSObject {
                     payload: taggedPayload,
                     ts: Date().timeIntervalSince1970))
             } catch {
-                log.error("failed to send local ICE candidate: \(String(describing: error), privacy: .public)")
+                log.error("failed to send local ICE candidate")
             }
         }
     }
@@ -1375,12 +1499,43 @@ extension HostPeerSession: RTCPeerConnectionDelegate {
     func peerConnection(_ peerConnection: RTCPeerConnection, didAdd stream: RTCMediaStream) {}
     func peerConnection(_ peerConnection: RTCPeerConnection, didRemove stream: RTCMediaStream) {}
     func peerConnectionShouldNegotiate(_ peerConnection: RTCPeerConnection) {}
-    func peerConnection(_ peerConnection: RTCPeerConnection, didChange newState: RTCIceConnectionState) {}
-    func peerConnection(_ peerConnection: RTCPeerConnection, didChange newState: RTCIceGatheringState) {}
+    func peerConnection(_ peerConnection: RTCPeerConnection, didChange newState: RTCIceConnectionState) {
+        log.notice("ICE connection_state=\(String(describing: newState), privacy: .public)")
+        Self.handlePortMappingICEState(newState, session: portMappingSession)
+        if newState == .connected || newState == .completed { logSelectedPair(peerConnection) }
+    }
+    func peerConnection(_ peerConnection: RTCPeerConnection, didChange newState: RTCIceGatheringState) {
+        guard newState == .complete else { return }
+        diagnosticLock.lock()
+        let summary = diagnosticLocal.summary
+        let global = diagnosticLocal.globalIPv6Host
+        diagnosticLock.unlock()
+        log.notice("ICE local={\(summary, privacy: .public)} global_ipv6_host=\(global, privacy: .public)")
+    }
+
+    private func logSelectedPair(_ peer: RTCPeerConnection) {
+        peer.statistics { [log] report in
+            guard let id = report.statistics.values.first(where: { $0.type == "transport" })?.values["selectedCandidatePairId"] as? String,
+                  let pair = report.statistics[id],
+                  let localID = pair.values["localCandidateId"] as? String,
+                  let remoteID = pair.values["remoteCandidateId"] as? String,
+                  let local = report.statistics[localID], let remote = report.statistics[remoteID] else { return }
+            let lt = ICECandidateDiagnostics.kind(local.values["candidateType"] as? String)
+            let rt = ICECandidateDiagnostics.kind(remote.values["candidateType"] as? String)
+            let lf = ICECandidateDiagnostics.family(local.values["address"] as? String ?? local.values["ip"] as? String ?? "")
+            let rf = ICECandidateDiagnostics.family(remote.values["address"] as? String ?? remote.values["ip"] as? String ?? "")
+            let proto = ICECandidateDiagnostics.transport(local.values["protocol"] as? String)
+            log.notice("ICE selected local=\(lt, privacy: .public)/\(lf, privacy: .public) remote=\(rt, privacy: .public)/\(rf, privacy: .public) protocol=\(proto, privacy: .public)")
+        }
+    }
     func peerConnection(_ peerConnection: RTCPeerConnection, didRemove candidates: [RTCIceCandidate]) {}
 
     func peerConnection(_ peerConnection: RTCPeerConnection, didGenerate candidate: RTCIceCandidate) {
+        diagnosticLock.lock()
+        diagnosticLocal.record(candidate.sdp)
+        diagnosticLock.unlock()
         bufferOrSendLocalICE(signalingPayload(for: candidate))
+        portMappingSession?.gather(sdp: candidate.sdp, mid: candidate.sdpMid, lineIndex: candidate.sdpMLineIndex)
     }
 
     func peerConnection(_ peerConnection: RTCPeerConnection, didChange stateChanged: RTCConnectionState) {
@@ -1433,7 +1588,12 @@ extension HostPeerSession: RTCPeerConnectionDelegate {
 extension HostPeerSession: RTCDataChannelDelegate {
     func dataChannelDidChangeState(_ dataChannel: RTCDataChannel) {
         if dataChannel.readyState == .closed || dataChannel.readyState == .closing {
+            closeStateLock.lock()
+            let isCurrentChannel = self.dataChannel === dataChannel
+            closeStateLock.unlock()
+            guard isCurrentChannel else { return }
             inputAuthorization.closeChannel(ObjectIdentifier(dataChannel))
+            stopClientCursor()
         }
     }
 
@@ -1489,6 +1649,11 @@ extension HostPeerSession: RTCDataChannelDelegate {
             guard inputAuthorization.acceptHello(channel: ObjectIdentifier(dataChannel),
                 orderedControls: orderedComputerUseControls, inputHello: packet.inputHello,
                 inputInvalidation: packet.inputInvalidation) else { return }
+            if !packet.clientCursor { stopClientCursor() }
+            closeStateLock.lock()
+            if packet.clientCursor && !cursorRequested { cursorEpoch = UUID() }
+            cursorRequested = packet.clientCursor
+            closeStateLock.unlock()
             sendHelloAckAndDisplay()
         case .bye(let reason):
             if inputAuthorization.close(ifChannel: ObjectIdentifier(dataChannel)) {
@@ -1501,6 +1666,11 @@ extension HostPeerSession: RTCDataChannelDelegate {
                   Self.acceptsDirectInput(message, helloAuthenticated: true) else {
                 log.warning("dropping remote input without a current authorized input session")
                 return
+            }
+            if case let .pointer(x, y, _) = message {
+                DispatchQueue.main.async { [weak self] in
+                    self?.cursorPublisher?.recordClientPosition(CGPoint(x: x, y: y))
+                }
             }
             #if DEBUG
             let clientTime = labInstrumentation && LatencyStatsCollector.enabled ? ((try? JSONSerialization.jsonObject(with: buffer.data)) as? [String: Any])?["ts"] as? NSNumber : nil

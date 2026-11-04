@@ -14,6 +14,8 @@ struct SessionView: View {
     @EnvironmentObject private var session: SessionModel
     @StateObject private var accessories = AccessoryMonitor()
     @StateObject private var zoom = RemoteScreenZoomController()
+    @State private var touchMode: TouchInputMode = .direct
+    private let touchPreferences = TouchInputPreferenceStore()
     @State private var softKeyboardOpen = false
     @State private var restoreSoftKeyboardAfterHardwareDisconnect = false
     @State private var chromeRevealed = false
@@ -71,10 +73,10 @@ struct SessionView: View {
         ZStack(alignment: .top) {
             // ── Remote screen ──────────────────────────────────
             #if DEBUG
-            RemoteScreenView(accessories: accessories, zoom: zoom, allowF4Renderer: true, onLatencyGesture: { showsVideoStatistics.toggle() })
+            RemoteScreenView(accessories: accessories, zoom: zoom, allowF4Renderer: true, onLatencyGesture: { showsVideoStatistics.toggle() }, touchMode: touchMode)
                 .ignoresSafeArea()
             #else
-            RemoteScreenView(accessories: accessories, zoom: zoom)
+            RemoteScreenView(accessories: accessories, zoom: zoom, touchMode: touchMode)
                 .ignoresSafeArea()
             #endif
 
@@ -237,6 +239,7 @@ struct SessionView: View {
         .animation(.smooth(duration: 0.32), value: accessories.hasHardwareKeyboard)
         .animation(.smooth(duration: 0.32), value: accessories.hasIndirectPointer)
         .onAppear {
+            if let hostID = session.touchPreferenceHostID { touchMode = touchPreferences.mode(for: hostID) }
             synchronizeChrome(with: session.state)
         }
         .onChange(of: session.state) { _, state in
@@ -378,6 +381,23 @@ struct SessionView: View {
             }
 
             Spacer()
+
+            Menu {
+                ForEach(TouchInputMode.allCases, id: \.self) { mode in
+                    Button {
+                        touchMode = mode
+                        if let hostID = session.touchPreferenceHostID { touchPreferences.set(mode, for: hostID) }
+                    } label: {
+                        if touchMode == mode { Label(mode == .direct ? "Direct" : "Trackpad", systemImage: "checkmark") }
+                        else { Text(mode == .direct ? "Direct" : "Trackpad") }
+                    }
+                }
+            } label: {
+                Text("Touch: \(touchMode == .direct ? "Direct" : "Trackpad")")
+                    .font(.caption.weight(.semibold))
+                    .frame(minHeight: 44)
+            }
+            .accessibilityLabel("Touch mode")
 
             // Disconnect button
             Button(role: .destructive) {

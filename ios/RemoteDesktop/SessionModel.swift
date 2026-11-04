@@ -85,6 +85,7 @@ final class SessionModel: ObservableObject, VideoRendererTarget {
 
     @Published private(set) var state: State = .idle { didSet { notifyRemoteScreenVisibilityChanged() } }
     @Published private(set) var hostName: String?
+    @Published private(set) var touchPreferenceHostID: String?
     @Published private(set) var display: DisplayInfo? { didSet { notifyRemoteScreenVisibilityChanged() } }
     @Published private(set) var hasReceivedVideoFrame = false {
         didSet {
@@ -239,6 +240,43 @@ final class SessionModel: ObservableObject, VideoRendererTarget {
     private var isNotifyingScreenVisibility = false
     private var screenVisibilityNotificationPending = false
     private weak var remoteScreenInputOwner: AnyObject?
+    private var clientCursorEnabled = false
+    private var cursorShapeCache = CursorShapeCache()
+    private var clientCursorPosition: CGPoint?
+
+    func applyCursorState(to view: RemoteScreenUIView) {
+        guard remoteScreenInputOwner === view else { return }
+        view.setClientCursorEnabled(clientCursorEnabled)
+        guard clientCursorEnabled else { return }
+        for shape in cursorShapeCache.shapes.values {
+            view.installCursorShape(id: shape.id, png: shape.png, hotspot: shape.hotspot, size: shape.size)
+        }
+        if let id = cursorShapeCache.selectedID { view.setShape(id: id) }
+        if let point = clientCursorPosition { view.moveHostCursor(toRemotePoint: point) }
+    }
+
+    private func receiveCursor(_ message: HostMessage) {
+        guard clientCursorEnabled, inputHelloReceived, state == .connected else { return }
+        let view = remoteScreenInputOwner as? RemoteScreenUIView
+        switch message {
+        case .cursorShape(let shape):
+            cursorShapeCache.store(shape)
+            view?.installCursorShape(id: shape.id, png: shape.png, hotspot: shape.hotspot, size: shape.size)
+        case .cursorShapeRef(let id):
+            cursorShapeCache.select(id)
+            view?.setShape(id: id)
+        case .cursorPosition(let point):
+            clientCursorPosition = point
+            view?.moveHostCursor(toRemotePoint: point)
+        default: break
+        }
+    }
+
+    private func resetClientCursor() {
+        clientCursorEnabled = false
+        clientCursorPosition = nil
+        (remoteScreenInputOwner as? RemoteScreenUIView)?.setClientCursorEnabled(false)
+    }
 
     /// Only the most recently bound remote-screen view may acquire the shared
     /// pointer input source. A displaced view can still receive SwiftUI updates,
@@ -300,7 +338,7 @@ final class SessionModel: ObservableObject, VideoRendererTarget {
         }
     }
 
-    private let transportFactory: @MainActor () -> Transport
+    private let transportFactory: (@MainActor () -> Transport)?
     private let computerUseVisualTransportFactory:
         @MainActor () -> Transport
     private let localAccountBindingValidator: LocalAccountBindingValidator
@@ -321,7 +359,10 @@ final class SessionModel: ObservableObject, VideoRendererTarget {
     private var keyboardTaskInputPermitted = true
     private let videoRendererBinding = RemoteVideoRendererBinding()
     private var transport: Transport? {
-        didSet { updateVideoRendererTarget() }
+        didSet {
+            cursorShapeCache.bindPeer(transport.map { $0 as AnyObject })
+            updateVideoRendererTarget()
+        }
     }
     private var computerUseVisualSidecar: ComputerUseVisualSidecar? {
         didSet { updateVideoRendererTarget() }
@@ -345,6 +386,7 @@ final class SessionModel: ObservableObject, VideoRendererTarget {
     private func invalidateRemoteInput() {
         // Transport/host teardown owns release of the previous lifetime. Local
         // controls discard their state instead of releasing into its successor.
+        resetClientCursor()
         inputHelloReceived = false
         hasReceivedVideoFrame = false
         display = nil
@@ -357,9 +399,7 @@ final class SessionModel: ObservableObject, VideoRendererTarget {
     init(
         initialInputActivity: RemoteInputActivity = .inactive,
         applicationNotificationCenter: NotificationCenter = .default,
-        transportFactory: @escaping @MainActor () -> Transport = {
-            WebRTCTransport()
-        },
+        transportFactory: (@MainActor () -> Transport)? = nil,
         computerUseVisualTransportFactory:
             @escaping @MainActor () -> Transport = {
                 WebRTCTransport(
@@ -495,6 +535,10 @@ final class SessionModel: ObservableObject, VideoRendererTarget {
         }
     }
 
+    static func usesLANPlayoutCap(_ source: LocalHostAdvertisement.Source) -> Bool {
+        source == .localNetwork
+    }
+
     func connect(
         code: String,
         experience: Experience = .remoteControl,
@@ -502,7 +546,8 @@ final class SessionModel: ObservableObject, VideoRendererTarget {
         hostName: String = "Mac",
         localComputerUseEndpoint: LocalComputerUseEndpoint? = nil,
         localCredentialID: String? = nil,
-        localCloudAccountBinding: CloudKitAccountBinding? = nil
+        localCloudAccountBinding: CloudKitAccountBinding? = nil,
+        discoverySource: LocalHostAdvertisement.Source = .cloudKit
     ) {
         guard state == .idle || {
             if case .ended = state { return true } else { return false }
@@ -513,6 +558,7 @@ final class SessionModel: ObservableObject, VideoRendererTarget {
         error = nil
         invalidateRemoteInput()
         self.experience = experience
+        touchPreferenceHostID = computerUseHostID.flatMap { $0.isEmpty ? nil : $0 }
         sessionAccountBinding = localCloudAccountBinding
         computerUseConnectionMode = .liveScreen
 
@@ -552,7 +598,8 @@ final class SessionModel: ObservableObject, VideoRendererTarget {
             computerUseSession = nil
         }
 
-        let t = transportFactory()
+        let t = transportFactory?() ?? WebRTCTransport(
+            useLANPlayoutCap: Self.usesLANPlayoutCap(discoverySource))
         bind(t)
         transport = t
 
@@ -809,6 +856,7 @@ final class SessionModel: ObservableObject, VideoRendererTarget {
         state = .idle
         error = nil
         hostName = nil
+        touchPreferenceHostID = nil
         display = nil
         invalidateRemoteInput()
         experience = .remoteControl
@@ -1081,6 +1129,12 @@ final class SessionModel: ObservableObject, VideoRendererTarget {
     }
 
     private func bind(_ t: Transport) {
+        if let cursorTransport = t as? WebRTCTransport {
+            cursorTransport.onCursorMessage = { [weak self, weak t] message in
+                guard let self, let t, self.transport === t else { return }
+                self.receiveCursor(message)
+            }
+        }
         t.onVideoFrameUnavailable = { [weak self, weak t] in
             guard let self, let t else { return }
             self.retireRenderedInput { self.transport === t }
@@ -1095,6 +1149,10 @@ final class SessionModel: ObservableObject, VideoRendererTarget {
                   !self.isCloudAccountRevalidationPending else { return }
             let isInitialHandshake = self.state == .connecting
             self.invalidateRemoteInput()
+            self.clientCursorEnabled = h.clientCursor == 1
+            if let view = self.remoteScreenInputOwner as? RemoteScreenUIView {
+                self.applyCursorState(to: view)
+            }
             self.inputHelloReceived = true
             self.hostName = h.hostname
             if self.experience == .computerUse,
