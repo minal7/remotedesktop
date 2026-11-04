@@ -438,14 +438,15 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
 
         let offer = try await createOffer(on: peerConnection)
         try await setLocalDescription(offer, on: peerConnection)
+        var offerPayload = ["client": UIDevice.current.name, "sdp": offer.sdp, "sdpType": "offer"]
+        #if DEBUG
+        offerPayload = Self.lab60OfferPayload(offerPayload, environment: ProcessInfo.processInfo.environment,
+                                              ordinarySession: mediaPolicy == .remoteSession)
+        #endif
         try await signaling.send(SignalingEnvelope(
             role: .client,
             kind: .offer,
-            payload: [
-                "client": UIDevice.current.name,
-                "sdp": offer.sdp,
-                "sdpType": "offer",
-            ],
+            payload: offerPayload,
             ts: Date().timeIntervalSince1970))
         log.notice("ICE id=\(self.diagnosticConnectionID, privacy: .public) stage=offer_sent elapsed_ms=\(self.diagnosticElapsed, privacy: .public)")
         #if DEBUG
@@ -525,6 +526,19 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
         close(reason: reason, notifyRemote: false)
         callback?(reason)
     }
+
+    #if DEBUG
+    static func lab60OfferPayload(_ payload: [String: String], environment: [String: String],
+                                  ordinarySession: Bool) -> [String: String] {
+        var payload = payload
+        if SessionModel.labQoSFrameRate(environment: environment, ordinarySession: ordinarySession) == 60 {
+            payload["latencyLab60"] = "1"
+        } else {
+            payload.removeValue(forKey: "latencyLab60")
+        }
+        return payload
+    }
+    #endif
 
     private func logSelectedPair(_ peer: RTCPeerConnection) {
         let attempt = diagnosticConnectionID
@@ -950,6 +964,8 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
             guard !isClosing, peerConnection === replacement else { return }
             var payload = ["client": UIDevice.current.name, "sdp": offer.sdp, "sdpType": "offer",
                            "latencyF1Restart": nonce]
+            payload = Self.lab60OfferPayload(payload, environment: ProcessInfo.processInfo.environment,
+                                             ordinarySession: mediaPolicy == .remoteSession)
             if f2ApplyToReplacement { payload["latencyF2Encoder"] = "1" }
             if f3ApplyToReplacement { payload["latencyF3Sender"] = "1" }
             try await signaling.send(SignalingEnvelope(role: .client, kind: .offer,

@@ -11,6 +11,23 @@ final class WebRTCTransportTests: XCTestCase {
         rawValue: String(repeating: "c", count: 64))!
 
     #if DEBUG
+    func test_lab60OfferRequiresBothFlagsAndOrdinarySession() {
+        let payload = ["sdpType": "offer"]
+        let enabled = ["LATENCY_LAB": "1", "LATENCY_QOS_FPS": "60"]
+        XCTAssertEqual(WebRTCTransport.lab60OfferPayload(payload, environment: enabled, ordinarySession: true)["latencyLab60"], "1")
+        XCTAssertNil(WebRTCTransport.lab60OfferPayload(payload, environment: [:], ordinarySession: true)["latencyLab60"])
+        XCTAssertNil(WebRTCTransport.lab60OfferPayload(payload, environment: enabled, ordinarySession: false)["latencyLab60"])
+        XCTAssertNil(WebRTCTransport.lab60OfferPayload(["latencyLab60": "1"], environment: [:], ordinarySession: true)["latencyLab60"])
+    }
+
+    func test_labQoS60RequiresOrdinarySessionAndExplicitOptIn() {
+        XCTAssertEqual(SessionModel.labQoSFrameRate(environment: [:], ordinarySession: true), 30)
+        XCTAssertEqual(SessionModel.labQoSFrameRate(environment: ["LATENCY_QOS_FPS": "60"], ordinarySession: true), 30)
+        XCTAssertEqual(SessionModel.labQoSFrameRate(environment: ["LATENCY_LAB": "1", "LATENCY_QOS_FPS": "60"], ordinarySession: true), 60)
+        XCTAssertEqual(SessionModel.labQoSFrameRate(environment: ["LATENCY_LAB": "1", "LATENCY_QOS_FPS": "60"], ordinarySession: false), 30)
+        XCTAssertEqual(SessionModel.labQoSFrameRate(environment: ["LATENCY_LAB": "1", "LATENCY_QOS_FPS": "120"], ordinarySession: true), 30)
+    }
+
     func test_labQualityPreferenceIsOptInAndRejectsUnknownValues() {
         XCTAssertEqual(SessionModel.labQualityPreference(environment: [:]), "sharpness")
         XCTAssertEqual(SessionModel.labQualityPreference(environment: ["LATENCY_QOS_PREFERENCE": "fluency"]), "sharpness")

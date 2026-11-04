@@ -1132,6 +1132,11 @@ final class SessionModel: ObservableObject, VideoRendererTarget {
     }
 
     #if DEBUG
+    static func labQoSFrameRate(environment: [String: String], ordinarySession: Bool) -> Int {
+        ordinarySession && environment["LATENCY_LAB"] == "1" && environment["LATENCY_QOS_FPS"] == "60"
+            ? 60 : DesktopVideoQuality.targetFramesPerSecond
+    }
+
     static func labQualityPreference(environment: [String: String]) -> String {
         guard environment["LATENCY_LAB"] == "1",
               let value = environment["LATENCY_QOS_PREFERENCE"],
@@ -1182,11 +1187,14 @@ final class SessionModel: ObservableObject, VideoRendererTarget {
             if isInitialHandshake { self.computerUseSession?.start() }
             #if DEBUG
             let preference = Self.labQualityPreference(environment: ProcessInfo.processInfo.environment)
+            let targetFps = Self.labQoSFrameRate(environment: ProcessInfo.processInfo.environment,
+                                                ordinarySession: self.experience == .remoteControl)
             #else
             let preference = "sharpness"
+            let targetFps = DesktopVideoQuality.targetFramesPerSecond
             #endif
             self.send(.qos(
-                targetFps: DesktopVideoQuality.targetFramesPerSecond,
+                targetFps: targetFps,
                 maxBitrateKbps: DesktopVideoQuality.maximumBitrateKbps,
                 prefer: preference))
         }

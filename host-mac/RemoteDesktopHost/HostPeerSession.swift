@@ -299,6 +299,11 @@ final class HostPeerSession: NSObject {
     private let inputAuthorization: HostPeerInputAuthorization
     private let onEnded: @Sendable (String) -> Void
     private let latencyF2Enabled: Bool
+    #if DEBUG
+    private let labOrdinaryPeer: Bool
+    private let lab60Requested: Bool
+    private var lab60Selected = false // protected by closeStateLock
+    #endif
     private let latencyF3Enabled: Bool
     private let log = Logger(subsystem: "com.threadmark.remotedesktop.host", category: "webrtc")
     private let signalingStateQueue = DispatchQueue(label: "com.threadmark.remotedesktop.host.webrtc.signaling")
@@ -396,6 +401,7 @@ final class HostPeerSession: NSObject {
         latencyF1Nonce: String? = nil,
         latencyF2Enabled: Bool = false,
         latencyF3Enabled: Bool = false,
+        lab60Requested: Bool = false,
         onLatencyF1RestartRequest: (@Sendable (String, @escaping @Sendable () -> Void) -> Void)? = nil,
         onEnded: @escaping @Sendable (String) -> Void
     ) {
@@ -412,6 +418,10 @@ final class HostPeerSession: NSObject {
         }
         self.onEnded = onEnded
         self.labInstrumentation = labInstrumentation
+        #if DEBUG
+        self.labOrdinaryPeer = acceptedOrdinaryPeer
+        self.lab60Requested = lab60Requested
+        #endif
         self.latencyStats = LatencyStatsCollector(side: "host", enabled: labInstrumentation && LatencyStatsCollector.enabled)
         #if DEBUG
         self.onLatencyF1RestartRequest = onLatencyF1RestartRequest
@@ -490,14 +500,28 @@ final class HostPeerSession: NSObject {
         try configureLocalMedia(on: peerConnection)
         let answer = try await createAnswer(on: peerConnection)
         try await setLocalDescription(answer, on: peerConnection)
+        let codecs = videoSender?.parameters.codecs ?? []
         let capturePolicy = DesktopVideoQuality.capturePolicy(
-            negotiatedCodecs: videoSender?.parameters.codecs ?? [], f2Requested: latencyF2Enabled)
+            negotiatedCodecs: codecs, f2Requested: latencyF2Enabled)
+        #if DEBUG
+        let codec = codecs.first { ["H264", "VP8", "VP9", "AV1"].contains($0.name.uppercased()) }
+        let packetization = codec?.parameters["packetization-mode"]
+        let lab60 = Self.lab60Allowed(labInstrumentation: labInstrumentation, ordinaryPeer: labOrdinaryPeer,
+            clientRequested: lab60Requested, f2Enabled: latencyF2Enabled, f3Enabled: latencyF3Enabled,
+            arguments: ProcessInfo.processInfo.arguments, environment: ProcessInfo.processInfo.environment,
+            codecName: codec?.name, profileLevelID: codec?.parameters["profile-level-id"] as? String,
+            packetizationMode: (packetization as? String) ?? (packetization as? NSNumber)?.stringValue)
+        #else
+        let lab60 = false
+        #endif
         try setCaptureMacroblockLimit(capturePolicy.maximumMacroblocksPerFrame,
-                                     framesPerSecond: capturePolicy.framesPerSecond)
+                                     framesPerSecond: lab60 ? 60 : capturePolicy.framesPerSecond,
+                                     lab60: lab60)
         #if DEBUG
         latencyStats.trace(["type": "f2_capture_policy", "time": ProcessInfo.processInfo.systemUptime,
-                           "authorized": latencyF2Enabled, "framesPerSecond": capturePolicy.framesPerSecond,
-                           "macroblocks": capturePolicy.maximumMacroblocksPerFrame,
+                           "authorized": latencyF2Enabled, "framesPerSecond": lab60 ? 60 : capturePolicy.framesPerSecond,
+                           "macroblocks": Self.labCaptureMacroblockLimit(negotiated: capturePolicy.maximumMacroblocksPerFrame,
+                               labInstrumentation: labInstrumentation, environment: ProcessInfo.processInfo.environment),
                            "lowLatencyRequested": capturePolicy.lowLatencyEncoder])
         #endif
         applyVideoSenderPolicy(DesktopVideoQuality.sharpnessPolicy, isDefault: true)
@@ -780,6 +804,28 @@ final class HostPeerSession: NSObject {
     }
 
     #if DEBUG
+    static func lab60OfferRequested(_ payload: [String: String]) -> Bool {
+        payload["latencyLab60"] == "1"
+    }
+
+    static func lab60Allowed(labInstrumentation: Bool, ordinaryPeer: Bool, clientRequested: Bool, f2Enabled: Bool, f3Enabled: Bool,
+                             arguments: [String], environment: [String: String], codecName: String?,
+                             profileLevelID: String?, packetizationMode: String?) -> Bool {
+        guard labInstrumentation, ordinaryPeer, clientRequested, !f2Enabled, !f3Enabled,
+              Array(arguments.dropFirst()) == [DebugResidentHostConfiguration.latencyArgument],
+              let rawID = environment[DebugResidentHostConfiguration.latencyIdentityEnvironmentKey],
+              rawID.utf8.count == 36, UUID(uuidString: rawID) != nil,
+              environment[DebugResidentHostConfiguration.identityEnvironmentKey] == nil,
+              environment["LATENCY_LAB"] == "1", environment["LATENCY_CAPTURE_FPS"] == "60",
+              ["3600", "8192"].contains(environment["LATENCY_CAPTURE_MACROBLOCKS"] ?? "") else { return false }
+        return DesktopVideoQuality.supportsExperimentalEncoder(name: codecName ?? "",
+            profileLevelID: profileLevelID, packetizationMode: packetizationMode)
+    }
+
+    static func lab60SenderRate(requested: Int, captureRate: Int32, lab60: Bool) -> Int? {
+        lab60 && captureRate == 60 && requested == 60 ? 60 : nil
+    }
+
     static func labCaptureMacroblockLimit(negotiated: Int, labInstrumentation: Bool,
                                          environment: [String: String]) -> Int {
         guard labInstrumentation, environment["LATENCY_LAB"] == "1",
@@ -789,7 +835,7 @@ final class HostPeerSession: NSObject {
     }
     #endif
 
-    private func setCaptureMacroblockLimit(_ limit: Int, framesPerSecond: Int32) throws {
+    private func setCaptureMacroblockLimit(_ limit: Int, framesPerSecond: Int32, lab60: Bool) throws {
         closeStateLock.lock()
         defer { closeStateLock.unlock() }
         guard !ended else { return }
@@ -805,7 +851,7 @@ final class HostPeerSession: NSObject {
         }
         // Lab handoffs create a fresh peer/capture owner. A subsequent codec
         // renegotiation must not claim new constraints on an existing stream.
-        if latencyF2Enabled, captureStartupRequested,
+        if (latencyF2Enabled || lab60Selected || lab60), captureStartupRequested,
            captureMaximumMacroblocksPerFrame != selectedLimit || captureFramesPerSecond != framesPerSecond {
             throw NSError(domain: "LatencyLab", code: 1,
                           userInfo: [NSLocalizedDescriptionKey: "The latency capture policy changed. Reconnect to continue."])
@@ -813,10 +859,14 @@ final class HostPeerSession: NSObject {
         if labInstrumentation, ProcessInfo.processInfo.environment["LATENCY_LAB"] == "1",
            ["3600", "8192"].contains(ProcessInfo.processInfo.environment["LATENCY_CAPTURE_MACROBLOCKS"] ?? "") {
             latencyStats.trace(["type": "capture_ceiling", "time": ProcessInfo.processInfo.systemUptime,
-                                "negotiatedMacroblocks": limit, "appliedMacroblocks": selectedLimit])
+                                "negotiatedMacroblocks": limit, "appliedMacroblocks": selectedLimit,
+                                "framesPerSecond": framesPerSecond])
         }
         #else
         let selectedLimit = limit
+        #endif
+        #if DEBUG
+        lab60Selected = lab60
         #endif
         captureMaximumMacroblocksPerFrame = selectedLimit
         captureFramesPerSecond = framesPerSecond
@@ -854,7 +904,7 @@ final class HostPeerSession: NSObject {
     }
 
     private func applyVideoSenderPolicy(
-        _ policy: DesktopVideoQuality.SenderPolicy, isDefault: Bool = false
+        _ policy: DesktopVideoQuality.SenderPolicy, isDefault: Bool = false, requestedFrameRate: Int? = nil
     ) {
         guard let videoSender else {
             log.warning("couldn't apply desktop video quality policy: missing sender")
@@ -866,8 +916,22 @@ final class HostPeerSession: NSObject {
             log.warning("couldn't apply desktop video quality policy: missing encoding")
             return
         }
-        let senderFrameRate = DesktopVideoQuality.senderFrameRate(
+        let senderFrameRate: Int
+        #if DEBUG
+        closeStateLock.lock()
+        let lab60 = lab60Selected
+        closeStateLock.unlock()
+        if let requestedFrameRate, let selected = Self.lab60SenderRate(requested: requestedFrameRate,
+                                                                       captureRate: captureFrameRate, lab60: lab60) {
+            senderFrameRate = selected
+        } else {
+            senderFrameRate = DesktopVideoQuality.senderFrameRate(
+                policyRate: policy.maximumFramesPerSecond, captureRate: captureFrameRate, isDefault: isDefault)
+        }
+        #else
+        senderFrameRate = DesktopVideoQuality.senderFrameRate(
             policyRate: policy.maximumFramesPerSecond, captureRate: captureFrameRate, isDefault: isDefault)
+        #endif
         for encoding in encodings {
             encoding.maxBitrateBps = NSNumber(value: policy.maximumBitrateBps)
             encoding.maxFramerate = NSNumber(value: senderFrameRate)
@@ -1789,7 +1853,7 @@ extension HostPeerSession: RTCDataChannelDelegate {
             applyVideoSenderPolicy(DesktopVideoQuality.senderPolicy(
                 targetFramesPerSecond: targetFps,
                 maximumBitrateKbps: maxBitrateKbps,
-                preference: prefer))
+                preference: prefer), requestedFrameRate: targetFps)
         }
     }
 }

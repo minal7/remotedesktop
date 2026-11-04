@@ -8,6 +8,52 @@ import XCTest
 
 final class ScreenCaptureSizingTests: XCTestCase {
     #if DEBUG
+    func testLab60RequiresIsolatedOptInAndExactSafeCodec() {
+        let defaultArgs = ["host", DebugResidentHostConfiguration.latencyArgument]
+        let env = [DebugResidentHostConfiguration.latencyIdentityEnvironmentKey: "8f8f6c31-7bf6-4c51-ae04-5b94b01a59a2",
+                   "LATENCY_LAB": "1", "LATENCY_CAPTURE_FPS": "60", "LATENCY_CAPTURE_MACROBLOCKS": "3600",
+                   "LATENCY_LAB_F2": "1", "LATENCY_LAB_F3": "1"]
+        func allowed(_ env: [String: String], args: [String]? = nil, lab: Bool = true, ordinary: Bool = true, client: Bool = true,
+                     f2: Bool = false, f3: Bool = false, codec: String = "H264", profile: String = "640c33",
+                     packetization: String = "1") -> Bool {
+            HostPeerSession.lab60Allowed(labInstrumentation: lab, ordinaryPeer: ordinary, clientRequested: client, f2Enabled: f2,
+                f3Enabled: f3, arguments: args ?? defaultArgs, environment: env, codecName: codec,
+                profileLevelID: profile, packetizationMode: packetization)
+        }
+        XCTAssertTrue(HostPeerSession.lab60OfferRequested(["latencyLab60": "1"]))
+        XCTAssertFalse(HostPeerSession.lab60OfferRequested([:]))
+        XCTAssertFalse(HostPeerSession.lab60OfferRequested(["latencyLab60": "60"]))
+        XCTAssertTrue(allowed(env))
+        XCTAssertTrue(allowed(env.merging(["LATENCY_CAPTURE_MACROBLOCKS": "8192"]) { _, new in new }))
+        XCTAssertFalse(allowed(env, lab: false))
+        XCTAssertFalse(allowed(env, ordinary: false))
+        XCTAssertFalse(allowed(env, client: false))
+        XCTAssertFalse(allowed(env, f2: true))
+        XCTAssertFalse(allowed(env, f3: true))
+        XCTAssertFalse(allowed(env, args: ["host"]))
+        XCTAssertFalse(allowed(env, codec: "VP8"))
+        XCTAssertFalse(allowed(env, profile: "42e01f"))
+        XCTAssertFalse(allowed(env, packetization: "0"))
+        for key in ["LATENCY_LAB", "LATENCY_CAPTURE_FPS", "LATENCY_CAPTURE_MACROBLOCKS", DebugResidentHostConfiguration.latencyIdentityEnvironmentKey] {
+            var missing = env; missing.removeValue(forKey: key)
+            XCTAssertFalse(allowed(missing), key)
+        }
+        for (key, value) in [("LATENCY_CAPTURE_FPS", "30"), ("LATENCY_CAPTURE_MACROBLOCKS", "16384")] {
+            var bad = env; bad[key] = value; XCTAssertFalse(allowed(bad), key)
+        }
+        var mixed = env; mixed[DebugResidentHostConfiguration.identityEnvironmentKey] = env[DebugResidentHostConfiguration.latencyIdentityEnvironmentKey]
+        XCTAssertFalse(allowed(mixed))
+        for limit in [3_600, 8_192] { XCTAssertLessThanOrEqual(limit * 60, 983_040) }
+    }
+
+    func testLab60QoSOverrideNeverExceedsOptedCapture() {
+        XCTAssertEqual(HostPeerSession.lab60SenderRate(requested: 60, captureRate: 60, lab60: true), 60)
+        XCTAssertNil(HostPeerSession.lab60SenderRate(requested: 30, captureRate: 60, lab60: true))
+        XCTAssertNil(HostPeerSession.lab60SenderRate(requested: 120, captureRate: 60, lab60: true))
+        XCTAssertNil(HostPeerSession.lab60SenderRate(requested: 60, captureRate: 30, lab60: true))
+        XCTAssertNil(HostPeerSession.lab60SenderRate(requested: 60, captureRate: 60, lab60: false))
+    }
+
     func testLabCaptureCeilingIsStrictOptInAndNeverExceedsCodecLimit() {
         let limit = HostPeerSession.labCaptureMacroblockLimit
         XCTAssertEqual(limit(32_768, true, [:]), 32_768)
