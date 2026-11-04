@@ -333,12 +333,21 @@ final class HostPeerSession: NSObject {
     private var captureRecoveryDeadlineTask: Task<Void, Never>?
     private var lastVideoAttempt: CaptureAttemptLease?
     private let closeCoordinator = PeerCloseCoordinator()
+    private var portMappingSession: HostPortMappingSession?
     private var hostSeq: UInt32 = 0
     private let diagnosticLock = NSLock()
     private var diagnosticLocal = ICECandidateDiagnostics()
     private var diagnosticRemote = ICECandidateDiagnostics()
     private var answerSent = false
     private var pendingLocalICEPayloads: [[String: String]] = []
+
+    static func allowsPortMapping(for classification: HostComputerUseManager.WebRTCPeerClassification?) -> Bool {
+        classification == .primaryRemoteControl
+    }
+
+    static func handlePortMappingICEState(_ state: RTCIceConnectionState, session: HostPortMappingSession?) {
+        if state == .failed || state == .closed { session?.closeAsync() }
+    }
 
     /// Message-kind/protocol classification only. Dispatch also requires the
     /// current channel's exact connected input session, rechecked by the injector.
@@ -362,6 +371,7 @@ final class HostPeerSession: NSObject {
         iceConfig: ICEConfig,
         audioEnabled: Bool,
         peerSenderID: String,
+        acceptedOrdinaryPeer: Bool = false,
         onUserInput: @escaping @Sendable () -> Bool,
         onPeerAuthorizationChanged:
             @escaping @Sendable (PeerAuthorization) -> Void,
@@ -397,6 +407,18 @@ final class HostPeerSession: NSObject {
         self.videoTrack = factory.videoTrack(with: videoSource, trackId: "screen")
         self.videoCapturer = RTCVideoCapturer(delegate: videoSource)
         super.init()
+        portMappingSession = HostPortMappingSession(acceptedOrdinaryPeer: acceptedOrdinaryPeer,
+            enabled: {
+                let defaults = UserDefaults.standard
+                return defaults.object(forKey: "allowRouterPortMapping") as? Bool ?? true
+            }, send: { [weak self] candidate, sdp in
+                guard let self, !self.isEnded else { return }
+                self.bufferOrSendLocalICE([
+                    "candidate": sdp,
+                    "sdpMid": candidate.mid ?? "",
+                    "sdpMLineIndex": "\(candidate.lineIndex)",
+                ])
+            })
         log.info("host audio ADM voiceProcessingEnabled=false status=\(voiceProcessingStatus, privacy: .public)")
         if audioEnabled {
             audioBridge.attach(to: factory.audioDeviceModule)
@@ -468,6 +490,7 @@ final class HostPeerSession: NSObject {
         return closeCoordinator.close(revokeInput: {
             self.inputAuthorization.close()
         }) {
+            self.portMappingSession?.close()
             self.closeStateLock.lock()
             self.ended = true
             self.cursorRequested = false
@@ -1291,6 +1314,7 @@ extension HostPeerSession: RTCPeerConnectionDelegate {
     func peerConnectionShouldNegotiate(_ peerConnection: RTCPeerConnection) {}
     func peerConnection(_ peerConnection: RTCPeerConnection, didChange newState: RTCIceConnectionState) {
         log.notice("ICE connection_state=\(String(describing: newState), privacy: .public)")
+        Self.handlePortMappingICEState(newState, session: portMappingSession)
         if newState == .connected || newState == .completed { logSelectedPair(peerConnection) }
     }
     func peerConnection(_ peerConnection: RTCPeerConnection, didChange newState: RTCIceGatheringState) {
@@ -1324,6 +1348,7 @@ extension HostPeerSession: RTCPeerConnectionDelegate {
         diagnosticLocal.record(candidate.sdp)
         diagnosticLock.unlock()
         bufferOrSendLocalICE(signalingPayload(for: candidate))
+        portMappingSession?.gather(sdp: candidate.sdp, mid: candidate.sdpMid, lineIndex: candidate.sdpMLineIndex)
     }
 
     func peerConnection(_ peerConnection: RTCPeerConnection, didChange stateChanged: RTCConnectionState) {

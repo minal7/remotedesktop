@@ -8,6 +8,7 @@ struct HostSettingsView: View {
     @ObservedObject var session: HostSession
     let openSetup: () -> Void
     @State private var historyMessage: String?
+    @AppStorage("allowRouterPortMapping") private var allowRouterPortMapping = true
 
     var body: some View {
         TabView {
@@ -60,6 +61,8 @@ struct HostSettingsView: View {
                 }
                 .padding(6)
             }
+
+            Toggle("Allow connections from other networks (router port mapping)", isOn: $allowRouterPortMapping)
 
             HStack {
                 Text("macOS manages these permissions in System Settings.")
