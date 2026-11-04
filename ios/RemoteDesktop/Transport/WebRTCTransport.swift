@@ -156,6 +156,14 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
             if let (p50, p95) = RemoteVideoLatencyProbe.shared.renderPercentiles() {
                 text += String(format: "\nRender p50/p95: %.1f / %.1f ms", p50, p95)
             }
+            if ProcessInfo.processInfo.arguments.contains("LatencyQuality") {
+                let requested = LatencyLabConfiguration.current
+                let onlyRenderer = !requested.f1Playout && !requested.f2Encoder && !requested.f3Sender
+                let expected = LatencyLabSelection(f1MaximumDelayMs: nil, f2: false, f3: false, f4: requested.f4Renderer)
+                let ready = onlyRenderer && labPending == nil && labApplied == expected
+                    && answerApplied && directInputState.isReady && hasReportedRendererFrame
+                text += "\nQuality F4 \(labApplied.f4 ? "on" : "off"): \(ready ? "ready" : "waiting")"
+            }
         }
         return text
     }

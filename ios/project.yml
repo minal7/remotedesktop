@@ -118,6 +118,18 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.threadmark.remotedesktop.client.tests
         GENERATE_INFOPLIST_FILE: YES
 
+  RemoteDesktopLatencyQualityTests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - path: RemoteDesktopLatencyQualityTests
+    dependencies:
+      - target: RemoteDesktop
+    settings:
+      DEVELOPMENT_TEAM: V9AX39SPJD
+      PRODUCT_BUNDLE_IDENTIFIER: com.threadmark.remotedesktop.client.latency-quality-tests
+      GENERATE_INFOPLIST_FILE: YES
+
   RemoteDesktopLiveE2ETests:
     type: bundle.ui-testing
     platform: iOS
@@ -142,6 +154,23 @@ schemes:
       config: Debug
       targets:
         - RemoteDesktopTests
+
+  RemoteDesktopLatencyQuality:
+    build:
+      targets:
+        RemoteDesktop: all
+        RemoteDesktopLatencyQualityTests: [test]
+    test:
+      config: Debug
+      captureScreenshotsAutomatically: false
+      preferredScreenCaptureFormat: screenshots
+      targets:
+        - RemoteDesktopLatencyQualityTests
+      environmentVariables:
+        RUN_LATENCY_QUALITY_E2E: "$(RUN_LATENCY_QUALITY_E2E)"
+        LATENCY_QUALITY_NOT_BEFORE: "$(LATENCY_QUALITY_NOT_BEFORE)"
+        LATENCY_QUALITY_REFERENCE_PIXELS: "$(LATENCY_QUALITY_REFERENCE_PIXELS)"
+        LATENCY_QUALITY_REFERENCE_CROP: "$(LATENCY_QUALITY_REFERENCE_CROP)"
 
   RemoteDesktopLiveE2E:
     build:

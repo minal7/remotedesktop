@@ -183,6 +183,8 @@ struct SessionView: View {
                         .font(.caption.monospacedDigit())
                         .foregroundStyle(.white)
                         .allowsHitTesting(false)
+                        .accessibilityIdentifier("latency-video-statistics")
+                        .accessibilityValue("Zoom \(Int((zoom.scale * 100).rounded())) percent")
                     Button("Latency lab") { showsLatencyLabSettings = true }
                         .buttonStyle(.borderedProminent)
                 }
@@ -195,6 +197,9 @@ struct SessionView: View {
         .sheet(isPresented: $showsLatencyLabSettings) { LatencyLabSettingsView() }
         .task {
             let arguments = ProcessInfo.processInfo.arguments
+            if arguments.contains("LatencyQuality"), LatencyStatsCollector.enabled {
+                showsVideoStatistics = true
+            }
             guard LatencyStatsCollector.enabled,
                   let scenario = arguments.firstIndex(of: "LatencyProbeScenario"),
                   arguments.indices.contains(scenario + 1), arguments[scenario + 1] == "C" else { return }
