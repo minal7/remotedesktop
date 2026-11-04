@@ -82,9 +82,14 @@ def normalized_host_id(value):
     return str(parsed).upper()
 
 
-def write_state(path, **state):
+def write_state(path, *, private=False, **state):
     temporary = path.with_suffix('.tmp')
-    temporary.write_text(json.dumps(state, sort_keys=True) + '\n')
+    if private:
+        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(descriptor, 'w') as stream:
+            stream.write(json.dumps(state, sort_keys=True) + '\n')
+    else:
+        temporary.write_text(json.dumps(state, sort_keys=True) + '\n')
     os.replace(temporary, path)
 
 
@@ -102,9 +107,16 @@ def guarded_run(args):
         raise ValueError('The exact Debug host executable is already running.')
     if args.qa_flag.exists():
         raise ValueError('Release QA is active; host not started.')
-    args.output.mkdir(parents=False, exist_ok=False)
+    args.output.mkdir(mode=0o700 if args.owner_use else 0o777, parents=False, exist_ok=False)
     state = args.output / 'state.json'
     log_path = args.output / 'host.log'
+
+    def report_state(**values):
+        if args.owner_use:
+            values.pop('host_id', None)
+            values.pop('executable', None)
+        write_state(state, private=args.owner_use, **values)
+
     pending = 0
     child = None
 
@@ -125,17 +137,24 @@ def guarded_run(args):
         env.pop('LATENCY_LAB_RESOURCES_ONLY', None)
         if args.resources_only:
             env['LATENCY_LAB_RESOURCES_ONLY'] = '1'
-        with log_path.open('wb') as log:
+        if args.owner_use:
+            # Owner sessions do not create lab trace files or enable experiments.
+            env.update({'LATENCY_LAB': '0', 'LATENCY_LAB_F1': '0', 'LATENCY_LAB_F1_MAX_MS': '0',
+                        'LATENCY_LAB_F2': '0', 'LATENCY_LAB_F3': '0', 'LATENCY_LAB_F4': '0'})
+            for key in ('LATENCY_LAB_RESOURCES_ONLY', 'CONNECTIVITY_DIAGNOSTICS', 'CURSOR_DIAGNOSTICS', 'CURSOR_CAPABILITY_OFF'):
+                env.pop(key, None)
+        with open(os.devnull, 'wb') if args.owner_use else log_path.open('wb') as log:
             if pending or args.qa_flag.exists():
                 raise RuntimeError('Cancelled before the Debug host started.')
             child = subprocess.Popen([str(executable), '--debug-latency-host'], env=env,
                                      stdout=log, stderr=subprocess.STDOUT, preexec_fn=ignore_sigint)
-            write_state(state, status='running', pid=child.pid, host_id=host_id, executable=str(executable))
-            deadline = time.monotonic() + args.timeout
-            while child.poll() is None and not pending and not args.qa_flag.exists() and time.monotonic() < deadline:
+            report_state(status='running', pid=child.pid, host_id=host_id, executable=str(executable))
+            deadline = None if args.owner_use else time.monotonic() + args.timeout
+            while (child.poll() is None and not pending and not args.qa_flag.exists()
+                   and (deadline is None or time.monotonic() < deadline)):
                 time.sleep(.1)
             if child.poll() is not None:
-                write_state(state, status='exited', pid=child.pid, returncode=child.returncode, host_id=host_id)
+                report_state(status='exited', pid=child.pid, returncode=child.returncode, host_id=host_id)
                 return child.returncode if child.returncode else 1
             reason = 'qa' if args.qa_flag.exists() else ('signal' if pending else 'timeout')
             # Popen owns this exact child; never signal a discovered PID.
@@ -145,11 +164,11 @@ def guarded_run(args):
                 # Release QA still has qa_guard's six-second hard stop; its
                 # second signal is handled while this wait is in progress.
                 code = child.wait(timeout=5.5 if args.qa_flag.exists() else 30)
-                write_state(state, status='stopped', pid=child.pid, returncode=code, reason=reason, host_id=host_id)
+                report_state(status='stopped', pid=child.pid, returncode=code, reason=reason, host_id=host_id)
                 return 75 if reason == 'qa' else (128 + pending if pending else 0)
             except subprocess.TimeoutExpired:
                 child.kill(); child.wait()
-                write_state(state, status='forced_stop', pid=child.pid, reason=reason, host_id=host_id)
+                report_state(status='forced_stop', pid=child.pid, reason=reason, host_id=host_id)
                 raise RuntimeError('Debug host did not complete shutdown within the guard grace period.')
     finally:
         if child is not None and child.poll() is None:
@@ -168,18 +187,23 @@ def main():
     parser.add_argument('--host-id', required=True)
     parser.add_argument('--qa-flag', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
-    parser.add_argument('--timeout', type=float, required=True)
+    duration = parser.add_mutually_exclusive_group(required=True)
+    duration.add_argument('--timeout', type=float)
+    duration.add_argument('--owner-use', action='store_true', help='Run until stopped or release QA begins')
     parser.add_argument('--resources-only', action='store_true', help='Use bounded resource-only telemetry')
     parser.add_argument('--internal-guarded', action='store_true', help=argparse.SUPPRESS)
     args = parser.parse_args()
-    if not 1 <= args.timeout <= 3600:
+    if not args.owner_use and not 1 <= args.timeout <= 3600:
         parser.error('timeout must be between 1 and 3600 seconds')
+    if args.owner_use and args.resources_only:
+        parser.error('resource telemetry is unavailable in owner-use mode')
     if args.internal_guarded:
         return guarded_run(args)
     if args.qa_flag.exists():
         raise ValueError('Release QA is active; host not started.')
+    guard_duration = ['--owner-use'] if args.owner_use else ['--timeout', str(args.timeout + 30)]
     command = [sys.executable, str(ROOT / 'script/latency/qa_guard.py'), '--flag', str(args.qa_flag),
-               '--timeout', str(args.timeout + 30), '--', sys.executable, str(Path(__file__).resolve()),
+               *guard_duration, '--', sys.executable, str(Path(__file__).resolve()),
                *sys.argv[1:], '--internal-guarded']
     return subprocess.call(command)
 

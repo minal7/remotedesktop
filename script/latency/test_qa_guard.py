@@ -41,6 +41,44 @@ class QAGuardTests(unittest.TestCase):
         result = subprocess.run(['ps', '-p', str(pid), '-o', 'stat='], capture_output=True, text=True)
         return result.returncode == 0 and result.stdout.strip() and not result.stdout.strip().startswith('Z')
 
+    def testOwnerUseStopsOnQAFlag(self):
+        marker = self.root / 'owner-pid'
+        code = f'import os,time; from pathlib import Path; Path({str(marker)!r}).write_text(str(os.getpid())); time.sleep(30)'
+        process = subprocess.Popen([sys.executable, str(self.guard), '--flag', str(self.flag),
+                                    '--owner-use', '--', sys.executable, '-c', code],
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        self.addCleanup(self.finish, process)
+        self.await_file(marker)
+        child = int(marker.read_text())
+        started = time.monotonic()
+        self.flag.touch()
+        process.communicate(timeout=7)
+        self.assertEqual(process.returncode, 75)
+        self.assertLess(time.monotonic() - started, 6)
+        self.assertFalse(self.running(child))
+
+    def testOwnerUseSignalStopsOwnedChild(self):
+        marker = self.root / 'owner-signal-pid'
+        code = f'import os,time; from pathlib import Path; Path({str(marker)!r}).write_text(str(os.getpid())); time.sleep(30)'
+        process = subprocess.Popen([sys.executable, str(self.guard), '--flag', str(self.flag),
+                                    '--owner-use', '--', sys.executable, '-c', code],
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        self.addCleanup(self.finish, process)
+        self.await_file(marker)
+        child = int(marker.read_text())
+        process.send_signal(signal.SIGHUP)
+        process.communicate(timeout=7)
+        self.assertEqual(process.returncode, 128 + signal.SIGHUP)
+        self.assertFalse(self.running(child))
+
+    def testTimedModeStillStopsAtDeadline(self):
+        process = subprocess.Popen([sys.executable, str(self.guard), '--flag', str(self.flag),
+                                    '--timeout', '0.2', '--', sys.executable, '-c', 'import time; time.sleep(30)'],
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        self.addCleanup(self.finish, process)
+        process.communicate(timeout=7)
+        self.assertEqual(process.returncode, 124)
+
     def testExistingQAFlagNeverStartsChild(self):
         self.flag.touch()
         marker = self.root / 'started'

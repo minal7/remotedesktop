@@ -37,13 +37,16 @@ def stop(process):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--flag', type=Path, required=True)
-    parser.add_argument('--timeout', type=float, default=2700)
+    duration = parser.add_mutually_exclusive_group()
+    duration.add_argument('--timeout', type=float, default=None)
+    duration.add_argument('--owner-use', action='store_true')
     parser.add_argument('--wait-seconds', type=float, default=0)
     parser.add_argument('command', nargs=argparse.REMAINDER)
     args = parser.parse_args()
     command = args.command[1:] if args.command[:1] == ['--'] else args.command
     if not command:
         parser.error('A command is required after --.')
+    timeout = None if args.owner_use else (args.timeout if args.timeout is not None else 2700)
     cancelled = 0
 
     def cancel(signum, _frame):
@@ -75,11 +78,11 @@ def main():
                 print('Release QA claimed memory; stopping this latency command.', flush=True)
                 stop(process)
                 return 75
-            if time.monotonic() - started >= args.timeout:
+            if timeout is not None and time.monotonic() - started >= timeout:
                 print('Latency command reached its time box.', flush=True)
                 stop(process)
                 return 124
-            time.sleep(.2)
+            time.sleep(.1 if args.owner_use else .2)
         if cancelled:
             return 128 + cancelled
         if args.flag.exists():

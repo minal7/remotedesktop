@@ -25,10 +25,21 @@ class DebugHostLauncherTests(unittest.TestCase):
             'CFBundleIdentifier': runner.BUNDLE_ID, 'CFBundleExecutable': 'RemoteDesktopHost'}))
         (contents / 'MacOS' / 'RemoteDesktopHost').touch()
         self.args = SimpleNamespace(host_app=self.app, host_id='8f8f6c31-7bf6-4c51-ae04-5b94b01a59a2',
-            qa_flag=self.root / 'qa', output=self.root / 'output', timeout=1, resources_only=False)
+            qa_flag=self.root / 'qa', output=self.root / 'output', timeout=1, owner_use=False, resources_only=False)
         self.build_patch = patch.object(runner, 'BUILD_ROOT', self.build)
         self.build_patch.start()
         self.addCleanup(self.build_patch.stop)
+
+    def test_cli_requires_exactly_one_mode_and_rejects_owner_telemetry(self):
+        import subprocess
+        import sys
+        base = [sys.executable, str(Path(runner.__file__).resolve()), '--host-app', str(self.app),
+                '--host-id', self.args.host_id, '--qa-flag', str(self.args.qa_flag), '--output', str(self.args.output)]
+        for flags in ([], ['--timeout', '1', '--owner-use'], ['--owner-use', '--resources-only'], ['--timeout', '3601']):
+            with self.subTest(flags=flags):
+                result = subprocess.run(base + flags, capture_output=True, timeout=3)
+                self.assertEqual(result.returncode, 2)
+        self.assertFalse(self.args.output.exists())
 
     def test_validates_bundle_path_identity_and_uuid(self):
         app, executable = runner.validate_bundle(self.app)
@@ -76,8 +87,8 @@ class DebugHostLauncherTests(unittest.TestCase):
         def spawn(command, **kwargs):
             self.assertEqual(command, [str((self.app / 'Contents/MacOS/RemoteDesktopHost').resolve()), '--debug-latency-host'])
             self.assertIs(kwargs['preexec_fn'], runner.ignore_sigint)
-            self.assertEqual(kwargs['env']['LATENCY_LAB'], '1')
-            self.assertEqual(kwargs['env']['LATENCY_LAB_F2'], '1')
+            self.assertEqual(kwargs['env']['LATENCY_LAB'], '0' if self.args.owner_use else '1')
+            self.assertEqual(kwargs['env']['LATENCY_LAB_F2'], '0' if self.args.owner_use else '1')
             self.assertNotIn('LATENCY_LAB_RESOURCES_ONLY', kwargs['env'])
             self.assertEqual(kwargs['env']['REMOTE_DESKTOP_LATENCY_HOST_ID'], self.args.host_id.upper())
             handlers[signal.SIGINT](signal.SIGINT, None)
@@ -91,6 +102,46 @@ class DebugHostLauncherTests(unittest.TestCase):
         child.wait.assert_called_once_with(timeout=30)
         state = json.loads((self.args.output / 'state.json').read_text())
         self.assertEqual((state['status'], state['pid'], state['reason']), ('stopped', 12345, 'signal'))
+
+    def test_owner_use_stops_owned_child_when_qa_flag_appears(self):
+        self.args.owner_use = True
+        self.args.timeout = None
+        child = Mock(pid=12345, returncode=0)
+        child.poll.side_effect = [None, None, None, 0]
+        child.wait.return_value = 0
+        def sleep(_): self.args.qa_flag.touch()
+        with patch.object(runner, 'validate_entitlements'), \
+             patch.object(runner, 'running_pids_with_executable', return_value=[]), \
+             patch.object(runner.subprocess, 'Popen', return_value=child), \
+             patch.object(runner.time, 'sleep', side_effect=sleep):
+            self.assertEqual(runner.guarded_run(self.args), 75)
+        child.terminate.assert_called_once_with()
+        child.wait.assert_called_once_with(timeout=5.5)
+        state_file = self.args.output / 'state.json'
+        state = json.loads(state_file.read_text())
+        self.assertEqual(state['reason'], 'qa')
+        self.assertNotIn('host_id', state)
+        self.assertNotIn('executable', state)
+        self.assertEqual(state_file.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(self.args.output.stat().st_mode & 0o777, 0o700)
+        self.assertFalse((self.args.output / 'host.log').exists())
+
+    def test_owner_use_signal_stops_owned_child(self):
+        self.args.owner_use = True
+        self.args.timeout = None
+        self.test_signal_during_spawn_is_deferred_and_stops_only_owned_child()
+
+    def test_timed_mode_still_stops_at_deadline(self):
+        child = Mock(pid=12345, returncode=0)
+        child.poll.side_effect = [None, None, 0]
+        child.wait.return_value = 0
+        with patch.object(runner, 'validate_entitlements'), \
+             patch.object(runner, 'running_pids_with_executable', return_value=[]), \
+             patch.object(runner.subprocess, 'Popen', return_value=child), \
+             patch.object(runner.time, 'monotonic', side_effect=[0, 2]):
+            self.assertEqual(runner.guarded_run(self.args), 0)
+        child.terminate.assert_called_once_with()
+        self.assertEqual(json.loads((self.args.output / 'state.json').read_text())['reason'], 'timeout')
 
     def test_resource_opt_in_is_explicit_and_keeps_sole_selector(self):
         self.args.resources_only = True
