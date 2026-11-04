@@ -6,6 +6,13 @@ import run_device_quality as quality
 
 
 class QualityOwnershipTests(unittest.TestCase):
+    def test_fix_selection_is_bounded_unique_and_canonical(self):
+        self.assertEqual(quality.selected_fixes('F4,F1,F3'), ['F1', 'F3', 'F4'])
+        self.assertEqual(quality.selected_fixes('F4'), ['F4'])
+        for invalid in ('', 'F2', 'F1,F1', 'F1,', 'f4'):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                quality.selected_fixes(invalid)
+
     def test_only_exact_quality_runner_in_application_container_matches(self):
         name = 'RemoteDesktopLatencyQualityTests-Runner.app'
         exe = 'RemoteDesktopLatencyQualityTests-Runner'
@@ -46,6 +53,19 @@ class QualityOwnershipTests(unittest.TestCase):
         data = {'path': '__TESTROOT__/Debug/runner.app', 'nested': ['__TESTHOST__/bundle', '__TESTROOT__/one']}
         self.assertEqual(quality.replace_testroot(data, '/tmp/products'),
             {'path': '/tmp/products/Debug/runner.app', 'nested': ['__TESTHOST__/bundle', '/tmp/products/one']})
+
+    def test_destination_artifacts_replaces_install_paths(self):
+        config = {'TestHostPath': '/local/runner.app', 'UITargetAppPath': '/local/client.app',
+                  'TestBundlePath': '__TESTHOST__/PlugIns/RemoteDesktopLatencyQualityTests.xctest',
+                  'DependentProductPaths': ['/local/client.app'], 'EnvironmentVariables': {'sentinel': 'kept'}}
+        quality.use_destination_artifacts(config)
+        for key in ('TestHostPath', 'UITargetAppPath', 'TestBundlePath', 'DependentProductPaths'):
+            self.assertNotIn(key, config)
+        self.assertIs(config['UseDestinationArtifacts'], True)
+        self.assertEqual(config['TestHostBundleIdentifier'], quality.RUNNER_BUNDLE)
+        self.assertEqual(config['UITargetAppBundleIdentifier'], quality.CLIENT_BUNDLE)
+        self.assertEqual(config['TestBundleDestinationRelativePath'], '__TESTHOST__/PlugIns/RemoteDesktopLatencyQualityTests.xctest')
+        self.assertEqual(config['EnvironmentVariables'], {'sentinel': 'kept'})
 
 
 if __name__ == '__main__':

@@ -5,6 +5,7 @@ import Foundation
 final class TextFixture: NSView {
     let headerFont: NSFont
     let textFonts: [NSFont]
+    var heartbeatOn = false
     init(frame: CGRect, headerFont: NSFont, textFonts: [NSFont]) {
         self.headerFont = headerFont; self.textFonts = textFonts
         super.init(frame: frame)
@@ -17,6 +18,7 @@ final class TextFixture: NSView {
          CGRect(x: 60, y: 370, width: 460, height: 120)]
     }
     var textCrop: CGRect { fontCrops.reduce(CGRect.null) { $0.union($1) } }
+    var heartbeatRect: CGRect { CGRect(x: bounds.width - 48, y: bounds.height - 48, width: 24, height: 24) }
 
     override func draw(_ dirtyRect: NSRect) {
         NSColor.white.setFill(); bounds.fill()
@@ -45,6 +47,8 @@ final class TextFixture: NSView {
             }
         }
         NSGraphicsContext.restoreGraphicsState()
+        (heartbeatOn ? NSColor.black : NSColor.white).setFill()
+        heartbeatRect.fill()
     }
 }
 
@@ -59,6 +63,7 @@ final class FixtureApp: NSObject, NSApplicationDelegate {
     let output: URL
     let lifetime: TimeInterval
     var window: NSWindow?
+    var heartbeatTimer: Timer?
     init(output: URL, lifetime: TimeInterval) { self.output = output; self.lifetime = lifetime }
     func applicationDidFinishLaunching(_ notification: Notification) {
         do {
@@ -96,9 +101,16 @@ final class FixtureApp: NSObject, NSApplicationDelegate {
                 "crop_points": [crop.minX, crop.minY, crop.width, crop.height],
                 "crop_pixels": pixels(crop),
                 "font_crops_pixels": Dictionary(uniqueKeysWithValues: zip(["11pt", "12pt", "13pt"], view.fontCrops.map(pixels))),
+                "heartbeat": ["rect_points": [view.heartbeatRect.minX, view.heartbeatRect.minY, view.heartbeatRect.width, view.heartbeatRect.height],
+                              "rect_pixels": pixels(view.heartbeatRect), "toggles_per_second": 10],
                 "reference": "reference.png", "font": "Menlo-Regular 11, 12, 13 pt"]
             try JSONSerialization.data(withJSONObject: metadata, options: [.prettyPrinted, .sortedKeys])
                 .write(to: output.appendingPathComponent("geometry.json"), options: .atomic)
+            heartbeatTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak view] _ in
+                guard let view else { return }
+                view.heartbeatOn.toggle()
+                view.setNeedsDisplay(view.heartbeatRect)
+            }
             print("FIXTURE_READY \(output.path)"); fflush(stdout)
             DispatchQueue.main.asyncAfter(deadline: .now() + lifetime) { NSApp.terminate(nil) }
         } catch { fputs("Fixture failed: \(error)\n", stderr); exit(1) }

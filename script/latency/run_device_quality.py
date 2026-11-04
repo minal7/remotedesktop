@@ -58,8 +58,11 @@ def inspect_xctestrun(path):
     if (test.get('SystemAttachmentLifetime') != 'keepNever'
             or test.get('PreferredScreenCaptureFormat') != 'screenshots'):
         raise ValueError('xctestrun must disable retained automatic captures and video.')
-    if test.get('BlueprintName') != TEST_TARGET or test.get('TestHostBundleIdentifier') != RUNNER_BUNDLE:
+    if (test.get('BlueprintName') != TEST_TARGET or test.get('TestHostBundleIdentifier') != RUNNER_BUNDLE
+            or test.get('IsUITestBundle') is not True):
         raise ValueError('Unexpected test blueprint.')
+    if test.get('TestBundlePath') != '__TESTHOST__/PlugIns/RemoteDesktopLatencyQualityTests.xctest':
+        raise ValueError('Unexpected quality test bundle location.')
     scheme_path = ROOT / 'ios/RemoteDesktop.xcodeproj/xcshareddata/xcschemes/RemoteDesktopLatencyQuality.xcscheme'
     action = ET.parse(scheme_path).getroot().find('TestAction')
     if action is None or action.get('buildConfiguration') != 'Debug' or action.get('systemAttachmentLifetime') != 'keepNever' or action.get('preferredScreenCaptureFormat') != 'screenshots':
@@ -77,7 +80,26 @@ def inspect_xctestrun(path):
             or TEST_TARGET not in runner_path.name or TEST_TARGET not in executable
             or not (runner_path / executable).is_file()):
         raise ValueError('Runner bundle/executable is not uniquely identifiable as the quality runner.')
-    return rebased, runner_path.name, executable
+    if not (runner_path / 'PlugIns/RemoteDesktopLatencyQualityTests.xctest').is_dir():
+        raise ValueError('Quality runner does not contain its expected test bundle.')
+    client_path = Path(test.get('UITargetAppPath', '')).resolve(strict=True)
+    if not client_path.is_relative_to(original.parent / 'Debug-iphoneos'):
+        raise ValueError('Target app must be the built iOS Debug app.')
+    client_info = plistlib.loads((client_path / 'Info.plist').read_bytes())
+    if client_info.get('CFBundleIdentifier') != CLIENT_BUNDLE:
+        raise ValueError('Unexpected quality target app bundle.')
+    return rebased, runner_path, executable, client_path
+
+
+def use_destination_artifacts(test):
+    # Documented by `man xcodebuild.xctestrun`: all three path keys must
+    # be excluded when destination artifacts are used.
+    for key in ('TestBundlePath', 'TestHostPath', 'UITargetAppPath', 'DependentProductPaths'):
+        test.pop(key, None)
+    test['UseDestinationArtifacts'] = True
+    test['TestHostBundleIdentifier'] = RUNNER_BUNDLE
+    test['TestBundleDestinationRelativePath'] = '__TESTHOST__/PlugIns/RemoteDesktopLatencyQualityTests.xctest'
+    test['UITargetAppBundleIdentifier'] = CLIENT_BUNDLE
 
 
 def quality_processes(data, runner_name, executable):
@@ -132,7 +154,15 @@ def geometry(path):
     return size, crop
 
 
+def selected_fixes(value):
+    fixes = value.split(',')
+    if not fixes or len(fixes) != len(set(fixes)) or any(item not in ('F1', 'F3', 'F4') for item in fixes):
+        raise ValueError('Fixes must be a nonempty comma-separated subset of F1,F3,F4.')
+    return [name for name in ('F1', 'F3', 'F4') if name in fixes]
+
+
 def run(args):
+    fixes = selected_fixes(args.fixes)
     handoff_time(args.not_before)
     if args.qa_flag.exists(): raise ValueError('Release QA is active; no device command started.')
     host = args.host_app.resolve(strict=True)
@@ -145,7 +175,8 @@ def run(args):
     except ValueError: raise ValueError('Host ID must be a UUID.') from None
     fixture_binary = args.fixture_binary.resolve(strict=True)
     if not fixture_binary.is_file(): raise ValueError('StaticTextFixture binary is unavailable.')
-    test_config, runner_name, runner_executable = inspect_xctestrun(args.xctestrun)
+    test_config, runner_path, runner_executable, client_path = inspect_xctestrun(args.xctestrun)
+    runner_name = runner_path.name
     if not args.guarded:
         command = [sys.executable, str(ROOT / 'script/latency/qa_guard.py'), '--flag', str(args.qa_flag),
                    '--timeout', '660', '--', sys.executable, str(Path(__file__).resolve()),
@@ -188,6 +219,12 @@ def run(args):
     try:
         check()
         if processes(): raise ValueError('The exact quality test runner is already running.')
+        # Install both exact build products before starting the client. The
+        # subsequent xctestrun uses destination artifacts and must not install.
+        for name, app in (('install-client.log', client_path), ('install-runner.log', runner_path)):
+            check()
+            subprocess.run(['xcrun', 'devicectl', 'device', 'install', 'app', '--device', args.device, str(app)],
+                           stdout=logfile(name), stderr=subprocess.STDOUT, check=True, timeout=60)
         check()
         fixture_dir = args.output / 'fixture'
         fixture = subprocess.Popen([str(fixture_binary), str(fixture_dir), '600'], stdout=logfile('fixture.log'), stderr=subprocess.STDOUT)
@@ -198,10 +235,12 @@ def run(args):
             time.sleep(.1)
         size, crop = geometry(fixture_dir / 'geometry.json')
         env = {'RUN_LATENCY_QUALITY_E2E': '1', 'LATENCY_QUALITY_NOT_BEFORE': args.not_before,
+               'LATENCY_QUALITY_FIXES': ','.join(fixes), 'LATENCY_QUALITY_F1_MAX_MS': str(args.f1_max_ms),
                'LATENCY_QUALITY_REFERENCE_PIXELS': ','.join(map(str, size)),
                'LATENCY_QUALITY_REFERENCE_CROP': ','.join(map(str, crop))}
         test = test_config[TEST_TARGET]
         test.setdefault('EnvironmentVariables', {}).update(env)
+        use_destination_artifacts(test)
         local_run = args.output / 'quality.xctestrun'
         local_run.write_bytes(plistlib.dumps(test_config))
         check()
@@ -217,6 +256,7 @@ def run(args):
         test_started = True
         test_process = subprocess.Popen(['xcodebuild', 'test-without-building', '-xctestrun', str(local_run),
             '-destination', 'platform=iOS,id=' + args.device, '-parallel-testing-enabled', 'NO',
+            '-collect-test-diagnostics', 'never',
             '-only-testing:' + TEST_IDENTIFIER, '-resultBundlePath', str(args.output / 'quality.xcresult')],
             stdout=logfile('xcodebuild.log'), stderr=subprocess.STDOUT)
         deadline = time.monotonic() + 510
@@ -294,6 +334,8 @@ def main():
     parser.add_argument('--qa-flag', type=Path, required=True)
     parser.add_argument('--not-before', required=True)
     parser.add_argument('--fixture-binary', type=Path, required=True)
+    parser.add_argument('--fixes', default='F4', help='Comma-separated subset of F1,F3,F4')
+    parser.add_argument('--f1-max-ms', type=int, choices=[0, 10, 20], default=0)
     parser.add_argument('--xctestrun', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--guarded', action='store_true', help=argparse.SUPPRESS)
