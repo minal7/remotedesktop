@@ -15,6 +15,24 @@ final class LatencyLabPairRunTests: XCTestCase {
         XCTAssertEqual(LatencyStatsCollector.traceLimit(arguments: ["LatencyProbe"]), 1_000_000)
     }
 
+    func testStandaloneExtendedTraceNeedsExactProbeArgumentAndLabEnvironment() {
+        let valid = ["app", "LatencyProbe", "LatencyLabExtendedTrace"]
+        XCTAssertEqual(LatencyStatsCollector.traceLimit(arguments: valid, environment: ["LATENCY_LAB": "1"]), 8_000_000)
+        for environment in [[:], ["LATENCY_LAB": "0"], ["LATENCY_LAB": "true"], ["LATENCY_LAB": "01"]] {
+            XCTAssertEqual(LatencyStatsCollector.traceLimit(arguments: valid, environment: environment), 1_000_000)
+        }
+        for arguments in [["LatencyLabExtendedTrace"], ["LatencyProbe"],
+                          ["LatencyProbe", "LatencyLabExtendedTrace=1"],
+                          ["LatencyProbe", "LatencyLabExtendedTrace", "LatencyLabExtendedTrace"],
+                          ["LatencyProbe", "LatencyLabPairFix", "R60", "LatencyLabExtendedTrace"],
+                          ["LatencyProbe", "LatencyLabPairFix", "LatencyLabExtendedTrace"]] {
+            XCTAssertEqual(LatencyStatsCollector.traceLimit(arguments: arguments, environment: ["LATENCY_LAB": "1"]), 1_000_000)
+        }
+        XCTAssertEqual(LatencyStatsCollector.traceLimit(arguments: ["LatencyProbe", "LatencyLabPairFix", "F1"], environment: [:]), 8_000_000)
+        let existingHelper: ([String]) -> Int = LatencyStatsCollector.traceLimit(arguments:)
+        XCTAssertEqual(existingHelper(["LatencyProbe"]), 1_000_000)
+    }
+
     private func events(_ actions: [LatencyLabPairRun.Action]) -> [[String: Any]] {
         actions.compactMap { if case let .trace(value) = $0 { return value }; return nil }
     }

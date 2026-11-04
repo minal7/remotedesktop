@@ -88,11 +88,19 @@ final class LatencyStatsCollector: @unchecked Sendable {
     #endif
     #if DEBUG && os(iOS)
     static func traceLimit(arguments: [String]) -> Int {
-        // Share validation without depending on the iOS application's runner.
-        guard arguments.contains("LatencyProbe"),
-              let index = arguments.firstIndex(of: "LatencyLabPairFix"),
-              arguments.indices.contains(index + 1),
-              LatencyLabConfiguration.pairedFixes(arguments[index + 1]) != nil else { return 1_000_000 }
+        traceLimit(arguments: arguments, environment: ProcessInfo.processInfo.environment)
+    }
+
+    static func traceLimit(arguments: [String], environment: [String: String]) -> Int {
+        guard arguments.contains("LatencyProbe") else { return 1_000_000 }
+        if let index = arguments.firstIndex(of: "LatencyLabPairFix") {
+            guard arguments.indices.contains(index + 1),
+                  LatencyLabConfiguration.pairedFixes(arguments[index + 1]) != nil else { return 1_000_000 }
+            return 8_000_000
+        }
+        // Standalone extended traces require both explicit, exact lab opt-ins.
+        guard environment["LATENCY_LAB"] == "1",
+              arguments.filter({ $0 == "LatencyLabExtendedTrace" }).count == 1 else { return 1_000_000 }
         return 8_000_000
     }
     #endif
@@ -120,8 +128,8 @@ final class LatencyStatsCollector: @unchecked Sendable {
         self.active = enabled
         self.writer = enabled ? DispatchQueue(label: "latency.trace.writer") : nil
         #if DEBUG && os(iOS)
-        // Eight measured windows share one client collector. Keep the normal
-        // one-megabyte bound everywhere else, including every host peer.
+        // Paired runs and explicitly opted-in standalone lab probes use the
+        // extended bound; ordinary clients and every host peer retain 1 MB.
         self.limit = Self.traceLimit(arguments: ProcessInfo.processInfo.arguments)
         #else
         self.limit = 1_000_000
