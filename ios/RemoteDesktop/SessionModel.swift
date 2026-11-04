@@ -1131,6 +1131,15 @@ final class SessionModel: ObservableObject, VideoRendererTarget {
         (softModifierMask & modifier.mask) != 0
     }
 
+    #if DEBUG
+    static func labQualityPreference(environment: [String: String]) -> String {
+        guard environment["LATENCY_LAB"] == "1",
+              let value = environment["LATENCY_QOS_PREFERENCE"],
+              ["sharpness", "fluency", "balanced"].contains(value) else { return "sharpness" }
+        return value
+    }
+    #endif
+
     private func bind(_ t: Transport) {
         if let cursorTransport = t as? WebRTCTransport {
             cursorTransport.onCursorMessage = { [weak self, weak t] message in
@@ -1171,10 +1180,15 @@ final class SessionModel: ObservableObject, VideoRendererTarget {
             }
             self.state = .connected
             if isInitialHandshake { self.computerUseSession?.start() }
+            #if DEBUG
+            let preference = Self.labQualityPreference(environment: ProcessInfo.processInfo.environment)
+            #else
+            let preference = "sharpness"
+            #endif
             self.send(.qos(
                 targetFps: DesktopVideoQuality.targetFramesPerSecond,
                 maxBitrateKbps: DesktopVideoQuality.maximumBitrateKbps,
-                prefer: "sharpness"))
+                prefer: preference))
         }
         t.onDisplay = { [weak self, weak t] d in
             guard let self, let t, self.transport === t, self.inputHelloReceived,

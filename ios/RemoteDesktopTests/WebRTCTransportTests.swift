@@ -10,6 +10,17 @@ final class WebRTCTransportTests: XCTestCase {
     private let accountBinding = CloudKitAccountBinding(
         rawValue: String(repeating: "c", count: 64))!
 
+    #if DEBUG
+    func test_labQualityPreferenceIsOptInAndRejectsUnknownValues() {
+        XCTAssertEqual(SessionModel.labQualityPreference(environment: [:]), "sharpness")
+        XCTAssertEqual(SessionModel.labQualityPreference(environment: ["LATENCY_QOS_PREFERENCE": "fluency"]), "sharpness")
+        XCTAssertEqual(SessionModel.labQualityPreference(environment: ["LATENCY_LAB": "1", "LATENCY_QOS_PREFERENCE": "fluency"]), "fluency")
+        XCTAssertEqual(SessionModel.labQualityPreference(environment: ["LATENCY_LAB": "1", "LATENCY_QOS_PREFERENCE": "balanced"]), "balanced")
+        XCTAssertEqual(SessionModel.labQualityPreference(environment: ["LATENCY_LAB": "1", "LATENCY_QOS_PREFERENCE": "sharpness"]), "sharpness")
+        XCTAssertEqual(SessionModel.labQualityPreference(environment: ["LATENCY_LAB": "1", "LATENCY_QOS_PREFERENCE": "invalid"]), "sharpness")
+    }
+    #endif
+
     func test_lanDiscoveryEnablesPlayoutCapButCloudOnlyDoesNot() {
         XCTAssertTrue(SessionModel.usesLANPlayoutCap(.localNetwork))
         XCTAssertFalse(SessionModel.usesLANPlayoutCap(.cloudKit))
