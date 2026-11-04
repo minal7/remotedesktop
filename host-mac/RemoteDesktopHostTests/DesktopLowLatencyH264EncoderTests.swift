@@ -6,6 +6,44 @@ import XCTest
 @testable import RemoteDesktopHost
 
 final class DesktopLowLatencyH264EncoderTests: XCTestCase {
+    func testBundledDefaultH264UsesValidatedObjectiveCEncoderClass() throws {
+        let factory = LKRTCDefaultVideoEncoderFactory()
+        let info = try XCTUnwrap(factory.supportedCodecs().first { $0.name.uppercased() == "H264" })
+        let encoder = try XCTUnwrap(factory.createEncoder(info) as? NSObject)
+        XCTAssertTrue(NSStringFromClass(type(of: encoder)).hasSuffix("RTCVideoEncoderH264"))
+        XCTAssertFalse(encoder.responds(to: NSSelectorFromString("build:")))
+        if let nativeBuilder = NSProtocolFromString("LKRTCNativeVideoEncoderBuilder") {
+            XCTAssertFalse(encoder.conforms(to: nativeBuilder))
+        }
+    }
+
+    func testObservedEncoderForwardsRealCallbackAndCountsOnlyBytes() throws {
+        let base = RecordingFallbackEncoder()
+        var observed: [Int] = []
+        let encoder = LatencyObservedVideoEncoder(base: base) { observed.append($0) }
+        var delivered = 0
+        encoder.setCallback { image, _ in delivered += image.buffer.count; return true }
+        let image = LKRTCEncodedImage(); image.buffer = Data(repeating: 7, count: 123)
+        XCTAssertTrue(try XCTUnwrap(base.callback)(image, LKRTCCodecSpecificInfoH264()))
+        XCTAssertEqual(observed, [123]); XCTAssertEqual(delivered, 123)
+        XCTAssertEqual(encoder.implementationName(), base.implementationName())
+        XCTAssertEqual(encoder.resolutionAlignment, base.resolutionAlignment)
+        XCTAssertEqual(encoder.supportsNativeHandle, base.supportsNativeHandle)
+        encoder.setCallback(nil); XCTAssertNil(base.callback)
+    }
+
+    func testIndependentObserversDoNotMixLateEncoderCallbacks() throws {
+        let first = RecordingFallbackEncoder(), second = RecordingFallbackEncoder()
+        var firstSizes: [Int] = [], secondSizes: [Int] = []
+        let old = LatencyObservedVideoEncoder(base: first) { firstSizes.append($0) }
+        let current = LatencyObservedVideoEncoder(base: second) { secondSizes.append($0) }
+        old.setCallback { _, _ in true }; current.setCallback { _, _ in true }
+        let late = try XCTUnwrap(first.callback), active = try XCTUnwrap(second.callback)
+        let frame = LKRTCEncodedImage(); frame.buffer = Data(repeating: 0, count: 8)
+        _ = active(frame, LKRTCCodecSpecificInfoH264()); _ = late(frame, LKRTCCodecSpecificInfoH264())
+        XCTAssertEqual(firstSizes, [8]); XCTAssertEqual(secondSizes, [8])
+    }
+
     func testSessionCreationFailureUsesStockEncoderAndPreservesRateUpdates() {
         let fallback = RecordingFallbackEncoder()
         let encoder = DesktopLowLatencyH264Encoder(fallback: fallback) { _, _, _, _ in -1 }
@@ -110,7 +148,8 @@ private final class RecordingFallbackEncoder: NSObject, LKRTCVideoEncoder {
     var startCount = 0
     var releaseCount = 0
     var bitrates: [(UInt32, UInt32)] = []
-    func setCallback(_ callback: RTCVideoEncoderCallback?) {}
+    var callback: RTCVideoEncoderCallback?
+    func setCallback(_ callback: RTCVideoEncoderCallback?) { self.callback = callback }
     func startEncode(with settings: LKRTCVideoEncoderSettings, numberOfCores: Int32) -> Int { startCount += 1; return 0 }
     func release() -> Int { releaseCount += 1; return 0 }
     func encode(_ frame: LKRTCVideoFrame, codecSpecificInfo info: (any LKRTCCodecSpecificInfo)?, frameTypes: [NSNumber]) -> Int { 0 }

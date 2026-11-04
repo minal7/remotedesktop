@@ -251,10 +251,14 @@ enum DesktopVideoQuality {
 final class DesktopVideoEncoderFactory: NSObject, LKRTCVideoEncoderFactory {
     private let base = LKRTCDefaultVideoEncoderFactory()
     private let f2Enabled: Bool
+    #if DEBUG && os(macOS)
+    private let frameByteObserver: ((Int) -> Void)?
+    #endif
 
-    init(f2Enabled: Bool = false) {
+    init(f2Enabled: Bool = false, frameByteObserver: ((Int) -> Void)? = nil) {
         #if DEBUG && os(macOS)
         self.f2Enabled = f2Enabled
+        self.frameByteObserver = frameByteObserver
         #else
         self.f2Enabled = false
         #endif
@@ -265,20 +269,63 @@ final class DesktopVideoEncoderFactory: NSObject, LKRTCVideoEncoderFactory {
         _ info: LKRTCVideoCodecInfo
     ) -> (any LKRTCVideoEncoder)? {
         #if DEBUG && os(macOS)
+        guard let native = base.createEncoder(info) else { return nil }
+        let encoder: any LKRTCVideoEncoder
         if f2Enabled, DesktopVideoQuality.supportsExperimentalEncoder(
             name: info.name, profileLevelID: info.parameters["profile-level-id"],
-            packetizationMode: info.parameters["packetization-mode"]),
-           let fallback = base.createEncoder(info) {
-            return DesktopLowLatencyH264Encoder(fallback: fallback)
+            packetizationMode: info.parameters["packetization-mode"]) {
+            encoder = DesktopLowLatencyH264Encoder(fallback: native)
+        } else { encoder = native }
+        // WebRTC unwraps native software encoders by concrete class; wrapping
+        // one would change its adapter path. Observe only the validated ObjC H.264 encoder.
+        if !f2Enabled, info.name.uppercased() == "H264", let frameByteObserver,
+           let object = encoder as? NSObject,
+           NSStringFromClass(type(of: object)).hasSuffix("RTCVideoEncoderH264"),
+           !object.responds(to: NSSelectorFromString("build:")) {
+            return LatencyObservedVideoEncoder(base: encoder, observe: frameByteObserver)
         }
-        #endif
+        return encoder
+        #else
         return base.createEncoder(info)
+        #endif
     }
 
     func supportedCodecs() -> [LKRTCVideoCodecInfo] {
         DesktopVideoQuality.upgradedCodecs(base.supportedCodecs())
     }
 }
+
+#if DEBUG && os(macOS)
+/// Observes only encoded byte counts; forwards the same callback and encoder API.
+final class LatencyObservedVideoEncoder: NSObject, LKRTCVideoEncoder {
+    private let base: any LKRTCVideoEncoder
+    private let observe: (Int) -> Void
+    init(base: any LKRTCVideoEncoder, observe: @escaping (Int) -> Void) {
+        self.base = base; self.observe = observe; super.init()
+    }
+    func setCallback(_ callback: RTCVideoEncoderCallback?) {
+        guard let callback else { base.setCallback(nil); return }
+        let observe = self.observe
+        base.setCallback { frame, info in
+            observe(frame.buffer.count)
+            return callback(frame, info)
+        }
+    }
+    func startEncode(with settings: LKRTCVideoEncoderSettings, numberOfCores: Int32) -> Int {
+        base.startEncode(with: settings, numberOfCores: numberOfCores)
+    }
+    func release() -> Int { base.release() }
+    func encode(_ frame: LKRTCVideoFrame, codecSpecificInfo: (any LKRTCCodecSpecificInfo)?, frameTypes: [NSNumber]) -> Int {
+        base.encode(frame, codecSpecificInfo: codecSpecificInfo, frameTypes: frameTypes)
+    }
+    func setBitrate(_ bitrateKbit: UInt32, framerate: UInt32) -> Int32 { base.setBitrate(bitrateKbit, framerate: framerate) }
+    func implementationName() -> String { base.implementationName() }
+    func scalingSettings() -> LKRTCVideoEncoderQpThresholds? { base.scalingSettings() }
+    var resolutionAlignment: Int { base.resolutionAlignment }
+    var applyAlignmentToAllSimulcastLayers: Bool { base.applyAlignmentToAllSimulcastLayers }
+    var supportsNativeHandle: Bool { base.supportsNativeHandle }
+}
+#endif
 
 final class DesktopVideoDecoderFactory: NSObject, LKRTCVideoDecoderFactory {
     private let base = LKRTCDefaultVideoDecoderFactory()

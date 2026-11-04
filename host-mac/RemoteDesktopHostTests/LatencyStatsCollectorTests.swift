@@ -114,6 +114,51 @@ final class LatencyStatsCollectorTests: XCTestCase {
         XCTAssertNil(collector.snapshot()["jitterBufferTargetMs"])
     }
 
+    func testSelectedPairLabelsAndRttFloorNeverExposeAddresses() throws {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let collector = LatencyStatsCollector(side: "test", enabled: true, traceURL: url)
+        func sample(_ rtt: Double) {
+            collector.ingest([
+                .init(id: "transport", type: "transport", values: ["selectedCandidatePairId": "pair"]),
+                .init(id: "pair", type: "candidate-pair", values: ["localCandidateId": "local", "remoteCandidateId": "remote", "currentRoundTripTime": rtt]),
+                .init(id: "local", type: "local-candidate", values: ["candidateType": "host", "address": "192.0.2.99", "protocol": "udp"]),
+                .init(id: "remote", type: "remote-candidate", values: ["candidateType": "srflx", "ip": "2001:db8::12", "port": 1234])], at: 1)
+        }
+        sample(0.03); sample(0.02); sample(0.04)
+        collector.flush()
+        let text = try String(contentsOf: url, encoding: .utf8)
+        XCTAssertFalse(text.contains("192.0.2.99")); XCTAssertFalse(text.contains("2001:db8::12"))
+        XCTAssertFalse(text.contains("\"port\""))
+        let rows = try text.split(separator: "\n").compactMap { try JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any] }
+        let stats = try XCTUnwrap(rows.last { $0["type"] as? String == "stats" })
+        let values = try XCTUnwrap(stats["values"] as? [String: Any])
+        XCTAssertEqual(values["localCandidateType"] as? String, "host")
+        XCTAssertEqual(values["localCandidateFamily"] as? String, "v4")
+        XCTAssertEqual(values["remoteCandidateType"] as? String, "srflx")
+        XCTAssertEqual(values["remoteCandidateFamily"] as? String, "v6")
+        XCTAssertEqual(values["candidateProtocol"] as? String, "udp")
+        XCTAssertEqual(values["rttFloorMs"] as? Double, 20)
+    }
+
+    func testEncodedFramePercentilesAreBoundedAndMarkOverflow() throws {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let collector = LatencyStatsCollector(side: "test", enabled: true, traceURL: url)
+        for size in 1...20 { collector.recordEncodedFrameBytes(size) }
+        collector.flushEncodedFrameSizes(at: 1)
+        for _ in 0..<513 { collector.recordEncodedFrameBytes(100) }
+        collector.flushEncodedFrameSizes(at: 2); collector.flushEncodedFrameSizes(at: 3); collector.flush()
+        let text = try String(contentsOf: url, encoding: .utf8)
+        let rows = try text.split(separator: "\n").compactMap { try JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any] }
+            .filter { $0["type"] as? String == "encoded_frame_sizes" }
+        XCTAssertEqual(rows.count, 2)
+        XCTAssertEqual(rows[0]["count"] as? Int, 20); XCTAssertEqual(rows[0]["p50Bytes"] as? Int, 10)
+        XCTAssertEqual(rows[0]["p95Bytes"] as? Int, 19); XCTAssertEqual(rows[0]["maxBytes"] as? Int, 20)
+        XCTAssertEqual(rows[0]["complete"] as? Bool, true); XCTAssertEqual(rows[1]["complete"] as? Bool, false)
+        XCTAssertEqual(rows[1]["count"] as? Int, 512)
+    }
+
     func testOneMinuteOf60FPSFrameRecordsFits() throws {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: url) }

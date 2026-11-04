@@ -430,7 +430,8 @@ final class HostPeerSession: NSObject {
         self.labOrdinaryPeer = acceptedOrdinaryPeer
         self.lab60Requested = lab60Requested
         #endif
-        self.latencyStats = LatencyStatsCollector(side: "host", enabled: labInstrumentation && LatencyStatsCollector.enabled)
+        let stats = LatencyStatsCollector(side: "host", enabled: labInstrumentation && LatencyStatsCollector.enabled)
+        self.latencyStats = stats
         #if DEBUG
         self.onLatencyF1RestartRequest = onLatencyF1RestartRequest
         self.latencyF1Nonce = latencyF1Nonce
@@ -444,10 +445,16 @@ final class HostPeerSession: NSObject {
         #endif
         self.latencyF2Enabled = enableF2
         self.latencyF3Enabled = enableF3
+        #if DEBUG
+        let observeEncodedBytes: ((Int) -> Void)? = labInstrumentation && LatencyStatsCollector.enabled && !LatencyStatsCollector.resourcesOnly
+            ? { [weak stats] bytes in stats?.recordEncodedFrameBytes(bytes) } : nil
+        #else
+        let observeEncodedBytes: ((Int) -> Void)? = nil
+        #endif
         self.factory = RTCPeerConnectionFactory(
             audioDeviceModuleType: .audioEngine,
             bypassVoiceProcessing: true,
-            encoderFactory: DesktopVideoEncoderFactory(f2Enabled: enableF2),
+            encoderFactory: DesktopVideoEncoderFactory(f2Enabled: enableF2, frameByteObserver: observeEncodedBytes),
             decoderFactory: DesktopVideoDecoderFactory(),
             audioProcessingModule: nil)
         let voiceProcessingStatus = factory.audioDeviceModule.setVoiceProcessingEnabled(false)
@@ -562,6 +569,7 @@ final class HostPeerSession: NSObject {
             guard let self, let connection, !self.isEnded else { return }
             #if DEBUG
             let time = ProcessInfo.processInfo.systemUptime
+            self.latencyStats.flushEncodedFrameSizes(at: time)
             if let cpu = cpuSampler.sample(at: time) {
                 self.latencyStats.trace(["type": "resource", "time": time,
                                          "processCPUPercent": cpu])
@@ -1265,6 +1273,11 @@ final class HostPeerSession: NSObject {
                 fps: captureFrameRate)
             adaptedVideoWidth = normalizedSize.width
             adaptedVideoHeight = normalizedSize.height
+            #if DEBUG
+            if labInstrumentation && LatencyStatsCollector.enabled {
+                latencyStats.recordCaptureSize(width: CVPixelBufferGetWidth(imageBuffer), height: CVPixelBufferGetHeight(imageBuffer))
+            }
+            #endif
         }
 
         let rtcBuffer = RTCCVPixelBuffer(pixelBuffer: imageBuffer)

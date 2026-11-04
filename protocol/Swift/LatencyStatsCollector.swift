@@ -101,6 +101,11 @@ final class LatencyStatsCollector: @unchecked Sendable {
     private let active: Bool
     private var previous: [String: [String: Double]] = [:]
     private var latest: [String: Double] = [:]
+    private var rttFloorMs: Double?
+    private var captureSize: (Int, Int)?
+    private var encodedSizes: [Int] = []
+    private var encodedSizeOverflow = false
+    private var encodedWindowStart: Double?
     private var bytes = 0 // accessed only on writer
     private var truncated = false // accessed only on writer
     private var writeFailed = false // accessed only on writer
@@ -160,20 +165,30 @@ final class LatencyStatsCollector: @unchecked Sendable {
         #else
         let numericTrafficCounters = Set<String>()
         #endif
-        let relevant = numericTrafficCounters.union(["encoderImplementation", "codecId", "framesEncoded", "totalEncodeTime", "totalPacketSendDelay", "packetsSent", "targetBitrate", "qualityLimitationReason", "frameWidth", "frameHeight", "framesPerSecond", "jitterBufferDelay", "jitterBufferTargetDelay", "jitterBufferEmittedCount", "totalDecodeTime", "totalProcessingDelay", "framesDecoded", "framesDropped", "freezeCount", "totalFreezesDuration", "keyFramesEncoded", "keyFramesDecoded", "jitter", "packetsLost", "nackCount", "pliCount", "currentRoundTripTime", "availableOutgoingBitrate", "localCandidateType", "remoteCandidateType"])
+        let relevant = numericTrafficCounters.union(["encoderImplementation", "codecId", "framesEncoded", "totalEncodeTime", "totalPacketSendDelay", "packetsSent", "targetBitrate", "qualityLimitationReason", "frameWidth", "frameHeight", "framesPerSecond", "jitterBufferDelay", "jitterBufferTargetDelay", "jitterBufferEmittedCount", "totalDecodeTime", "totalProcessingDelay", "framesDecoded", "framesDropped", "freezeCount", "totalFreezesDuration", "keyFramesEncoded", "keyFramesDecoded", "jitter", "packetsLost", "nackCount", "pliCount", "currentRoundTripTime", "availableOutgoingBitrate"])
         var next: [String: [String: Double]] = [:]
         var weighted: [String: (Double, Double)] = [:]
         var perID: [String: [String: Any]] = [:]
         let byID = Dictionary(reports.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
-        let selectedID = reports.first(where: { $0.type == "transport" })?.values["selectedCandidatePairId"] as? String
+        let nominated = reports.filter { $0.type == "candidate-pair" && ($0.values["nominated"] as? NSNumber)?.boolValue == true }
+        let selectedID = (reports.first(where: { $0.type == "transport" })?.values["selectedCandidatePairId"] as? String)
+            ?? (nominated.count == 1 ? nominated.first?.id : nil)
         for report in reports {
             guard ["outbound-rtp", "inbound-rtp", "candidate-pair"].contains(report.type) else { continue }
             if report.type == "candidate-pair" {
-                if let selectedID, report.id != selectedID { continue }
-                if selectedID == nil, (report.values["nominated"] as? NSNumber)?.boolValue != true { continue }
-                for (idKey, result) in [("localCandidateId", "localCandidateType"), ("remoteCandidateId", "remoteCandidateType")] {
-                    if let id = report.values[idKey] as? String,
-                       let type = byID[id]?.values["candidateType"] as? String { values[result] = type }
+                guard let selectedID, report.id == selectedID else { continue }
+                for (idKey, prefix) in [("localCandidateId", "localCandidate"), ("remoteCandidateId", "remoteCandidate")] {
+                    guard let id = report.values[idKey] as? String, let candidate = byID[id] else { continue }
+                    values[prefix + "Type"] = ICECandidateDiagnostics.kind(candidate.values["candidateType"] as? String)
+                    if let address = (candidate.values["address"] ?? candidate.values["ip"]) as? String {
+                        values[prefix + "Family"] = ICECandidateDiagnostics.family(address)
+                    }
+                    if prefix == "localCandidate" {
+                        values["candidateProtocol"] = ICECandidateDiagnostics.transport(candidate.values["protocol"] as? String)
+                    }
+                }
+                if let rtt = (report.values["currentRoundTripTime"] as? NSNumber)?.doubleValue, rtt.isFinite, rtt > 0 {
+                    rttFloorMs = min(rttFloorMs ?? rtt * 1000, rtt * 1000)
                 }
             }
             if report.type != "candidate-pair", let kind = (report.values["kind"] ?? report.values["mediaType"]) as? String, kind != "video" { continue }
@@ -238,9 +253,37 @@ final class LatencyStatsCollector: @unchecked Sendable {
         if perID.count == 1, let only = perID.values.first {
             values.merge(only) { old, _ in old }
         }
+        if let rttFloorMs { values["rttFloorMs"] = rttFloorMs }
+        if let captureSize { values["captureWidth"] = captureSize.0; values["captureHeight"] = captureSize.1 }
         previous = next
         latest = values.compactMapValues { ($0 as? NSNumber)?.doubleValue }
         writeLocked(["type": "stats", "time": time, "side": side, "values": values, "reports": perID])
+        lock.unlock()
+    }
+    func recordCaptureSize(width: Int, height: Int) {
+        guard active, width > 0, height > 0 else { return }
+        lock.lock(); captureSize = (width, height); lock.unlock()
+    }
+    func recordEncodedFrameBytes(_ count: Int) {
+        guard active, count > 0 else { return }
+        lock.lock()
+        if encodedWindowStart == nil { encodedWindowStart = ProcessInfo.processInfo.systemUptime }
+        if encodedSizes.count < 512 { encodedSizes.append(count) } else { encodedSizeOverflow = true }
+        lock.unlock()
+    }
+    func flushEncodedFrameSizes(at time: Double) {
+        guard active, time.isFinite else { return }
+        lock.lock()
+        let sorted = encodedSizes.sorted(), overflow = encodedSizeOverflow
+        let start = min(encodedWindowStart ?? time, time)
+        encodedSizes.removeAll(keepingCapacity: true); encodedSizeOverflow = false; encodedWindowStart = time
+        if !sorted.isEmpty {
+            func percentile(_ p: Double) -> Int { sorted[max(0, Int(ceil(Double(sorted.count) * p)) - 1)] }
+            writeLocked(["type": "encoded_frame_sizes", "side": side, "time": time,
+                         "intervalStart": start, "intervalSeconds": time - start,
+                         "count": sorted.count, "p50Bytes": percentile(0.5), "p95Bytes": percentile(0.95),
+                         "maxBytes": sorted.last!, "complete": !overflow])
+        }
         lock.unlock()
     }
     func snapshot() -> [String: Double] { lock.lock(); defer { lock.unlock() }; return latest }
