@@ -81,6 +81,18 @@ private final class ICEConfigContinuationBox<Value>: @unchecked Sendable {
 }
 
 public actor ICEConfigFetcher {
+    private enum Source: String {
+        case cloudKit = "cloudkit"
+        case fallbackUnavailable = "fallback_unavailable"
+        case fallbackEmpty = "fallback_empty_stun"
+        case fallbackFetchFailure = "fallback_fetch_failure"
+    }
+
+    private struct FetchedConfig {
+        let config: ICEConfig
+        let source: Source
+    }
+
     public init(containerIdentifier: String, recordName: String = "default") {
         self.containerIdentifier = containerIdentifier
         self.recordID = CKRecord.ID(recordName: recordName)
@@ -90,10 +102,14 @@ public actor ICEConfigFetcher {
     /// any error so callers always get a usable config. The first
     /// successful fetch in a process lifetime is memoized.
     public func get() async -> ICEConfig {
-        if let cached { return cached }
-        let config = await fetchOrFallback()
-        cached = config
-        return config
+        if let cached {
+            logConfiguration(cached, reused: true)
+            return cached.config
+        }
+        let fetched = await fetchOrFallback()
+        cached = fetched
+        logConfiguration(fetched, reused: false)
+        return fetched.config
     }
 
     /// Clears the cached config so the next `get()` re-fetches from
@@ -109,17 +125,25 @@ public actor ICEConfigFetcher {
     private let containerIdentifier: String
     private let recordID: CKRecord.ID
     private let log = Logger(subsystem: "com.threadmark.remotedesktop.signaling", category: "ice-config")
-    private var cached: ICEConfig?
+    private var cached: FetchedConfig?
     private var container: CKContainer?
     private var database: CKDatabase?
 
-    private func fetchOrFallback() async -> ICEConfig {
+    private func logConfiguration(_ fetched: FetchedConfig, reused: Bool) {
+        let config = fetched.config
+        let usableRelay = !config.turnURLs.isEmpty
+            && !(config.turnUsername ?? "").isEmpty
+            && !(config.turnCredential ?? "").isEmpty
+        log.notice("ICE configuration source=\(fetched.source.rawValue, privacy: .public) cached=\(reused, privacy: .public) stun_count=\(config.stunURLs.count, privacy: .public) turn_count=\(config.turnURLs.count, privacy: .public) usable_relay=\(usableRelay, privacy: .public)")
+    }
+
+    private func fetchOrFallback() async -> FetchedConfig {
         let database: CKDatabase
         do {
             database = try publicDatabase()
         } catch {
             log.info("ICEConfig fetch skipped because CloudKit isn't available (\(String(describing: error), privacy: .public)); using fallback")
-            return .fallback
+            return .init(config: .fallback, source: .fallbackUnavailable)
         }
 
         // Cap the fetch at 3 s. This uses a callback-based CloudKit wrapper
@@ -132,21 +156,21 @@ public actor ICEConfigFetcher {
             let urls = (record["stunURLs"] as? [String]) ?? []
             guard !urls.isEmpty else {
                 log.info("ICEConfig record present but stunURLs empty; using fallback")
-                return .fallback
+                return .init(config: .fallback, source: .fallbackEmpty)
             }
             let turnURLs = (record["turnURLs"] as? [String]) ?? []
             let turnUsername = record["turnUsername"] as? String
             let turnCredential = record["turnCredential"] as? String
             let updatedAt = record["updatedAt"] as? Date
-            return ICEConfig(
+            return .init(config: ICEConfig(
                 stunURLs: urls,
                 turnURLs: turnURLs,
                 turnUsername: turnUsername,
                 turnCredential: turnCredential,
-                updatedAt: updatedAt)
+                updatedAt: updatedAt), source: .cloudKit)
         } catch {
             log.info("ICEConfig fetch failed (\(String(describing: error), privacy: .public)); using fallback")
-            return .fallback
+            return .init(config: .fallback, source: .fallbackFetchFailure)
         }
     }
 
