@@ -7,6 +7,21 @@ import XCTest
 @testable import RemoteDesktopHost
 
 final class ScreenCaptureSizingTests: XCTestCase {
+    #if DEBUG
+    func testLabCaptureCeilingIsStrictOptInAndNeverExceedsCodecLimit() {
+        let limit = HostPeerSession.labCaptureMacroblockLimit
+        XCTAssertEqual(limit(32_768, true, [:]), 32_768)
+        XCTAssertEqual(limit(32_768, false, ["LATENCY_LAB": "1", "LATENCY_CAPTURE_MACROBLOCKS": "3600"]), 32_768)
+        XCTAssertEqual(limit(32_768, true, ["LATENCY_CAPTURE_MACROBLOCKS": "3600"]), 32_768)
+        XCTAssertEqual(limit(32_768, true, ["LATENCY_LAB": "1", "LATENCY_CAPTURE_MACROBLOCKS": "3600"]), 3_600)
+        XCTAssertEqual(limit(32_768, true, ["LATENCY_LAB": "1", "LATENCY_CAPTURE_MACROBLOCKS": "8192"]), 8_192)
+        XCTAssertEqual(limit(1_620, true, ["LATENCY_LAB": "1", "LATENCY_CAPTURE_MACROBLOCKS": "3600"]), 1_620)
+        for invalid in ["", "0", "03600", "-1", "10000"] {
+            XCTAssertEqual(limit(32_768, true, ["LATENCY_LAB": "1", "LATENCY_CAPTURE_MACROBLOCKS": invalid]), 32_768)
+        }
+    }
+    #endif
+
     /// One passive initial-frame observation; no pixels are saved or encoded.
     /// This tests native metadata admission, not stationary recovery or remote presentation.
     func test_optInNativeInitialFrameMetadata() async throws {

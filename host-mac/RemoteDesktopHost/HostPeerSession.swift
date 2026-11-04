@@ -779,20 +779,46 @@ final class HostPeerSession: NSObject {
         return (captureOwner, captureMaximumMacroblocksPerFrame)
     }
 
+    #if DEBUG
+    static func labCaptureMacroblockLimit(negotiated: Int, labInstrumentation: Bool,
+                                         environment: [String: String]) -> Int {
+        guard labInstrumentation, environment["LATENCY_LAB"] == "1",
+              let raw = environment["LATENCY_CAPTURE_MACROBLOCKS"],
+              raw == "3600" || raw == "8192", let requested = Int(raw) else { return negotiated }
+        return min(negotiated, requested)
+    }
+    #endif
+
     private func setCaptureMacroblockLimit(_ limit: Int, framesPerSecond: Int32) throws {
         closeStateLock.lock()
         defer { closeStateLock.unlock() }
         guard !ended else { return }
         #if DEBUG
+        let selectedLimit = Self.labCaptureMacroblockLimit(negotiated: limit,
+            labInstrumentation: labInstrumentation, environment: ProcessInfo.processInfo.environment)
+        // Do not apply an experimental ceiling to an already running stream.
+        if labInstrumentation, ProcessInfo.processInfo.environment["LATENCY_LAB"] == "1",
+           ["3600", "8192"].contains(ProcessInfo.processInfo.environment["LATENCY_CAPTURE_MACROBLOCKS"] ?? ""),
+           captureStartupRequested, captureMaximumMacroblocksPerFrame != selectedLimit {
+            throw NSError(domain: "LatencyLab", code: 2,
+                          userInfo: [NSLocalizedDescriptionKey: "Capture sizing changed. Reconnect to continue."])
+        }
         // Lab handoffs create a fresh peer/capture owner. A subsequent codec
         // renegotiation must not claim new constraints on an existing stream.
         if latencyF2Enabled, captureStartupRequested,
-           captureMaximumMacroblocksPerFrame != limit || captureFramesPerSecond != framesPerSecond {
+           captureMaximumMacroblocksPerFrame != selectedLimit || captureFramesPerSecond != framesPerSecond {
             throw NSError(domain: "LatencyLab", code: 1,
                           userInfo: [NSLocalizedDescriptionKey: "The latency capture policy changed. Reconnect to continue."])
         }
+        if labInstrumentation, ProcessInfo.processInfo.environment["LATENCY_LAB"] == "1",
+           ["3600", "8192"].contains(ProcessInfo.processInfo.environment["LATENCY_CAPTURE_MACROBLOCKS"] ?? "") {
+            latencyStats.trace(["type": "capture_ceiling", "time": ProcessInfo.processInfo.systemUptime,
+                                "negotiatedMacroblocks": limit, "appliedMacroblocks": selectedLimit])
+        }
+        #else
+        let selectedLimit = limit
         #endif
-        captureMaximumMacroblocksPerFrame = limit
+        captureMaximumMacroblocksPerFrame = selectedLimit
         captureFramesPerSecond = framesPerSecond
     }
 
