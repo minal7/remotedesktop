@@ -10,6 +10,47 @@ import UIKit
 @MainActor
 final class RemoteVideoPresentationSurfaceTests: XCTestCase {
     #if DEBUG
+    func testNormalLabRefreshHintRequiresOptInAndStopsWhenNotVisible() {
+        let action = RemoteVideoPresentationSurface.labRefreshHintAction
+        let enabled = ["LATENCY_LAB": "1", "LATENCY_RENDER_HINT_60": "1"]
+        XCTAssertEqual(action(true, true, false, [:]), .stop)
+        XCTAssertEqual(action(true, true, false, ["LATENCY_RENDER_HINT_60": "1"]), .stop)
+        XCTAssertEqual(action(true, true, false, ["LATENCY_LAB": "1", "LATENCY_RENDER_HINT_60": "true"]), .stop)
+        XCTAssertEqual(action(false, true, false, enabled), .stop)
+        XCTAssertEqual(action(true, false, true, enabled), .stop)
+        XCTAssertEqual(action(true, true, false, enabled), .start)
+        XCTAssertEqual(action(true, true, true, enabled), .keep)
+        XCTAssertEqual(action(true, false, false, enabled), .stop)
+    }
+
+    func testNormalLabRefreshLinkIsIdempotentAndRetires() throws {
+        let old = LatencyLabConfiguration.current
+        defer { LatencyLabConfiguration.setRuntime(old) }
+        var config = old; config.f4Renderer = false
+        LatencyLabConfiguration.setRuntime(config)
+        let host = try RemoteKeyboardTestWindow()
+        defer { host.close() }
+        let surface = try XCTUnwrap(RemoteVideoPresentationSurface.make(allowF4: true))
+        surface.setLabRefreshEnvironmentForTesting(["LATENCY_LAB": "1", "LATENCY_RENDER_HINT_60": "1"])
+        surface.view.frame = CGRect(x: 0, y: 0, width: 64, height: 64)
+        try XCTUnwrap(host.window.rootViewController?.view).addSubview(surface.view)
+        surface.configure(mode: .aspectFit, viewport: surface.view.bounds)
+        let first = try XCTUnwrap(surface.labRefreshLinkIdentityForTesting)
+        let range = try XCTUnwrap(surface.labRefreshRangeForTesting)
+        let expected = Float(max(1, min(60, host.window.screen.maximumFramesPerSecond)))
+        XCTAssertEqual(range.minimum, expected)
+        XCTAssertEqual(range.maximum, expected)
+        XCTAssertEqual(range.preferred, expected)
+        surface.configure(mode: .aspectFit, viewport: surface.view.bounds)
+        XCTAssertEqual(surface.labRefreshLinkIdentityForTesting, first)
+        surface.view.isHidden = true
+        XCTAssertNil(surface.labRefreshLinkIdentityForTesting)
+        surface.view.isHidden = false
+        XCTAssertNotNil(surface.labRefreshLinkIdentityForTesting)
+        surface.retire()
+        XCTAssertNil(surface.labRefreshLinkIdentityForTesting)
+    }
+
     /// The coordinator captures the actual Simulator screen during the ready
     /// interval; UIKit snapshots do not reliably include CAMetalLayer pixels.
     func test_optInNV12ColorScreenshot() async throws {

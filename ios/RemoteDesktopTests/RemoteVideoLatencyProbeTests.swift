@@ -56,6 +56,28 @@ final class RemoteVideoLatencyProbeTests: XCTestCase {
             cropWidth: cropWidth, cropHeight: 500, screenWidth: 1000, screenHeight: 500)
     }
 
+    func testMarkerSamplingOffRequiresExplicitLabOptIn() {
+        XCTAssertTrue(RemoteVideoLatencyProbe.markerSamplingEnabled(environment: [:]))
+        XCTAssertTrue(RemoteVideoLatencyProbe.markerSamplingEnabled(environment: ["LATENCY_SKIP_MARKER_SAMPLING": "1"]))
+        XCTAssertTrue(RemoteVideoLatencyProbe.markerSamplingEnabled(environment: ["LATENCY_LAB": "1", "LATENCY_SKIP_MARKER_SAMPLING": "true"]))
+        XCTAssertFalse(RemoteVideoLatencyProbe.markerSamplingEnabled(environment: ["LATENCY_LAB": "1", "LATENCY_SKIP_MARKER_SAMPLING": "1"]))
+    }
+
+    func testRenderRecordIncludesOnlyFiniteOptionalPacingTimes() {
+        let sample = RemoteVideoLatencyProbe().snapshot(decodedAt: 10, marker: 42)
+        sample.acquisitionRequestedTime = 9.99
+        sample.acquisitionReturnedTime = 10.01
+        sample.receiptDeliveryTime = 10.04
+        let record = RemoteVideoLatencyProbe.renderRecord(sample, submitted: 10.02, presented: 10.03)
+        XCTAssertEqual(record["type"] as? String, "render")
+        XCTAssertEqual(record["acquisitionRequestedTime"] as? Double, 9.99)
+        XCTAssertEqual(record["acquisitionReturnedTime"] as? Double, 10.01)
+        XCTAssertEqual(record["receiptDeliveryTime"] as? Double, 10.04)
+        XCTAssertNil(record["marker"])
+        sample.receiptDeliveryTime = .infinity
+        XCTAssertNil(RemoteVideoLatencyProbe.renderRecord(sample, submitted: 10.02, presented: 10.03)["receiptDeliveryTime"])
+    }
+
     func testSamplesCroppedPaddedNV12AndRejectsCorruption() throws {
         let buffer = try makeBuffer()
         try paint(buffer, id: 0x1234)

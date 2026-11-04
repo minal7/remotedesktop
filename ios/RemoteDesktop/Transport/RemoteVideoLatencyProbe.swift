@@ -40,6 +40,7 @@ final class LatencyBatteryMonitoringLease {
 /// Debug probe stores only timestamps and the synthetic counter, never pixels.
 final class RemoteVideoLatencyProbe: @unchecked Sendable {
     static let shared = RemoteVideoLatencyProbe()
+    private static let processMarkerSamplingEnabled = markerSamplingEnabled(environment: ProcessInfo.processInfo.environment)
     private let lock = NSLock()
     final class FrameSample: @unchecked Sendable {
         let session: UUID
@@ -48,6 +49,9 @@ final class RemoteVideoLatencyProbe: @unchecked Sendable {
         let decodeTime: Double
         let marker: Int?
         var submittedTime: Double?
+        var acquisitionRequestedTime: Double?
+        var acquisitionReturnedTime: Double?
+        var receiptDeliveryTime: Double?
         init(session: UUID, collector: LatencyStatsCollector, displayGeneration: UUID, decodeTime: Double, marker: Int?) {
             self.session = session; self.collector = collector; self.displayGeneration = displayGeneration
             self.decodeTime = decodeTime; self.marker = marker
@@ -88,13 +92,18 @@ final class RemoteVideoLatencyProbe: @unchecked Sendable {
         lastMarkerPresentation = nil
     }
 
+    static func markerSamplingEnabled(environment: [String: String]) -> Bool {
+        !(environment["LATENCY_LAB"] == "1" && environment["LATENCY_SKIP_MARKER_SAMPLING"] == "1")
+    }
+
     func capture(_ frame: RTCVideoFrame, decodedAt: Double) -> FrameSample {
         lock.lock()
         let capturedSession = session, capturedCollector = storedCollector
         let generation = displayGeneration, dimensions = displayPoints
         lock.unlock()
         let marker: Int?
-        if LatencyStatsCollector.enabled, frame.rotation.rawValue == 0,
+        if LatencyStatsCollector.enabled, Self.processMarkerSamplingEnabled,
+           frame.rotation.rawValue == 0,
            let native = frame.buffer as? RTCCVPixelBuffer, let (width, height) = dimensions {
             marker = Self.sampleMarker(pixelBuffer: native.pixelBuffer,
                 cropX: Int(native.cropX), cropY: Int(native.cropY),
@@ -139,8 +148,17 @@ final class RemoteVideoLatencyProbe: @unchecked Sendable {
         renderSamples.append((time - sample.decodeTime) * 1000)
         if renderSamples.count > 600 { renderSamples.removeFirst(renderSamples.count - 600) }
         lock.unlock()
-        sample.collector.trace(["type": "render", "decodeTime": sample.decodeTime, "submittedTime": submitted, "presentedTime": time])
+        sample.collector.trace(Self.renderRecord(sample, submitted: submitted, presented: time))
         if let newMarker { sample.collector.trace(["type": "marker", "marker_id": newMarker, "decodeTime": sample.decodeTime, "presentedTime": time]) }
+    }
+
+    static func renderRecord(_ sample: FrameSample, submitted: Double, presented: Double) -> [String: Any] {
+        var record: [String: Any] = ["type": "render", "decodeTime": sample.decodeTime,
+                                     "submittedTime": submitted, "presentedTime": presented]
+        if let value = sample.acquisitionRequestedTime, value.isFinite { record["acquisitionRequestedTime"] = value }
+        if let value = sample.acquisitionReturnedTime, value.isFinite { record["acquisitionReturnedTime"] = value }
+        if let value = sample.receiptDeliveryTime, value.isFinite { record["receiptDeliveryTime"] = value }
+        return record
     }
 
     func renderPercentiles() -> (Double, Double)? {

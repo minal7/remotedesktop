@@ -23,6 +23,12 @@ final class RemoteVideoPresentationSurface: NSObject, RTCVideoRenderer {
     private var f4EventSerial: UInt64 = 0
     private var highRefreshLink: CADisplayLink?
     private let highRefreshTarget = RemoteVideoHighRefreshTarget()
+    private var labRefreshEnvironmentOverride: [String: String]?
+    var labRefreshLinkIdentityForTesting: ObjectIdentifier? { highRefreshLink.map(ObjectIdentifier.init) }
+    var labRefreshRangeForTesting: CAFrameRateRange? { highRefreshLink?.preferredFrameRateRange }
+    func setLabRefreshEnvironmentForTesting(_ environment: [String: String]) {
+        labRefreshEnvironmentOverride = environment
+    }
     #endif
     private var active = true
     private var contentMode: RemoteVideoPresentationProducer.ContentMode = .fill
@@ -73,6 +79,12 @@ final class RemoteVideoPresentationSurface: NSObject, RTCVideoRenderer {
         view.isUserInteractionEnabled = false
         view.onGeometryChange = { [weak self] in self?.refreshLayout() }
         #if DEBUG
+        view.onLabVisibilityChange = { [weak self] in
+            guard let self, self.f4 == nil,
+                  Self.labRefreshHintAction(labAdmitted: self.labInstrumentation, visible: true, hasLink: false,
+                    environment: self.labRefreshEnvironmentOverride ?? ProcessInfo.processInfo.environment) != .stop else { return }
+            self.refreshLayout()
+        }
         if allowF4 && LatencyLabConfiguration.current.f4Renderer {
             guard let renderer = RemoteVideoF4Renderer(layer: view.metalLayer, mailbox: mailbox, notify: { [weak self] serial, event in
                 Task { @MainActor [weak self] in self?.receiveF4(event, serial: serial) }
@@ -123,6 +135,7 @@ final class RemoteVideoPresentationSurface: NSObject, RTCVideoRenderer {
         active = false; layout = nil; layoutWindow = nil; phase = .idle
         #if DEBUG
         stopHighRefresh(); f4?.retire()
+        view.onLabVisibilityChange = nil
         submittedLatency = nil
         #endif
         cancelWaits(); mailbox.replaceContext(nil); producer.retire()
@@ -202,12 +215,29 @@ final class RemoteVideoPresentationSurface: NSObject, RTCVideoRenderer {
         }
     }
 
+    enum LabRefreshHintAction: Equatable { case start, keep, stop }
+
+    static func labRefreshHintAction(labAdmitted: Bool, visible: Bool, hasLink: Bool,
+                                     environment: [String: String]) -> LabRefreshHintAction {
+        guard labAdmitted, visible, environment["LATENCY_LAB"] == "1",
+              environment["LATENCY_RENDER_HINT_60"] == "1" else { return .stop }
+        return hasLink ? .keep : .start
+    }
+
     private func updateHighRefresh(streaming: Bool) {
-        guard streaming, f4 != nil, let screen = view.window?.screen else {
+        guard streaming, let screen = view.window?.screen else {
             stopHighRefresh(); return
         }
-        let maximum = Float(max(1, min(120, screen.maximumFramesPerSecond)))
-        let range = CAFrameRateRange(minimum: min(80, maximum), maximum: maximum, preferred: maximum)
+        let isF4 = f4 != nil
+        if !isF4 {
+            let action = Self.labRefreshHintAction(labAdmitted: labInstrumentation,
+                visible: streaming, hasLink: highRefreshLink != nil,
+                environment: labRefreshEnvironmentOverride ?? ProcessInfo.processInfo.environment)
+            guard action != .stop else { stopHighRefresh(); return }
+        }
+        let maximum = Float(max(1, min(isF4 ? 120 : 60, screen.maximumFramesPerSecond)))
+        let minimum = isF4 ? min(80, maximum) : maximum
+        let range = CAFrameRateRange(minimum: minimum, maximum: maximum, preferred: maximum)
         if let highRefreshLink {
             highRefreshLink.preferredFrameRateRange = range
             return
@@ -232,7 +262,13 @@ final class RemoteVideoPresentationSurface: NSObject, RTCVideoRenderer {
         guard mailbox.hasPending(context: context) else { return }
         ensureDeadline(context)
         let request = UUID(); phase = .acquiring(request)
+        #if DEBUG
+        let acquisitionRequestedTime = CACurrentMediaTime()
+        #endif
         let admitted = RemoteVideoDrawableAcquirer.shared.request(layer: view.metalLayer, size: layout.size) { [weak self] drawable in
+            #if DEBUG
+            let acquisitionReturnedTime = CACurrentMediaTime()
+            #endif
             guard let self, self.isCurrent(context), self.phase == .acquiring(request) else { return }
             self.phase = .idle
             self.refreshLayout()
@@ -241,6 +277,10 @@ final class RemoteVideoPresentationSurface: NSObject, RTCVideoRenderer {
             guard let entry = self.mailbox.takeLatest(context: context) else { return }
             #if DEBUG
             let latency = entry.latency
+            if let latency {
+                latency.acquisitionRequestedTime = acquisitionRequestedTime
+                latency.acquisitionReturnedTime = acquisitionReturnedTime
+            }
             if let latency { self.producer.onLatencySubmit = { latency.submittedTime = CACurrentMediaTime() } }
             else { self.producer.onLatencySubmit = nil }
             #endif
@@ -271,6 +311,9 @@ final class RemoteVideoPresentationSurface: NSObject, RTCVideoRenderer {
     private func received(_ result: RemoteVideoPresentationLedger.Result, frame: UUID,
                           entry: RemoteVideoLatestFrameMailbox<RTCVideoFrame>.Entry, context: UUID) {
         guard isCurrent(context), phase == .submitted(frame) else { return }
+        #if DEBUG
+        let receiptDeliveryTime = CACurrentMediaTime()
+        #endif
         phase = .idle
         // Observe a current failure before refreshing geometry. Otherwise a
         // layout discovered by this callback could transfer the failed image
@@ -288,6 +331,7 @@ final class RemoteVideoPresentationSurface: NSObject, RTCVideoRenderer {
         case .presented(let time), .rendered(let time):
             #if DEBUG
             if case .presented = result, let latency = submittedLatency, latency.frame == frame {
+                latency.sample.receiptDeliveryTime = receiptDeliveryTime
                 RemoteVideoLatencyProbe.shared.presented(latency.sample, time: time)
             }
             submittedLatency = nil
@@ -357,6 +401,7 @@ final class RemoteVideoPresentationSurface: NSObject, RTCVideoRenderer {
         active = false; layout = nil; layoutWindow = nil; phase = .idle
         #if DEBUG
         stopHighRefresh(); f4?.retire()
+        view.onLabVisibilityChange = nil
         submittedLatency = nil
         #endif
         cancelWaits(); mailbox.replaceContext(nil); producer.retire()
@@ -377,6 +422,10 @@ final class RemoteVideoMetalView: UIView {
     override class var layerClass: AnyClass { CAMetalLayer.self }
     var metalLayer: CAMetalLayer { layer as! CAMetalLayer }
     var onGeometryChange: (@MainActor () -> Void)?
+    #if DEBUG
+    var onLabVisibilityChange: (@MainActor () -> Void)?
+    override var isHidden: Bool { didSet { if oldValue != isHidden { onLabVisibilityChange?() } } }
+    #endif
     override func layoutSubviews() { super.layoutSubviews(); onGeometryChange?() }
     override func didMoveToWindow() { super.didMoveToWindow(); onGeometryChange?() }
 }
