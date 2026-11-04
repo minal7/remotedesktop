@@ -184,6 +184,15 @@ final class PatternView: NSView {
     var markerID = 1
     var tick = 0
     let cell: Double
+    // Keep a concrete, immutable font for the fixture. On macOS 27 the
+    // dynamically resolved system monospace font crashed in CoreText during
+    // baseline drawing, before any experimental encoder was enabled.
+    private let headerAttributes: [NSAttributedString.Key: Any] = [
+        .font: NSFont(name: "Menlo-Bold", size: 18) ?? NSFont.monospacedSystemFont(ofSize: 18, weight: .medium),
+        .foregroundColor: NSColor.white]
+    private let textAttributes: [NSAttributedString.Key: Any] = [
+        .font: NSFont(name: "Menlo-Regular", size: 12) ?? NSFont.monospacedSystemFont(ofSize: 12, weight: .regular),
+        .foregroundColor: NSColor.black]
     init(frame: NSRect, cell: Double) { self.cell = cell; super.init(frame: frame) }
     required init?(coder: NSCoder) { fatalError() }
     override var isFlipped: Bool { true }
@@ -194,12 +203,9 @@ final class PatternView: NSView {
             ((word & (UInt32(1) << bit)) == 0 ? NSColor.black : NSColor.white).setFill()
             NSRect(x: 16 + Double(bit) * cell, y: 40, width: cell, height: 40).fill()
         }
-        let attributes: [NSAttributedString.Key: Any] = [.font: NSFont.monospacedSystemFont(ofSize: 18, weight: .medium), .foregroundColor: NSColor.white]
-        ("LOCAL LATENCY PROBE  •  SOURCE  •  \(markerID)" as NSString).draw(at: NSPoint(x: 16, y: 10), withAttributes: attributes)
+        ("LOCAL LATENCY PROBE  •  SOURCE  •  \(markerID)" as NSString).draw(at: NSPoint(x: 16, y: 10), withAttributes: headerAttributes)
         NSColor.white.setFill()
         NSRect(x: 16, y: 230, width: cell * 32, height: 88).fill()
-        let textAttributes: [NSAttributedString.Key: Any] = [
-            .font: NSFont.monospacedSystemFont(ofSize: 12, weight: .regular), .foregroundColor: NSColor.black]
         for (index, text) in ["Finder  Documents  Modified  Size  Kind", "The quick brown fox jumps over the lazy dog.",
                               "let readableText = 1234567890; // Remote Desktop", "Aa Bb Cc Dd Ee Ff Gg Hh Ii Jj Kk Ll Mm Nn"].enumerated() {
             (text as NSString).draw(at: NSPoint(x: 20, y: 234 + index * 20), withAttributes: textAttributes)
