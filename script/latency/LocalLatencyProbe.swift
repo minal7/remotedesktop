@@ -460,9 +460,10 @@ private let f3PacerFieldTrial = "WebRTC-ProbingScreenshareBwe/2.5,2875,80,40,-60
             return f
         }
         func makeSenderFactory() -> LKRTCPeerConnectionFactory {
+            guard f3Pacer else { return factory() }
             // Factory initialization snapshots the global trial. Restore it
             // synchronously before creating the independent receiver factory.
-            LKRTCPeerConnectionFactory.configureFieldTrials(f3Pacer ? f3PacerFieldTrial : nil)
+            LKRTCPeerConnectionFactory.configureFieldTrials(f3PacerFieldTrial)
             defer { LKRTCPeerConnectionFactory.configureFieldTrials(nil) }
             return factory()
         }

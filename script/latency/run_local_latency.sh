@@ -15,7 +15,7 @@ from pathlib import Path
 root, framework_parent = map(Path, sys.argv[1:])
 resolved = json.loads((root / 'host-mac/RemoteDesktopHost.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved').read_text())
 pin = next(p['state'] for p in resolved['pins'] if p['identity'] == 'webrtc-xcframework')
-source_packages = next((p for p in framework_parent.parents if p.name == 'SourcePackages'), None)
+source_packages = next((p for p in framework_parent.parents if (p / 'workspace-state.json').is_file()), None)
 if source_packages is None:
     raise SystemExit('Framework must come from a versioned SourcePackages cache.')
 state = json.loads((source_packages / 'workspace-state.json').read_text())['object']
