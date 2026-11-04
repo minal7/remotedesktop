@@ -17,6 +17,8 @@ final class RemoteVideoPresentationSurface: NSObject, RTCVideoRenderer {
     #if DEBUG
     private var submittedLatency: (frame: UUID, sample: RemoteVideoLatencyProbe.FrameSample)?
     nonisolated private let labInstrumentation: Bool
+    private let labRetryDiagnostics: Bool
+    private var retryTraceGeneration = 0
     #endif
     #if DEBUG
     private var f4: RemoteVideoF4Renderer?
@@ -73,6 +75,8 @@ final class RemoteVideoPresentationSurface: NSObject, RTCVideoRenderer {
         self.view = view; self.producer = producer
         #if DEBUG
         self.labInstrumentation = allowF4
+        self.labRetryDiagnostics = Self.retryDiagnosticsEnabled(labAdmitted: allowF4,
+            environment: ProcessInfo.processInfo.environment)
         #endif
         presentation = RemoteVideoSurfacePresentation(context: producer.contextID)
         super.init()
@@ -168,6 +172,9 @@ final class RemoteVideoPresentationSurface: NSObject, RTCVideoRenderer {
         // or changed-window transitions cannot carry the retained image.
         if !continuous { cancelWaits(); failedAttempts = 0 }
         producer.replaceContext()
+        #if DEBUG
+        if labRetryDiagnostics { retryTraceGeneration = min(retryTraceGeneration + 1, 1_000_000) }
+        #endif
         let context = producer.contextID
         mailbox.replaceContext(next == nil ? nil : context,
                                preservingLatestFrom: continuous ? previousContext : nil,
@@ -254,6 +261,58 @@ final class RemoteVideoPresentationSurface: NSObject, RTCVideoRenderer {
     }
     #endif
 
+    #if DEBUG
+    enum RetryDiagnosticReason: String, CaseIterable {
+        case acquirerRejected = "acquirer_rejected", drawableNil = "drawable_nil"
+        case producerBusy = "producer_busy", producerUnavailable = "producer_unavailable"
+        case preparationFailed = "preparation_failed", encodingFailed = "encoding_failed"
+        case receiptSkipped = "receipt_skipped", receiptFailed = "receipt_failed"
+        case receiptExpired = "receipt_expired", retryScheduled = "retry_scheduled"
+    }
+
+    static func retryDiagnosticsEnabled(labAdmitted: Bool, environment: [String: String]) -> Bool {
+        labAdmitted && environment["LATENCY_LAB"] == "1" && environment["LATENCY_RENDER_DIAGNOSTICS"] == "1"
+    }
+
+    static func retryDiagnosticRecord(reason: RetryDiagnosticReason, time: Double, attempt: Int,
+                                      contextGeneration: Int, acquisitionMs: Double? = nil) -> [String: Any]? {
+        guard time.isFinite, time >= 0, (0...30).contains(attempt),
+              (0...1_000_000).contains(contextGeneration) else { return nil }
+        var record: [String: Any] = ["type": "render_retry", "reason": reason.rawValue,
+            "time": time, "attempt": attempt, "contextGeneration": contextGeneration]
+        if reason == .drawableNil, let acquisitionMs, acquisitionMs.isFinite,
+           acquisitionMs >= 0, acquisitionMs <= 60_000 { record["acquisitionMs"] = acquisitionMs }
+        return record
+    }
+
+    static func retryReason(for admission: RemoteVideoPresentationProducer.Admission) -> RetryDiagnosticReason? {
+        switch admission {
+        case .busy: return .producerBusy
+        case .unavailable: return .producerUnavailable
+        case .preparationFailed: return .preparationFailed
+        case .encodingFailed: return .encodingFailed
+        case .submitted, .unsupportedFrame: return nil
+        }
+    }
+
+    static func retryReason(for result: RemoteVideoPresentationLedger.Result) -> RetryDiagnosticReason? {
+        switch result {
+        case .skipped: return .receiptSkipped
+        case .failed: return .receiptFailed
+        case .expired: return .receiptExpired
+        case .presented, .rendered: return nil
+        }
+    }
+
+    private func traceRetry(_ reason: RetryDiagnosticReason, acquisitionMs: Double? = nil) {
+        guard labRetryDiagnostics,
+              let record = Self.retryDiagnosticRecord(reason: reason, time: CACurrentMediaTime(),
+                  attempt: min(failedAttempts, 30), contextGeneration: retryTraceGeneration,
+                  acquisitionMs: acquisitionMs) else { return }
+        RemoteVideoLatencyProbe.shared.collector.trace(record)
+    }
+    #endif
+
     private func isCurrent(_ context: UUID) -> Bool { active && producer.contextID == context }
 
     private func requestNext() {
@@ -273,7 +332,12 @@ final class RemoteVideoPresentationSurface: NSObject, RTCVideoRenderer {
             self.phase = .idle
             self.refreshLayout()
             guard self.isCurrent(context), self.layout == layout else { return }
-            guard let drawable else { self.retryLater(context); return }
+            guard let drawable else {
+                #if DEBUG
+                self.traceRetry(.drawableNil, acquisitionMs: (acquisitionReturnedTime - acquisitionRequestedTime) * 1000)
+                #endif
+                self.retryLater(context); return
+            }
             guard let entry = self.mailbox.takeLatest(context: context) else { return }
             #if DEBUG
             let latency = entry.latency
@@ -299,13 +363,21 @@ final class RemoteVideoPresentationSurface: NSObject, RTCVideoRenderer {
                 else { self.submittedLatency = nil }
                 #endif
             case .busy, .unavailable, .preparationFailed, .encodingFailed:
+                #if DEBUG
+                if self.labRetryDiagnostics, let reason = Self.retryReason(for: admission) { self.traceRetry(reason) }
+                #endif
                 self.mailbox.restoreUnlessNewer(entry)
                 self.retryLater(context)
             case .unsupportedFrame:
                 self.fail(context, message: "This remote screen format is not supported. Reconnect to try again.", category: .unsupportedFrame)
             }
         }
-        if !admitted { phase = .idle; retryLater(context) }
+        if !admitted {
+            #if DEBUG
+            traceRetry(.acquirerRejected)
+            #endif
+            phase = .idle; retryLater(context)
+        }
     }
 
     private func received(_ result: RemoteVideoPresentationLedger.Result, frame: UUID,
@@ -315,6 +387,9 @@ final class RemoteVideoPresentationSurface: NSObject, RTCVideoRenderer {
         let receiptDeliveryTime = CACurrentMediaTime()
         #endif
         phase = .idle
+        #if DEBUG
+        if labRetryDiagnostics, let reason = Self.retryReason(for: result) { traceRetry(reason) }
+        #endif
         // Observe a current failure before refreshing geometry. Otherwise a
         // layout discovered by this callback could transfer the failed image
         // and suppress the failure as belonging to the replaced context.
@@ -360,6 +435,9 @@ final class RemoteVideoPresentationSurface: NSObject, RTCVideoRenderer {
         guard isCurrent(context) else { return }
         ensureDeadline(context)
         guard retry == nil else { return }
+        #if DEBUG
+        traceRetry(.retryScheduled)
+        #endif
         let id = UUID(); retryID = id
         let retryAt = ContinuousClock.now.advanced(by: .milliseconds(100))
         retry = Task { @MainActor [weak self] in

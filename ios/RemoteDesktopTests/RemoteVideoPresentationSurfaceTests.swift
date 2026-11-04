@@ -10,6 +10,44 @@ import UIKit
 @MainActor
 final class RemoteVideoPresentationSurfaceTests: XCTestCase {
     #if DEBUG
+    func testRetryDiagnosticsRequireExplicitLabAdmissionAndOptIn() {
+        let enabled = ["LATENCY_LAB": "1", "LATENCY_RENDER_DIAGNOSTICS": "1"]
+        XCTAssertTrue(RemoteVideoPresentationSurface.retryDiagnosticsEnabled(labAdmitted: true, environment: enabled))
+        XCTAssertFalse(RemoteVideoPresentationSurface.retryDiagnosticsEnabled(labAdmitted: false, environment: enabled))
+        XCTAssertFalse(RemoteVideoPresentationSurface.retryDiagnosticsEnabled(labAdmitted: true, environment: [:]))
+        XCTAssertFalse(RemoteVideoPresentationSurface.retryDiagnosticsEnabled(labAdmitted: true, environment: ["LATENCY_RENDER_DIAGNOSTICS": "1"]))
+        XCTAssertFalse(RemoteVideoPresentationSurface.retryDiagnosticsEnabled(labAdmitted: true, environment: ["LATENCY_LAB": "1", "LATENCY_RENDER_DIAGNOSTICS": "true"]))
+    }
+
+    func testRetryDiagnosticsMapOnlyFailureReasonsAndBoundValues() throws {
+        typealias Surface = RemoteVideoPresentationSurface
+        XCTAssertEqual(Surface.retryReason(for: RemoteVideoPresentationProducer.Admission.busy), .producerBusy)
+        XCTAssertEqual(Surface.retryReason(for: RemoteVideoPresentationProducer.Admission.unavailable), .producerUnavailable)
+        XCTAssertEqual(Surface.retryReason(for: RemoteVideoPresentationProducer.Admission.preparationFailed), .preparationFailed)
+        XCTAssertEqual(Surface.retryReason(for: RemoteVideoPresentationProducer.Admission.encodingFailed), .encodingFailed)
+        XCTAssertNil(Surface.retryReason(for: RemoteVideoPresentationProducer.Admission.unsupportedFrame))
+        XCTAssertEqual(Surface.retryReason(for: RemoteVideoPresentationLedger.Result.skipped), .receiptSkipped)
+        XCTAssertEqual(Surface.retryReason(for: RemoteVideoPresentationLedger.Result.failed), .receiptFailed)
+        XCTAssertEqual(Surface.retryReason(for: RemoteVideoPresentationLedger.Result.expired), .receiptExpired)
+        XCTAssertNil(Surface.retryReason(for: RemoteVideoPresentationLedger.Result.presented(1)))
+        XCTAssertNil(Surface.retryReason(for: RemoteVideoPresentationLedger.Result.rendered(1)))
+        for reason in Surface.RetryDiagnosticReason.allCases {
+            let record = try XCTUnwrap(Surface.retryDiagnosticRecord(reason: reason, time: 1, attempt: 2,
+                contextGeneration: 3, acquisitionMs: 100))
+            XCTAssertEqual(record["type"] as? String, "render_retry")
+            XCTAssertEqual(record["reason"] as? String, reason.rawValue)
+            XCTAssertEqual(record["acquisitionMs"] as? Double, reason == .drawableNil ? 100 : nil)
+            XCTAssertTrue(Set(record.keys).isSubset(of: ["type", "reason", "time", "attempt", "contextGeneration", "acquisitionMs"]))
+            XCTAssertTrue(JSONSerialization.isValidJSONObject(record))
+        }
+        XCTAssertNil(Surface.retryDiagnosticRecord(reason: .drawableNil, time: .nan, attempt: 0, contextGeneration: 0))
+        XCTAssertNil(Surface.retryDiagnosticRecord(reason: .drawableNil, time: 1, attempt: 31, contextGeneration: 0))
+        XCTAssertNil(Surface.retryDiagnosticRecord(reason: .drawableNil, time: 1, attempt: 0, contextGeneration: -1))
+        let invalidDuration = try XCTUnwrap(Surface.retryDiagnosticRecord(reason: .drawableNil, time: 1,
+            attempt: 0, contextGeneration: 0, acquisitionMs: .infinity))
+        XCTAssertNil(invalidDuration["acquisitionMs"])
+    }
+
     func testNormalLabRefreshHintRequiresOptInAndStopsWhenNotVisible() {
         let action = RemoteVideoPresentationSurface.labRefreshHintAction
         let enabled = ["LATENCY_LAB": "1", "LATENCY_RENDER_HINT_60": "1"]
