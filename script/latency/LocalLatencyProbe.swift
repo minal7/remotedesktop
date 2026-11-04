@@ -27,6 +27,8 @@ final class Measurements: @unchecked Sendable {
     var dimensions = ""
     var adaptedSize = ""
     var receivedFrames = 0
+    var firstNativeTimestampsNs: [Int64] = []
+    var zeroNativeTimestampFrames = 0
     var observationFrames = 0
     var invalidSource = 0
     var invalidMirror = 0
@@ -230,6 +232,8 @@ final class DecoderProbe: NSObject, LKRTCVideoRenderer {
         guard let frame else { return }
         records.withLock {
             records.receivedFrames += 1
+            if records.firstNativeTimestampsNs.count < 8 { records.firstNativeTimestampsNs.append(frame.timeStampNs) }
+            if frame.timeStampNs == 0 { records.zeroNativeTimestampFrames += 1 }
             records.dimensions = "\(frame.width)x\(frame.height)"
         }
         guard frame.rotation == ._0 else { return }
@@ -252,6 +256,27 @@ final class DecoderProbe: NSObject, LKRTCVideoRenderer {
             records.decodedText = text
             if let id, records.decoded[id] == nil { records.decoded[id] = t }
         }
+    }
+}
+
+/// Only the display sink needs distinct timestamps for its duplicate check.
+/// DecoderProbe continues to receive the original frame and timestamps.
+final class DisplayTimestampAdapter: NSObject, LKRTCVideoRenderer {
+    private let view: LKRTCMTLVideoView
+    private let lock = NSLock()
+    private var previousNs: Int64 = 0
+
+    init(_ view: LKRTCMTLVideoView) { self.view = view }
+    func setSize(_ size: CGSize) { view.setSize(size) }
+    func renderFrame(_ frame: LKRTCVideoFrame?) {
+        guard let frame else { return }
+        lock.lock(); defer { lock.unlock() }
+        let clock = Int64(clamping: DispatchTime.now().uptimeNanoseconds)
+        let stamp = max(previousNs + 1, clock)
+        previousNs = stamp
+        let displayFrame = LKRTCVideoFrame(buffer: frame.buffer, rotation: frame.rotation, timeStampNs: stamp)
+        displayFrame.timeStamp = frame.timeStamp
+        view.renderFrame(displayFrame)
     }
 }
 
@@ -386,6 +411,7 @@ private let f3PacerFieldTrial = "WebRTC-ProbingScreenshareBwe/2.5,2875,80,40,-60
     let capture = ScreenCapture()
     var observer: DisplayProbe?
     var sink: DecoderProbe?
+    var displayAdapter: DisplayTimestampAdapter?
     var senderFactory: LKRTCPeerConnectionFactory?
     var receiverFactory: LKRTCPeerConnectionFactory?
     var sender: LKRTCPeerConnection?
@@ -492,7 +518,8 @@ private let f3PacerFieldTrial = "WebRTC-ProbingScreenshareBwe/2.5,2875,80,40,-60
         let receive = rf.peerConnection(with: config, constraints: constraints, delegate: receiveDelegate)!
         sender = send; receiver = receive; sendDelegate.other = receive; receiveDelegate.other = send
         let sink = DecoderProbe(records, geometry); self.sink = sink
-        receiveDelegate.onTrack = { track in track.add(video); track.add(sink) }
+        let adapter = DisplayTimestampAdapter(video); self.displayAdapter = adapter
+        receiveDelegate.onTrack = { track in track.add(adapter); track.add(sink) }
         let ti = LKRTCRtpTransceiverInit(); ti.direction = .recvOnly
         receive.addTransceiver(of: .video, init: ti)
         let offer = try await describe(receive, offer: true)
@@ -617,6 +644,9 @@ private let f3PacerFieldTrial = "WebRTC-ProbingScreenshareBwe/2.5,2875,80,40,-60
         await polling.value
         senderTrace.flush(); receiverTrace.flush()
         await capture.stop(); try await observer.stream?.stopCapture()
+        receiveDelegate.onTrack = nil
+        receiveDelegate.track?.remove(adapter)
+        receiveDelegate.track?.remove(sink)
         send.close(); receive.close()
         var result: [String: Any] = records.withLock {
             let ids = records.sourceSeen.keys.filter { $0 >= records.firstID && $0 <= lastID && records.sourceSeen[$0]! >= records.start && records.sourceSeen[$0]! <= records.end }.sorted()
@@ -639,6 +669,9 @@ private let f3PacerFieldTrial = "WebRTC-ProbingScreenshareBwe/2.5,2875,80,40,-60
         result["sender_field_trial_effective"] = "unverified"
         result["receiver_field_trial"] = configuredF1Trial
         result["receiver_field_trial_effective"] = "unverified"
+        result["display_timestamp_adapter"] = "all_arms_monotonic_display_only"
+        result["first_native_timestamps_ns"] = records.withLock { records.firstNativeTimestampsNs }
+        result["zero_native_timestamp_frames"] = records.withLock { records.zeroNativeTimestampFrames }
         result["measurement_start_s"] = records.withLock { records.start }
         result["measurement_end_s"] = records.withLock { records.end }
         result["native_text_ssim"] = nativeTextSSIM as Any? ?? NSNull()
@@ -651,7 +684,7 @@ private let f3PacerFieldTrial = "WebRTC-ProbingScreenshareBwe/2.5,2875,80,40,-60
         print("RESULT \(output)")
         print("SUMMARY \(result.filter { ["compositor_to_compositor", "capture_pts_to_decode_callback", "decode_callback_to_viewer_compositor", "observer_complete_frame_intervals", "video_size", "source_marker_count", "viewer_marker_count"].contains($0.key) })")
         windows.forEach { $0.close() }; windows.removeAll()
-        self.sender = nil; self.receiver = nil; self.sink = nil; self.observer = nil
+        self.sender = nil; self.receiver = nil; self.sink = nil; self.displayAdapter = nil; self.observer = nil
         videoSource = nil; self.capturer = nil
         senderFactory = nil; receiverFactory = nil
     }
