@@ -98,7 +98,10 @@ final class EODSafetyTaskLiveE2ETests: XCTestCase {
         let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
         let springboardCount = springboard.alerts.count
         let appCount = app.alerts.count
-        if springboardCount > 0 || appCount > 0 {
+        let unexpectedAppAlert = (0..<appCount).contains { index in
+            app.alerts.element(boundBy: index).identifier != "computer-use-approval-card"
+        }
+        if springboardCount > 0 || unexpectedAppAlert {
             attachDiagnostics(named: "alert-\(context)") {
                 var details = "springboard.alerts.count=\(springboardCount)\napp.alerts.count=\(appCount)"
                 for index in 0..<springboardCount {
