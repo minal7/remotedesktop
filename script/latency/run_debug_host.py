@@ -138,10 +138,10 @@ def guarded_run(args):
             # Popen owns this exact child; never signal a discovered PID.
             child.terminate()
             try:
-                # qa_guard allows three seconds after SIGINT, then another
-                # three after SIGTERM. Its second signal is also handled by
-                # this wrapper, leaving time for the host's async teardown.
-                code = child.wait(timeout=5.5)
+                # A normal streamed session also awaits CloudKit cleanup.
+                # Release QA still has qa_guard's six-second hard stop; its
+                # second signal is handled while this wait is in progress.
+                code = child.wait(timeout=5.5 if args.qa_flag.exists() else 30)
                 write_state(state, status='stopped', pid=child.pid, returncode=code, reason=reason, host_id=host_id)
                 return 75 if reason == 'qa' else (128 + pending if pending else 0)
             except subprocess.TimeoutExpired:
@@ -152,7 +152,7 @@ def guarded_run(args):
         if child is not None and child.poll() is None:
             child.terminate()
             try:
-                child.wait(timeout=5.5)
+                child.wait(timeout=5.5 if args.qa_flag.exists() else 30)
             except subprocess.TimeoutExpired:
                 child.kill(); child.wait()
         for sig, handler in old_handlers.items():

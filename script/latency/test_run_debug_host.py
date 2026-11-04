@@ -86,7 +86,7 @@ class DebugHostLauncherTests(unittest.TestCase):
              patch.object(runner.subprocess, 'Popen', side_effect=spawn):
             self.assertEqual(runner.guarded_run(self.args), 128 + signal.SIGINT)
         child.terminate.assert_called_once_with()
-        child.wait.assert_called_once_with(timeout=5.5)
+        child.wait.assert_called_once_with(timeout=30)
         state = json.loads((self.args.output / 'state.json').read_text())
         self.assertEqual((state['status'], state['pid'], state['reason']), ('stopped', 12345, 'signal'))
 
