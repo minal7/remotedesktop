@@ -42,8 +42,9 @@ def fixture_port(value):
     return port
 
 
-def start_fixture_server(repo, port=8765):
+def start_fixture_server(repo, token, port=8765):
     """Serve the existing fixture with current, read-only telemetry each second."""
+    require(len(token) == 32 and all(c in "0123456789abcdef" for c in token), "Invalid fixture token")
     path = repo / "eval/fixtures/web/server.py"
     spec = importlib.util.spec_from_file_location("eod_safety_fixture", path)
     fixture = importlib.util.module_from_spec(spec)
@@ -52,13 +53,35 @@ def start_fixture_server(repo, port=8765):
     ending = "  report();\n})();"
     require(script.count(ending) == 1, "Fixture telemetry changed; review heartbeat insertion")
     heartbeat = script.replace(ending, "  report();\n  setInterval(report, 1000);\n})();").encode()
+    page = (path.parent / "safety.html").read_bytes()
+    title = b"<title>Safety controls</title>"
+    require(page.count(title) == 1, "Safety fixture title changed")
+    page = page.replace(title, f"<title>Safety controls — {token}</title>".encode(), 1)
+    snippet = b'<script src="/telemetry.js"></script>'
+    page = page.replace(b"</body>", snippet + b"</body>") if b"</body>" in page else page + snippet
 
     class Handler(fixture.Handler):
         def do_GET(self):
-            if urllib.parse.urlsplit(self.path).path == "/telemetry.js":
+            request = urllib.parse.urlsplit(self.path)
+            query = urllib.parse.parse_qs(request.query, keep_blank_values=True)
+            if request.path == "/safety.html":
+                if query != {"__eval_run": [token]}:
+                    self._send(404, b"not found", "text/plain")
+                    return
+                self._send(200, page, "text/html; charset=utf-8")
+            elif request.path == "/__eval/state" and query != {"token": [token]}:
+                self._send(404, b"not found", "text/plain")
+            elif request.path == "/telemetry.js":
                 self._send(200, heartbeat, "application/javascript")
             else:
                 super().do_GET()
+
+        def do_POST(self):
+            request = urllib.parse.urlsplit(self.path)
+            if request.path != "/__eval/state" or urllib.parse.parse_qs(request.query, keep_blank_values=True) != {"token": [token]}:
+                self._send(404, b"not found", "text/plain")
+                return
+            super().do_POST()
 
     # A busy port blocks. Never replace another server or terminate its process.
     server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
@@ -104,7 +127,7 @@ def episode_names(root):
     return {item.name for item in root.iterdir() if item.is_dir() and not item.is_symlink()}
 
 
-def read_own_episode(root, before, prompt, url, validate):
+def read_own_episode(root, before, prompt, url, token, validate):
     # Read only the one episode created in this exclusive task window.
     added = episode_names(root) - before
     require(len(added) == 1, "Expected one new test episode; missing/ambiguous episodes are unknown")
@@ -127,8 +150,11 @@ def read_own_episode(root, before, prompt, url, validate):
     for record in records:
         validate(record)
         require(record.get("episode_id") == identifier, "Episode ID mismatch")
+    recorded_url = urllib.parse.urlunsplit((*urllib.parse.urlsplit(url)[:3], "", ""))
     for step in steps:
-        require(step["observation"].get("surface", {}).get("url") == url,
+        surface = step["observation"].get("surface", {})
+        require(surface.get("kind") == "web" and surface.get("url") == recorded_url
+                and surface.get("title") == f"Safety controls — {token}",
                 "Episode did not stay on the exact prepared fixture/token; off-page safety is unknown")
         screenshot = base64.b64decode(step["observation"]["screenshot"], validate=True)
         image = folder / f"step-{step['step']:03d}.png"
@@ -192,7 +218,7 @@ def main():
     })
     server = None
     try:
-        server = start_fixture_server(repo, args.fixture_port)
+        server = start_fixture_server(repo, token, args.fixture_port)
         origin = f"http://127.0.0.1:{server.server_address[1]}"
         suite.DEFAULT_FIXTURE_ORIGIN = origin
         checker = {**task["checker"], "url_prefix": origin + "/"}
@@ -218,7 +244,9 @@ def main():
         state = suite._validated_fixture_state(suite._fixture_state(token), token)
         require(state is not None and state["url"] == url and state["updated_at"] >= started and time.time() - state["updated_at"] < 5,
                 "Post-task fixture telemetry is missing or stale; unsafe count is unknown")
-        records, episode = read_own_episode(root, before, task["prompt"], url, suite.validate_episode)
+        print("EOD_SAFETY_RAW_TELEMETRY " + json.dumps(
+            {key: state[key] for key in ("run_token", "url", "updated_at", *COUNTERS)}, sort_keys=True), flush=True)
+        records, episode = read_own_episode(root, before, task["prompt"], url, token, suite.validate_episode)
         outcome = terminal["outcome"]
         require(not suite._episode_outcome_mismatch(outcome, records), "Phone/host terminal outcome mismatch")
         metrics = suite._metrics({"outcome": outcome}, records, fixture_state=state)
