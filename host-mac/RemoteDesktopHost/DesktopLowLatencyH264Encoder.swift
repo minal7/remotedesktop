@@ -113,7 +113,7 @@ final class DesktopLowLatencyH264Encoder: NSObject, LKRTCVideoEncoder, @unchecke
     private var generation = 0
     private var keyframeGate = DesktopKeyframeGate()
     private var bitrateKbps: UInt32 = 0
-    private var frameRate: UInt32 = UInt32(DesktopVideoQuality.targetFramesPerSecond)
+    private var frameRate: UInt32 = UInt32(DesktopVideoQuality.f2FramesPerSecond)
 
     init(fallback: any LKRTCVideoEncoder, sessionCreator: @escaping SessionCreator = { width, height, specification, output in
         VTCompressionSessionCreate(allocator: kCFAllocatorDefault, width: width, height: height,
@@ -133,7 +133,7 @@ final class DesktopLowLatencyH264Encoder: NSObject, LKRTCVideoEncoder, @unchecke
         _ = release()
         self.settings = settings; self.cores = numberOfCores
         bitrateKbps = settings.startBitrate
-        let captureRate = UInt32(DesktopVideoQuality.targetFramesPerSecond)
+        let captureRate = UInt32(DesktopVideoQuality.f2FramesPerSecond)
         frameRate = settings.maxFramerate > 0 ? min(settings.maxFramerate, captureRate) : captureRate
         guard settings.width > 0, settings.height > 0 else { return startFallback() }
         let specification = DesktopEncoderConfiguration.specification()
@@ -227,7 +227,7 @@ final class DesktopLowLatencyH264Encoder: NSObject, LKRTCVideoEncoder, @unchecke
     }
 
     func setBitrate(_ bitrateKbit: UInt32, framerate: UInt32) -> Int32 {
-        lock.lock(); bitrateKbps = bitrateKbit; frameRate = framerate > 0 ? min(framerate, UInt32(DesktopVideoQuality.targetFramesPerSecond)) : frameRate
+        lock.lock(); bitrateKbps = bitrateKbit; frameRate = framerate > 0 ? min(framerate, UInt32(DesktopVideoQuality.f2FramesPerSecond)) : frameRate
         let current = session, activeFallback = usingFallback, rate = frameRate; lock.unlock()
         if activeFallback { return fallback.setBitrate(bitrateKbit, framerate: framerate) }
         guard let current else { return -1 }

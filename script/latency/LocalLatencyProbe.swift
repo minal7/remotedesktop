@@ -448,7 +448,7 @@ private let f3PacerFieldTrial = "WebRTC-ProbingScreenshareBwe/2.5,2875,80,40,-60
                     }
                     records = Measurements()
                     sendDelegate = PeerDelegate(); receiveDelegate = PeerDelegate()
-                    try await runTrial(f3Pacer: fix == "F3Pacer" && enabled, f1Receiver: fix == "F1" && enabled)
+                    try await runTrial(f3Pacer: fix == "F3Pacer" && enabled)
                     paths.append(output)
                 }
             }
@@ -462,8 +462,9 @@ private let f3PacerFieldTrial = "WebRTC-ProbingScreenshareBwe/2.5,2875,80,40,-60
         }
         NSApp.terminate(nil)
     }
-    func runTrial(f3Pacer: Bool = false, f1Receiver: Bool = false) async throws {
+    func runTrial(f3Pacer: Bool = false) async throws {
         let lab = LatencyLabConfiguration.current
+        let f1Receiver = lab.f1Playout
         let configuredTrial: Any = f3Pacer ? (f3PacerFieldTrial as Any) : NSNull()
         let f1Trial = "WebRTC-ForcePlayoutDelay/min_ms:0,max_ms:\(lab.f1MaximumDelayMs)/"
         let configuredF1Trial: Any = f1Receiver ? (f1Trial as Any) : NSNull()

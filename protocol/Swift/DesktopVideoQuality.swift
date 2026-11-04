@@ -8,6 +8,8 @@ import LiveKitWebRTC
 /// a constrained link stays responsive instead of building a stale-frame queue.
 enum DesktopVideoQuality {
     static let targetFramesPerSecond = 30
+    static let f2FramesPerSecond = 60
+    static let f2MaximumMacroblocksPerFrame = 16_384
     static let maximumBitrateBps = 30_000_000
     static let maximumBitrateKbps = maximumBitrateBps / 1_000
     static let captureQueueDepth = 3
@@ -35,8 +37,7 @@ enum DesktopVideoQuality {
             profileLevelID?.lowercased() == "640c33" && packetizationMode == "1"
     }
 
-    /// F2 changes only the encoder. Capture keeps the negotiated size limit
-    /// and the established 30 fps; legacy and software peers stay unchanged.
+    /// F2 uses a level-5.1-safe size at 60 fps; legacy and software peers stay unchanged.
     static func capturePolicy(negotiatedCodecs: [LKRTCRtpCodecParameters], f2Requested: Bool) -> CapturePolicy {
         let current = maximumMacroblocksPerFrame(negotiatedCodecs: negotiatedCodecs)
         let codec = negotiatedCodecs.first(where: {
@@ -56,12 +57,17 @@ enum DesktopVideoQuality {
             return CapturePolicy(framesPerSecond: Int32(targetFramesPerSecond),
                                  maximumMacroblocksPerFrame: currentLimit, lowLatencyEncoder: false)
         }
-        return CapturePolicy(framesPerSecond: Int32(targetFramesPerSecond),
-                             maximumMacroblocksPerFrame: currentLimit, lowLatencyEncoder: true)
+        return CapturePolicy(framesPerSecond: Int32(f2FramesPerSecond),
+                             maximumMacroblocksPerFrame: min(currentLimit, f2MaximumMacroblocksPerFrame),
+                             lowLatencyEncoder: true)
         #else
         return CapturePolicy(framesPerSecond: Int32(targetFramesPerSecond),
                              maximumMacroblocksPerFrame: currentLimit, lowLatencyEncoder: false)
         #endif
+    }
+
+    static func senderFrameRate(policyRate: Int, captureRate: Int32, isDefault: Bool) -> Int {
+        isDefault && captureRate == Int32(f2FramesPerSecond) ? f2FramesPerSecond : policyRate
     }
 
     struct SenderPolicy: Equatable {

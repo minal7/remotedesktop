@@ -13,7 +13,7 @@ final class DesktopLowLatencyH264EncoderTests: XCTestCase {
         settings.width = 1280; settings.height = 720; settings.startBitrate = 8_000; settings.maxFramerate = 60
         XCTAssertEqual(encoder.startEncode(with: settings, numberOfCores: 2), 0)
         XCTAssertEqual(fallback.startCount, 1)
-        XCTAssertEqual(fallback.bitrates.last?.1, 30)
+        XCTAssertEqual(fallback.bitrates.last?.1, 60)
         XCTAssertEqual(encoder.implementationName(), "test stock fallback")
         XCTAssertEqual(encoder.setBitrate(6_000, framerate: 30), 0)
         XCTAssertEqual(fallback.bitrates.last?.0, 6_000)
