@@ -253,17 +253,28 @@ final class DesktopVideoEncoderFactory: NSObject, LKRTCVideoEncoderFactory {
     private let f2Enabled: Bool
     #if DEBUG && os(macOS)
     private let frameByteObserver: ((Int) -> Void)?
+    private let keyframeControl: LatencyKeyframeControl?
     #endif
 
     init(f2Enabled: Bool = false, frameByteObserver: ((Int) -> Void)? = nil) {
         #if DEBUG && os(macOS)
         self.f2Enabled = f2Enabled
         self.frameByteObserver = frameByteObserver
+        self.keyframeControl = nil
         #else
         self.f2Enabled = false
         #endif
         super.init()
     }
+
+    #if DEBUG && os(macOS)
+    init(f2Enabled: Bool, frameByteObserver: ((Int) -> Void)?, keyframeControl: LatencyKeyframeControl?) {
+        self.f2Enabled = f2Enabled
+        self.frameByteObserver = frameByteObserver
+        self.keyframeControl = keyframeControl
+        super.init()
+    }
+    #endif
 
     func createEncoder(
         _ info: LKRTCVideoCodecInfo
@@ -278,11 +289,11 @@ final class DesktopVideoEncoderFactory: NSObject, LKRTCVideoEncoderFactory {
         } else { encoder = native }
         // WebRTC unwraps native software encoders by concrete class; wrapping
         // one would change its adapter path. Observe only the validated ObjC H.264 encoder.
-        if !f2Enabled, info.name.uppercased() == "H264", let frameByteObserver,
+        if !f2Enabled, info.name.uppercased() == "H264", (frameByteObserver != nil || keyframeControl != nil),
            let object = encoder as? NSObject,
            NSStringFromClass(type(of: object)).hasSuffix("RTCVideoEncoderH264"),
            !object.responds(to: NSSelectorFromString("build:")) {
-            return LatencyObservedVideoEncoder(base: encoder, observe: frameByteObserver)
+            return LatencyObservedVideoEncoder(base: encoder, observe: frameByteObserver ?? { _ in }, control: keyframeControl)
         }
         return encoder
         #else
@@ -296,27 +307,152 @@ final class DesktopVideoEncoderFactory: NSObject, LKRTCVideoEncoderFactory {
 }
 
 #if DEBUG && os(macOS)
-/// Observes only encoded byte counts; forwards the same callback and encoder API.
+/// A peer-local request latch. The event sink must enqueue only and must not
+/// synchronously call this control; it is invoked while generation state is locked.
+final class LatencyKeyframeControl: @unchecked Sendable {
+    enum RequestResult: String { case accepted, coalesced, unavailable }
+    enum Event: String { case delivered, encodeFailed, observed }
+    private struct Flight { var accepted = false; var observed = false }
+    private let lock = NSLock()
+    private let event: @Sendable (Event) -> Void
+    private var generation: UInt64 = 0
+    private var active = false
+    private var closed = false
+    private var pending = false
+    private var flights: [UInt32: Flight] = [:]
+    private var order: [UInt32] = []
+
+    init(event: @escaping @Sendable (Event) -> Void) { self.event = event }
+
+    func requestKeyframe() -> RequestResult {
+        lock.lock(); defer { lock.unlock() }
+        guard !closed, active else { return .unavailable }
+        guard !pending else { return .coalesced }
+        pending = true
+        return .accepted
+    }
+
+    func invalidate() {
+        lock.lock(); defer { lock.unlock() }
+        closed = true; active = false; pending = false; flights.removeAll(); order.removeAll()
+    }
+
+    fileprivate func beginEncoder() -> UInt64? {
+        lock.lock(); defer { lock.unlock() }
+        guard !closed else { return nil }
+        generation &+= 1
+        if generation == 0 { generation = 1 }
+        active = false; pending = false; flights.removeAll(); order.removeAll()
+        return generation
+    }
+    fileprivate func finishStart(_ token: UInt64?, succeeded: Bool) {
+        lock.lock(); defer { lock.unlock() }
+        guard let token, !closed, token == generation else { return }
+        active = succeeded
+    }
+    fileprivate func releaseEncoder(_ token: UInt64?) {
+        lock.lock(); defer { lock.unlock() }
+        guard let token, !closed, token == generation else { return }
+        active = false; pending = false; flights.removeAll(); order.removeAll()
+    }
+    fileprivate func takeRequest(_ token: UInt64?, timestamp: UInt32) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard let token, !closed, active, token == generation, pending,
+              flights[timestamp] == nil else { return false }
+        pending = false
+        order.append(timestamp)
+        flights[timestamp] = Flight()
+        if order.count > 8 { flights.removeValue(forKey: order.removeFirst()) }
+        return true
+    }
+    fileprivate func finishEncode(_ token: UInt64?, timestamp: UInt32, succeeded: Bool) {
+        lock.lock(); defer { lock.unlock() }
+        guard let token, !closed, active, token == generation, var flight = flights[timestamp] else { return }
+        if succeeded {
+            flight.accepted = true
+            event(.delivered)
+            if flight.observed {
+                flights.removeValue(forKey: timestamp); order.removeAll { $0 == timestamp }
+                event(.observed)
+            } else { flights[timestamp] = flight }
+        } else {
+            flights.removeValue(forKey: timestamp); order.removeAll { $0 == timestamp }
+            pending = true
+            event(.encodeFailed)
+        }
+    }
+    fileprivate func observe(_ token: UInt64?, timestamp: UInt32, isKeyframe: Bool) {
+        guard isKeyframe else { return }
+        lock.lock(); defer { lock.unlock() }
+        guard let token, !closed, active, token == generation, var flight = flights[timestamp] else { return }
+        if flight.accepted {
+            flights.removeValue(forKey: timestamp); order.removeAll { $0 == timestamp }
+            event(.observed)
+        } else { flight.observed = true; flights[timestamp] = flight }
+    }
+}
+
+/// Observes encoded byte counts and optionally forwards one peer-local request.
 final class LatencyObservedVideoEncoder: NSObject, LKRTCVideoEncoder {
     private let base: any LKRTCVideoEncoder
     private let observe: (Int) -> Void
-    init(base: any LKRTCVideoEncoder, observe: @escaping (Int) -> Void) {
-        self.base = base; self.observe = observe; super.init()
+    private let control: LatencyKeyframeControl?
+    private let stateLock = NSLock()
+    private var generation: UInt64?
+    private var callback: RTCVideoEncoderCallback?
+    init(base: any LKRTCVideoEncoder, observe: @escaping (Int) -> Void, control: LatencyKeyframeControl?) {
+        self.base = base; self.observe = observe; self.control = control; super.init()
     }
-    func setCallback(_ callback: RTCVideoEncoderCallback?) {
+    convenience init(base: any LKRTCVideoEncoder, observe: @escaping (Int) -> Void) {
+        self.init(base: base, observe: observe, control: nil)
+    }
+    private func installCallback(_ callback: RTCVideoEncoderCallback?, generation: UInt64?) {
         guard let callback else { base.setCallback(nil); return }
-        let observe = self.observe
+        let observe = self.observe, control = self.control
         base.setCallback { frame, info in
             observe(frame.buffer.count)
+            control?.observe(generation, timestamp: frame.timeStamp, isKeyframe: frame.frameType.rawValue == 3)
             return callback(frame, info)
         }
     }
-    func startEncode(with settings: LKRTCVideoEncoderSettings, numberOfCores: Int32) -> Int {
-        base.startEncode(with: settings, numberOfCores: numberOfCores)
+    func setCallback(_ callback: RTCVideoEncoderCallback?) {
+        if control == nil {
+            guard let callback else { base.setCallback(nil); return }
+            let observe = self.observe
+            base.setCallback { frame, info in
+                observe(frame.buffer.count)
+                return callback(frame, info)
+            }
+            return
+        }
+        stateLock.lock(); self.callback = callback; let token = generation; stateLock.unlock()
+        installCallback(callback, generation: token)
     }
-    func release() -> Int { base.release() }
+    func startEncode(with settings: LKRTCVideoEncoderSettings, numberOfCores: Int32) -> Int {
+        guard let control else { return base.startEncode(with: settings, numberOfCores: numberOfCores) }
+        let token = control.beginEncoder()
+        stateLock.lock(); generation = token; let callback = self.callback; stateLock.unlock()
+        installCallback(callback, generation: token)
+        let result = base.startEncode(with: settings, numberOfCores: numberOfCores)
+        control.finishStart(token, succeeded: result == 0)
+        return result
+    }
+    func release() -> Int {
+        guard let control else { return base.release() }
+        stateLock.lock(); let token = generation; generation = nil; stateLock.unlock()
+        control.releaseEncoder(token)
+        return base.release()
+    }
     func encode(_ frame: LKRTCVideoFrame, codecSpecificInfo: (any LKRTCCodecSpecificInfo)?, frameTypes: [NSNumber]) -> Int {
-        base.encode(frame, codecSpecificInfo: codecSpecificInfo, frameTypes: frameTypes)
+        guard let control else { return base.encode(frame, codecSpecificInfo: codecSpecificInfo, frameTypes: frameTypes) }
+        stateLock.lock(); let token = generation; stateLock.unlock()
+        let timestamp = UInt32(bitPattern: frame.timeStamp)
+        let force = control.takeRequest(token, timestamp: timestamp)
+        let requested = force && !frameTypes.contains(where: { $0.uintValue == 3 })
+            ? frameTypes + [NSNumber(value: 3)] : frameTypes
+        let result = base.encode(frame, codecSpecificInfo: codecSpecificInfo, frameTypes: requested)
+        if force { control.finishEncode(token, timestamp: timestamp, succeeded: result == 0) }
+        return result
     }
     func setBitrate(_ bitrateKbit: UInt32, framerate: UInt32) -> Int32 { base.setBitrate(bitrateKbit, framerate: framerate) }
     func implementationName() -> String { base.implementationName() }

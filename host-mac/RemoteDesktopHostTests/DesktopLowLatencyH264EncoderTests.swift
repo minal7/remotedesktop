@@ -1,11 +1,107 @@
 #if DEBUG
 import Foundation
+import CoreVideo
 import LiveKitWebRTC
 import VideoToolbox
 import XCTest
 @testable import RemoteDesktopHost
 
 final class DesktopLowLatencyH264EncoderTests: XCTestCase {
+    private func encoderFrame(_ timestamp: Int32) throws -> LKRTCVideoFrame {
+        var pixel: CVPixelBuffer?
+        XCTAssertEqual(CVPixelBufferCreate(kCFAllocatorDefault, 16, 16, kCVPixelFormatType_32BGRA, nil, &pixel), kCVReturnSuccess)
+        let frame = LKRTCVideoFrame(buffer: LKRTCCVPixelBuffer(pixelBuffer: try XCTUnwrap(pixel)), rotation: ._0, timeStampNs: 1)
+        frame.timeStamp = timestamp
+        return frame
+    }
+
+    private func emit(_ callback: RTCVideoEncoderCallback, timestamp: UInt32, keyframe: Bool) {
+        let image = LKRTCEncodedImage(); image.buffer = Data([1, 2]); image.timeStamp = timestamp
+        image.frameType = LKRTCFrameType(rawValue: keyframe ? 3 : 4)!
+        _ = callback(image, LKRTCCodecSpecificInfoH264())
+    }
+
+    func testKeyframeControlCoalescesAndConfirmsOnlyMatchingKeyOutput() throws {
+        let events = EncoderTestEvents(), base = RecordingFallbackEncoder()
+        let control = LatencyKeyframeControl { events.append($0) }
+        let wrapper = LatencyObservedVideoEncoder(base: base, observe: { _ in }, control: control)
+        XCTAssertEqual(control.requestKeyframe(), .unavailable)
+        wrapper.setCallback { _, _ in true }
+        XCTAssertEqual(wrapper.startEncode(with: LKRTCVideoEncoderSettings(), numberOfCores: 1), 0)
+        XCTAssertEqual(control.requestKeyframe(), .accepted); XCTAssertEqual(control.requestKeyframe(), .coalesced)
+        XCTAssertEqual(wrapper.encode(try encoderFrame(101), codecSpecificInfo: nil, frameTypes: [4]), 0)
+        XCTAssertEqual(base.encodedTypes.last, [4, 3]); XCTAssertEqual(events.values, [.delivered])
+        let callback = try XCTUnwrap(base.callback)
+        emit(callback, timestamp: 102, keyframe: true); emit(callback, timestamp: 101, keyframe: false)
+        XCTAssertEqual(events.values, [.delivered])
+        emit(callback, timestamp: 101, keyframe: true)
+        XCTAssertEqual(events.values, [.delivered, .observed])
+        emit(callback, timestamp: 101, keyframe: true)
+        XCTAssertEqual(events.values, [.delivered, .observed])
+    }
+
+    func testKeyframeControlRetriesNativeFailureWithoutClaimingDelivery() throws {
+        let events = EncoderTestEvents(), base = RecordingFallbackEncoder()
+        let control = LatencyKeyframeControl { events.append($0) }
+        let wrapper = LatencyObservedVideoEncoder(base: base, observe: { _ in }, control: control)
+        wrapper.setCallback { _, _ in true }
+        _ = wrapper.startEncode(with: LKRTCVideoEncoderSettings(), numberOfCores: 1)
+        XCTAssertEqual(control.requestKeyframe(), .accepted)
+        base.encodeResult = -1
+        XCTAssertEqual(wrapper.encode(try encoderFrame(1), codecSpecificInfo: nil, frameTypes: [4]), -1)
+        XCTAssertEqual(events.values, [.encodeFailed]); XCTAssertEqual(control.requestKeyframe(), .coalesced)
+        base.encodeResult = 0
+        XCTAssertEqual(wrapper.encode(try encoderFrame(2), codecSpecificInfo: nil, frameTypes: [4]), 0)
+        XCTAssertEqual(events.values, [.encodeFailed, .delivered]); XCTAssertEqual(base.encodedTypes.last, [4, 3])
+        let callback = try XCTUnwrap(base.callback)
+        emit(callback, timestamp: 1, keyframe: true); XCTAssertEqual(events.values, [.encodeFailed, .delivered])
+        emit(callback, timestamp: 2, keyframe: true); XCTAssertEqual(events.values, [.encodeFailed, .delivered, .observed])
+    }
+
+    func testSynchronousOutputCannotClaimSuccessWhenNativeEncodeFails() throws {
+        let events = EncoderTestEvents(), base = RecordingFallbackEncoder()
+        let control = LatencyKeyframeControl { events.append($0) }
+        let wrapper = LatencyObservedVideoEncoder(base: base, observe: { _ in }, control: control)
+        wrapper.setCallback { _, _ in true }
+        _ = wrapper.startEncode(with: LKRTCVideoEncoderSettings(), numberOfCores: 1)
+        base.onEncode = { [weak base] frame in
+            guard let callback = base?.callback else { return }
+            let image = LKRTCEncodedImage(); image.buffer = Data([1]); image.timeStamp = UInt32(bitPattern: frame.timeStamp)
+            image.frameType = LKRTCFrameType(rawValue: 3)!
+            _ = callback(image, LKRTCCodecSpecificInfoH264())
+        }
+        defer { base.onEncode = nil }
+        XCTAssertEqual(control.requestKeyframe(), .accepted)
+        base.encodeResult = -1
+        XCTAssertEqual(wrapper.encode(try encoderFrame(8), codecSpecificInfo: nil, frameTypes: [4]), -1)
+        XCTAssertEqual(events.values, [.encodeFailed])
+        base.encodeResult = 0
+        XCTAssertEqual(wrapper.encode(try encoderFrame(9), codecSpecificInfo: nil, frameTypes: [4]), 0)
+        XCTAssertEqual(events.values, [.encodeFailed, .delivered, .observed])
+    }
+
+    func testOldEncoderReleaseAndCallbacksCannotAffectReplacementOrClosedPeer() throws {
+        let events = EncoderTestEvents(), control = LatencyKeyframeControl { events.append($0) }
+        let first = RecordingFallbackEncoder(), second = RecordingFallbackEncoder()
+        let old = LatencyObservedVideoEncoder(base: first, observe: { _ in }, control: control)
+        let current = LatencyObservedVideoEncoder(base: second, observe: { _ in }, control: control)
+        old.setCallback { _, _ in true }; current.setCallback { _, _ in true }
+        _ = old.startEncode(with: LKRTCVideoEncoderSettings(), numberOfCores: 1)
+        let oldCallback = try XCTUnwrap(first.callback)
+        _ = current.startEncode(with: LKRTCVideoEncoderSettings(), numberOfCores: 1)
+        _ = old.release()
+        XCTAssertEqual(control.requestKeyframe(), .accepted)
+        _ = current.encode(try encoderFrame(7), codecSpecificInfo: nil, frameTypes: [4])
+        emit(oldCallback, timestamp: 7, keyframe: true)
+        XCTAssertEqual(events.values, [.delivered])
+        let currentCallback = try XCTUnwrap(second.callback)
+        emit(currentCallback, timestamp: 7, keyframe: true)
+        XCTAssertEqual(events.values, [.delivered, .observed])
+        control.invalidate(); XCTAssertEqual(control.requestKeyframe(), .unavailable)
+        emit(currentCallback, timestamp: 7, keyframe: true)
+        XCTAssertEqual(events.values, [.delivered, .observed])
+    }
+
     func testBundledDefaultH264UsesValidatedObjectiveCEncoderClass() throws {
         let factory = LKRTCDefaultVideoEncoderFactory()
         let info = try XCTUnwrap(factory.supportedCodecs().first { $0.name.uppercased() == "H264" })
@@ -149,15 +245,26 @@ private final class RecordingFallbackEncoder: NSObject, LKRTCVideoEncoder {
     var releaseCount = 0
     var bitrates: [(UInt32, UInt32)] = []
     var callback: RTCVideoEncoderCallback?
+    var encodedTypes: [[NSNumber]] = []
+    var encodeResult = 0
+    var onEncode: ((LKRTCVideoFrame) -> Void)?
     func setCallback(_ callback: RTCVideoEncoderCallback?) { self.callback = callback }
     func startEncode(with settings: LKRTCVideoEncoderSettings, numberOfCores: Int32) -> Int { startCount += 1; return 0 }
     func release() -> Int { releaseCount += 1; return 0 }
-    func encode(_ frame: LKRTCVideoFrame, codecSpecificInfo info: (any LKRTCCodecSpecificInfo)?, frameTypes: [NSNumber]) -> Int { 0 }
+    func encode(_ frame: LKRTCVideoFrame, codecSpecificInfo info: (any LKRTCCodecSpecificInfo)?, frameTypes: [NSNumber]) -> Int {
+        encodedTypes.append(frameTypes); onEncode?(frame); return encodeResult
+    }
     func setBitrate(_ bitrateKbit: UInt32, framerate: UInt32) -> Int32 { bitrates.append((bitrateKbit, framerate)); return 0 }
     func implementationName() -> String { "test stock fallback" }
     func scalingSettings() -> LKRTCVideoEncoderQpThresholds? { nil }
     var resolutionAlignment: Int { 2 }
     var applyAlignmentToAllSimulcastLayers: Bool { false }
     var supportsNativeHandle: Bool { true }
+}
+private final class EncoderTestEvents: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: [LatencyKeyframeControl.Event] = []
+    func append(_ event: LatencyKeyframeControl.Event) { lock.lock(); stored.append(event); lock.unlock() }
+    var values: [LatencyKeyframeControl.Event] { lock.lock(); defer { lock.unlock() }; return stored }
 }
 #endif
