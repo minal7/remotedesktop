@@ -39,6 +39,7 @@ xcrun swiftc -O -DDEBUG -swift-version 5 -F "$WEBRTC_FRAMEWORK_DIR" -framework L
   "$ROOT/host-mac/RemoteDesktopHost/DesktopLowLatencyH264Encoder.swift" \
   "$ROOT/protocol/Swift/LatencyLabConfiguration.swift" \
   "$ROOT/protocol/Swift/LatencyLabSenderPolicy.swift" \
+  "$ROOT/protocol/Swift/ICECandidateDiagnostics.swift" \
   "$ROOT/protocol/Swift/LatencyStatsCollector.swift" \
   "$ROOT/protocol/Swift/DirectInputSessionProtocol.swift" \
   "$ROOT/host-mac/RemoteDesktopHost/HostRuntimeContext.swift" \
