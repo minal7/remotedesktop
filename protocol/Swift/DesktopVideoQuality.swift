@@ -7,6 +7,12 @@ import LiveKitWebRTC
 /// sharpness policy; negotiated adaptive sessions prefer frame rate at 60 fps
 /// and allow WebRTC to reduce image quality or resolution when constrained.
 enum DesktopVideoQuality {
+    /// The screen-share default paces at 1.0x the bandwidth estimate, so a large frame
+    /// leaves only as fast as the estimate. 4x was the highest factor without a blackout
+    /// on a 10 Mbps path. WebRTC's frame dropper fights a constant-bitrate encoder.
+    static let streamFieldTrials = "WebRTC-FrameDropper/Disabled/WebRTC-ProbingScreenshareBwe/4.0,2875,80,40,-60,3/"
+    /// Keeps a false estimate collapse from blurring the stream. See StreamFloorGuard.
+    static let streamMinimumBitrateBps = 2_000_000
     static let targetFramesPerSecond = 30
     static let adaptiveFramesPerSecond = 60
     static let adaptiveMaximumMacroblocksPerFrame = 16_384
@@ -319,6 +325,9 @@ enum DesktopVideoQuality {
 final class DesktopVideoEncoderFactory: NSObject, LKRTCVideoEncoderFactory {
     private let base = LKRTCDefaultVideoEncoderFactory()
     private let f2Enabled: Bool
+    #if os(macOS)
+    private let defaultCBR: Bool
+    #endif
     #if DEBUG && os(macOS)
     private let frameByteObserver: ((Int) -> Void)?
     private let keyframeControl: LatencyKeyframeControl?
@@ -327,6 +336,9 @@ final class DesktopVideoEncoderFactory: NSObject, LKRTCVideoEncoderFactory {
     #endif
 
     init(f2Enabled: Bool = false, frameByteObserver: ((Int) -> Void)? = nil) {
+        #if os(macOS)
+        self.defaultCBR = false
+        #endif
         #if DEBUG && os(macOS)
         self.f2Enabled = f2Enabled
         self.frameByteObserver = frameByteObserver
@@ -339,8 +351,17 @@ final class DesktopVideoEncoderFactory: NSObject, LKRTCVideoEncoderFactory {
         super.init()
     }
 
+    #if os(macOS) && !DEBUG
+    init(defaultCBR: Bool) {
+        self.f2Enabled = false
+        self.defaultCBR = defaultCBR
+        super.init()
+    }
+    #endif
+
     #if DEBUG && os(macOS)
     init(f2Enabled: Bool, frameByteObserver: ((Int) -> Void)?, keyframeControl: LatencyKeyframeControl?, cbrEnabled: Bool = false, cbrTrace: (([String: Any]) -> Void)? = nil) {
+        self.defaultCBR = false
         self.f2Enabled = f2Enabled
         self.frameByteObserver = frameByteObserver
         self.keyframeControl = keyframeControl
@@ -375,6 +396,12 @@ final class DesktopVideoEncoderFactory: NSObject, LKRTCVideoEncoderFactory {
             return LatencyObservedVideoEncoder(base: encoder, observe: frameByteObserver ?? { _ in }, control: keyframeControl)
         }
         return encoder
+        #elseif os(macOS)
+        guard let native = base.createEncoder(info) else { return nil }
+        guard defaultCBR, DesktopVideoQuality.supportsExperimentalEncoder(
+            name: info.name, profileLevelID: info.parameters["profile-level-id"],
+            packetizationMode: info.parameters["packetization-mode"]) else { return native }
+        return DesktopLowLatencyH264Encoder(fallback: native, cbr: true)
         #else
         return base.createEncoder(info)
         #endif

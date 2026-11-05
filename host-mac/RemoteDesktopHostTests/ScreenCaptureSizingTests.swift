@@ -108,12 +108,14 @@ final class ScreenCaptureSizingTests: XCTestCase {
         for key in ["LATENCY_LAB", "REMOTE_DESKTOP_LATENCY_HOST_ID"] {
             var changed = env; changed.removeValue(forKey: key); XCTAssertEqual(mode(true, true, false, false, args, changed), 0)
         }
-        for raw in ["", "0", "3", "01", "true", "-1"] {
+        for raw in ["", "0", "4", "01", "true", "-1"] {
             var changed = env; changed["LATENCY_ALR_TRIAL"] = raw
             XCTAssertEqual(mode(true, true, false, false, args, changed), 0)
         }
         var unset = env; unset.removeValue(forKey: "LATENCY_ALR_TRIAL")
         XCTAssertEqual(mode(true, true, false, false, args, unset), 0)
+        var three = env; three["LATENCY_ALR_TRIAL"] = "3"
+        XCTAssertEqual(mode(true, true, false, false, args, three), 3)
         var two = env; two["LATENCY_ALR_TRIAL"] = "2"
         XCTAssertEqual(mode(true, true, false, false, args, two), 2)
         for forbidden in ["LATENCY_UDP_CAPACITY", "LATENCY_STAGE2_FLOOR", "REMOTE_DESKTOP_R0_HOST_ID"] {

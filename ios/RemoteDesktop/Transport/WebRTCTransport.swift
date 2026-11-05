@@ -338,6 +338,8 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
         RTCInitializeSSL()
         self.mediaPolicy = mediaPolicy
         self.requestAdaptive60 = requestAdaptive60 && mediaPolicy == .remoteSession
+        // A remote-control stream shows each frame as it arrives instead of buffering for smoothness.
+        let playoutCap = useLANPlayoutCap || self.requestAdaptive60
         #if DEBUG
         self.labInstrumentation = mediaPolicy == .remoteSession
         let environment = ProcessInfo.processInfo.environment
@@ -345,15 +347,15 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
             environment["LATENCY_LAB"] == "1" && environment["LATENCY_HEVC"] == "1" &&
             VTIsHardwareDecodeSupported(kCMVideoCodecType_HEVC)
         self.labHEVCDecoderEnabled = labDecoderEnabled
-        self.initialLANPlayoutCap = useLANPlayoutCap
+        self.initialLANPlayoutCap = playoutCap
         let labOptedIn = mediaPolicy == .remoteSession && LatencyStatsCollector.enabled
         self.labControlsActive = labOptedIn
         self.initialFactoryDelay = LatencyF1Policy.initialSelection(
-            lanPlayoutCap: useLANPlayoutCap, f4: false, labOptedIn: labOptedIn,
+            lanPlayoutCap: playoutCap, f4: false, labOptedIn: labOptedIn,
             configuration: LatencyLabConfiguration.current).f1MaximumDelayMs
         let initialTrial = initialFactoryDelay.map { "WebRTC-ForcePlayoutDelay/min_ms:0,max_ms:\($0)/" }
         #else
-        let initialTrial = useLANPlayoutCap ? "WebRTC-ForcePlayoutDelay/min_ms:0,max_ms:10/" : nil
+        let initialTrial = playoutCap ? "WebRTC-ForcePlayoutDelay/min_ms:0,max_ms:10/" : nil
         #endif
         // Field trials are copied into the factory at creation; restore the
         // process setting immediately so later remote factories remain adaptive.

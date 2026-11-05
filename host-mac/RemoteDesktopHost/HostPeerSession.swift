@@ -40,11 +40,10 @@ final class LabALRFieldTrialBootstrap: @unchecked Sendable {
         case 1: return screen
         case 2: return screen + "WebRTC-Pacer-PadInSilence/Enabled/"
         case 3:
-            // The screen-share default string starts with pacing factor 1.0, so a frame leaves
-            // only at the estimated rate. The first field is the only change from that default.
-            let factor = ProcessInfo.processInfo.environment["LATENCY_PACE_FACTOR"].flatMap(Double.init)
-            let pacing = factor.map { "WebRTC-ProbingScreenshareBwe/\($0),2875,80,40,-60,3/" } ?? ""
-            return "WebRTC-FrameDropper/Disabled/" + pacing
+            guard let factor = ProcessInfo.processInfo.environment["LATENCY_PACE_FACTOR"].flatMap(Double.init) else {
+                return DesktopVideoQuality.streamFieldTrials
+            }
+            return "WebRTC-FrameDropper/Disabled/WebRTC-ProbingScreenshareBwe/\(factor),2875,80,40,-60,3/"
         default: return nil
         }
     }
@@ -62,6 +61,18 @@ final class LabALRFieldTrialBootstrap: @unchecked Sendable {
     }
 }
 #endif
+
+/// Process-wide field trials must be set once, before any peer factory.
+final class StreamFieldTrialsOnce: @unchecked Sendable {
+    private let lock = NSLock()
+    private var done = false
+    func configure() {
+        lock.lock(); defer { lock.unlock() }
+        guard !done else { return }
+        done = true
+        RTCPeerConnectionFactory.configureFieldTrials(DesktopVideoQuality.streamFieldTrials)
+    }
+}
 
 /// Serializes direct-input authority separately from media teardown. The
 /// change callback must not re-enter this object; it runs inside the same lock
@@ -349,6 +360,19 @@ final class HostPeerSession: NSObject {
     private let iceConfig: ICEConfig
     private let audioEnabled: Bool
     private let adaptive60Requested: Bool
+    private static let streamTrialsOnce = StreamFieldTrialsOnce()
+    /// Constant-bitrate H.264 at full width. Needs a 60 fps client and macOS 26's VBV keys.
+    private let streamDefaultsActive: Bool
+    private var streamFloorGuard = StreamFloorGuard()
+    private var streamFloorTimer: DispatchSourceTimer?
+
+    static func streamDefaultsAllowed(ordinaryPeer: Bool, requestAdaptive60: Bool, environment: [String: String]) -> Bool {
+        guard #available(macOS 26.0, *), ordinaryPeer, requestAdaptive60 else { return false }
+        #if DEBUG
+        guard environment["LATENCY_ENCODER_MODE"] != "stock" else { return false }
+        #endif
+        return true
+    }
     private var adaptive60Selected = false
     private let onUserInput: @Sendable () -> Bool
     private let inputAuthorization: HostPeerInputAuthorization
@@ -594,10 +618,18 @@ final class HostPeerSession: NSObject {
             labInstrumentation: labInstrumentation, ordinaryPeer: acceptedOrdinaryPeer,
             f2Enabled: latencyF2Enabled, f3Enabled: latencyF3Enabled,
             arguments: ProcessInfo.processInfo.arguments, environment: ProcessInfo.processInfo.environment)
-        let configuredALRMode = Self.labALRBootstrap.configureOnce(requestedMode: requestedALRMode) {
+        let streamDefaults = Self.streamDefaultsAllowed(ordinaryPeer: acceptedOrdinaryPeer, requestAdaptive60: requestAdaptive60,
+            environment: ProcessInfo.processInfo.environment)
+        let configuredALRMode = Self.labALRBootstrap.configureOnce(
+            requestedMode: requestedALRMode == 0 && streamDefaults && ProcessInfo.processInfo.environment["LATENCY_ALR_TRIAL"] == nil ? 3 : requestedALRMode) {
             RTCPeerConnectionFactory.configureFieldTrials($0)
         }
+        #else
+        let streamDefaults = Self.streamDefaultsAllowed(ordinaryPeer: acceptedOrdinaryPeer, requestAdaptive60: requestAdaptive60,
+            environment: [:])
+        if streamDefaults { Self.streamTrialsOnce.configure() }
         #endif
+        self.streamDefaultsActive = streamDefaults
         RTCInitializeSSL()
         self.signaling = signaling
         self.capture = capture
@@ -664,9 +696,11 @@ final class HostPeerSession: NSObject {
                          "requested": ProcessInfo.processInfo.environment["LATENCY_ENCODER_MODE"] == "h264-cbr100" ? 1 : 0,
                          "clientLab60": lab60Requested ? 1 : 0, "admitted": cbrEnabled ? 1 : 0])
         }
+        let cbrSelected = cbrEnabled || (streamDefaults && !enableF2 && !enableF3 &&
+            ProcessInfo.processInfo.environment["LATENCY_ENCODER_MODE"] != "h265-cbr100")
         let baseEncoderFactory = DesktopVideoEncoderFactory(f2Enabled: enableF2, frameByteObserver: observeEncodedBytes,
-            keyframeControl: keyframeControl, cbrEnabled: cbrEnabled,
-            cbrTrace: cbrEnabled ? { [weak stats] event in
+            keyframeControl: keyframeControl, cbrEnabled: cbrSelected,
+            cbrTrace: cbrSelected ? { [weak stats] event in
                 var record = event
                 record["time"] = ProcessInfo.processInfo.systemUptime
                 stats?.trace(record)
@@ -682,7 +716,7 @@ final class HostPeerSession: NSObject {
         stats.trace(["type": "encoder_hevc_gate", "time": ProcessInfo.processInfo.systemUptime,
                      "requested": hevcRequested ? 1 : 0, "admitted": self.labHEVCEnabled ? 1 : 0])
         #else
-        let encoderFactory = DesktopVideoEncoderFactory(f2Enabled: enableF2, frameByteObserver: observeEncodedBytes)
+        let encoderFactory = DesktopVideoEncoderFactory(defaultCBR: streamDefaults)
         #endif
         self.factory = RTCPeerConnectionFactory(
             audioDeviceModuleType: .audioEngine,
@@ -814,6 +848,36 @@ final class HostPeerSession: NSObject {
         #else
         try requestCaptureStartup()
         #endif
+    }
+
+    /// Gives up the bitrate minimum for this session if the link cannot sustain it.
+    private func startStreamFloorGuard(_ connection: RTCPeerConnection) {
+        closeStateLock.lock(); defer { closeStateLock.unlock() }
+        guard streamDefaultsActive, adaptive60Selected, streamFloorTimer == nil, !ended else { return }
+        let timer = DispatchSource.makeTimerSource(queue: DispatchQueue(label: "host.stream.floor"))
+        timer.schedule(deadline: .now() + 2, repeating: 2)
+        timer.setEventHandler { [weak self, weak connection] in
+            guard let self, let connection else { return }
+            connection.statistics { [weak self, weak connection] report in
+                guard let self, let connection else { return }
+                func number(_ type: String, _ key: String) -> Double? {
+                    report.statistics.values.first { $0.type == type && ($0.values["kind"] as? String) == "video" }
+                        .flatMap { ($0.values[key] as? NSNumber)?.doubleValue }
+                }
+                self.closeStateLock.lock()
+                guard !self.ended, self.peerConnection === connection else { self.closeStateLock.unlock(); return }
+                let release = self.streamFloorGuard.observe(packetsSent: number("outbound-rtp", "packetsSent"),
+                    packetsLost: number("remote-inbound-rtp", "packetsLost"),
+                    roundTrip: number("remote-inbound-rtp", "roundTripTime"))
+                if release { self.streamFloorTimer?.cancel(); self.streamFloorTimer = nil }
+                self.closeStateLock.unlock()
+                guard release else { return }
+                connection.setBweMinBitrateBps(NSNumber(value: 0), currentBitrateBps: nil, maxBitrateBps: nil)
+                self.log.notice("stream bitrate minimum released: sustained loss or delay")
+            }
+        }
+        streamFloorTimer = timer
+        timer.resume()
     }
 
     private func startLatencyPolling(_ connection: RTCPeerConnection) {
@@ -1055,6 +1119,8 @@ final class HostPeerSession: NSObject {
             #endif
             self.latencyTimer?.cancel()
             self.latencyTimer = nil
+            self.streamFloorTimer?.cancel()
+            self.streamFloorTimer = nil
             self.cursorRequested = false
             self.cursorEpoch = UUID()
             DispatchQueue.main.async { [weak self] in self?.stopCursorPublisher() }
@@ -1461,6 +1527,12 @@ final class HostPeerSession: NSObject {
         #if DEBUG
         if labPinScale != nil { parameters.degradationPreference = NSNumber(value: LKRTCDegradationPreference.maintainResolution.rawValue) }
         #endif
+        closeStateLock.lock()
+        let streamDefaultsApply = streamDefaultsActive && adaptive60Selected
+        let floorReleased = streamFloorGuard.released
+        closeStateLock.unlock()
+        // Constant bitrate trades sharpness instead of resolution, so the width stays put.
+        if streamDefaultsApply { parameters.degradationPreference = NSNumber(value: LKRTCDegradationPreference.maintainResolution.rawValue) }
         videoSender.parameters = parameters
 
         #if DEBUG
@@ -1475,10 +1547,12 @@ final class HostPeerSession: NSObject {
                 "transportSequenceExtensionPresent": transportSequence, "runtimeProbingVerified": false])
         }
         #endif
+        let defaultMinimum: NSNumber? = streamDefaultsApply && !floorReleased
+            ? NSNumber(value: DesktopVideoQuality.streamMinimumBitrateBps) : nil
         #if DEBUG
-        let bweMinimum = labFloor.map { NSNumber(value: $0) }
+        let bweMinimum = labFloor.map { NSNumber(value: $0) } ?? defaultMinimum
         #else
-        let bweMinimum: NSNumber? = nil
+        let bweMinimum = defaultMinimum
         #endif
         let bweUpdated = peerConnection?.setBweMinBitrateBps(
             bweMinimum,
@@ -2268,6 +2342,7 @@ extension HostPeerSession: RTCPeerConnectionDelegate {
         guard !isEnded, self.peerConnection === peerConnection else { return }
         switch stateChanged {
         case .connected:
+            startStreamFloorGuard(peerConnection)
             #if DEBUG
             if latencyF3Enabled && !stage2Enabled {
                 peerConnection.statistics { [weak self, weak peerConnection] report in

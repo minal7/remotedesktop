@@ -1,4 +1,4 @@
-#if DEBUG && os(macOS)
+#if os(macOS)
 import CoreMedia
 import CoreVideo
 import Foundation
@@ -164,6 +164,29 @@ struct LabCBRRatePolicy {
     }
     private mutating func commit(_ kbps: UInt32, _ now: TimeInterval) -> UInt32 {
         appliedKbps = kbps; lastChange = now; raiseStart = nil; return kbps
+    }
+}
+
+/// The bitrate minimum keeps a false estimate collapse (Wi-Fi delay spikes, not real
+/// congestion) from blurring the stream. If a link really is slower than the minimum,
+/// sustained loss or delay shows up here and the session gives the minimum up for good.
+struct StreamFloorGuard {
+    static let lossFraction = 0.05, lossPolls = 2
+    static let roundTripSeconds = 0.5, roundTripPolls = 3
+    private var lastSent: Double?, lastLost: Double?
+    private var lossyPolls = 0, slowPolls = 0
+    private(set) var released = false
+    /// Returns true once, on the poll that should remove the minimum.
+    mutating func observe(packetsSent: Double?, packetsLost: Double?, roundTrip: Double?) -> Bool {
+        guard !released else { return false }
+        if let packetsSent, let packetsLost, let lastSent, let lastLost {
+            let sent = packetsSent - lastSent, lost = packetsLost - lastLost
+            if sent > 0, lost >= 0 { lossyPolls = lost / (sent + lost) >= Self.lossFraction ? lossyPolls + 1 : 0 }
+        }
+        lastSent = packetsSent ?? lastSent; lastLost = packetsLost ?? lastLost
+        if let roundTrip { slowPolls = roundTrip >= Self.roundTripSeconds ? slowPolls + 1 : 0 }
+        if lossyPolls >= Self.lossPolls || slowPolls >= Self.roundTripPolls { released = true }
+        return released
     }
 }
 
@@ -497,6 +520,7 @@ final class DesktopLowLatencyH264Encoder: NSObject, LKRTCVideoEncoder, @unchecke
         lock.unlock()
     }
 }
+#if DEBUG
 // One in-flight delivery only. Cancellation revokes queued generations without
 // waiting for an external WebRTC callback to return.
 final class LabHEVCDeliveryGate: @unchecked Sendable {
@@ -832,5 +856,5 @@ final class LabHEVCEncoderFactory: NSObject, LKRTCVideoEncoderFactory {
         return LabHEVCEncoder(native: native, info: metadata, observeBytes: observeBytes, trace: trace)
     }
 }
-
+#endif
 #endif

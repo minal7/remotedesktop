@@ -483,5 +483,25 @@ private final class EncoderTestEvents: @unchecked Sendable {
         XCTAssertNil(policy.decide(requestKbps: 800, now: 5, framesEncoded: 300))
         XCTAssertEqual(policy.decide(requestKbps: 1200, now: 6.1, framesEncoded: 366), 800, "raises only to the lowest sustained request")
     }
+
+    func testFloorGuardReleasesOnSustainedLossOnly() {
+        var guardState = StreamFloorGuard()
+        XCTAssertFalse(guardState.observe(packetsSent: 1000, packetsLost: 0, roundTrip: 0.02))
+        XCTAssertFalse(guardState.observe(packetsSent: 2000, packetsLost: 200, roundTrip: 0.02), "one lossy poll may be a burst")
+        XCTAssertFalse(guardState.observe(packetsSent: 3000, packetsLost: 200, roundTrip: 0.02), "a clean poll resets it")
+        XCTAssertFalse(guardState.observe(packetsSent: 4000, packetsLost: 400, roundTrip: 0.02))
+        XCTAssertTrue(guardState.observe(packetsSent: 5000, packetsLost: 600, roundTrip: 0.02))
+        XCTAssertFalse(guardState.observe(packetsSent: 6000, packetsLost: 900, roundTrip: 0.02), "released only once")
+    }
+
+    func testFloorGuardReleasesOnSustainedDelay() {
+        var guardState = StreamFloorGuard()
+        XCTAssertFalse(guardState.observe(packetsSent: nil, packetsLost: nil, roundTrip: 0.8))
+        XCTAssertFalse(guardState.observe(packetsSent: nil, packetsLost: nil, roundTrip: 0.8))
+        XCTAssertFalse(guardState.observe(packetsSent: nil, packetsLost: nil, roundTrip: 0.05), "a normal poll resets it")
+        XCTAssertFalse(guardState.observe(packetsSent: nil, packetsLost: nil, roundTrip: 0.8))
+        XCTAssertFalse(guardState.observe(packetsSent: nil, packetsLost: nil, roundTrip: 0.8))
+        XCTAssertTrue(guardState.observe(packetsSent: nil, packetsLost: nil, roundTrip: 0.8))
+    }
 }
 #endif
