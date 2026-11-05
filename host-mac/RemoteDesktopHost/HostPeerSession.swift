@@ -352,6 +352,7 @@ final class HostPeerSession: NSObject {
     private let labALRTrialMode: Int
     private static let labALRBootstrap = LabALRFieldTrialBootstrap()
     private let lab60Requested: Bool
+    private let labHEVCEnabled: Bool
     private var lab60Selected = false // protected by closeStateLock
     #endif
     private let latencyF3Enabled: Bool
@@ -558,6 +559,7 @@ final class HostPeerSession: NSObject {
         latencyF2Enabled: Bool = false,
         latencyF3Enabled: Bool = false,
         lab60Requested: Bool = false,
+        labHEVCRequested: Bool = false,
         onLatencyF1RestartRequest: (@Sendable (String, @escaping @Sendable () -> Void) -> Void)? = nil,
         onEnded: @escaping @Sendable (String) -> Void
     ) {
@@ -632,13 +634,23 @@ final class HostPeerSession: NSObject {
                          "requested": ProcessInfo.processInfo.environment["LATENCY_ENCODER_MODE"] == "h264-cbr100" ? 1 : 0,
                          "clientLab60": lab60Requested ? 1 : 0, "admitted": cbrEnabled ? 1 : 0])
         }
-        let encoderFactory = DesktopVideoEncoderFactory(f2Enabled: enableF2, frameByteObserver: observeEncodedBytes,
+        let baseEncoderFactory = DesktopVideoEncoderFactory(f2Enabled: enableF2, frameByteObserver: observeEncodedBytes,
             keyframeControl: keyframeControl, cbrEnabled: cbrEnabled,
             cbrTrace: cbrEnabled ? { [weak stats] event in
                 var record = event
                 record["time"] = ProcessInfo.processInfo.systemUptime
                 stats?.trace(record)
             } : nil)
+        let hevcRequested = Self.labHEVCAllowed(labInstrumentation: labInstrumentation, ordinaryPeer: acceptedOrdinaryPeer,
+            clientRequested: labHEVCRequested, lab60Requested: lab60Requested, f2Enabled: enableF2, f3Enabled: enableF3,
+            arguments: ProcessInfo.processInfo.arguments, environment: ProcessInfo.processInfo.environment)
+        let encoderFactory: any LKRTCVideoEncoderFactory
+        if #available(macOS 26.0, *), hevcRequested, LabHEVCEncoder.preflight() {
+            self.labHEVCEnabled = true
+            encoderFactory = LabHEVCEncoderFactory(base: baseEncoderFactory, observeBytes: observeEncodedBytes, trace: { [weak stats] in stats?.trace($0) })
+        } else { self.labHEVCEnabled = false; encoderFactory = baseEncoderFactory }
+        stats.trace(["type": "encoder_hevc_gate", "time": ProcessInfo.processInfo.systemUptime,
+                     "requested": hevcRequested ? 1 : 0, "admitted": self.labHEVCEnabled ? 1 : 0])
         #else
         let encoderFactory = DesktopVideoEncoderFactory(f2Enabled: enableF2, frameByteObserver: observeEncodedBytes)
         #endif
@@ -729,9 +741,15 @@ final class HostPeerSession: NSObject {
         #else
         let lab60 = false
         #endif
-        let appliedCapture = try setCaptureMacroblockLimit(capturePolicy.maximumMacroblocksPerFrame,
-                                     framesPerSecond: lab60 ? 60 : capturePolicy.framesPerSecond,
-                                     lab60: lab60, supportedAnswer: DesktopVideoQuality.supportsAdaptive60(answerSDP: answer.sdp))
+        #if DEBUG
+        let hevcSelected = labHEVCEnabled && DesktopVideoQuality.supportsLabHEVC60(answerSDP: answer.sdp)
+        #else
+        let hevcSelected = false
+        #endif
+        let supportedAnswer = DesktopVideoQuality.supportsAdaptive60(answerSDP: answer.sdp) || hevcSelected
+        let appliedCapture = try setCaptureMacroblockLimit(hevcSelected ? 16_384 : capturePolicy.maximumMacroblocksPerFrame,
+                                     framesPerSecond: (lab60 || hevcSelected) ? 60 : capturePolicy.framesPerSecond,
+                                     lab60: lab60 || hevcSelected, supportedAnswer: supportedAnswer)
         let selectedAdaptive = appliedCapture.adaptive
         #if DEBUG
         latencyStats.trace(["type": "f2_capture_policy", "time": ProcessInfo.processInfo.systemUptime,
@@ -747,6 +765,9 @@ final class HostPeerSession: NSObject {
         #endif
         var answerPayload = ["sdp": answer.sdp, "sdpType": "answer"]
         if selectedAdaptive { answerPayload["adaptiveVideo60"] = "1" }
+        #if DEBUG
+        if hevcSelected { answerPayload["latencyLabHEVC"] = "1" }
+        #endif
         try await signaling.send(SignalingEnvelope(
             role: .host,
             kind: .answer,
@@ -1182,6 +1203,18 @@ final class HostPeerSession: NSObject {
     /// The common 5 Mbps lab ceiling is deliberately a single closed setting.
     /// A missing or malformed opt-in leaves the sender policy unchanged.
     #if DEBUG
+    static func labHEVCAllowed(labInstrumentation: Bool, ordinaryPeer: Bool, clientRequested: Bool,
+                               lab60Requested: Bool, f2Enabled: Bool, f3Enabled: Bool,
+                               arguments: [String], environment: [String: String]) -> Bool {
+        guard #available(macOS 26.0, *) else { return false }
+        return labInstrumentation && ordinaryPeer && clientRequested && lab60Requested && !f2Enabled && !f3Enabled &&
+            Array(arguments.dropFirst()) == ["--debug-latency-host"] && environment["LATENCY_LAB"] == "1" &&
+            environment["LATENCY_ENCODER_MODE"] == "h265-cbr100" &&
+            environment["LATENCY_UDP_CAPACITY"] != "1" && environment["LATENCY_STAGE2_FLOOR"] != "1" &&
+            environment["REMOTE_DESKTOP_R0_HOST_ID"] == nil &&
+            environment["REMOTE_DESKTOP_LATENCY_HOST_ID"].flatMap(UUID.init(uuidString:)) != nil
+    }
+
     static func labCBREnabled(labInstrumentation: Bool, ordinaryPeer: Bool, clientRequested: Bool, f2Enabled: Bool, f3Enabled: Bool,
                               arguments: [String], environment: [String: String]) -> Bool {
         guard #available(macOS 26.0, *) else { return false }

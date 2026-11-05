@@ -1056,11 +1056,13 @@ final class HostSession: ObservableObject {
                             let labF2 = labNonce != nil && env.payload["latencyF2Encoder"] == "1"
                             let labF3 = labNonce != nil && env.payload["latencyF3Sender"] == "1"
                             let lab60Requested = HostPeerSession.lab60OfferRequested(env.payload)
+                            let labHEVCRequested = env.payload["latencyLabHEVC"] == "1"
                             #else
                             let labNonce: String? = nil
                             let labF2 = false
                             let labF3 = false
                             let lab60Requested = false
+                            let labHEVCRequested = false
                             #endif
                             let computerUse = computerUse
                             peerSession = HostPeerSession(
@@ -1105,6 +1107,7 @@ final class HostSession: ObservableObject {
                                 latencyF2Enabled: labF2,
                                 latencyF3Enabled: labF3,
                                 lab60Requested: lab60Requested,
+                                labHEVCRequested: labHEVCRequested,
                                 onLatencyF1RestartRequest: { [weak self] nonce, ready in
                                     #if DEBUG
                                     Task { @MainActor [weak self] in

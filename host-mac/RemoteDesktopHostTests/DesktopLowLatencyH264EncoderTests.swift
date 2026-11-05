@@ -235,6 +235,97 @@ final class DesktopLowLatencyH264EncoderTests: XCTestCase {
         XCTAssertEqual(encoder.release(), 0)
     }
 
+    func testHEVCKeyframeRequestSurvivesBusyAdmission() {
+        var latch = LabHEVCKeyframeLatch()
+        XCTAssertNil(latch.pending)
+        latch.request(); let first = latch.pending
+        latch.request(); latch.acknowledge(first!)
+        XCTAssertNotNil(latch.pending)
+        latch.acknowledge(latch.pending!); XCTAssertNil(latch.pending)
+    }
+
+    func testHEVCStaleCompletionCannotReleaseNewGenerationReservation() throws {
+        let gate = LabHEVCDeliveryGate(); gate.start()
+        let old = try XCTUnwrap(gate.reserve())
+        gate.stop(); gate.start()
+        let current = try XCTUnwrap(gate.reserve())
+        gate.complete(old)
+        XCTAssertNil(gate.reserve())
+        gate.complete(current)
+        XCTAssertNotNil(gate.reserve())
+        gate.stop()
+    }
+
+    func testHEVCDeliveryStopDoesNotWaitForBlockedCallback() {
+        let gate = LabHEVCDeliveryGate(); gate.start()
+        let entered = expectation(description: "delivery entered")
+        let stopped = expectation(description: "stop returned")
+        let unblock = DispatchSemaphore(value: 0)
+        let ticket = try! XCTUnwrap(gate.reserve())
+        XCTAssertNil(gate.reserve())
+        XCTAssertTrue(gate.deliver(ticket) { entered.fulfill(); _ = unblock.wait(timeout: .now() + 3) })
+        wait(for: [entered], timeout: 1)
+        DispatchQueue.global().async { gate.stop(); stopped.fulfill() }
+        wait(for: [stopped], timeout: 0.5)
+        XCTAssertNil(gate.reserve())
+        gate.start(); XCTAssertNil(gate.reserve())
+        unblock.signal()
+    }
+
+    @available(macOS 26.0, *)
+    func testHEVCMetadataFailsClosedWhenClassMissing() {
+        XCTAssertNil(LabHEVCEncoder.makeInfo(lookup: { _ in nil }))
+        XCTAssertNotNil(LabHEVCEncoder.makeInfo())
+    }
+
+    @available(macOS 26.0, *)
+    func testHEVCSPSRejectsWrongProfileTierAndLevel() {
+        var rbsp = [UInt8](repeating: 0, count: 13); rbsp[1] = 1; rbsp[12] = 153
+        func sps() -> Data { Data([0x42, 0x01] + rbsp) }
+        XCTAssertTrue(LabHEVCEncoder.acceptsSPS(sps()))
+        rbsp[1] = 2; XCTAssertFalse(LabHEVCEncoder.acceptsSPS(sps()))
+        rbsp[1] = 0x21; XCTAssertFalse(LabHEVCEncoder.acceptsSPS(sps()))
+        rbsp[1] = 0x41; XCTAssertFalse(LabHEVCEncoder.acceptsSPS(sps()))
+        rbsp[1] = 1; rbsp[12] = 0; XCTAssertFalse(LabHEVCEncoder.acceptsSPS(sps()))
+        rbsp[12] = 154; XCTAssertFalse(LabHEVCEncoder.acceptsSPS(sps()))
+        XCTAssertFalse(LabHEVCEncoder.acceptsSPS(Data([0x42, 0x01])))
+        rbsp[12] = 153
+        XCTAssertTrue(LabHEVCEncoder.annexBContainsAcceptedSPS(Data([0, 0, 0, 1]) + sps()))
+        rbsp[12] = 154
+        XCTAssertFalse(LabHEVCEncoder.annexBContainsAcceptedSPS(Data([0, 0, 1]) + sps()))
+        XCTAssertFalse(LabHEVCEncoder.annexBContainsAcceptedSPS(Data([0, 0, 0, 1, 0x40, 0x01])))
+    }
+
+    @available(macOS 26.0, *)
+    func testHEVCCroppedFrameEncodesAndDecodes() throws {
+        guard LabHEVCEncoder.preflight(), let info = LabHEVCEncoder.makeInfo(),
+              let native = LKRTCDefaultVideoEncoderFactory().createEncoder(LKRTCVideoCodecInfo(name: "H265")),
+              let decoder = LKRTCDefaultVideoDecoderFactory().createDecoder(LKRTCVideoCodecInfo(name: "H265")) else {
+            throw XCTSkip("HEVC CBR/VBV hardware unavailable")
+        }
+        let decoded = expectation(description: "HEVC decoded")
+        decoder.setCallback { _ in decoded.fulfill() }
+        XCTAssertEqual(decoder.startDecode(withNumberOfCores: 1), 0)
+        let events = HEVCEventCapture()
+        let encoder = LabHEVCEncoder(native: native, info: info, trace: { events.append($0) })
+        encoder.setCallback { image, metadata in
+            _ = decoder.decode(image, missingFrames: false, codecSpecificInfo: metadata, renderTimeMs: 0); return true
+        }
+        let settings = LKRTCVideoEncoderSettings(); settings.name = "H265"; settings.width = 320; settings.height = 240; settings.startBitrate = 3000; settings.maxFramerate = 60
+        XCTAssertEqual(encoder.startEncode(with: settings, numberOfCores: 1), 0)
+        XCTAssertTrue(events.contains("configured"), "The test must exercise CBR, not its native fallback")
+        XCTAssertEqual(encoder.setBitrate(2500, framerate: 60), 0)
+        XCTAssertTrue(events.appliedRateUpdate)
+        var pixel: CVPixelBuffer?
+        XCTAssertEqual(CVPixelBufferCreate(kCFAllocatorDefault, 640, 480, kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange, nil, &pixel), kCVReturnSuccess)
+        let nativeBuffer = LKRTCCVPixelBuffer(pixelBuffer: try XCTUnwrap(pixel), adaptedWidth: 320, adaptedHeight: 240, cropWidth: 320, cropHeight: 240, cropX: 0, cropY: 0)
+        let frame = LKRTCVideoFrame(buffer: nativeBuffer, rotation: ._0, timeStampNs: 1_000_000)
+        XCTAssertEqual(encoder.encode(frame, codecSpecificInfo: nil, frameTypes: [3]), 0)
+        wait(for: [decoded], timeout: 5)
+        XCTAssertFalse(events.contains("native_hevc_fallback"))
+        XCTAssertEqual(encoder.release(), 0); XCTAssertEqual(decoder.release(), 0)
+    }
+
     func testSessionCreationFailureUsesStockEncoderAndPreservesRateUpdates() {
         let fallback = RecordingFallbackEncoder()
         let encoder = DesktopLowLatencyH264Encoder(fallback: fallback) { _, _, _, _ in -1 }
@@ -356,6 +447,14 @@ private final class RecordingFallbackEncoder: NSObject, LKRTCVideoEncoder {
     var applyAlignmentToAllSimulcastLayers: Bool { false }
     var supportsNativeHandle: Bool { true }
 }
+private final class HEVCEventCapture: @unchecked Sendable {
+    private let lock = NSLock()
+    private var values: [[String: Any]] = []
+    func append(_ value: [String: Any]) { lock.lock(); values.append(value); lock.unlock() }
+    func contains(_ event: String) -> Bool { lock.lock(); defer { lock.unlock() }; return values.contains { $0["event"] as? String == event } }
+    var appliedRateUpdate: Bool { lock.lock(); defer { lock.unlock() }; return values.contains { $0["event"] as? String == "rate_update" && $0["applied"] as? Bool == true } }
+}
+
 private final class EncoderTestEvents: @unchecked Sendable {
     private let lock = NSLock()
     private var stored: [LatencyKeyframeControl.Event] = []

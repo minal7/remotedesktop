@@ -403,4 +403,319 @@ final class DesktopLowLatencyH264Encoder: NSObject, LKRTCVideoEncoder, @unchecke
         lock.unlock()
     }
 }
+// One in-flight delivery only. Cancellation revokes queued generations without
+// waiting for an external WebRTC callback to return.
+final class LabHEVCDeliveryGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private let queue = DispatchQueue(label: "latency.hevc.delivery")
+    private var generation: UInt64 = 0
+    private var active = false
+    private var reservation: UInt64?
+    private var reservationGeneration: UInt64 = 0
+    private var nextTicket: UInt64 = 0
+    private var delivering = false
+    func start() { lock.lock(); generation &+= 1; active = true; lock.unlock() }
+    func stop() {
+        lock.lock(); generation &+= 1; active = false
+        if !delivering { reservation = nil }; lock.unlock()
+    }
+    func reserve() -> UInt64? {
+        lock.lock(); defer { lock.unlock() }
+        guard active, reservation == nil else { return nil }
+        nextTicket &+= 1; reservation = nextTicket; reservationGeneration = generation; return nextTicket
+    }
+    func complete(_ ticket: UInt64) {
+        lock.lock(); if reservation == ticket { reservation = nil; delivering = false }; lock.unlock()
+    }
+    func deliver(_ ticket: UInt64, callback: @escaping @Sendable () -> Void) -> Bool {
+        lock.lock()
+        guard active, generation == reservationGeneration, reservation == ticket, !delivering else { lock.unlock(); return false }
+        delivering = true; let admittedGeneration = generation; lock.unlock()
+        queue.async { [self] in
+            lock.lock(); let permitted = active && generation == admittedGeneration && reservation == ticket; lock.unlock()
+            if permitted { callback() }
+            complete(ticket)
+        }
+        return true
+    }
+}
+struct LabHEVCKeyframeLatch {
+    private var requested: UInt64 = 0
+    private var acknowledged: UInt64 = 0
+    mutating func request() { requested &+= 1 }
+    var pending: UInt64? { requested == acknowledged ? nil : requested }
+    mutating func acknowledge(_ ticket: UInt64) { if ticket > acknowledged { acknowledged = ticket } }
+}
+
+@available(macOS 26.0, *)
+final class LabHEVCEncoder: NSObject, LKRTCVideoEncoder, @unchecked Sendable {
+    private let native: any LKRTCVideoEncoder
+    private let info: any LKRTCCodecSpecificInfo
+    private let trace: ([String: Any]) -> Void
+    private let observeBytes: ((Int) -> Void)?
+    private let gate = LabHEVCDeliveryGate()
+    private let lock = NSLock()
+    private var session: VTCompressionSession?
+    private var callback: RTCVideoEncoderCallback?
+    private var settings: LKRTCVideoEncoderSettings?
+    private var cores: Int32 = 1
+    private var fallback = false
+    private var fallbackPending = false
+    private var spsRejected = false
+    private var nativeTicket: UInt64?
+    private var nativeSPSAccepted = false
+    private var keyframes = LabHEVCKeyframeLatch()
+    private var nativeKeyframeTicket: UInt64?
+    private var generation: UInt64 = 0
+    private var rate: UInt32 = 0
+    private var fps: UInt32 = 60
+
+    static func makeInfo(lookup: (String) -> AnyClass? = { NSClassFromString($0) }) -> (any LKRTCCodecSpecificInfo)? {
+        guard let type = lookup("LKRTCCodecSpecificInfoH265") as? NSObject.Type else { return nil }
+        return type.init() as? any LKRTCCodecSpecificInfo
+    }
+    init(native: any LKRTCVideoEncoder, info: any LKRTCCodecSpecificInfo, observeBytes: ((Int) -> Void)? = nil, trace: @escaping ([String: Any]) -> Void) {
+        self.native = native; self.info = info; self.observeBytes = observeBytes; self.trace = trace; super.init()
+    }
+    private static func properties(_ fps: UInt32, _ kbps: UInt32) -> [(CFString, CFTypeRef)] {
+        [(kVTCompressionPropertyKey_RealTime, kCFBooleanTrue),
+         (kVTCompressionPropertyKey_AllowFrameReordering, kCFBooleanFalse),
+         (kVTCompressionPropertyKey_ProfileLevel, kVTProfileLevel_HEVC_Main_AutoLevel),
+         (kVTCompressionPropertyKey_ExpectedFrameRate, fps as CFNumber),
+         (kVTCompressionPropertyKey_MaxKeyFrameInterval, 7200 as CFNumber),
+         (kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration, 240 as CFNumber),
+         (kVTCompressionPropertyKey_ConstantBitRate, (Int64(kbps) * 1000) as CFNumber),
+         (kVTCompressionPropertyKey_VBVBufferDuration, 0.1 as CFNumber)]
+    }
+    private static func makeSession(width: Int32, height: Int32, fps: UInt32, kbps: UInt32) -> VTCompressionSession? {
+        guard width > 0, height > 0, fps > 0, kbps > 0 else { return nil }
+        var created: VTCompressionSession?
+        let spec = [kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder: true] as CFDictionary
+        guard VTCompressionSessionCreate(allocator: kCFAllocatorDefault, width: width, height: height,
+            codecType: kCMVideoCodecType_HEVC, encoderSpecification: spec, imageBufferAttributes: nil,
+            compressedDataAllocator: nil, outputCallback: nil, refcon: nil, compressionSessionOut: &created) == noErr,
+            let created else { return nil }
+        let configured = properties(fps, kbps).allSatisfy { VTSessionSetProperty(created, key: $0.0, value: $0.1) == noErr }
+        let seconds = DesktopCBRConfiguration.readNumber(created, key: kVTCompressionPropertyKey_VBVBufferDuration)?.doubleValue
+        let actual = DesktopCBRConfiguration.readNumber(created, key: kVTCompressionPropertyKey_ConstantBitRate)?.int64Value
+        guard configured, let seconds, abs(seconds - 0.1) < 0.001, let actual,
+              DesktopCBRConfiguration.rateMatches(requested: Int64(kbps) * 1000, readback: actual),
+              VTCompressionSessionPrepareToEncodeFrames(created) == noErr else {
+            VTCompressionSessionInvalidate(created); return nil
+        }
+        return created
+    }
+    static func preflight() -> Bool {
+        guard makeInfo() != nil, LKRTCDefaultVideoEncoderFactory().createEncoder(LKRTCVideoCodecInfo(name: "H265")) != nil,
+              let session = makeSession(width: 2544, height: 1644, fps: 60, kbps: 3000) else { return false }
+        VTCompressionSessionInvalidate(session); return true
+    }
+    func setCallback(_ cb: RTCVideoEncoderCallback?) {
+        lock.lock(); callback = cb; lock.unlock()
+        native.setCallback { [weak self] image, metadata in
+            guard let self else { return false }
+            self.lock.lock(); let ticket = self.nativeTicket; self.nativeTicket = nil; let accepted = self.nativeSPSAccepted; let keyTicket = self.nativeKeyframeTicket; self.nativeKeyframeTicket = nil; let callbackGeneration = self.generation; self.lock.unlock()
+            guard let ticket else { return false }
+            let key = image.frameType.rawValue == 3
+            if key || !accepted {
+                guard key, Self.annexBContainsAcceptedSPS(image.buffer) else {
+                    self.gate.complete(ticket)
+                    self.lock.lock(); self.spsRejected = true; self.lock.unlock()
+                    self.trace(["type": "encoder_hevc", "event": "native_sps_rejected", "time": ProcessInfo.processInfo.systemUptime])
+                    return false
+                }
+                self.lock.lock(); self.nativeSPSAccepted = true; self.lock.unlock()
+            }
+            return self.gate.deliver(ticket) { [weak self] in
+                guard let self else { return }
+                self.lock.lock(); let cb = self.callback; self.lock.unlock()
+                self.observeBytes?(image.buffer.count)
+                if cb?(image, metadata) == true, key, let keyTicket {
+                    self.lock.lock(); if self.generation == callbackGeneration { self.keyframes.acknowledge(keyTicket) }; self.lock.unlock()
+                }
+            }
+        }
+    }
+    func startEncode(with settings: LKRTCVideoEncoderSettings, numberOfCores: Int32) -> Int {
+        _ = release(); self.settings = settings; cores = numberOfCores; rate = settings.startBitrate
+        fps = settings.maxFramerate > 0 ? settings.maxFramerate : 60
+        gate.start()
+        guard let created = Self.makeSession(width: Int32(settings.width), height: Int32(settings.height), fps: fps, kbps: rate) else {
+            return startFallback()
+        }
+        lock.lock(); generation &+= 1; session = created; fallback = false; fallbackPending = false; spsRejected = false; keyframes = LabHEVCKeyframeLatch(); lock.unlock()
+        let actualRate = DesktopCBRConfiguration.readNumber(created, key: kVTCompressionPropertyKey_ConstantBitRate)?.int64Value ?? 0
+        let actualVBV = DesktopCBRConfiguration.readNumber(created, key: kVTCompressionPropertyKey_VBVBufferDuration)?.doubleValue ?? 0
+        trace(["type": "encoder_hevc", "event": "configured", "time": ProcessInfo.processInfo.systemUptime, "rateBps": Int64(rate)*1000, "readbackBps": actualRate, "readbackVBVMs": actualVBV * 1000])
+        return 0
+    }
+    private func retire(_ old: VTCompressionSession?) {
+        if let old { DispatchQueue.global(qos: .userInitiated).async { VTCompressionSessionInvalidate(old) } }
+    }
+    private func startFallback() -> Int {
+        guard let settings else { return -1 }
+        lock.lock(); generation &+= 1; let old = session; session = nil; fallback = true; fallbackPending = false; nativeSPSAccepted = false; lock.unlock()
+        gate.stop(); gate.start()
+        retire(old)
+        let result = native.startEncode(with: settings, numberOfCores: cores)
+        if result == 0, rate > 0 { _ = native.setBitrate(rate, framerate: fps) }
+        trace(["type": "encoder_hevc", "event": "native_hevc_fallback", "time": ProcessInfo.processInfo.systemUptime])
+        return result
+    }
+    func release() -> Int {
+        gate.stop()
+        lock.lock(); generation &+= 1; let old = session; session = nil; let wasFallback = fallback; fallback = false; fallbackPending = false; nativeTicket = nil; nativeKeyframeTicket = nil; lock.unlock()
+        retire(old)
+        if wasFallback { return native.release() }
+        return 0
+    }
+    func encode(_ frame: LKRTCVideoFrame, codecSpecificInfo: (any LKRTCCodecSpecificInfo)?, frameTypes: [NSNumber]) -> Int {
+        lock.lock()
+        if frameTypes.contains(where: { $0.uintValue == 3 }) { keyframes.request() }
+        let keyTicket = keyframes.pending
+        let useNative = fallback; let needFallback = fallbackPending; let rejected = spsRejected; let current = session; let ticket = generation; lock.unlock()
+        if rejected { return -1 }
+        if needFallback { guard startFallback() == 0 else { return -1 }; return encode(frame, codecSpecificInfo: codecSpecificInfo, frameTypes: [3]) }
+        guard let deliveryTicket = gate.reserve() else { return 0 }
+        if useNative {
+            lock.lock(); nativeTicket = deliveryTicket; nativeKeyframeTicket = keyTicket; lock.unlock()
+            let requestedTypes: [NSNumber] = keyTicket != nil ? [3] : frameTypes
+            let result = native.encode(frame, codecSpecificInfo: codecSpecificInfo, frameTypes: requestedTypes)
+            if result != 0 { lock.lock(); nativeTicket = nil; lock.unlock(); gate.complete(deliveryTicket) }
+            return result
+        }
+        guard let current, let settings, let source = frame.buffer as? LKRTCCVPixelBuffer,
+              frame.width == Int32(settings.width), frame.height == Int32(settings.height) else {
+            gate.complete(deliveryTicket)
+            guard startFallback() == 0 else { return -1 }; return encode(frame, codecSpecificInfo: codecSpecificInfo, frameTypes: [3])
+        }
+        var pixel = source.pixelBuffer
+        if source.requiresCropping() {
+            var output: CVPixelBuffer?
+            let result = CVPixelBufferCreate(kCFAllocatorDefault, Int(frame.width), Int(frame.height),
+                CVPixelBufferGetPixelFormatType(pixel), nil, &output)
+            guard result == kCVReturnSuccess, let output else { gate.complete(deliveryTicket); lock.lock(); if ticket == generation { fallbackPending = true }; lock.unlock(); return 0 }
+            let count = Int(source.bufferSizeForCroppingAndScaling(toWidth: frame.width, height: frame.height))
+            var tmp = [UInt8](repeating: 0, count: max(1, count))
+            let ok = tmp.withUnsafeMutableBufferPointer { source.cropAndScale(to: output, withTempBuffer: $0.baseAddress) }
+            guard ok else { gate.complete(deliveryTicket); lock.lock(); if ticket == generation { fallbackPending = true }; lock.unlock(); return 0 }
+            pixel = output
+        }
+        let force = keyTicket != nil ? [kVTEncodeFrameOptionKey_ForceKeyFrame: true] as CFDictionary : nil
+        let ts = frame.timeStamp, ns = frame.timeStampNs, rot = frame.rotation, width = frame.width, height = frame.height
+        let status = VTCompressionSessionEncodeFrame(current, imageBuffer: pixel, presentationTimeStamp: CMTime(value: ns, timescale: 1_000_000_000), duration: .invalid, frameProperties: force, infoFlagsOut: nil) { [weak self] status, flags, sample in
+            self?.deliver(status: status, flags: flags, sample: sample, ticket: ticket, deliveryTicket: deliveryTicket, keyTicket: keyTicket, ts: ts, ns: ns, rotation: rot, width: width, height: height)
+        }
+        if status != noErr { gate.complete(deliveryTicket); lock.lock(); if ticket == generation { fallbackPending = true }; lock.unlock() }
+        return 0
+    }
+    func setBitrate(_ bitrateKbit: UInt32, framerate: UInt32) -> Int32 {
+        lock.lock(); rate = bitrateKbit; if framerate > 0 { fps = framerate }; let current = session; let nativeActive = fallback; let nowFPS = fps; lock.unlock()
+        if nativeActive { return native.setBitrate(bitrateKbit, framerate: framerate) }
+        guard let current else { return -1 }
+        let set = DesktopCBRConfiguration.update(kbps: bitrateKbit, fps: nowFPS) { VTSessionSetProperty(current, key: $0, value: $1) }
+        let actual = set ? DesktopCBRConfiguration.readNumber(current, key: kVTCompressionPropertyKey_ConstantBitRate)?.int64Value : nil
+        let applied = actual.map { DesktopCBRConfiguration.rateMatches(requested: Int64(bitrateKbit)*1000, readback: $0) } ?? false
+        trace(["type": "encoder_hevc", "event": "rate_update", "time": ProcessInfo.processInfo.systemUptime, "requestedBps": Int64(bitrateKbit)*1000, "readbackBps": actual ?? 0, "applied": applied])
+        if !applied { lock.lock(); fallbackPending = true; lock.unlock() }
+        return 0
+    }
+    func implementationName() -> String { "LabHEVCEncoder" }
+    func scalingSettings() -> LKRTCVideoEncoderQpThresholds? { native.scalingSettings() }
+    var resolutionAlignment: Int { native.resolutionAlignment }
+    var applyAlignmentToAllSimulcastLayers: Bool { native.applyAlignmentToAllSimulcastLayers }
+    var supportsNativeHandle: Bool { true }
+    static func annexBContainsAcceptedSPS(_ data: Data) -> Bool {
+        let bytes = [UInt8](data)
+        var starts: [(Int, Int)] = []
+        var i = 0
+        while i + 3 <= bytes.count {
+            if i + 4 <= bytes.count, bytes[i] == 0, bytes[i+1] == 0, bytes[i+2] == 0, bytes[i+3] == 1 {
+                starts.append((i, i+4)); i += 4
+            } else if bytes[i] == 0, bytes[i+1] == 0, bytes[i+2] == 1 {
+                starts.append((i, i+3)); i += 3
+            } else { i += 1 }
+        }
+        for n in starts.indices {
+            let start = starts[n].1, end = n+1 < starts.count ? starts[n+1].0 : bytes.count
+            if start < end, (bytes[start] >> 1) & 0x3f == 33 { return acceptsSPS(Data(bytes[start..<end])) }
+        }
+        return false
+    }
+    static func acceptsSPS(_ sps: Data) -> Bool {
+        guard sps.count >= 2 else { return false }
+        var rbsp: [UInt8] = []; var zeroes = 0
+        for b in sps.dropFirst(2) {
+            if zeroes >= 2 && b == 3 { zeroes = 0; continue }
+            rbsp.append(b); zeroes = b == 0 ? zeroes + 1 : 0
+        }
+        return rbsp.count > 12 && rbsp[1] & 0xc0 == 0 && rbsp[1] & 0x1f == 1 && rbsp[1] & 0x20 == 0 &&
+            [UInt8(30), 60, 63, 90, 93, 120, 123, 150, 153].contains(rbsp[12])
+    }
+    private func deliver(status: OSStatus, flags: VTEncodeInfoFlags, sample: CMSampleBuffer?, ticket: UInt64, deliveryTicket: UInt64, keyTicket: UInt64?, ts: Int32, ns: Int64, rotation: LKRTCVideoRotation, width: Int32, height: Int32) {
+        var handedOff = false
+        defer { if !handedOff { gate.complete(deliveryTicket) } }
+        lock.lock(); let valid = ticket == generation && !fallback; lock.unlock()
+        guard valid else { return }
+        if flags.contains(.frameDropped) { return }
+        guard status == noErr, let sample, CMSampleBufferDataIsReady(sample),
+              let format = CMSampleBufferGetFormatDescription(sample), let block = CMSampleBufferGetDataBuffer(sample) else {
+            lock.lock(); if ticket == generation { fallbackPending = true }; lock.unlock(); return
+        }
+        var parameterSets: [Data] = []; var lengthSize: Int32 = 0, count = 0
+        for index in 0..<3 {
+            var ptr: UnsafePointer<UInt8>?, len = 0
+            guard CMVideoFormatDescriptionGetHEVCParameterSetAtIndex(format, parameterSetIndex: index, parameterSetPointerOut: &ptr, parameterSetSizeOut: &len, parameterSetCountOut: &count, nalUnitHeaderLengthOut: &lengthSize) == noErr, let ptr, len > 0 else {
+                lock.lock(); if ticket == generation { fallbackPending = true }; lock.unlock(); return
+            }
+            parameterSets.append(Data(bytes: ptr, count: len))
+        }
+        guard Self.acceptsSPS(parameterSets[1]) else {
+            // Never substitute a possibly out-of-profile stream inside negotiated HEVC.
+            lock.lock(); let current = ticket == generation; let old = current ? session : nil
+            if current { session = nil; spsRejected = true; generation &+= 1 }; lock.unlock()
+            guard current else { return }
+            retire(old); gate.stop()
+            trace(["type": "encoder_hevc", "event": "sps_rejected", "time": ProcessInfo.processInfo.systemUptime])
+            return
+        }
+        let attachments = CMSampleBufferGetSampleAttachmentsArray(sample, createIfNecessary: false) as? [[CFString: Any]]
+        let key = !((attachments?.first?[kCMSampleAttachmentKey_NotSync] as? Bool) ?? false)
+        let byteCount = CMBlockBufferGetDataLength(block)
+        var bytes = Data(count: byteCount)
+        guard byteCount > 0, bytes.withUnsafeMutableBytes({ CMBlockBufferCopyDataBytes(block, atOffset: 0, dataLength: byteCount, destination: $0.baseAddress!) }) == noErr,
+              let annex = DesktopH264AnnexB.convert(bytes, lengthSize: Int(lengthSize), parameterSets: key ? parameterSets : []) else {
+            lock.lock(); if ticket == generation { fallbackPending = true }; lock.unlock(); return
+        }
+        let image = LKRTCEncodedImage(); image.buffer = annex; image.encodedWidth = width; image.encodedHeight = height
+        image.timeStamp = UInt32(bitPattern: ts); image.captureTimeMs = ns / 1_000_000; image.rotation = rotation
+        image.flags = UInt8.max; image.frameType = LKRTCFrameType(rawValue: key ? 3 : 4)!; image.contentType = LKRTCVideoContentType(rawValue: 1)!; image.qp = NSNumber(value: -1)
+        handedOff = gate.deliver(deliveryTicket) { [weak self] in
+            guard let self else { return }; self.lock.lock(); let cb = self.callback; self.lock.unlock()
+            self.observeBytes?(image.buffer.count)
+            if cb?(image, self.info) == true, key, let keyTicket {
+                self.lock.lock(); if self.generation == ticket { self.keyframes.acknowledge(keyTicket) }; self.lock.unlock()
+            }
+        }
+    }
+}
+
+@available(macOS 26.0, *)
+final class LabHEVCEncoderFactory: NSObject, LKRTCVideoEncoderFactory {
+    private let base: DesktopVideoEncoderFactory
+    private let trace: ([String: Any]) -> Void
+    private let observeBytes: ((Int) -> Void)?
+    init(base: DesktopVideoEncoderFactory, observeBytes: ((Int) -> Void)?, trace: @escaping ([String: Any]) -> Void) {
+        self.base = base; self.observeBytes = observeBytes; self.trace = trace; super.init()
+    }
+    func supportedCodecs() -> [LKRTCVideoCodecInfo] {
+        [LKRTCVideoCodecInfo(name: "H265", parameters: ["profile-id": "1", "tier-flag": "0", "level-id": "153"])] + base.supportedCodecs()
+    }
+    func createEncoder(_ info: LKRTCVideoCodecInfo) -> (any LKRTCVideoEncoder)? {
+        guard info.name.uppercased() == "H265" else { return base.createEncoder(info) }
+        guard let native = LKRTCDefaultVideoEncoderFactory().createEncoder(info), let metadata = LabHEVCEncoder.makeInfo() else { return nil }
+        return LabHEVCEncoder(native: native, info: metadata, observeBytes: observeBytes, trace: trace)
+    }
+}
+
 #endif

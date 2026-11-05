@@ -8,6 +8,24 @@ import XCTest
 
 final class ScreenCaptureSizingTests: XCTestCase {
     #if DEBUG
+    func testHEVCRequiresBothPeersAndIsolatedDebugHost() {
+        guard #available(macOS 26.0, *) else { return }
+        let args = ["host", "--debug-latency-host"]
+        let env = ["LATENCY_LAB": "1", "LATENCY_ENCODER_MODE": "h265-cbr100", "REMOTE_DESKTOP_LATENCY_HOST_ID": UUID().uuidString]
+        func allowed(_ lab: Bool = true, _ ordinary: Bool = true, _ client: Bool = true, _ sixty: Bool = true,
+                     _ f2: Bool = false, _ f3: Bool = false, _ environment: [String: String]? = nil) -> Bool {
+            HostPeerSession.labHEVCAllowed(labInstrumentation: lab, ordinaryPeer: ordinary, clientRequested: client,
+                lab60Requested: sixty, f2Enabled: f2, f3Enabled: f3, arguments: args, environment: environment ?? env)
+        }
+        XCTAssertTrue(allowed()); XCTAssertFalse(allowed(false)); XCTAssertFalse(allowed(true, false))
+        XCTAssertFalse(allowed(true, true, false)); XCTAssertFalse(allowed(true, true, true, false))
+        XCTAssertFalse(allowed(true, true, true, true, true)); XCTAssertFalse(allowed(true, true, true, true, false, true))
+        var other = env; other["LATENCY_ENCODER_MODE"] = "h264-cbr100"
+        XCTAssertFalse(allowed(true, true, true, true, false, false, other))
+        var r0 = env; r0["REMOTE_DESKTOP_R0_HOST_ID"] = "1"
+        XCTAssertFalse(allowed(true, true, true, true, false, false, r0))
+    }
+
     func testCBRRequiresIsolatedOrdinaryOptIn() {
         guard #available(macOS 26.0, *) else { return }
         let args = ["host", "--debug-latency-host"]
