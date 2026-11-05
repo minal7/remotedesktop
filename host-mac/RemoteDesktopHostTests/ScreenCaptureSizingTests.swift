@@ -1438,15 +1438,39 @@ final class ScreenCaptureSizingTests: XCTestCase {
         XCTAssertEqual(ScreenCapture.streamConfiguration(width: 1280, height: 720, audioEnabled: false, framesPerSecond: 30, labCapture120: true).minimumFrameInterval, CMTime(value: 1, timescale: 30))
     }
 
-    func test_labCaptureLimiterAdmitsOnlyIncreasingFramesAtOrBelow60() {
+    func test_labCaptureLimiterTracksRationalPhaseWithTruncated120HzTimestamps() {
         var limiter = LabCaptureFrameLimiter()
-        XCTAssertTrue(limiter.admit(displayTimeNanoseconds: 1_000_000_000))
-        XCTAssertFalse(limiter.admit(displayTimeNanoseconds: 1_008_333_333))
-        XCTAssertFalse(limiter.admit(displayTimeNanoseconds: 1_016_666_666))
-        XCTAssertTrue(limiter.admit(displayTimeNanoseconds: 1_016_666_667))
-        XCTAssertFalse(limiter.admit(displayTimeNanoseconds: 1_016_666_667))
-        XCTAssertFalse(limiter.admit(displayTimeNanoseconds: 1_000_000_000))
-        XCTAssertTrue(limiter.admit(displayTimeNanoseconds: 1_033_333_334))
+        var accepted: [Int64] = []
+        for tick in 0...1200 {
+            let time = Int64(tick) * 1_000_000_000 / 120
+            if limiter.admit(displayTimeNanoseconds: time) { accepted.append(time) }
+        }
+        XCTAssertGreaterThanOrEqual(accepted.count, 599)
+        XCTAssertLessThanOrEqual(accepted.count, 601)
+        for index in 1..<accepted.count {
+            XCTAssertGreaterThanOrEqual(accepted[index] - accepted[index - 1], 15_000_000)
+            XCTAssertLessThanOrEqual(Int64(index) * 1_000_000_000, accepted[index] * 60)
+        }
+    }
+
+    func test_labCaptureLimiterJitterGapsAndAttemptReset() {
+        var limiter = LabCaptureFrameLimiter()
+        var accepted: [Int64] = []
+        for tick in 0...1200 {
+            let time = Int64(tick) * 1_000_000_000 / 120 + (tick == 0 ? 0 : Int64((tick % 3) - 1) * 150_000)
+            if limiter.admit(displayTimeNanoseconds: time) { accepted.append(time) }
+        }
+        XCTAssertGreaterThanOrEqual(accepted.count, 590)
+        for index in 1..<accepted.count {
+            XCTAssertGreaterThanOrEqual(accepted[index] - accepted[index - 1], 15_000_000)
+            XCTAssertLessThanOrEqual(Int64(index) * 1_000_000_000, accepted[index] * 60)
+        }
+        XCTAssertFalse(limiter.admit(displayTimeNanoseconds: accepted.last!))
+        XCTAssertFalse(limiter.admit(displayTimeNanoseconds: accepted.last! - 1))
+        let gap = accepted.last! + 1_000_000_000
+        XCTAssertTrue(limiter.admit(displayTimeNanoseconds: gap))
+        XCTAssertFalse(limiter.admit(displayTimeNanoseconds: gap + 8_333_334))
+        XCTAssertTrue(limiter.admit(displayTimeNanoseconds: gap + 20_000_000))
         var newAttempt = LabCaptureFrameLimiter()
         XCTAssertTrue(newAttempt.admit(displayTimeNanoseconds: 1))
     }

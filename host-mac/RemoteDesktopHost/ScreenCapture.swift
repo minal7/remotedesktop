@@ -380,17 +380,31 @@ struct CaptureVideoFrameOrder {
 #if DEBUG
 /// A per-attempt limiter of genuine complete frames, using the display clock.
 struct LabCaptureFrameLimiter {
+    private var anchor: Int64?
     private var last: Int64?
+    private var lastSlot: UInt64 = 0
+
+    // The rational slot index bounds the average to 60 fps from the anchor.
+    // The 15 ms spacing only prevents immediate catch-up after a missed slot.
     mutating func admit(displayTimeNanoseconds: Int64) -> Bool {
         guard displayTimeNanoseconds >= 0 else { return false }
-        if let last {
-            guard displayTimeNanoseconds > last,
-                  displayTimeNanoseconds - last >= 16_666_667 else { return false }
+        guard let anchor, let last else {
+            anchor = displayTimeNanoseconds; last = displayTimeNanoseconds
+            return true
         }
-        last = displayTimeNanoseconds
+        guard displayTimeNanoseconds > last,
+              displayTimeNanoseconds - last >= 15_000_000 else { return false }
+        let elapsed = UInt64(displayTimeNanoseconds - anchor)
+        let seconds = elapsed / 1_000_000_000
+        guard seconds <= (UInt64.max - 59) / 60 else { return false }
+        let slot = seconds * 60 + (elapsed % 1_000_000_000) * 60 / 1_000_000_000
+        guard slot > lastSlot else { return false }
+        lastSlot = slot
+        self.last = displayTimeNanoseconds
         return true
     }
 }
+
 #endif
 
 /// Status-only events need no image buffer. In particular, idle means no
