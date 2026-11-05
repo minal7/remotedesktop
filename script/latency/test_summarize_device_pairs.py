@@ -104,6 +104,31 @@ class DevicePairSummaryTests(unittest.TestCase):
         self.assertEqual(Path(result['runs'][0]['host_trace']).name, 'host-1.jsonl')
         self.assertEqual(Path(result['runs'][1]['host_trace']).name, 'host-2.jsonl')
 
+    def test_scene_interval_survives_sanitization_and_summary(self):
+        for interval in (2, 8):
+            with self.subTest(interval=interval):
+                self.fixture()
+                source = json.loads(self.marker_path.read_text())
+                source['scene_interval_s'] = interval
+                source['private_unrelated'] = 'must not survive'
+                self.marker_path.write_text(json.dumps(source))
+                result = self.run_summary()
+                self.assertEqual(result['scene_interval_s'], interval)
+                self.assertTrue(all(run['scene_interval_s'] == interval for run in result['runs']))
+                saved = json.loads((self.output / '1-A.fixture-sanitized.json').read_text())
+                self.assertEqual(saved['scene_interval_s'], interval)
+                self.assertNotIn('private_unrelated', saved)
+
+    def test_invalid_scene_interval_is_rejected_and_legacy_is_unknown(self):
+        self.fixture()
+        self.assertIsNone(self.run_summary()['scene_interval_s'])
+        for invalid in (True, None, 0, 3, 2.5, '8'):
+            with self.subTest(invalid=invalid):
+                source = json.loads(self.marker_path.read_text())
+                source['scene_interval_s'] = invalid
+                self.marker_path.write_text(json.dumps(source))
+                with self.assertRaises(ValueError): self.run_summary()
+
     def test_requires_complete_ordered_windows_and_stable_nonselected_settings(self):
         rows = self.fixture()
         events = [r for r in rows if r.get('type') == 'lab_pair']

@@ -376,6 +376,11 @@ def summarize(host_marker, client_trace, host_directory, output_directory):
     client = read_trace(client_trace)
     windows = segments(client)
     source = strict_loads(Path(host_marker).read_text())
+    scene_interval = source.get('scene_interval_s')
+    if 'scene_interval_s' in source:
+        if (not finite_number(scene_interval) or scene_interval not in (2, 8)):
+            raise ValueError('Fixture scene interval must be 2 or 8 seconds.')
+        scene_interval = int(scene_interval)
     output_directory.mkdir(parents=True, exist_ok=True)
     host_traces = []
     for path in Path(host_directory).glob('host-*.jsonl'):
@@ -467,10 +472,11 @@ def summarize(host_marker, client_trace, host_directory, output_directory):
         metrics['locked_25ms_runs'] = (stage0['locked_25ms']['observed_runs']
                                        if stage0['locked_25ms']['coverage'] == 'observed_window' else None)
         metrics['rtt_floor_ms'] = stage0['rtt_floor_ms']
-        stem.with_suffix('.fixture-sanitized.json').write_text(json.dumps({'duration_s': 30, 'markers': sanitize_fixture_markers(selected_markers)}, indent=2) + '\n')
+        stem.with_suffix('.fixture-sanitized.json').write_text(json.dumps({'duration_s': 30, 'scene_interval_s': scene_interval,
+                                                                        'markers': sanitize_fixture_markers(selected_markers)}, indent=2) + '\n')
         write_trace(stem.with_suffix('.client-sanitized.jsonl'), sanitize_stage0(selected_client))
         write_trace(stem.with_suffix('.host-sanitized.jsonl'), sanitize_stage0(selected_host))
-        entry = {'stage0': stage0, 'marker_caveat': marker_caveat, 'pair': begin['pair'], 'arm': begin['arm'], 'settings': begin['settings'],
+        entry = {'scene_interval_s': scene_interval, 'stage0': stage0, 'marker_caveat': marker_caveat, 'pair': begin['pair'], 'arm': begin['arm'], 'settings': begin['settings'],
                  'host_trace': str(host_path), 'peerNonce': begin.get('peerNonce'), 'metrics': metrics,
                  'wifi_spike': metrics['rtt_p95_ms'] is not None and metrics['rtt_p95_ms'] > 150,
                  'marker_coverage': [detail['matched_marker_count'], detail['source_marker_count']],
@@ -484,7 +490,7 @@ def summarize(host_marker, client_trace, host_directory, output_directory):
                             for key, value in a['metrics'].items()})
     paired = {key: median([d[key] for d in differences]) if all(d[key] is not None for d in differences) else None
               for key in differences[0]}
-    return {'fix': windows[0][0]['fix'], 'pairs': 4, 'run': windows[0][0]['run'],
+    return {'scene_interval_s': scene_interval, 'fix': windows[0][0]['fix'], 'pairs': 4, 'run': windows[0][0]['run'],
             'median_paired_B_minus_A': paired, 'paired_differences': differences, 'runs': results,
             'note': 'Same app/signaling session, replacement peers between arms; one-second stage interval averages. '
                     'Wi-Fi spikes count. Sharpness and resource acceptance remain separate.'}

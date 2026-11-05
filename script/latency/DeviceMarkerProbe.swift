@@ -5,8 +5,23 @@ import QuartzCore
 
 // The observer reads only the marker cells and persists only their IDs and times.
 enum LargeChangeCadence {
-    static func isPhoto(elapsed: TimeInterval) -> Bool {
-        Int(max(0, elapsed) / 2) % 2 == 1
+    enum Interval: Int {
+        case stress = 2, recovery = 8
+
+        static func parse(_ raw: String?) -> Interval? {
+            guard let raw else { return .stress }
+            guard let value = Double(raw), value.isFinite else { return nil }
+            switch value {
+            case 2: return .stress
+            case 8: return .recovery
+            default: return nil
+            }
+        }
+        var role: String { self == .stress ? "stress" : "recovery" }
+    }
+    static func isPhoto(elapsed: TimeInterval, interval: Interval = .stress) -> Bool {
+        guard elapsed.isFinite else { return false }
+        return Int(max(0, elapsed) / Double(interval.rawValue)) % 2 == 1
     }
 }
 
@@ -193,6 +208,9 @@ final class Observer: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sen
     func run() async throws {
         guard CGPreflightScreenCaptureAccess() else { throw NSError(domain: "Screen Recording permission required", code: 1) }
         guard let screen = NSScreen.screens.first(where: { ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value == CGMainDisplayID() }), let output = env["LATENCY_HOST_TRACE"], let duration = Double(env["LATENCY_SECONDS"] ?? "60"), duration > 0 else { throw NSError(domain: "Missing output, screen, or duration", code: 1) }
+        guard let sceneInterval = LargeChangeCadence.Interval.parse(env["LATENCY_SCENE_INTERVAL_S"]) else {
+            throw NSError(domain: "Scene interval must be 2 or 8 seconds", code: 1)
+        }
         let optical = env["LATENCY_OPTICAL"] == "1"
         let animate = env["LATENCY_FIXTURE_ANIMATION_60"] == "1"
         guard !animate || optical else { throw NSError(domain: "Animation requires optical fixture mode", code: 1) }
@@ -252,7 +270,7 @@ final class Observer: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sen
             MainActor.assumeIsolated {
                 pattern.id = (pattern.id % 65534) + 1
                 if photo != nil {
-                    let nextPhotoScene = LargeChangeCadence.isPhoto(elapsed: ProcessInfo.processInfo.systemUptime - fixtureStart)
+                    let nextPhotoScene = LargeChangeCadence.isPhoto(elapsed: ProcessInfo.processInfo.systemUptime - fixtureStart, interval: sceneInterval)
                     let sceneChanged = pattern.photoScene != nextPhotoScene
                     pattern.photoScene = nextPhotoScene
                     observer.registerScene(id: pattern.id, scene: pattern.photoScene ? "photo" : "text")
@@ -275,7 +293,8 @@ final class Observer: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sen
         try await observer.stream?.stopCapture()
         let rows = observer.snapshot()
         let result: [String: Any] = ["kind": "device_host_marker", "clock": "host_monotonic_seconds", "duration_s": duration, "initial_marker_observed_before_timing": true,
-            "animation_enabled": animate, "animation_target_fps": animate ? 60 : 0, "geometry": ["x": markerX, "y": markerY, "cell": cell, "screen_width": w, "screen_height": h], "markers": rows]
+            "animation_enabled": animate, "animation_target_fps": animate ? 60 : 0,
+            "scene_interval_s": sceneInterval.rawValue, "scene_interval_role": sceneInterval.role, "geometry": ["x": markerX, "y": markerY, "cell": cell, "screen_width": w, "screen_height": h], "markers": rows]
         try JSONSerialization.data(withJSONObject: result, options: [.prettyPrinted, .sortedKeys]).write(to: URL(fileURLWithPath: output), options: .atomic)
         window.close(); NSApp.terminate(nil)
     }

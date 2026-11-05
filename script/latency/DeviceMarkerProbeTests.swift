@@ -10,6 +10,20 @@ import AppKit
             precondition(LargeChangeCadence.isPhoto(elapsed: elapsed) == expected,
                          "Unexpected scene at \(elapsed) seconds")
         }
+        let parseCases: [(String?, LargeChangeCadence.Interval?)] = [
+            (nil, .stress), ("2", .stress), ("2.0", .stress), ("8", .recovery), ("8.0", .recovery),
+            ("", nil), ("0", nil), ("3", nil), ("-2", nil), ("nan", nil), ("inf", nil), ("-inf", nil), ("2.1", nil)]
+        for (raw, expected) in parseCases {
+            precondition(LargeChangeCadence.Interval.parse(raw) == expected, "Invalid scene interval validation")
+        }
+        let recovery: [(TimeInterval, Bool)] = [(-1, false), (0, false), (7.999, false),
+                                               (8, true), (15.999, true), (16, false), (24, true)]
+        for (elapsed, expected) in recovery {
+            precondition(LargeChangeCadence.isPhoto(elapsed: elapsed, interval: .recovery) == expected,
+                         "Unexpected 8-second scene at \(elapsed)")
+        }
+        precondition(!LargeChangeCadence.isPhoto(elapsed: .nan, interval: .recovery))
+        precondition(LargeChangeCadence.Interval.stress.role == "stress" && LargeChangeCadence.Interval.recovery.role == "recovery")
         let steps: [(TimeInterval, Int)] = [(-1, 0), (0, 0), (1.0 / 120, 0),
                                              (1.0 / 60, 1), (0.5, 30), (1, 60), (601, 36_000)]
         for (elapsed, expected) in steps {
@@ -33,6 +47,6 @@ import AppKit
             precondition(FixtureAnimationCadence.displayStep(target: target, anchor: anchor) == index,
                          "Display target must advance one 60 Hz step")
         }
-        print("145 cadence, marker-separation and display-link checks passed")
+        print("167 fixture checks passed")
     }
 }
