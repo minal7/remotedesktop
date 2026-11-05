@@ -1184,6 +1184,64 @@ final class WebRTCTransportTests: XCTestCase {
         model.reset()
     }
 
+    func test_recoverableDropConnectsToTheSameHostAgainByItself() async {
+        let firstConnected = expectation(description: "first connect")
+        let first = RecordingTargetTransport(connected: firstConnected)
+        let secondConnected = expectation(description: "second connect")
+        let second = RecordingTargetTransport(connected: secondConnected)
+        var candidates = [first, second]
+        let model = SessionModel(initialInputActivity: .active, applicationNotificationCenter: NotificationCenter(),
+                                 transportFactory: { candidates.removeFirst() })
+        model.connect(code: "123456", computerUseHostID: "HOST-B", hostName: "Studio Mac")
+        await fulfillment(of: [firstConnected], timeout: 1)
+
+        first.lastDisconnectIsRecoverable = true
+        first.onDisconnect?("lost")
+
+        XCTAssertEqual(model.state, .connecting)
+        XCTAssertTrue(model.isReconnecting)
+        await fulfillment(of: [secondConnected], timeout: 4)
+        XCTAssertEqual(second.pairingCode, "123456")
+        XCTAssertEqual(second.expectedHostID, "HOST-B")
+        model.reset()
+    }
+
+    func test_deliberateEndDoesNotReconnect() async {
+        let connected = expectation(description: "connect")
+        let transport = RecordingTargetTransport(connected: connected)
+        let model = SessionModel(initialInputActivity: .active, applicationNotificationCenter: NotificationCenter(),
+                                 transportFactory: { transport })
+        model.connect(code: "123456", computerUseHostID: "HOST-B", hostName: "Studio Mac")
+        await fulfillment(of: [connected], timeout: 1)
+
+        transport.onDisconnect?("user")
+
+        XCTAssertEqual(model.state, .ended("user"))
+        XCTAssertFalse(model.isReconnecting)
+        model.reset()
+    }
+
+    func test_userCanCancelAWaitingReconnect() async {
+        let firstConnected = expectation(description: "first connect")
+        let first = RecordingTargetTransport(connected: firstConnected)
+        let unexpected = expectation(description: "no second connect")
+        unexpected.isInverted = true
+        let second = RecordingTargetTransport(connected: unexpected)
+        var candidates = [first, second]
+        let model = SessionModel(initialInputActivity: .active, applicationNotificationCenter: NotificationCenter(),
+                                 transportFactory: { candidates.removeFirst() })
+        model.connect(code: "123456", computerUseHostID: "HOST-B", hostName: "Studio Mac")
+        await fulfillment(of: [firstConnected], timeout: 1)
+
+        first.lastDisconnectIsRecoverable = true
+        first.onDisconnect?("lost")
+        model.reset()
+
+        await fulfillment(of: [unexpected], timeout: 3)
+        XCTAssertEqual(model.state, .idle)
+        XCTAssertFalse(model.isReconnecting)
+    }
+
     func test_sessionModelRequiresAnActualDecodedFrameForVideoReadiness() async {
         let connected = expectation(description: "transport connect called")
         let transport = RecordingTargetTransport(connected: connected)
@@ -1848,6 +1906,7 @@ private final class RecordingTargetTransport: VideoRenderingTransport {
     var onVideoFrameUnavailable: (@MainActor () -> Void)?
     var onFirstVideoFrame: (@MainActor () -> Void)?
     var onDisconnect: (@MainActor (String) -> Void)?
+    var lastDisconnectIsRecoverable = false
 
     private(set) var attachedRenderers: [any RemoteVideoSurface] = []
     private(set) var detachedRenderers: [any RemoteVideoSurface] = []

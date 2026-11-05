@@ -59,6 +59,9 @@ protocol Transport: AnyObject {
     /// freshness or an occlusion proof. Non-video fixtures synthesize it explicitly.
     var onFirstVideoFrame: (@MainActor () -> Void)? { get set }
     var onDisconnect: (@MainActor (String) -> Void)? { get set }
+    /// True when the session that just ended was live and nobody chose to end it,
+    /// so the client should connect again on its own.
+    var lastDisconnectIsRecoverable: Bool { get }
 
     func connect(pairingCode: String, expectedHostID: String?) async throws
     func send(_ message: ControlMessage, seq: UInt32, ts: UInt64)
@@ -66,6 +69,8 @@ protocol Transport: AnyObject {
 }
 
 extension Transport {
+    var lastDisconnectIsRecoverable: Bool { false }
+
     func connect(pairingCode: String) async throws {
         try await connect(pairingCode: pairingCode, expectedHostID: nil)
     }

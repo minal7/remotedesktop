@@ -45,6 +45,34 @@ struct RemoteKeyboardCaptureIdentity: Hashable {
 
 /// Top-level state holder for the client. Owns the `Transport`, tracks
 /// lifecycle, and fans input events out as `ControlMessage`s.
+#if DEBUG
+/// Why sessions ended, kept on the device so a drop can be explained afterwards.
+enum SessionEventLog {
+    private static let queue = DispatchQueue(label: "session.events")
+    private static let url = FileManager.default
+        .urls(for: .cachesDirectory, in: .userDomainMask)[0]
+        .appendingPathComponent("session-events.log")
+
+    static func record(_ event: String) {
+        let line = "\(Date().ISO8601Format()) \(event)\n"
+        queue.async {
+            guard let data = line.data(using: .utf8) else { return }
+            if let size = (try? FileManager.default.attributesOfItem(atPath: url.path))?[.size] as? Int,
+               size > 2_000_000 {
+                try? FileManager.default.removeItem(at: url)
+            }
+            if let handle = try? FileHandle(forWritingTo: url) {
+                defer { try? handle.close() }
+                _ = try? handle.seekToEnd()
+                try? handle.write(contentsOf: data)
+            } else {
+                try? data.write(to: url)
+            }
+        }
+    }
+}
+#endif
+
 @MainActor
 final class SessionModel: ObservableObject, VideoRendererTarget {
     typealias LocalAccountBindingValidator = @Sendable (
@@ -83,7 +111,39 @@ final class SessionModel: ObservableObject, VideoRendererTarget {
         case ended(String)
     }
 
-    @Published private(set) var state: State = .idle { didSet { notifyRemoteScreenVisibilityChanged() } }
+    @Published private(set) var state: State = .idle {
+        didSet {
+            notifyRemoteScreenVisibilityChanged()
+            // Auto-lock would suspend the app and end the session.
+            UIApplication.shared.isIdleTimerDisabled = state == .connecting || state == .connected
+            if state == .connected {
+                connectedAt = Date()
+                isReconnecting = false
+            }
+            #if DEBUG
+            if state != oldValue { SessionEventLog.record("session_state \(state) reconnecting=\(reconnectDeadline != nil)") }
+            #endif
+        }
+    }
+    @Published private(set) var isReconnecting = false
+
+    /// What to connect to again if a live remote-control session drops by itself.
+    private struct ReconnectRoute {
+        let code: String
+        let hostID: String?
+        let hostName: String
+        let accountBinding: CloudKitAccountBinding?
+        let source: LocalHostAdvertisement.Source
+    }
+    /// Long enough to ride out a Wi-Fi outage; a host that is really gone ends in the normal failure.
+    private static let reconnectWindow: TimeInterval = 180
+    /// A session that lasted this long starts a new window, so a repeat drop is not cut short.
+    private static let reconnectResetAfter: TimeInterval = 60
+    private var reconnectRoute: ReconnectRoute?
+    private var reconnectDeadline: Date?
+    private var reconnectTask: Task<Void, Never>?
+    private var resumingRoute = false
+    private var connectedAt: Date?
     @Published private(set) var hostName: String?
     @Published private(set) var touchPreferenceHostID: String?
     @Published private(set) var display: DisplayInfo? { didSet { notifyRemoteScreenVisibilityChanged() } }
@@ -471,12 +531,18 @@ final class SessionModel: ObservableObject, VideoRendererTarget {
             applicationObservers.append(applicationNotificationCenter.addObserver(
                 forName: name, object: nil, queue: .main
             ) { [weak self] _ in
+                #if DEBUG
+                SessionEventLog.record("app \(name.rawValue)")
+                #endif
                 MainActor.assumeIsolated { self?.setApplicationInputActive(false) }
             })
         }
         applicationObservers.append(applicationNotificationCenter.addObserver(
             forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main
         ) { [weak self] _ in
+            #if DEBUG
+            SessionEventLog.record("app didBecomeActive")
+            #endif
             MainActor.assumeIsolated { self?.setApplicationInputActive(true) }
         })
     }
@@ -554,9 +620,16 @@ final class SessionModel: ObservableObject, VideoRendererTarget {
         localCloudAccountBinding: CloudKitAccountBinding? = nil,
         discoverySource: LocalHostAdvertisement.Source = .cloudKit
     ) {
-        guard state == .idle || {
+        let resuming = resumingRoute
+        resumingRoute = false
+        guard resuming || state == .idle || {
             if case .ended = state { return true } else { return false }
         }() else { return }
+        if !resuming { cancelReconnect() }
+        reconnectRoute = experience == .remoteControl
+            ? ReconnectRoute(code: code, hostID: computerUseHostID, hostName: hostName,
+                             accountBinding: localCloudAccountBinding, source: discoverySource)
+            : nil
         stopComputerUseVisualSidecar(preserveConfiguration: false)
         invalidateAccountRevalidation(clearBinding: true)
         state = .connecting
@@ -619,6 +692,10 @@ final class SessionModel: ObservableObject, VideoRendererTarget {
                 self.computerUseSession?.stop()
                 self.computerUseSession = nil
                 self.transport = nil
+                #if DEBUG
+                SessionEventLog.record("connect_failed resuming=\(self.reconnectDeadline != nil) error=\(String(describing: error))")
+                #endif
+                if self.reconnectDeadline != nil, self.scheduleReconnect() { return }
                 self.sessionAccountBinding = nil
                 self.error = (error as? LocalizedError)?.errorDescription ?? "Couldn't connect: \(error.localizedDescription)"
                 self.state = .idle
@@ -836,7 +913,47 @@ final class SessionModel: ObservableObject, VideoRendererTarget {
     }
     #endif
 
+    /// Starts or continues trying the same Mac again. False once the window has run out.
+    private func scheduleReconnect() -> Bool {
+        guard experience == .remoteControl, let route = reconnectRoute else { return false }
+        let now = Date()
+        if let connectedAt, now.timeIntervalSince(connectedAt) >= Self.reconnectResetAfter {
+            reconnectDeadline = nil
+        }
+        connectedAt = nil
+        let deadline = reconnectDeadline ?? now.addingTimeInterval(Self.reconnectWindow)
+        guard now < deadline else {
+            cancelReconnect()
+            return false
+        }
+        reconnectDeadline = deadline
+        isReconnecting = true
+        state = .connecting
+        reconnectTask?.cancel()
+        reconnectTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(2))
+            guard !Task.isCancelled, let self, self.state == .connecting, self.transport == nil else { return }
+            self.resumingRoute = true
+            self.connect(code: route.code,
+                         computerUseHostID: route.hostID,
+                         hostName: route.hostName,
+                         localCloudAccountBinding: route.accountBinding,
+                         discoverySource: route.source)
+        }
+        return true
+    }
+
+    private func cancelReconnect() {
+        reconnectTask?.cancel()
+        reconnectTask = nil
+        reconnectDeadline = nil
+        connectedAt = nil
+        isReconnecting = false
+    }
+
     func disconnect() {
+        cancelReconnect()
+        reconnectRoute = nil
         invalidateAccountRevalidation(clearBinding: true)
         releaseRemoteInputSources()
         stopComputerUseVisualSidecar(preserveConfiguration: false)
@@ -850,6 +967,8 @@ final class SessionModel: ObservableObject, VideoRendererTarget {
     }
 
     func reset() {
+        cancelReconnect()
+        reconnectRoute = nil
         invalidateAccountRevalidation(clearBinding: true)
         releaseRemoteInputSources()
         stopComputerUseVisualSidecar(preserveConfiguration: false)
@@ -926,6 +1045,8 @@ final class SessionModel: ObservableObject, VideoRendererTarget {
     }
 
     private func endForCloudAccountChange() {
+        cancelReconnect()
+        reconnectRoute = nil
         let reason = "The Apple Account changed or is no longer available. Sign into the same Apple Account and pair again."
         invalidateAccountRevalidation(clearBinding: true)
         localConnectionTask?.cancel()
@@ -1224,6 +1345,8 @@ final class SessionModel: ObservableObject, VideoRendererTarget {
             self.computerUseSession?.stop()
             self.transport = nil
             self.invalidateRemoteInput()
+            if t.lastDisconnectIsRecoverable || self.reconnectDeadline != nil, self.scheduleReconnect() { return }
+            self.cancelReconnect()
             self.state = .ended(r)
         }
     }

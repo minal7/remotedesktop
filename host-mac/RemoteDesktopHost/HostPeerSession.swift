@@ -368,6 +368,23 @@ final class HostPeerSession: NSObject {
     /// ICE has stopped hearing from the client. The client gives up after the same
     /// 12 s, and native ICE would otherwise hold the host for about 30 s.
     static let connectionRecoveryTimeout: Duration = .seconds(12)
+    /// A sleeping display stops the picture and a sleeping Mac ends the session.
+    private final class SessionKeepAwake: @unchecked Sendable {
+        private let lock = NSLock()
+        private var activity: NSObjectProtocol?
+        init() {
+            activity = ProcessInfo.processInfo.beginActivity(
+                options: [.idleDisplaySleepDisabled, .userInitiated, .latencyCritical],
+                reason: "Remote session in progress")
+        }
+        func end() {
+            lock.lock(); defer { lock.unlock() }
+            if let activity { ProcessInfo.processInfo.endActivity(activity) }
+            activity = nil
+        }
+        deinit { end() }
+    }
+    private let keepAwake = SessionKeepAwake()
     private var connectionLost = false
     private var connectionRecoveryTask: Task<Void, Never>?
 
@@ -1125,6 +1142,7 @@ final class HostPeerSession: NSObject {
         return closeCoordinator.close(revokeInput: {
             self.inputAuthorization.close()
         }) {
+            self.keepAwake.end()
             self.portMappingSession?.close()
             #if DEBUG
             self.traceCapturePhase("close_state_lock_entry")

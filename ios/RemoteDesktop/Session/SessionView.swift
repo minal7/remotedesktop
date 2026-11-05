@@ -86,7 +86,8 @@ struct SessionView: View {
                     VStack(spacing: 12) {
                         if session.inputActivity.allowsInput {
                             ConnectionWaitNotice(
-                                title: session.state == .connecting ? "Connecting to your computer…" : "Restoring the remote screen…",
+                                title: session.isReconnecting ? "Reconnecting to your computer…"
+                                    : (session.state == .connecting ? "Connecting to your computer…" : "Restoring the remote screen…"),
                                 recovery: session.state == .connecting
                                     ? "Still connecting to your computer. Check that both devices are online and the host app is open."
                                     : "Still restoring the remote screen. Check that both devices are online and the host app is open.",

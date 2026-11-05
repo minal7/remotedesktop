@@ -318,6 +318,7 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
     private var iceDeadlineTask: Task<Void, Never>?
     private var connectionRecoveryTask: Task<Void, Never>?
     private var connectedOnce = false
+    private(set) var lastDisconnectIsRecoverable = false
     private var directInputState = DirectInputClientState()
     private var inputHandshakeDeadlineTask: Task<Void, Never>?
     private(set) var answerApplied = false
@@ -635,6 +636,12 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
     private func finishDisconnect(reason: String, category: DisconnectCategory) {
         guard !didReportDisconnect else { return }
         didReportDisconnect = true
+        // A host that stops on purpose says bye without inviting a reconnect.
+        lastDisconnectIsRecoverable = connectedOnce && mediaPolicy == .remoteSession
+            && (category != .remoteBye || reason.localizedCaseInsensitiveContains("reconnect"))
+        #if DEBUG
+        SessionEventLog.record("transport_ended category=\(category.rawValue) connectedOnce=\(connectedOnce) recoverable=\(lastDisconnectIsRecoverable) reason=\(reason)")
+        #endif
         // Never log reason: it can contain remote or signaling-provided text.
         log.notice("transport ended category=\(category.rawValue, privacy: .public) sidecar=\(self.mediaPolicy == .computerUseVisualSidecar, privacy: .public) connectedOnce=\(self.connectedOnce, privacy: .public)")
         logCandidateCounts(stage: "transport_ended")
@@ -1359,10 +1366,17 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
                     return
                 }
                 log.error("poll loop failed: \(String(describing: error), privacy: .public)")
-                let message = (error as? LocalizedError)?.errorDescription
-                    ?? error.localizedDescription
-                finishDisconnect(reason: "The WebRTC signaling loop ended unexpectedly: \(message)", category: .signaling)
-                return
+                // Video and input run peer to peer, so losing iCloud for a moment
+                // must not end a live session. Keep polling until it comes back.
+                guard connectedOnce else {
+                    let message = (error as? LocalizedError)?.errorDescription
+                        ?? error.localizedDescription
+                    finishDisconnect(reason: "The WebRTC signaling loop ended unexpectedly: \(message)", category: .signaling)
+                    return
+                }
+                #if DEBUG
+                SessionEventLog.record("signaling_poll_failed_live error=\(String(describing: error))")
+                #endif
             }
 
             try? await Task.sleep(for: .seconds(2))
@@ -1712,6 +1726,9 @@ extension WebRTCTransport: RTCPeerConnectionDelegate {
                               "state": String(describing: stateChanged)])
             #endif
             log.info("peer connection state → \(String(describing: stateChanged), privacy: .public)")
+            #if DEBUG
+            SessionEventLog.record("peer_state \(stateChanged.rawValue) closing=\(isClosing)")
+            #endif
             guard !isClosing else { return }
             switch stateChanged {
             case .connected:
