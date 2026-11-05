@@ -135,6 +135,54 @@ enum DesktopCBRConfiguration {
     }
 }
 
+/// Every ConstantBitRate change makes VideoToolbox emit one frame holding about
+/// 0.42 s of the new rate (126 KB at 2.4 Mbps), whatever the change or the width.
+/// WebRTC sends small updates several times a second, so passing them through
+/// floods the pacer. Only meaningful, sustained changes reach the encoder.
+struct LabCBRRatePolicy {
+    static let minimumDownInterval: TimeInterval = 1, raiseHold: TimeInterval = 2
+    private(set) var appliedKbps: UInt32 = 0
+    private var lastChange: TimeInterval = -.infinity
+    private var raiseStart: TimeInterval?
+    private var raiseFloor: UInt32 = 0
+    mutating func reset() { self = LabCBRRatePolicy() }
+    /// Returns the rate to apply now, or nil to keep the current one.
+    mutating func decide(requestKbps: UInt32, now: TimeInterval, framesEncoded: Int) -> UInt32? {
+        guard requestKbps > 0 else { return nil }
+        // Before the first frame there is nothing to flood.
+        if framesEncoded == 0 || appliedKbps == 0 { return commit(requestKbps, now) }
+        let ratio = Double(requestKbps) / Double(appliedKbps)
+        if ratio < 0.75 {
+            raiseStart = nil
+            return now - lastChange >= Self.minimumDownInterval ? commit(requestKbps, now) : nil
+        }
+        guard ratio > 1.3 else { raiseStart = nil; return nil }
+        if raiseStart == nil { raiseStart = now; raiseFloor = requestKbps }
+        raiseFloor = min(raiseFloor, requestKbps)
+        guard now - raiseStart! >= Self.raiseHold, Double(raiseFloor) / Double(appliedKbps) > 1.3 else { return nil }
+        return commit(raiseFloor, now)
+    }
+    private mutating func commit(_ kbps: UInt32, _ now: TimeInterval) -> UInt32 {
+        appliedKbps = kbps; lastChange = now; raiseStart = nil; return kbps
+    }
+}
+
+final class LabEncoderCounters: @unchecked Sendable {
+    private let lock = NSLock(); private var last = ProcessInfo.processInfo.systemUptime
+    var calls = 0, outputs = 0, vtDropped = 0, busy = 0, bytes = 0, rateCalls = 0
+    var lastFramerate: UInt32 = 0, lastKbps: UInt32 = 0, appliedKbps: UInt32 = 0, width: Int32 = 0
+    func bump(_ body: (LabEncoderCounters) -> Void, emit: ([String: Any]) -> Void) {
+        lock.lock(); body(self); let now = ProcessInfo.processInfo.systemUptime
+        var row: [String: Any]?
+        if now - last >= 1 {
+            row = ["type": "encoder_counts", "time": now, "seconds": now - last, "calls": calls, "outputs": outputs, "vtDropped": vtDropped,
+                   "busy": busy, "bytes": bytes, "rateCalls": rateCalls, "framerate": lastFramerate, "kbps": lastKbps, "appliedKbps": appliedKbps, "width": width]
+            calls = 0; outputs = 0; vtDropped = 0; busy = 0; bytes = 0; rateCalls = 0; last = now
+        }
+        lock.unlock(); if let row { emit(row) }
+    }
+}
+
 /// Opt-in experimental encoder. Setup or unsupported-frame failures use the
 /// stock encoder; no experimental object exists in Release builds.
 final class DesktopLowLatencyH264Encoder: NSObject, LKRTCVideoEncoder, @unchecked Sendable {
@@ -161,7 +209,10 @@ final class DesktopLowLatencyH264Encoder: NSObject, LKRTCVideoEncoder, @unchecke
     // frame in flight, so CBR rate changes wait until encode() finds it idle.
     private var cbrInFlight = 0
     private var cbrPendingKbps: UInt32?
-    private var cbrLastRateChange: TimeInterval = 0
+    private var cbrPolicy = LabCBRRatePolicy()
+    private var cbrFramesEncoded = 0
+    private let counters = LabEncoderCounters()
+    private func count(_ body: (LabEncoderCounters) -> Void) { if cbr { counters.bump(body) { [trace] in trace?($0) } } }
 
     init(fallback: any LKRTCVideoEncoder, cbr: Bool = false, trace: (([String: Any]) -> Void)? = nil, observeBytes: ((Int) -> Void)? = nil, propertySetter: @escaping (VTCompressionSession, CFString, CFTypeRef) -> OSStatus = { VTSessionSetProperty($0, key: $1, value: $2) }, sessionCreator: @escaping SessionCreator = { width, height, specification, output in
         VTCompressionSessionCreate(allocator: kCFAllocatorDefault, width: width, height: height,
@@ -188,7 +239,7 @@ final class DesktopLowLatencyH264Encoder: NSObject, LKRTCVideoEncoder, @unchecke
         bitrateKbps = settings.startBitrate
         let captureRate = UInt32(DesktopVideoQuality.f2FramesPerSecond)
         frameRate = cbr ? captureRate : (settings.maxFramerate > 0 ? min(settings.maxFramerate, captureRate) : captureRate)
-        cbrInFlight = 0; cbrPendingKbps = nil; cbrLastRateChange = 0
+        cbrInFlight = 0; cbrPendingKbps = nil; cbrPolicy.reset(); cbrFramesEncoded = 0
         guard settings.width > 0, settings.height > 0 else { return startFallback() }
         let specification: [CFString: Any]
         if cbr {
@@ -269,6 +320,7 @@ final class DesktopLowLatencyH264Encoder: NSObject, LKRTCVideoEncoder, @unchecke
 
     func encode(_ frame: LKRTCVideoFrame, codecSpecificInfo info: (any LKRTCCodecSpecificInfo)?,
                 frameTypes: [NSNumber]) -> Int {
+        count { $0.calls += 1; $0.width = frame.width }
         lock.lock(); let needsFallback = fallbackNeeded; let activeFallback = usingFallback; lock.unlock()
         if needsFallback {
             guard startFallback() == 0 else { return -1 }
@@ -328,17 +380,21 @@ final class DesktopLowLatencyH264Encoder: NSObject, LKRTCVideoEncoder, @unchecke
         guard #available(macOS 26.0, *) else { return }
         let now = ProcessInfo.processInfo.systemUptime
         lock.lock()
-        guard cbrInFlight == 0, let kbps = cbrPendingKbps, now - cbrLastRateChange >= 0.1 else { lock.unlock(); return }
-        cbrPendingKbps = nil; cbrLastRateChange = now; lock.unlock()
+        cbrFramesEncoded += 1
+        guard cbrInFlight == 0, let request = cbrPendingKbps,
+              let kbps = cbrPolicy.decide(requestKbps: request, now: now, framesEncoded: cbrFramesEncoded - 1) else { lock.unlock(); return }
+        lock.unlock()
         let set = DesktopCBRConfiguration.updateRate(kbps: kbps) { propertySetter(current, $0, $1) }
         let read = set ? DesktopCBRConfiguration.readNumber(current, key: kVTCompressionPropertyKey_ConstantBitRate)?.int64Value : nil
         let actual = read ?? 0
         let applied = read != nil && DesktopCBRConfiguration.rateMatches(requested: Int64(kbps) * 1000, readback: actual)
         trace?(["type": "encoder_cbr", "event": "rate_update", "bitrateBps": Int64(kbps) * 1000, "readbackBps": actual, "applied": applied])
+        count { $0.appliedKbps = kbps }
         if !applied { lock.lock(); fallbackNeeded = true; lock.unlock() }
     }
 
     func setBitrate(_ bitrateKbit: UInt32, framerate: UInt32) -> Int32 {
+        count { $0.rateCalls += 1; $0.lastFramerate = framerate; $0.lastKbps = bitrateKbit }
         lock.lock(); bitrateKbps = bitrateKbit
         if !cbr, framerate > 0 { frameRate = min(framerate, UInt32(DesktopVideoQuality.f2FramesPerSecond)) }
         let current = session, activeFallback = usingFallback, rate = frameRate
@@ -382,7 +438,7 @@ final class DesktopLowLatencyH264Encoder: NSObject, LKRTCVideoEncoder, @unchecke
         lock.lock(); let current = generation == self.generation && !usingFallback; lock.unlock()
         guard current else { return }
         guard status == noErr else { requestFallback(generation: generation); return }
-        guard !flags.contains(.frameDropped) else { return }
+        guard !flags.contains(.frameDropped) else { count { $0.vtDropped += 1 }; return }
         guard let sample, CMSampleBufferDataIsReady(sample),
               let format = CMSampleBufferGetFormatDescription(sample),
               let block = CMSampleBufferGetDataBuffer(sample) else {
@@ -430,6 +486,7 @@ final class DesktopLowLatencyH264Encoder: NSObject, LKRTCVideoEncoder, @unchecke
         lock.lock()
         if generation == self.generation && !usingFallback {
             observeBytes?(annexB.count)
+            count { $0.outputs += 1; $0.bytes += annexB.count }
             if callback?(image, info) == true, keyframe, let keyframeTicket,
                generation == self.generation && !usingFallback {
                 keyframeGate.acknowledge(keyframeTicket)
@@ -505,7 +562,10 @@ final class LabHEVCEncoder: NSObject, LKRTCVideoEncoder, @unchecked Sendable {
     private var rate: UInt32 = 0
     private var fps: UInt32 = 60
     private var pendingRate: UInt32?
-    private var lastRateChange: TimeInterval = 0
+    private var policy = LabCBRRatePolicy()
+    private var framesEncoded = 0
+    private let counters = LabEncoderCounters()
+    private func count(_ body: (LabEncoderCounters) -> Void) { counters.bump(body) { [trace] in trace($0) } }
 
     static func makeInfo(lookup: (String) -> AnyClass? = { NSClassFromString($0) }) -> (any LKRTCCodecSpecificInfo)? {
         guard let type = lookup("LKRTCCodecSpecificInfoH265") as? NSObject.Type else { return nil }
@@ -575,7 +635,7 @@ final class LabHEVCEncoder: NSObject, LKRTCVideoEncoder, @unchecked Sendable {
     }
     func startEncode(with settings: LKRTCVideoEncoderSettings, numberOfCores: Int32) -> Int {
         _ = release(); self.settings = settings; cores = numberOfCores; rate = settings.startBitrate
-        fps = 60; pendingRate = nil; lastRateChange = 0
+        fps = 60; pendingRate = nil; policy.reset(); framesEncoded = 0
         gate.start()
         guard let created = Self.makeSession(width: Int32(settings.width), height: Int32(settings.height), fps: fps, kbps: rate) else {
             return startFallback()
@@ -613,7 +673,8 @@ final class LabHEVCEncoder: NSObject, LKRTCVideoEncoder, @unchecked Sendable {
         let useNative = fallback; let needFallback = fallbackPending; let rejected = spsRejected; let current = session; let ticket = generation; lock.unlock()
         if rejected { return -1 }
         if needFallback { guard startFallback() == 0 else { return -1 }; return encode(frame, codecSpecificInfo: codecSpecificInfo, frameTypes: [3]) }
-        guard let deliveryTicket = gate.reserve() else { return 0 }
+        count { $0.calls += 1; $0.width = frame.width }
+        guard let deliveryTicket = gate.reserve() else { count { $0.busy += 1 }; return 0 }
         if useNative {
             lock.lock(); nativeTicket = deliveryTicket; nativeKeyframeTicket = keyTicket; lock.unlock()
             let requestedTypes: [NSNumber] = keyTicket != nil ? [3] : frameTypes
@@ -650,6 +711,7 @@ final class LabHEVCEncoder: NSObject, LKRTCVideoEncoder, @unchecked Sendable {
     func setBitrate(_ bitrateKbit: UInt32, framerate: UInt32) -> Int32 {
         // A VideoToolbox property call racing a frame in flight can block the remote
         // encoder forever. encode() applies this while the gate shows nothing in flight.
+        count { $0.rateCalls += 1; $0.lastFramerate = framerate; $0.lastKbps = bitrateKbit }
         lock.lock(); rate = bitrateKbit; let current = session; let nativeActive = fallback
         if !nativeActive, current != nil, bitrateKbit > 0 { pendingRate = bitrateKbit }
         lock.unlock()
@@ -659,12 +721,15 @@ final class LabHEVCEncoder: NSObject, LKRTCVideoEncoder, @unchecked Sendable {
     private func applyPendingRate(_ current: VTCompressionSession) {
         let now = ProcessInfo.processInfo.systemUptime
         lock.lock()
-        guard let kbps = pendingRate, now - lastRateChange >= 0.1 else { lock.unlock(); return }
-        pendingRate = nil; lastRateChange = now; lock.unlock()
+        framesEncoded += 1
+        guard let request = pendingRate,
+              let kbps = policy.decide(requestKbps: request, now: now, framesEncoded: framesEncoded - 1) else { lock.unlock(); return }
+        lock.unlock()
         let set = DesktopCBRConfiguration.updateRate(kbps: kbps) { VTSessionSetProperty(current, key: $0, value: $1) }
         let actual = set ? DesktopCBRConfiguration.readNumber(current, key: kVTCompressionPropertyKey_ConstantBitRate)?.int64Value : nil
         let applied = actual.map { DesktopCBRConfiguration.rateMatches(requested: Int64(kbps)*1000, readback: $0) } ?? false
         trace(["type": "encoder_hevc", "event": "rate_update", "time": ProcessInfo.processInfo.systemUptime, "requestedBps": Int64(kbps)*1000, "readbackBps": actual ?? 0, "applied": applied])
+        count { $0.appliedKbps = kbps }
         if !applied { lock.lock(); fallbackPending = true; lock.unlock() }
     }
     func implementationName() -> String { "LabHEVCEncoder" }
@@ -704,7 +769,7 @@ final class LabHEVCEncoder: NSObject, LKRTCVideoEncoder, @unchecked Sendable {
         defer { if !handedOff { gate.complete(deliveryTicket) } }
         lock.lock(); let valid = ticket == generation && !fallback; lock.unlock()
         guard valid else { return }
-        if flags.contains(.frameDropped) { return }
+        if flags.contains(.frameDropped) { count { $0.vtDropped += 1 }; return }
         guard status == noErr, let sample, CMSampleBufferDataIsReady(sample),
               let format = CMSampleBufferGetFormatDescription(sample), let block = CMSampleBufferGetDataBuffer(sample) else {
             lock.lock(); if ticket == generation { fallbackPending = true }; lock.unlock(); return
@@ -740,6 +805,7 @@ final class LabHEVCEncoder: NSObject, LKRTCVideoEncoder, @unchecked Sendable {
         handedOff = gate.deliver(deliveryTicket) { [weak self] in
             guard let self else { return }; self.lock.lock(); let cb = self.callback; self.lock.unlock()
             self.observeBytes?(image.buffer.count)
+            self.count { $0.outputs += 1; $0.bytes += image.buffer.count }
             if cb?(image, self.info) == true, key, let keyTicket {
                 self.lock.lock(); if self.generation == ticket { self.keyframes.acknowledge(keyTicket) }; self.lock.unlock()
             }

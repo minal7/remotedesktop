@@ -29,6 +29,7 @@ final class LabALRFieldTrialBootstrap: @unchecked Sendable {
         switch environment["LATENCY_ALR_TRIAL"] {
         case "1": return 1
         case "2": return 2
+        case "3": return 3
         default: return 0
         }
     }
@@ -38,6 +39,7 @@ final class LabALRFieldTrialBootstrap: @unchecked Sendable {
         switch mode {
         case 1: return screen
         case 2: return screen + "WebRTC-Pacer-PadInSilence/Enabled/"
+        case 3: return "WebRTC-FrameDropper/Disabled/"
         default: return nil
         }
     }

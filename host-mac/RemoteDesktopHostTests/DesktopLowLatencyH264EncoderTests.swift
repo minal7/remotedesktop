@@ -460,5 +460,23 @@ private final class EncoderTestEvents: @unchecked Sendable {
     private var stored: [LatencyKeyframeControl.Event] = []
     func append(_ event: LatencyKeyframeControl.Event) { lock.lock(); stored.append(event); lock.unlock() }
     var values: [LatencyKeyframeControl.Event] { lock.lock(); defer { lock.unlock() }; return stored }
+
+    func testCBRRatePolicyIgnoresSmallChanges() {
+        var policy = LabCBRRatePolicy()
+        XCTAssertEqual(policy.decide(requestKbps: 2400, now: 0, framesEncoded: 0), 2400)
+        XCTAssertNil(policy.decide(requestKbps: 2424, now: 5, framesEncoded: 300))
+        XCTAssertNil(policy.decide(requestKbps: 2000, now: 6, framesEncoded: 360))
+    }
+
+    func testCBRRatePolicyDropsFastAndRaisesAfterHold() {
+        var policy = LabCBRRatePolicy()
+        _ = policy.decide(requestKbps: 2400, now: 0, framesEncoded: 0)
+        XCTAssertEqual(policy.decide(requestKbps: 1000, now: 2, framesEncoded: 120), 1000)
+        XCTAssertNil(policy.decide(requestKbps: 500, now: 2.5, framesEncoded: 150), "one drop per second")
+        XCTAssertEqual(policy.decide(requestKbps: 500, now: 3.1, framesEncoded: 186), 500)
+        XCTAssertNil(policy.decide(requestKbps: 1000, now: 4, framesEncoded: 240))
+        XCTAssertNil(policy.decide(requestKbps: 800, now: 5, framesEncoded: 300))
+        XCTAssertEqual(policy.decide(requestKbps: 1200, now: 6.1, framesEncoded: 366), 800, "raises only to the lowest sustained request")
+    }
 }
 #endif
