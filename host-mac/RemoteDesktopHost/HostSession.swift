@@ -1065,6 +1065,14 @@ final class HostSession: ObservableObject {
                     guard let offerSenderID = env.senderID, !offerSenderID.isEmpty else {
                         continue
                     }
+                    // Another device can take over from a client that is gone. It sends
+                    // its offer once, so the old peer must not cause it to be dropped.
+                    if env.payload["sdp"] != nil, peerSession?.isConnectionLost == true,
+                       activeWebRTCPeer?.senderID != offerSenderID,
+                       await releasePeerInPlace(reason: "replaced") {
+                        guard !Task.isCancelled else { return }
+                        log.info("released a lost peer for a new device")
+                    }
                     guard let offeredClassification = computerUse
                         .classifyWebRTCPeer(senderID: offerSenderID) else {
                         // If account-enrolled LAN Computer Use already has a
