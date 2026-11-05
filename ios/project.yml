@@ -21,7 +21,7 @@ targets:
     type: application
     platform: iOS
     sources:
-      # Directory sources include the cursor overlay, trackpad controller and NAT64 synthesizer.
+      # Directory sources include the cursor overlay, trackpad controller, NAT64 synthesizer and Debug UDP probe.
       - path: RemoteDesktop
         excludes:
           - PrivacyInfo.xcprivacy

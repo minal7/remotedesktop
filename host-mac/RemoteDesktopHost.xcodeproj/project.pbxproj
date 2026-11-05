@@ -9,6 +9,7 @@
 /* Begin PBXBuildFile section */
 		011F517DDAFBE8E5487AC981 /* AppLogo.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4BCF8A7A47830BB9DBB25CE9 /* AppLogo.swift */; };
 		04286FABBD9989313AA94B48 /* ComputerUseObservationWorkerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 39FE1E3654B6C097036EB8BC /* ComputerUseObservationWorkerTests.swift */; };
+		06262029055A52C159D2FCFB /* LatencyUDPCapacityProbeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 17AD8EEFBF1A8D42003F9043 /* LatencyUDPCapacityProbeTests.swift */; };
 		064622BC20E058554FCD6495 /* JSONValue.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A8EC4B3DE7A1C8535CB24A7 /* JSONValue.swift */; };
 		065A20B76A564AC73E545AA9 /* ComputerUseDesktopExecutor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 245468562563D0F8AF76EAA6 /* ComputerUseDesktopExecutor.swift */; };
 		091AF5E318D1C54893CACA54 /* AgentDefaultButtonAXEvidenceReader.swift in Sources */ = {isa = PBXBuildFile; fileRef = F04319732EE48502F524EE0B /* AgentDefaultButtonAXEvidenceReader.swift */; };
@@ -200,6 +201,7 @@
 		B52D07F032EEF5EA41C14534 /* HIDUsage.swift in Sources */ = {isa = PBXBuildFile; fileRef = FC26EE65BC584A891CDF9054 /* HIDUsage.swift */; };
 		B59608BD3FF586DCEDCBF935 /* ComputerUseDefaultBrowserPageReaderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0A4FEABF6247BB740F509EBF /* ComputerUseDefaultBrowserPageReaderTests.swift */; };
 		B597842EC8F60077372E0E22 /* LatencyLabConfiguration.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1D1E1019D318C453227355E1 /* LatencyLabConfiguration.swift */; };
+		B5CCC80791E442EB9B114914 /* LatencyUDPCapacityProbe.swift in Sources */ = {isa = PBXBuildFile; fileRef = 09C9AA0013910682D011806A /* LatencyUDPCapacityProbe.swift */; };
 		B661AB326F2FD3366BF7260D /* AgentSafetyBoundary.swift in Sources */ = {isa = PBXBuildFile; fileRef = C25C0E43B7BEA14CA568EC3B /* AgentSafetyBoundary.swift */; };
 		B719FEA1E23F3779D4083566 /* ComputerUseRuntimeTypes.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1011F8B532D93C2004CCFA98 /* ComputerUseRuntimeTypes.swift */; };
 		B73783C849D1D9E4DACC7900 /* PersonalMemoryTaskContext.swift in Sources */ = {isa = PBXBuildFile; fileRef = 62077FEE1B67C25D5EE2983E /* PersonalMemoryTaskContext.swift */; };
@@ -321,6 +323,7 @@
 		05DE94E98B7329186B2A4358 /* PixelEnvironment.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PixelEnvironment.swift; sourceTree = "<group>"; };
 		073BFD6F71D2AA688EF7F69E /* DeviceIdentity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceIdentity.swift; sourceTree = "<group>"; };
 		07BE29E09643E04555FE686A /* LLAMA-CPP-MIT-LICENSE.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = "LLAMA-CPP-MIT-LICENSE.txt"; sourceTree = "<group>"; };
+		09C9AA0013910682D011806A /* LatencyUDPCapacityProbe.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LatencyUDPCapacityProbe.swift; sourceTree = "<group>"; };
 		0A4FEABF6247BB740F509EBF /* ComputerUseDefaultBrowserPageReaderTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseDefaultBrowserPageReaderTests.swift; sourceTree = "<group>"; };
 		0BF602C3B27BF21ABC81F288 /* ComputerUseNativeTextObservation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseNativeTextObservation.swift; sourceTree = "<group>"; };
 		0CB067F77907CD75B03E0558 /* AgentNativeFilePicker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentNativeFilePicker.swift; sourceTree = "<group>"; };
@@ -336,6 +339,7 @@
 		16CB73E4E41BE0E7586E4129 /* OSAtlasRuntimeInstallation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OSAtlasRuntimeInstallation.swift; sourceTree = "<group>"; };
 		173FB9F8EB3974A89C80AE69 /* LocalComputerUseBrokerServer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalComputerUseBrokerServer.swift; sourceTree = "<group>"; };
 		178543C74F742896058F900E /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
+		17AD8EEFBF1A8D42003F9043 /* LatencyUDPCapacityProbeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LatencyUDPCapacityProbeTests.swift; sourceTree = "<group>"; };
 		194F025F41B49A01DBE09654 /* HostSetupPreferencesTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HostSetupPreferencesTests.swift; sourceTree = "<group>"; };
 		199B8A0D8EBEE0F556692058 /* WebRTCAliases.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebRTCAliases.swift; sourceTree = "<group>"; };
 		1A57E2ED9808C6573BEC0737 /* LocalComputerUseBrokerClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalComputerUseBrokerClient.swift; sourceTree = "<group>"; };
@@ -853,6 +857,7 @@
 				9C849C26EEFB24770352E94D /* LatencyF1RestartTests.swift */,
 				A4D02A869429B5ECC2FC80B6 /* LatencyLabSenderPolicyTests.swift */,
 				EB592B803769EFBA1FAF3C4E /* LatencyStatsCollectorTests.swift */,
+				17AD8EEFBF1A8D42003F9043 /* LatencyUDPCapacityProbeTests.swift */,
 				9998D2A9BBCC15FA929764EA /* LocalComputerUseTransportTests.swift */,
 				5F659E7E28C3C01632A6838F /* MemoryFeatureConfigurationTests.swift */,
 				5420CDBF7C04AA9EB6330CC3 /* OSAtlasAcceptanceFixtureRenderer.swift */,
@@ -969,6 +974,7 @@
 				5603F5D28A3FD24068C738D6 /* HostSingleInstance.swift */,
 				178543C74F742896058F900E /* Info.plist */,
 				EE8CCAE6B38CDDD22B43E761 /* InputInjector.swift */,
+				09C9AA0013910682D011806A /* LatencyUDPCapacityProbe.swift */,
 				6704F4EF5979DBED1CBB31D5 /* MenuContent.swift */,
 				5AEEF525524B99DFE1BEBFDC /* PermissionsProvider.swift */,
 				9F6F855555A1D4FB18F7FE69 /* RemoteDesktopHost.entitlements */,
@@ -1269,6 +1275,7 @@
 				17C1FCD4914B0E4A34B0DBC4 /* LatencyF1RestartTests.swift in Sources */,
 				C6CD362A9B01E5B435E9F470 /* LatencyLabSenderPolicyTests.swift in Sources */,
 				2DF4307425979173083CBD13 /* LatencyStatsCollectorTests.swift in Sources */,
+				06262029055A52C159D2FCFB /* LatencyUDPCapacityProbeTests.swift in Sources */,
 				304E0EE72F59C9714A1B7FD2 /* LocalComputerUseTransportTests.swift in Sources */,
 				2B27A6B9261B7AAC593A9E5E /* MemoryFeatureConfigurationTests.swift in Sources */,
 				995F760AD6681463EF52E953 /* OSAtlasAcceptanceFixtureRenderer.swift in Sources */,
@@ -1404,6 +1411,7 @@
 				85759261E56EE1A21BDF9E6F /* LatencyLabConfiguration.swift in Sources */,
 				0C349EF094493E0A60B1B43B /* LatencyLabSenderPolicy.swift in Sources */,
 				64D95C752D71EAE54B576A2E /* LatencyStatsCollector.swift in Sources */,
+				B5CCC80791E442EB9B114914 /* LatencyUDPCapacityProbe.swift in Sources */,
 				43BAB6482DB2451740A8116D /* LegacyModelManifests.swift in Sources */,
 				62D9EE4F9186AF0FF8F7C6B4 /* LlamaVLMPolicy.swift in Sources */,
 				90F22628B233B06E096F5A47 /* LocalComputerUseBrokerServer.swift in Sources */,

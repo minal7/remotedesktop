@@ -52,7 +52,7 @@ targets:
     type: application
     platform: macOS
     sources:
-      # Directory sources include HostCursorPublisher and HostPortMapper.
+      # Directory sources include HostCursorPublisher, HostPortMapper and the Debug UDP probe.
       - path: RemoteDesktopHost
         excludes:
           - Resources/ComputerUseSkills

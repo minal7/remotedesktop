@@ -54,6 +54,7 @@
 		4AF69671B92B6D7C930E2A45 /* LatencyClockEstimateTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = CE39DCD443844FD5D99D8F69 /* LatencyClockEstimateTests.swift */; };
 		4D31AC3F7EC83F573A1A8354 /* AppLogo.swift in Sources */ = {isa = PBXBuildFile; fileRef = FB1B5B661D72871EE572230D /* AppLogo.swift */; };
 		4ED6D625F85DB8BB10976067 /* LocalMemoryDisplayProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A9A67B5BDFB8CB795F26E88 /* LocalMemoryDisplayProtocol.swift */; };
+		4F52384FF851E30DA611BA90 /* LatencyUDPCapacityProbeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B7DE86FA4AB47F644E292F39 /* LatencyUDPCapacityProbeTests.swift */; };
 		507B111F052E3672545EAC68 /* ComputerUseLocalLifecycleSimulatorLiveE2ETests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 43B102FF72608D14B901B855 /* ComputerUseLocalLifecycleSimulatorLiveE2ETests.swift */; };
 		515016DB53BC787681BED0C1 /* RemoteVideoSurfacePresentation.swift in Sources */ = {isa = PBXBuildFile; fileRef = FA80FDA00FCE00DB22342ABC /* RemoteVideoSurfacePresentation.swift */; };
 		545C1C36E5B981726B3086DF /* ModifierBar.swift in Sources */ = {isa = PBXBuildFile; fileRef = 581093AF6E46C70081FA6D8C /* ModifierBar.swift */; };
@@ -70,6 +71,7 @@
 		6D57F0C6D25F78D6E4B7AE53 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = FE3E13A07013ADDB25E1A1B0 /* Assets.xcassets */; };
 		6E2541C4E7E075D6E0917E79 /* TrackpadGestureController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7CDB7F4BDF0DCCF671EE3C4A /* TrackpadGestureController.swift */; };
 		6EDBAC58D22349AED0AFCDCF /* DesktopVideoQuality.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2CD3081D8A6278763022E2D3 /* DesktopVideoQuality.swift */; };
+		73468B3E94448B2558DB6B45 /* LatencyUDPCapacityProbe.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2356D36C096C592A98248CCE /* LatencyUDPCapacityProbe.swift */; };
 		738B780A1E73E642D874F73B /* PersonalMemoryViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 894E3CC2682247115F1C84DD /* PersonalMemoryViewModel.swift */; };
 		775BF1F4B8541D86EFE9E325 /* MCPMailSendSimulatorLiveE2ETests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 805CFC833EA95929F3DFF54A /* MCPMailSendSimulatorLiveE2ETests.swift */; };
 		7D3FD32BC2121C7E22AE39F3 /* OSAtlasDoorDashSimulatorLiveE2ETests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7F4F65461D5267F68E5D07E2 /* OSAtlasDoorDashSimulatorLiveE2ETests.swift */; };
@@ -173,6 +175,7 @@
 		1CEDA7CFCF90B3EABC580761 /* PersonalMemoryRememberTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PersonalMemoryRememberTests.swift; sourceTree = "<group>"; };
 		1D7306524087471A5B252E2F /* RemoteDesktopLatencyQualityTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = RemoteDesktopLatencyQualityTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		1E29AE5C30E16C6C44B21148 /* RemoteVideoLatencyProbe.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteVideoLatencyProbe.swift; sourceTree = "<group>"; };
+		2356D36C096C592A98248CCE /* LatencyUDPCapacityProbe.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LatencyUDPCapacityProbe.swift; sourceTree = "<group>"; };
 		257EF73BF74F077639F225FF /* EODReleaseUIReviewTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EODReleaseUIReviewTests.swift; sourceTree = "<group>"; };
 		25E1BBE14BA79C961E3EBED1 /* LatencyLabPairRunTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LatencyLabPairRunTests.swift; sourceTree = "<group>"; };
 		26C5D9ED42D026543E9A8D2E /* ComputerUseSetupCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseSetupCoordinator.swift; sourceTree = "<group>"; };
@@ -243,6 +246,7 @@
 		ABDF8C28382817A48E7EA529 /* RemoteVideoLatencyProbeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteVideoLatencyProbeTests.swift; sourceTree = "<group>"; };
 		AFA18E4B15D7483D0FCBBF13 /* ComputerUseSetupTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseSetupTests.swift; sourceTree = "<group>"; };
 		B3790FA3A93EC33FEF83DA4A /* OSAtlasLocalBrowserOutcomeSimulatorLiveE2ETests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OSAtlasLocalBrowserOutcomeSimulatorLiveE2ETests.swift; sourceTree = "<group>"; };
+		B7DE86FA4AB47F644E292F39 /* LatencyUDPCapacityProbeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LatencyUDPCapacityProbeTests.swift; sourceTree = "<group>"; };
 		BB1841FB9BF65AEA9C9A5D83 /* OSAtlasLocalBrowserSearchSpinnerSimulatorLiveE2ETests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OSAtlasLocalBrowserSearchSpinnerSimulatorLiveE2ETests.swift; sourceTree = "<group>"; };
 		BBC28FCFFF743DACD673665C /* LatencyQualityLiveE2ETests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LatencyQualityLiveE2ETests.swift; sourceTree = "<group>"; };
 		BC0908159D93A6B7B0F49E4A /* PersonalMemoryViewModelTypes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PersonalMemoryViewModelTypes.swift; sourceTree = "<group>"; };
@@ -415,6 +419,7 @@
 			children = (
 				0AD6FE9D87456770A656EBC1 /* LatencyF1Policy.swift */,
 				A3D5F13447F4BFC50503C3AA /* LatencyLabPairRun.swift */,
+				2356D36C096C592A98248CCE /* LatencyUDPCapacityProbe.swift */,
 				078ABC21014FC2BD8C4C6AA9 /* MockTransport.swift */,
 				38BAB78D82DAA21C97543A53 /* NAT64CandidateSynthesizer.swift */,
 				5B18D40DD84C99F40DE5B34C /* RemoteVideoF4Metal.swift */,
@@ -502,6 +507,7 @@
 				CE39DCD443844FD5D99D8F69 /* LatencyClockEstimateTests.swift */,
 				0888C9C7A7F9DD5830AB6FF7 /* LatencyF1PolicyTests.swift */,
 				25E1BBE14BA79C961E3EBED1 /* LatencyLabPairRunTests.swift */,
+				B7DE86FA4AB47F644E292F39 /* LatencyUDPCapacityProbeTests.swift */,
 				EC896876459CEDF7D7DE2DAB /* LocalComputerUseTests.swift */,
 				164053225348DD19A5BA19D8 /* NAT64CandidateSynthesizerTests.swift */,
 				7BA389D3536658C0C053F2E6 /* PersonalMemoryForgetTests.swift */,
@@ -746,6 +752,7 @@
 				BCF2AD37EE418A546465FE6C /* LatencyLabSenderPolicy.swift in Sources */,
 				EFD3E2794C7A5FF3783DDA44 /* LatencyLabSettingsView.swift in Sources */,
 				06BEFA4D3795953996C40B64 /* LatencyStatsCollector.swift in Sources */,
+				73468B3E94448B2558DB6B45 /* LatencyUDPCapacityProbe.swift in Sources */,
 				28E62F7DEA9C1729C2A27102 /* LocalComputerUseBrokerClient.swift in Sources */,
 				29D50779FC876DDCF03C4532 /* LocalComputerUseCredentials.swift in Sources */,
 				922F48C6D2C462D7251A0B7B /* LocalComputerUseRPC.swift in Sources */,
@@ -812,6 +819,7 @@
 				4AF69671B92B6D7C930E2A45 /* LatencyClockEstimateTests.swift in Sources */,
 				68BAE8A90DB641A961209602 /* LatencyF1PolicyTests.swift in Sources */,
 				A399264622F65D0625998AF1 /* LatencyLabPairRunTests.swift in Sources */,
+				4F52384FF851E30DA611BA90 /* LatencyUDPCapacityProbeTests.swift in Sources */,
 				FF7DDA4B59C39D2DEA394AFE /* LocalComputerUseTests.swift in Sources */,
 				21189195DF4215E409468ADD /* NAT64CandidateSynthesizerTests.swift in Sources */,
 				07D44BAB58661054CB5FA378 /* PersonalMemoryForgetTests.swift in Sources */,
