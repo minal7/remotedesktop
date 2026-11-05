@@ -365,6 +365,31 @@ final class HostPeerSession: NSObject {
     private let streamDefaultsActive: Bool
     private var streamFloorGuard = StreamFloorGuard()
     private var streamFloorTimer: DispatchSourceTimer?
+    /// ICE has stopped hearing from the client. The client gives up after the same
+    /// 12 s, and native ICE would otherwise hold the host for about 30 s.
+    static let connectionRecoveryTimeout: Duration = .seconds(12)
+    private var connectionLost = false
+    private var connectionRecoveryTask: Task<Void, Never>?
+
+    /// True while the client may be gone. The host re-advertises and a new offer may replace this peer.
+    var isConnectionLost: Bool {
+        closeStateLock.lock(); defer { closeStateLock.unlock() }
+        return connectionLost && !ended
+    }
+
+    private func setConnectionLost(_ lost: Bool) {
+        closeStateLock.lock(); defer { closeStateLock.unlock() }
+        guard !ended, connectionLost != lost else { return }
+        connectionLost = lost
+        connectionRecoveryTask?.cancel(); connectionRecoveryTask = nil
+        guard lost else { return }
+        connectionRecoveryTask = Task { [weak self] in
+            try? await Task.sleep(for: Self.connectionRecoveryTimeout)
+            guard !Task.isCancelled, let self, self.isConnectionLost else { return }
+            self.log.warning("peer connection did not recover; releasing the host")
+            self.onEnded("The connection was interrupted. Reconnect to resume remote control.")
+        }
+    }
 
     static func streamDefaultsAllowed(ordinaryPeer: Bool, requestAdaptive60: Bool, environment: [String: String]) -> Bool {
         guard #available(macOS 26.0, *), ordinaryPeer, requestAdaptive60 else { return false }
@@ -1121,6 +1146,8 @@ final class HostPeerSession: NSObject {
             self.latencyTimer = nil
             self.streamFloorTimer?.cancel()
             self.streamFloorTimer = nil
+            self.connectionRecoveryTask?.cancel()
+            self.connectionRecoveryTask = nil
             self.cursorRequested = false
             self.cursorEpoch = UUID()
             DispatchQueue.main.async { [weak self] in self?.stopCursorPublisher() }
@@ -2342,6 +2369,7 @@ extension HostPeerSession: RTCPeerConnectionDelegate {
         guard !isEnded, self.peerConnection === peerConnection else { return }
         switch stateChanged {
         case .connected:
+            setConnectionLost(false)
             startStreamFloorGuard(peerConnection)
             #if DEBUG
             if latencyF3Enabled && !stage2Enabled {
@@ -2363,6 +2391,7 @@ extension HostPeerSession: RTCPeerConnectionDelegate {
             if inputAuthorization.connectionChanged(connected: false), inputAuthorization.isClosed {
                 onEnded("The connection was interrupted. Reconnect to resume remote control.")
             }
+            setConnectionLost(true)
             log.warning("peer connection is disconnected (may recover)")
         case .failed, .closed:
             if inputAuthorization.connectionChanged(connected: false, terminal: true) {

@@ -160,7 +160,7 @@ struct PairingView: View {
     private var searchingDevicesState: some View {
         ConnectionWaitNotice(
             title: "Searching for hosts…",
-            recovery: "Can’t find your computer. Open the host app, use the same Apple Account, and check that both devices are online.",
+            recovery: Self.searchingRecoveryMessage,
             retry: {
                 discovery.stop()
                 discovery.start()
@@ -659,6 +659,16 @@ struct PairingView: View {
             }
         }
         .font(.footnote.weight(.medium))
+    }
+
+    private static var searchingRecoveryMessage: String {
+        let message = "Can’t find your computer. Open the host app, use the same Apple Account, and check that both devices are online."
+        #if DEBUG
+        // Debug uses CloudKit Development and Release uses Production. They never see each other.
+        return "This Debug build only finds a Mac running a Debug host. " + message
+        #else
+        return message
+        #endif
     }
 
     #if DEBUG

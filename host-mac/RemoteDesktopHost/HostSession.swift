@@ -92,6 +92,8 @@ final class HostSession: ObservableObject {
     private var nextWebRTCPeerGeneration: UInt64 = 0
     private var pendingPeerCaptureTeardown: Task<Void, Never>?
     private let advertiser = BonjourAdvertiser()
+    private var runLoopAcceptsPeerRelease = false
+    private var pendingPeerRelease: (generation: UInt64, reason: String)?
     private let injector: InputInjector
     private let capture = ScreenCapture()
     private let permissionsProvider: PermissionsProvider
@@ -890,8 +892,99 @@ final class HostSession: ObservableObject {
             advertiser.publishedMetadata == nil ? nil : publishedComputerUseCapability
         var nextAccountRevalidation = Date().addingTimeInterval(
             Self.cloudAccountRevalidationInterval)
+        var advertisingForLostPeer = false
+        var preflightDeadline: Date?
+        runLoopAcceptsPeerRelease = true
+        defer { runLoopAcceptsPeerRelease = false; pendingPeerRelease = nil }
+
+        /// Ends the remote-control peer but keeps this run, its pairing code and its
+        /// channels, so the Mac is listed again at once and an offer already on its way
+        /// to this code still lands. A running AI task takes the full restart instead,
+        /// because it must deliver a terminal result first.
+        func releasePeerInPlace(reason: String) async -> Bool {
+            guard case .idle = computerUse.activity, let owner = activeWebRTCPeer,
+                  owner.classification == .primaryRemoteControl else { return false }
+            _ = computerUse.endWebRTCPeer(senderID: owner.senderID, generation: owner.generation,
+                                          classification: owner.classification)
+            let oldPeer = peerSession
+            activeWebRTCPeer = nil
+            peerSession = nil
+            resetPendingRemoteICE()
+            await oldPeer?.close(reason: reason).value
+            guard !Task.isCancelled else { return true }
+            advertisingForLostPeer = false
+            await client.releaseOfferSender()
+            state = .advertising(code: code)
+            nextAdvertisementRefresh = .distantPast
+            advertiser.publish(
+                hostname: hostName,
+                code: code,
+                senderID: senderID,
+                computerUseCapability: computerUse.capability,
+                port: localPort,
+                localCredentialID: localCredentialID)
+            log.info("released the peer; listed again with the same pairing code")
+            return true
+        }
 
         while !Task.isCancelled {
+            if let release = pendingPeerRelease {
+                pendingPeerRelease = nil
+                if activeWebRTCPeer?.generation == release.generation,
+                   !(await releasePeerInPlace(reason: release.reason)) {
+                    handleDisconnect(reason: release.reason)
+                    return
+                }
+            }
+
+            // A preflight withdraws the advertisement. If its client never follows
+            // with an offer, this Mac must not stay hidden.
+            if let deadline = preflightDeadline, Date() >= deadline {
+                preflightDeadline = nil
+                if peerSession == nil {
+                    await client.releaseOfferSender()
+                    state = .advertising(code: code)
+                    nextAdvertisementRefresh = .distantPast
+                    advertiser.publish(
+                        hostname: hostName,
+                        code: code,
+                        senderID: senderID,
+                        computerUseCapability: computerUse.capability,
+                        port: localPort,
+                        localCredentialID: localCredentialID)
+                }
+            }
+
+            // A client that vanished without a bye (killed app, lost network)
+            // must not hide this Mac while ICE waits to fail. Advertise now, keep
+            // the old peer in case ICE recovers, and let a new offer replace it.
+            var computerUseIdle = false
+            if case .idle = computerUse.activity { computerUseIdle = true }
+            let lostPeer = peerSession?.isConnectionLost == true && computerUseIdle
+                && activeWebRTCPeer?.classification == .primaryRemoteControl
+            if lostPeer != advertisingForLostPeer {
+                advertisingForLostPeer = lostPeer
+                do {
+                    if lostPeer {
+                        log.info("peer connection lost; advertising for a new client")
+                        await client.releaseOfferSender()
+                        try await client.refreshAdvertisement()
+                        advertiser.publish(
+                            hostname: hostName,
+                            code: code,
+                            senderID: senderID,
+                            computerUseCapability: computerUse.capability,
+                            port: localPort,
+                            localCredentialID: localCredentialID)
+                    } else if peerSession != nil {
+                        advertiser.stop()
+                        await client.stopAdvertising()
+                    }
+                } catch {
+                    log.error("lost-peer advertisement failed: \(String(describing: error), privacy: .public)")
+                }
+            }
+
             if Date() >= nextAccountRevalidation,
                let localAccountBinding {
                 let accountStillMatches = await activeCloudAccountStillMatches(
@@ -1015,6 +1108,16 @@ final class HostSession: ObservableObject {
                     #endif
                     let clientName = env.payload["client"] ?? "iOS client"
                     if let sdp = env.payload["sdp"] {
+                        // The client side never restarts ICE, so an offer during a
+                        // lost connection is a new connection, not a renegotiation.
+                        if peerSession?.isConnectionLost == true,
+                           await releasePeerInPlace(reason: "replaced") {
+                            guard !Task.isCancelled else { return }
+                            // Release cleared the sender binding this offer just set.
+                            guard await client.acceptOfferSenderID(offerSenderID) else { continue }
+                            log.info("replaced a lost peer with a new client")
+                        }
+                        preflightDeadline = nil
                         if peerSession == nil {
                             // HostPeerSession shares one ScreenCapture. A
                             // replacement generation cannot install callbacks
@@ -1186,6 +1289,8 @@ final class HostSession: ObservableObject {
                             resetPendingRemoteICE()
                             await captureTeardown.value
                             await client.cleanup()
+                            // One failed offer must not leave this Mac hidden until relaunch.
+                            handleDisconnect(reason: "offer-failed")
                             return
                         }
                     } else {
@@ -1200,6 +1305,7 @@ final class HostSession: ObservableObject {
                             try await client.send(ack)
                             advertiser.stop()
                             await client.stopAdvertising()
+                            preflightDeadline = Date().addingTimeInterval(20)
                         } catch {
                             log.error("failed to send preflight answer: \(String(describing: error), privacy: .public)")
                             state = .error("Client reached the host, but the host couldn't reply over signaling.")
@@ -1252,6 +1358,10 @@ final class HostSession: ObservableObject {
                             generation: activeWebRTCPeer.generation,
                             classification:
                                 activeWebRTCPeer.classification)
+                        continue
+                    }
+                    if await releasePeerInPlace(reason: reason) {
+                        guard !Task.isCancelled else { return }
                         continue
                     }
                     log.info("client said bye — will restart listening")
@@ -1350,7 +1460,11 @@ final class HostSession: ObservableObject {
         }
 
         guard classification == .localComputerUseSidecar else {
-            handleDisconnect(reason: reason)
+            if runLoopAcceptsPeerRelease {
+                pendingPeerRelease = (generation: generation, reason: reason)
+            } else {
+                handleDisconnect(reason: reason)
+            }
             return
         }
 
