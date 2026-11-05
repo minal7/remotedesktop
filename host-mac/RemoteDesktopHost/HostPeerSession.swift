@@ -624,8 +624,21 @@ final class HostPeerSession: NSObject {
         let observeEncodedBytes: ((Int) -> Void)? = nil
         #endif
         #if DEBUG
+        let cbrEnabled = Self.labCBREnabled(labInstrumentation: labInstrumentation, ordinaryPeer: acceptedOrdinaryPeer,
+            clientRequested: lab60Requested, f2Enabled: enableF2, f3Enabled: enableF3, arguments: ProcessInfo.processInfo.arguments,
+            environment: ProcessInfo.processInfo.environment)
+        if labInstrumentation {
+            stats.trace(["type": "encoder_cbr_gate", "time": ProcessInfo.processInfo.systemUptime,
+                         "requested": ProcessInfo.processInfo.environment["LATENCY_ENCODER_MODE"] == "h264-cbr100" ? 1 : 0,
+                         "clientLab60": lab60Requested ? 1 : 0, "admitted": cbrEnabled ? 1 : 0])
+        }
         let encoderFactory = DesktopVideoEncoderFactory(f2Enabled: enableF2, frameByteObserver: observeEncodedBytes,
-                                                        keyframeControl: keyframeControl)
+            keyframeControl: keyframeControl, cbrEnabled: cbrEnabled,
+            cbrTrace: cbrEnabled ? { [weak stats] event in
+                var record = event
+                record["time"] = ProcessInfo.processInfo.systemUptime
+                stats?.trace(record)
+            } : nil)
         #else
         let encoderFactory = DesktopVideoEncoderFactory(f2Enabled: enableF2, frameByteObserver: observeEncodedBytes)
         #endif
@@ -1168,6 +1181,19 @@ final class HostPeerSession: NSObject {
 
     /// The common 5 Mbps lab ceiling is deliberately a single closed setting.
     /// A missing or malformed opt-in leaves the sender policy unchanged.
+    #if DEBUG
+    static func labCBREnabled(labInstrumentation: Bool, ordinaryPeer: Bool, clientRequested: Bool, f2Enabled: Bool, f3Enabled: Bool,
+                              arguments: [String], environment: [String: String]) -> Bool {
+        guard #available(macOS 26.0, *) else { return false }
+        return labInstrumentation && ordinaryPeer && clientRequested && !f2Enabled && !f3Enabled &&
+            Array(arguments.dropFirst()) == ["--debug-latency-host"] && environment["LATENCY_LAB"] == "1" &&
+            environment["LATENCY_ENCODER_MODE"] == "h264-cbr100" &&
+            environment["LATENCY_UDP_CAPACITY"] != "1" && environment["LATENCY_STAGE2_FLOOR"] != "1" &&
+            environment["REMOTE_DESKTOP_R0_HOST_ID"] == nil &&
+            environment["REMOTE_DESKTOP_LATENCY_HOST_ID"].flatMap(UUID.init(uuidString:)) != nil
+    }
+    #endif
+
     static func labVideoCeiling(labInstrumentation: Bool, ordinaryPeer: Bool, f3Enabled: Bool,
                                 arguments: [String], environment: [String: String]) -> Int? {
         guard labInstrumentation, ordinaryPeer, !f3Enabled,

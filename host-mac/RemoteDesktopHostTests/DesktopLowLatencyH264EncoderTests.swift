@@ -140,6 +140,101 @@ final class DesktopLowLatencyH264EncoderTests: XCTestCase {
         XCTAssertEqual(firstSizes, [8]); XCTAssertEqual(secondSizes, [8])
     }
 
+    @available(macOS 26.0, *)
+    func testCBRPropertiesAndLiveRateUpdateAreIsolatedFromF2() {
+        let spec = DesktopCBRConfiguration.specification()
+        XCTAssertNil(spec[kVTVideoEncoderSpecification_EnableLowLatencyRateControl])
+        let properties = Dictionary(uniqueKeysWithValues: DesktopCBRConfiguration.properties(fps: 60, bitrateKbps: 5_000).map { ($0.0 as String, $0.1) })
+        XCTAssertNil(properties[kVTCompressionPropertyKey_AverageBitRate as String])
+        XCTAssertNil(properties[kVTCompressionPropertyKey_DataRateLimits as String])
+        XCTAssertNil(properties[kVTCompressionPropertyKey_PrioritizeEncodingSpeedOverQuality as String])
+        XCTAssertEqual((properties[kVTCompressionPropertyKey_ConstantBitRate as String] as? NSNumber)?.intValue, 5_000_000)
+        XCTAssertEqual((properties[kVTCompressionPropertyKey_VBVBufferDuration as String] as? NSNumber)?.doubleValue ?? 0, 0.1, accuracy: 0.001)
+        XCTAssertEqual((properties[kVTCompressionPropertyKey_MaxKeyFrameInterval as String] as? NSNumber)?.intValue, 7200)
+        var seen: [String: Int] = [:]
+        XCTAssertTrue(DesktopCBRConfiguration.update(kbps: 3_000, fps: 60) { key, value in
+            seen[key as String] = (value as? NSNumber)?.intValue; return noErr
+        })
+        XCTAssertEqual(seen[kVTCompressionPropertyKey_ConstantBitRate as String], 3_000_000)
+        XCTAssertFalse(DesktopCBRConfiguration.update(kbps: 4_000, fps: 60) { key, _ in
+            key == kVTCompressionPropertyKey_ConstantBitRate ? -1 : noErr
+        })
+    }
+
+    func testCBRAcceptsLargerUncroppedNativeBufferAtConfiguredSize() throws {
+        var pixel: CVPixelBuffer?
+        XCTAssertEqual(CVPixelBufferCreate(kCFAllocatorDefault, 64, 64, kCVPixelFormatType_32BGRA, nil, &pixel), kCVReturnSuccess)
+        let buffer = try XCTUnwrap(pixel)
+        let native = LKRTCCVPixelBuffer(pixelBuffer: buffer, adaptedWidth: 32, adaptedHeight: 32,
+                                       cropWidth: 64, cropHeight: 64, cropX: 0, cropY: 0)
+        let settings = LKRTCVideoEncoderSettings(); settings.width = 32; settings.height = 32
+        XCTAssertTrue(DesktopLowLatencyH264Encoder.acceptsCBRFrame(native, frameWidth: 32, frameHeight: 32, settings: settings))
+        XCTAssertFalse(DesktopLowLatencyH264Encoder.acceptsCBRFrame(native, frameWidth: 16, frameHeight: 16, settings: settings))
+        let cropped = LKRTCCVPixelBuffer(pixelBuffer: buffer, adaptedWidth: 32, adaptedHeight: 32,
+                                        cropWidth: 32, cropHeight: 32, cropX: 0, cropY: 0)
+        XCTAssertFalse(DesktopLowLatencyH264Encoder.acceptsCBRFrame(cropped, frameWidth: 32, frameHeight: 32, settings: settings))
+    }
+
+    @available(macOS 26.0, *)
+    func testCBRReadbackTolerance() {
+        XCTAssertTrue(DesktopCBRConfiguration.rateMatches(requested: 5_000_000, readback: 5_050_000))
+        XCTAssertFalse(DesktopCBRConfiguration.rateMatches(requested: 5_000_000, readback: 5_050_001))
+        XCTAssertFalse(DesktopCBRConfiguration.rateMatches(requested: 0, readback: 1))
+    }
+
+    @available(macOS 26.0, *)
+    func testCBRRejectedConfigurationStartsNativeFallback() throws {
+        let fallback = RecordingFallbackEncoder()
+        var reachedVBV = false
+        let encoder = DesktopLowLatencyH264Encoder(fallback: fallback, cbr: true, propertySetter: { _, key, _ in
+            if key == kVTCompressionPropertyKey_VBVBufferDuration { reachedVBV = true; return -1 }
+            return noErr
+        })
+        let settings = LKRTCVideoEncoderSettings()
+        settings.width = 1280; settings.height = 720; settings.startBitrate = 4_000; settings.maxFramerate = 60
+        XCTAssertEqual(encoder.startEncode(with: settings, numberOfCores: 1), 0)
+        guard reachedVBV else { _ = encoder.release(); throw XCTSkip("Hardware VideoToolbox session unavailable") }
+        XCTAssertEqual(fallback.startCount, 1)
+        XCTAssertEqual(encoder.release(), 0)
+    }
+
+    @available(macOS 26.0, *)
+    func testCBRRejectedLiveRateFallsBackOnNextFrame() throws {
+        let fallback = RecordingFallbackEncoder()
+        var rejectRate = false, sawRejectedUpdate = false
+        let encoder = DesktopLowLatencyH264Encoder(fallback: fallback, cbr: true, propertySetter: { session, key, value in
+            if rejectRate && key == kVTCompressionPropertyKey_ConstantBitRate {
+                sawRejectedUpdate = true; return -1
+            }
+            return VTSessionSetProperty(session, key: key, value: value)
+        })
+        let settings = LKRTCVideoEncoderSettings()
+        settings.width = 1280; settings.height = 720; settings.startBitrate = 4_000; settings.maxFramerate = 60
+        XCTAssertEqual(encoder.startEncode(with: settings, numberOfCores: 1), 0)
+        guard fallback.startCount == 0 else { _ = encoder.release(); throw XCTSkip("Hardware CBR/VBV unavailable") }
+        rejectRate = true
+        XCTAssertEqual(encoder.setBitrate(3_000, framerate: 60), 0)
+        XCTAssertTrue(sawRejectedUpdate)
+        XCTAssertEqual(encoder.encode(try encoderFrame(1), codecSpecificInfo: nil, frameTypes: [4]), 0)
+        XCTAssertEqual(fallback.startCount, 1)
+        XCTAssertEqual(fallback.bitrates.last?.0, 3_000)
+        XCTAssertEqual(encoder.release(), 0)
+    }
+
+    func testCBRSessionCreationFailureUsesStockAndForwardsRate() {
+        let fallback = RecordingFallbackEncoder()
+        var events: [[String: Any]] = []
+        let encoder = DesktopLowLatencyH264Encoder(fallback: fallback, cbr: true, trace: { events.append($0) }) { _, _, _, _ in -1 }
+        let settings = LKRTCVideoEncoderSettings()
+        settings.width = 1280; settings.height = 720; settings.startBitrate = 4_000; settings.maxFramerate = 60
+        XCTAssertEqual(encoder.startEncode(with: settings, numberOfCores: 1), 0)
+        XCTAssertEqual(fallback.startCount, 1)
+        XCTAssertEqual(encoder.setBitrate(3_000, framerate: 60), 0)
+        XCTAssertEqual(fallback.bitrates.last?.0, 3_000)
+        XCTAssertEqual(events.last?["event"] as? String, "fallback")
+        XCTAssertEqual(encoder.release(), 0)
+    }
+
     func testSessionCreationFailureUsesStockEncoderAndPreservesRateUpdates() {
         let fallback = RecordingFallbackEncoder()
         let encoder = DesktopLowLatencyH264Encoder(fallback: fallback) { _, _, _, _ in -1 }

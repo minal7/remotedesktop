@@ -8,6 +8,26 @@ import XCTest
 
 final class ScreenCaptureSizingTests: XCTestCase {
     #if DEBUG
+    func testCBRRequiresIsolatedOrdinaryOptIn() {
+        guard #available(macOS 26.0, *) else { return }
+        let args = ["host", "--debug-latency-host"]
+        let env = ["LATENCY_LAB": "1", "LATENCY_ENCODER_MODE": "h264-cbr100", "REMOTE_DESKTOP_LATENCY_HOST_ID": UUID().uuidString]
+        func accepted(_ lab: Bool = true, _ ordinary: Bool = true, _ f2: Bool = false, _ f3: Bool = false, _ arguments: [String]? = nil, _ environment: [String: String]? = nil) -> Bool {
+            HostPeerSession.labCBREnabled(labInstrumentation: lab, ordinaryPeer: ordinary,
+                clientRequested: HostPeerSession.lab60OfferRequested(["latencyLab60": "1"]),
+                f2Enabled: f2, f3Enabled: f3, arguments: arguments ?? args, environment: environment ?? env)
+        }
+        XCTAssertTrue(accepted())
+        XCTAssertFalse(HostPeerSession.labCBREnabled(labInstrumentation: true, ordinaryPeer: true, clientRequested: false, f2Enabled: false, f3Enabled: false, arguments: args, environment: env))
+        XCTAssertFalse(accepted(false)); XCTAssertFalse(accepted(true, false))
+        XCTAssertFalse(accepted(true, true, true)); XCTAssertFalse(accepted(true, true, false, true))
+        XCTAssertFalse(accepted(true, true, false, false, ["host"], env))
+        for (key, value) in [("LATENCY_LAB", "0"), ("LATENCY_ENCODER_MODE", "other"), ("REMOTE_DESKTOP_R0_HOST_ID", "x"), ("LATENCY_UDP_CAPACITY", "1")] {
+            var changed = env; changed[key] = value
+            XCTAssertFalse(accepted(true, true, false, false, args, changed))
+        }
+    }
+
     func testALRTrialRequiresIsolatedOrdinaryLabAndExactMode() {
         let args = ["host", "--debug-latency-host"]
         let env = ["LATENCY_LAB": "1", "LATENCY_ALR_TRIAL": "1",

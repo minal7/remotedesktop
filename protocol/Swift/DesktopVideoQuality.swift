@@ -254,6 +254,8 @@ final class DesktopVideoEncoderFactory: NSObject, LKRTCVideoEncoderFactory {
     #if DEBUG && os(macOS)
     private let frameByteObserver: ((Int) -> Void)?
     private let keyframeControl: LatencyKeyframeControl?
+    private let cbrEnabled: Bool
+    private let cbrTrace: (([String: Any]) -> Void)?
     #endif
 
     init(f2Enabled: Bool = false, frameByteObserver: ((Int) -> Void)? = nil) {
@@ -261,6 +263,8 @@ final class DesktopVideoEncoderFactory: NSObject, LKRTCVideoEncoderFactory {
         self.f2Enabled = f2Enabled
         self.frameByteObserver = frameByteObserver
         self.keyframeControl = nil
+        self.cbrEnabled = false
+        self.cbrTrace = nil
         #else
         self.f2Enabled = false
         #endif
@@ -268,10 +272,12 @@ final class DesktopVideoEncoderFactory: NSObject, LKRTCVideoEncoderFactory {
     }
 
     #if DEBUG && os(macOS)
-    init(f2Enabled: Bool, frameByteObserver: ((Int) -> Void)?, keyframeControl: LatencyKeyframeControl?) {
+    init(f2Enabled: Bool, frameByteObserver: ((Int) -> Void)?, keyframeControl: LatencyKeyframeControl?, cbrEnabled: Bool = false, cbrTrace: (([String: Any]) -> Void)? = nil) {
         self.f2Enabled = f2Enabled
         self.frameByteObserver = frameByteObserver
         self.keyframeControl = keyframeControl
+        self.cbrEnabled = cbrEnabled && !f2Enabled
+        self.cbrTrace = cbrTrace
         super.init()
     }
     #endif
@@ -282,11 +288,16 @@ final class DesktopVideoEncoderFactory: NSObject, LKRTCVideoEncoderFactory {
         #if DEBUG && os(macOS)
         guard let native = base.createEncoder(info) else { return nil }
         let encoder: any LKRTCVideoEncoder
-        if f2Enabled, DesktopVideoQuality.supportsExperimentalEncoder(
+        if (f2Enabled || cbrEnabled), DesktopVideoQuality.supportsExperimentalEncoder(
             name: info.name, profileLevelID: info.parameters["profile-level-id"],
             packetizationMode: info.parameters["packetization-mode"]) {
-            encoder = DesktopLowLatencyH264Encoder(fallback: native)
-        } else { encoder = native }
+            encoder = DesktopLowLatencyH264Encoder(fallback: native, cbr: cbrEnabled, trace: cbrTrace, observeBytes: cbrEnabled ? frameByteObserver : nil)
+        } else {
+            if cbrEnabled && info.name.uppercased() == "H264" {
+                cbrTrace?(["type": "encoder_cbr", "event": "unsupported_profile_fallback"])
+            }
+            encoder = native
+        }
         // WebRTC unwraps native software encoders by concrete class; wrapping
         // one would change its adapter path. Observe only the validated ObjC H.264 encoder.
         if !f2Enabled, info.name.uppercased() == "H264", (frameByteObserver != nil || keyframeControl != nil),

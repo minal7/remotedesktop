@@ -96,12 +96,51 @@ enum DesktopEncoderConfiguration {
     }
 }
 
+@available(macOS 26.0, *)
+enum DesktopCBRConfiguration {
+    static func specification() -> [CFString: Any] {
+        [kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder: true]
+    }
+    static func properties(fps: UInt32, bitrateKbps: UInt32) -> [(CFString, CFTypeRef)] {
+        [(kVTCompressionPropertyKey_RealTime, kCFBooleanTrue),
+         (kVTCompressionPropertyKey_AllowFrameReordering, kCFBooleanFalse),
+         (kVTCompressionPropertyKey_ProfileLevel, kVTProfileLevel_H264_ConstrainedHigh_AutoLevel),
+         (kVTCompressionPropertyKey_ExpectedFrameRate, fps as CFNumber),
+         (kVTCompressionPropertyKey_MaxKeyFrameInterval, 7200 as CFNumber),
+         (kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration, 240 as CFNumber),
+         (kVTCompressionPropertyKey_ConstantBitRate, (Int64(bitrateKbps) * 1000) as CFNumber),
+         (kVTCompressionPropertyKey_VBVBufferDuration, 0.1 as CFNumber)]
+    }
+    static func readNumber(_ session: VTCompressionSession, key: CFString) -> NSNumber? {
+        // VTSessionCopyProperty returns a retained CF object through a void**.
+        var raw: Unmanaged<CFTypeRef>?
+        let status = VTSessionCopyProperty(session, key: key, allocator: kCFAllocatorDefault, valueOut: &raw)
+        let value = raw?.takeRetainedValue()
+        return status == noErr ? value as? NSNumber : nil
+    }
+    // VideoToolbox may quantize a target slightly; reject a difference over
+    // 1% or 1 kbit/s, whichever is greater, rather than call it CBR at the requested rate.
+    static func rateMatches(requested: Int64, readback: Int64) -> Bool {
+        guard requested > 0, readback > 0 else { return false }
+        return abs(Double(readback) - Double(requested)) <= max(1000, Double(requested) * 0.01)
+    }
+    static func update(kbps: UInt32, fps: UInt32, set: (CFString, CFTypeRef) -> OSStatus) -> Bool {
+        guard kbps > 0, fps > 0 else { return false }
+        return set(kVTCompressionPropertyKey_ExpectedFrameRate, fps as CFNumber) == noErr &&
+            set(kVTCompressionPropertyKey_ConstantBitRate, (Int64(kbps) * 1000) as CFNumber) == noErr
+    }
+}
+
 /// Opt-in experimental encoder. Setup or unsupported-frame failures use the
 /// stock encoder; no experimental object exists in Release builds.
 final class DesktopLowLatencyH264Encoder: NSObject, LKRTCVideoEncoder, @unchecked Sendable {
     typealias SessionCreator = (Int32, Int32, CFDictionary, inout VTCompressionSession?) -> OSStatus
     private let fallback: any LKRTCVideoEncoder
+    private let cbr: Bool
+    private let trace: (([String: Any]) -> Void)?
+    private let observeBytes: ((Int) -> Void)?
     private let sessionCreator: SessionCreator
+    private let propertySetter: (VTCompressionSession, CFString, CFTypeRef) -> OSStatus
     private let lock = NSRecursiveLock()
     private let log = Logger(subsystem: "com.threadmark.remotedesktop.host", category: "latency.encoder")
     private var callback: RTCVideoEncoderCallback?
@@ -115,18 +154,23 @@ final class DesktopLowLatencyH264Encoder: NSObject, LKRTCVideoEncoder, @unchecke
     private var bitrateKbps: UInt32 = 0
     private var frameRate: UInt32 = UInt32(DesktopVideoQuality.f2FramesPerSecond)
 
-    init(fallback: any LKRTCVideoEncoder, sessionCreator: @escaping SessionCreator = { width, height, specification, output in
+    init(fallback: any LKRTCVideoEncoder, cbr: Bool = false, trace: (([String: Any]) -> Void)? = nil, observeBytes: ((Int) -> Void)? = nil, propertySetter: @escaping (VTCompressionSession, CFString, CFTypeRef) -> OSStatus = { VTSessionSetProperty($0, key: $1, value: $2) }, sessionCreator: @escaping SessionCreator = { width, height, specification, output in
         VTCompressionSessionCreate(allocator: kCFAllocatorDefault, width: width, height: height,
             codecType: kCMVideoCodecType_H264, encoderSpecification: specification,
             imageBufferAttributes: nil, compressedDataAllocator: nil, outputCallback: nil,
             refcon: nil, compressionSessionOut: &output)
     }) {
-        self.fallback = fallback; self.sessionCreator = sessionCreator; super.init()
+        self.fallback = fallback; self.cbr = cbr; self.trace = trace; self.observeBytes = observeBytes; self.sessionCreator = sessionCreator; self.propertySetter = propertySetter; super.init()
     }
 
     func setCallback(_ callback: RTCVideoEncoderCallback?) {
         lock.lock(); self.callback = callback; lock.unlock()
-        fallback.setCallback(callback)
+        if cbr, let callback, let observeBytes {
+            fallback.setCallback { image, info in
+                observeBytes(image.buffer.count)
+                return callback(image, info)
+            }
+        } else { fallback.setCallback(callback) }
     }
 
     func startEncode(with settings: LKRTCVideoEncoderSettings, numberOfCores: Int32) -> Int {
@@ -134,34 +178,53 @@ final class DesktopLowLatencyH264Encoder: NSObject, LKRTCVideoEncoder, @unchecke
         self.settings = settings; self.cores = numberOfCores
         bitrateKbps = settings.startBitrate
         let captureRate = UInt32(DesktopVideoQuality.f2FramesPerSecond)
-        frameRate = settings.maxFramerate > 0 ? min(settings.maxFramerate, captureRate) : captureRate
+        frameRate = settings.maxFramerate > 0 ? (cbr ? settings.maxFramerate : min(settings.maxFramerate, captureRate)) : captureRate
         guard settings.width > 0, settings.height > 0 else { return startFallback() }
-        let specification = DesktopEncoderConfiguration.specification()
+        let specification: [CFString: Any]
+        if cbr {
+            guard #available(macOS 26.0, *) else { return startFallback() }
+            specification = DesktopCBRConfiguration.specification()
+        } else { specification = DesktopEncoderConfiguration.specification() }
         var created: VTCompressionSession?
         let status = sessionCreator(Int32(settings.width), Int32(settings.height), specification as CFDictionary, &created)
         guard status == noErr, let created else {
             if let created { VTCompressionSessionInvalidate(created) }
             return startFallback()
         }
-        let properties = DesktopEncoderConfiguration.properties(fps: frameRate, bitrateKbps: bitrateKbps)
+        let properties: [(CFString, CFTypeRef)]
+        if cbr, #available(macOS 26.0, *) { properties = DesktopCBRConfiguration.properties(fps: frameRate, bitrateKbps: bitrateKbps) }
+        else { properties = DesktopEncoderConfiguration.properties(fps: frameRate, bitrateKbps: bitrateKbps) }
         var supported: CFDictionary?
         let queried = VTSessionCopySupportedPropertyDictionary(created, supportedPropertyDictionaryOut: &supported) == noErr
         let speedHintSupported = queried && DesktopEncoderConfiguration.supportsSpeedHint(supported)
-        guard speedHintSupported else {
+        guard cbr || speedHintSupported else {
             log.warning("F2 speed-priority hint is not advertised; using stock encoder")
             VTCompressionSessionInvalidate(created)
             return startFallback()
         }
-        guard DesktopEncoderConfiguration.configure(properties,
-                speedHintSupported: speedHintSupported,
-                set: { VTSessionSetProperty(created, key: $0, value: $1) }),
-              VTCompressionSessionPrepareToEncodeFrames(created) == noErr else {
+        let configured: Bool
+        if cbr {
+            configured = properties.allSatisfy { propertySetter(created, $0.0, $0.1) == noErr }
+        } else {
+            configured = DesktopEncoderConfiguration.configure(properties, speedHintSupported: speedHintSupported,
+                set: { VTSessionSetProperty(created, key: $0, value: $1) })
+        }
+        guard configured, VTCompressionSessionPrepareToEncodeFrames(created) == noErr else {
             VTCompressionSessionInvalidate(created)
             return startFallback()
         }
+        if cbr, #available(macOS 26.0, *) {
+            guard let seconds = DesktopCBRConfiguration.readNumber(created, key: kVTCompressionPropertyKey_VBVBufferDuration)?.doubleValue,
+                  seconds.isFinite, abs(seconds - 0.1) < 0.001,
+                  let readBitrate = DesktopCBRConfiguration.readNumber(created, key: kVTCompressionPropertyKey_ConstantBitRate)?.int64Value,
+                  DesktopCBRConfiguration.rateMatches(requested: Int64(bitrateKbps) * 1000, readback: readBitrate) else {
+                VTCompressionSessionInvalidate(created)
+                return startFallback()
+            }
+            trace?(["type": "encoder_cbr", "event": "configured", "vbvMs": 100, "readbackMs": seconds * 1000, "bitrateBps": Int64(bitrateKbps) * 1000, "readbackBps": readBitrate])
+        } else { log.notice("F2 VideoToolbox low-latency encoder active; speed-priority hint accepted") }
         lock.lock(); generation += 1; session = created; usingFallback = false; fallbackNeeded = false
         keyframeGate = DesktopKeyframeGate(); lock.unlock()
-        log.notice("F2 VideoToolbox low-latency encoder active; speed-priority hint accepted")
         return 0
     }
 
@@ -171,7 +234,8 @@ final class DesktopLowLatencyH264Encoder: NSObject, LKRTCVideoEncoder, @unchecke
         if let old { VTCompressionSessionInvalidate(old) }
         let result = fallback.startEncode(with: settings, numberOfCores: cores)
         if result == 0, bitrateKbps > 0 { _ = fallback.setBitrate(bitrateKbps, framerate: frameRate) }
-        log.warning("F2 low-latency encoder unavailable; using stock encoder")
+        if cbr { trace?(["type": "encoder_cbr", "event": "fallback"]) }
+        else { log.warning("F2 low-latency encoder unavailable; using stock encoder") }
         return result
     }
 
@@ -181,6 +245,16 @@ final class DesktopLowLatencyH264Encoder: NSObject, LKRTCVideoEncoder, @unchecke
         if let old { VTCompressionSessionInvalidate(old) }
         if wasFallback { return fallback.release() }
         return 0
+    }
+
+    static func acceptsCBRFrame(_ native: LKRTCCVPixelBuffer, frameWidth: Int32, frameHeight: Int32,
+                                settings: LKRTCVideoEncoderSettings) -> Bool {
+        // M144 native H.264 passes a larger, uncropped source buffer directly
+        // to VideoToolbox when its configured output is smaller.
+        native.cropX == 0 && native.cropY == 0 &&
+        Int(native.cropWidth) == CVPixelBufferGetWidth(native.pixelBuffer) &&
+        Int(native.cropHeight) == CVPixelBufferGetHeight(native.pixelBuffer) &&
+        frameWidth == Int32(settings.width) && frameHeight == Int32(settings.height)
     }
 
     func encode(_ frame: LKRTCVideoFrame, codecSpecificInfo info: (any LKRTCCodecSpecificInfo)?,
@@ -193,23 +267,21 @@ final class DesktopLowLatencyH264Encoder: NSObject, LKRTCVideoEncoder, @unchecke
         if activeFallback {
             return fallback.encode(frame, codecSpecificInfo: info, frameTypes: frameTypes)
         }
-        guard let native = frame.buffer as? LKRTCCVPixelBuffer,
-              native.cropX == 0, native.cropY == 0,
-              Int(native.cropWidth) == CVPixelBufferGetWidth(native.pixelBuffer),
-              Int(native.cropHeight) == CVPixelBufferGetHeight(native.pixelBuffer),
-              let settings, frame.width == Int32(settings.width), frame.height == Int32(settings.height),
-              CVPixelBufferGetWidth(native.pixelBuffer) == Int(settings.width),
-              CVPixelBufferGetHeight(native.pixelBuffer) == Int(settings.height) else {
+        guard let native = frame.buffer as? LKRTCCVPixelBuffer, let settings,
+              Self.acceptsCBRFrame(native, frameWidth: frame.width, frameHeight: frame.height, settings: settings),
+              cbr || (CVPixelBufferGetWidth(native.pixelBuffer) == Int(settings.width) &&
+                      CVPixelBufferGetHeight(native.pixelBuffer) == Int(settings.height)) else {
             guard startFallback() == 0 else { return -1 }
             return fallback.encode(frame, codecSpecificInfo: info, frameTypes: [NSNumber(value: 3)])
         }
         lock.lock()
         guard let current = session else { lock.unlock(); return -1 }
         let currentGeneration = generation
-        let keyframeTicket = keyframeGate.shouldForce(requested: frameTypes.contains { $0.uintValue == 3 },
+        let requestedKeyframe = frameTypes.contains { $0.uintValue == 3 }
+        let keyframeTicket = cbr ? nil : keyframeGate.shouldForce(requested: requestedKeyframe,
                                                       now: ProcessInfo.processInfo.systemUptime)
         lock.unlock()
-        let properties = keyframeTicket != nil ? [kVTEncodeFrameOptionKey_ForceKeyFrame: true] as CFDictionary : nil
+        let properties = (cbr ? requestedKeyframe : keyframeTicket != nil) ? [kVTEncodeFrameOptionKey_ForceKeyFrame: true] as CFDictionary : nil
         let timestamp = frame.timeStamp, timestampNs = frame.timeStampNs, rotation = frame.rotation
         let width = frame.width, height = frame.height
         let status = VTCompressionSessionEncodeFrame(current, imageBuffer: native.pixelBuffer,
@@ -227,15 +299,22 @@ final class DesktopLowLatencyH264Encoder: NSObject, LKRTCVideoEncoder, @unchecke
     }
 
     func setBitrate(_ bitrateKbit: UInt32, framerate: UInt32) -> Int32 {
-        lock.lock(); bitrateKbps = bitrateKbit; frameRate = framerate > 0 ? min(framerate, UInt32(DesktopVideoQuality.f2FramesPerSecond)) : frameRate
+        lock.lock(); bitrateKbps = bitrateKbit; frameRate = framerate > 0 ? (cbr ? framerate : min(framerate, UInt32(DesktopVideoQuality.f2FramesPerSecond))) : frameRate
         let current = session, activeFallback = usingFallback, rate = frameRate; lock.unlock()
         if activeFallback { return fallback.setBitrate(bitrateKbit, framerate: framerate) }
         guard let current else { return -1 }
-        let applied = DesktopEncoderRate.apply(kbps: bitrateKbit, fps: rate) {
-            VTSessionSetProperty(current, key: $0, value: $1)
+        let applied: Bool
+        if cbr, #available(macOS 26.0, *) {
+            let set = DesktopCBRConfiguration.update(kbps: bitrateKbit, fps: rate) { propertySetter(current, $0, $1) }
+            let read = set ? DesktopCBRConfiguration.readNumber(current, key: kVTCompressionPropertyKey_ConstantBitRate)?.int64Value : nil
+            let actual = read ?? 0
+            applied = read != nil && DesktopCBRConfiguration.rateMatches(requested: Int64(bitrateKbit) * 1000, readback: actual)
+            trace?(["type": "encoder_cbr", "event": "rate_update", "bitrateBps": Int64(bitrateKbit) * 1000, "readbackBps": actual, "applied": applied])
+        } else {
+            applied = DesktopEncoderRate.apply(kbps: bitrateKbit, fps: rate) { VTSessionSetProperty(current, key: $0, value: $1) }
         }
         if !applied {
-            guard bitrateKbit > 0 else { return -1 }
+            guard cbr || bitrateKbit > 0 else { return -1 }
             // Switch on the encoder's next frame so a failed optional VT
             // property update doesn't terminate the stream before fallback.
             lock.lock(); fallbackNeeded = true; lock.unlock()
@@ -245,11 +324,11 @@ final class DesktopLowLatencyH264Encoder: NSObject, LKRTCVideoEncoder, @unchecke
 
     func implementationName() -> String {
         lock.lock(); let activeFallback = usingFallback; lock.unlock()
-        return activeFallback ? fallback.implementationName() : "DesktopLowLatencyH264"
+        return activeFallback ? fallback.implementationName() : (cbr ? "DesktopCBRH264" : "DesktopLowLatencyH264")
     }
     private var isUsingFallback: Bool { lock.lock(); defer { lock.unlock() }; return usingFallback }
     func scalingSettings() -> LKRTCVideoEncoderQpThresholds? {
-        isUsingFallback ? fallback.scalingSettings() : nil
+        (cbr || isUsingFallback) ? fallback.scalingSettings() : nil
     }
     var resolutionAlignment: Int { isUsingFallback ? fallback.resolutionAlignment : 2 }
     var applyAlignmentToAllSimulcastLayers: Bool {
@@ -314,10 +393,12 @@ final class DesktopLowLatencyH264Encoder: NSObject, LKRTCVideoEncoder, @unchecke
         // Serialize the final validity check and callback with retirement so an
         // old VideoToolbox callback cannot publish after stock fallback starts.
         lock.lock()
-        if generation == self.generation && !usingFallback,
-           callback?(image, info) == true, keyframe, let keyframeTicket,
-           generation == self.generation && !usingFallback {
-            keyframeGate.acknowledge(keyframeTicket)
+        if generation == self.generation && !usingFallback {
+            observeBytes?(annexB.count)
+            if callback?(image, info) == true, keyframe, let keyframeTicket,
+               generation == self.generation && !usingFallback {
+                keyframeGate.acknowledge(keyframeTicket)
+            }
         }
         lock.unlock()
     }
