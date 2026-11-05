@@ -20,6 +20,27 @@ final class LatencyStatsCollectorTests: XCTestCase {
         wrong = env; wrong["REMOTE_DESKTOP_R0_HOST_ID"] = id; XCTAssertFalse(allowed(wrong))
     }
 
+    func testExtendedHostTraceRequiresAdmittedRequestAndAllIsolatedGates() {
+        let args = ["host", "--debug-latency-host"]
+        let env = ["LATENCY_LAB": "1", "LATENCY_SEND_TRACE_10HZ": "1", "REMOTE_DESKTOP_LATENCY_HOST_ID": UUID().uuidString]
+        func limit(_ e: [String: String], side: String = "host", admitted: Bool = true, resources: Bool = false, args a: [String]? = nil) -> Int {
+            LatencyStatsCollector.hostTraceLimit(side: side, admittedRequest: admitted, resourcesOnly: resources,
+                                                arguments: a ?? args, environment: e)
+        }
+        XCTAssertEqual(limit(env), 8_000_000)
+        XCTAssertEqual(limit(env, side: "client"), 1_000_000)
+        XCTAssertEqual(limit(env, admitted: false), 1_000_000)
+        XCTAssertEqual(limit(env, resources: true), 1_000_000)
+        XCTAssertEqual(limit(env, args: ["host"]), 1_000_000)
+        XCTAssertEqual(limit(env, args: args + ["extra"]), 1_000_000)
+        for key in ["LATENCY_LAB", "LATENCY_SEND_TRACE_10HZ", "REMOTE_DESKTOP_LATENCY_HOST_ID"] {
+            var missing = env; missing.removeValue(forKey: key); XCTAssertEqual(limit(missing), 1_000_000)
+        }
+        var invalid = env; invalid["REMOTE_DESKTOP_LATENCY_HOST_ID"] = "invalid"; XCTAssertEqual(limit(invalid), 1_000_000)
+        invalid = env; invalid["REMOTE_DESKTOP_R0_HOST_ID"] = UUID().uuidString; XCTAssertEqual(limit(invalid), 1_000_000)
+        invalid = env; invalid["LATENCY_SEND_TRACE_10HZ"] = "true"; XCTAssertEqual(limit(invalid), 1_000_000)
+    }
+
     func testSend10GateAllowsOneRequestAndFencesCancellation() throws {
         var gate = LabSendPollGate()
         let first = try XCTUnwrap(gate.begin()); XCTAssertNil(gate.begin())

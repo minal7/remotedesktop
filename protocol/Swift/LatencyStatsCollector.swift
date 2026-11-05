@@ -203,6 +203,17 @@ final class LatencyStatsCollector: @unchecked Sendable {
         return true
     }
     #endif
+    #if DEBUG && os(macOS)
+    /// The request event is emitted only after the peer-scoped sampler's
+    /// ordinary-peer admission; recheck the isolated host process gates too.
+    static func hostTraceLimit(side: String, admittedRequest: Bool, resourcesOnly: Bool,
+                               arguments: [String], environment: [String: String]) -> Int {
+        guard side == "host", admittedRequest,
+              LabSendIntervalSampler.enabled(labAdmitted: true, ordinaryPeer: true, resourcesOnly: resourcesOnly,
+                                              arguments: arguments, environment: environment) else { return 1_000_000 }
+        return 8_000_000
+    }
+    #endif
     #if DEBUG && os(iOS)
     static func traceLimit(arguments: [String]) -> Int {
         traceLimit(arguments: arguments, environment: ProcessInfo.processInfo.environment)
@@ -237,7 +248,7 @@ final class LatencyStatsCollector: @unchecked Sendable {
     private var pending = 0
     private var overflowed = false
     private let writer: DispatchQueue?
-    private let limit: Int
+    private var limit: Int // writer queue only after initialization
     private let url: URL?
 
     init(side: String, enabled: Bool = LatencyStatsCollector.enabled, traceURL: URL? = nil) {
@@ -246,7 +257,7 @@ final class LatencyStatsCollector: @unchecked Sendable {
         self.writer = enabled ? DispatchQueue(label: "latency.trace.writer") : nil
         #if DEBUG && os(iOS)
         // Paired runs and explicitly opted-in standalone lab probes use the
-        // extended bound; ordinary clients and every host peer retain 1 MB.
+        // extended bound; ordinary clients retain 1 MB.
         self.limit = Self.traceLimit(arguments: ProcessInfo.processInfo.arguments)
         #else
         self.limit = 1_000_000
@@ -430,7 +441,18 @@ final class LatencyStatsCollector: @unchecked Sendable {
             return
         }
         pending += 1
+        #if DEBUG && os(macOS)
+        let raisedLimit: Int
+        if side == "host", fields["type"] as? String == "send_10hz_request" {
+            raisedLimit = Self.hostTraceLimit(side: side, admittedRequest: true,
+                resourcesOnly: Self.resourcesOnly, arguments: ProcessInfo.processInfo.arguments,
+                environment: ProcessInfo.processInfo.environment)
+        } else { raisedLimit = 1_000_000 }
+        #endif
         writer.async { [self] in
+            #if DEBUG && os(macOS)
+            limit = max(limit, raisedLimit)
+            #endif
             writeRecord(fields, to: url)
             lock.lock(); pending -= 1; lock.unlock()
         }
