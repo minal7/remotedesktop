@@ -1,6 +1,7 @@
 import AppKit
 import ScreenCaptureKit
 import CoreMedia
+import QuartzCore
 
 // The observer reads only the marker cells and persists only their IDs and times.
 enum LargeChangeCadence {
@@ -15,6 +16,15 @@ enum FixtureAnimationCadence {
         guard elapsed.isFinite, elapsed > 0 else { return 0 }
         return Int(min(36_000, (elapsed * 60).rounded(.down)))
     }
+    static func validTarget(_ target: TimeInterval, after previous: TimeInterval?) -> Bool {
+        target.isFinite && target > 0 && (previous.map { target > $0 } ?? true)
+    }
+    static func displayStep(target: TimeInterval, anchor: TimeInterval) -> Int {
+        step(elapsed: max(0, target - anchor) + 1.0 / 120)
+    }
+    static var requestedRange: CAFrameRateRange {
+        CAFrameRateRange(minimum: 60, maximum: 60, preferred: 60)
+    }
     static func frame(in bounds: NSRect) -> NSRect {
         NSRect(x: max(0, bounds.width - 240), y: 24,
                width: min(200, bounds.width), height: min(80, max(0, bounds.height - 24)))
@@ -23,6 +33,17 @@ enum FixtureAnimationCadence {
 
 final class FixtureAnimationRegion: NSView {
     var step = 0
+    private var targetAnchor: TimeInterval?
+    private var previousTarget: TimeInterval?
+    @objc func displayTick(_ link: CADisplayLink) {
+        let target = link.targetTimestamp
+        guard FixtureAnimationCadence.validTarget(target, after: previousTarget) else { return }
+        let anchor = targetAnchor ?? target
+        targetAnchor = anchor; previousTarget = target
+        let next = FixtureAnimationCadence.displayStep(target: target, anchor: anchor)
+        guard next != step else { return }
+        step = next; needsDisplay = true
+    }
     override var isFlipped: Bool { true }
     override func draw(_ dirtyRect: NSRect) {
         NSColor(calibratedHue: CGFloat(step % 120) / 120, saturation: 0.8, brightness: 0.9, alpha: 1).setFill()
@@ -164,7 +185,7 @@ final class Observer: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sen
     func stream(_ stream: SCStream, didStopWithError error: Error) { fputs("Observer stopped: \(error)\n", stderr) }
 }
 @MainActor final class Runner: NSObject, NSApplicationDelegate {
-    var window: NSWindow?, timer: Timer?, animationTimer: Timer?, observer: Observer?
+    var window: NSWindow?, timer: Timer?, animationLink: CADisplayLink?, observer: Observer?
     let env = ProcessInfo.processInfo.environment
     func applicationDidFinishLaunching(_ notification: Notification) {
         Task { do { try await run() } catch { fputs("Marker probe: \(error)\n", stderr); exit(1) } }
@@ -192,22 +213,13 @@ final class Observer: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sen
         let pattern = Pattern(frame: NSRect(origin: .zero, size: frame.size), cell: cell, optical: optical, photo: photo)
         let window = optical ? OpticalWindow(contentRect: frame, styleMask: [.borderless], backing: .buffered, defer: false)
             : NSWindow(contentRect: frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        let animation: FixtureAnimationRegion?
         if animate {
-            let animation = FixtureAnimationRegion(frame: FixtureAnimationCadence.frame(in: pattern.bounds))
-            animation.wantsLayer = true
-            pattern.addSubview(animation)
-            let start = ProcessInfo.processInfo.systemUptime
-            let animationTimer = Timer(timeInterval: 1.0 / 60, repeats: true) { [weak animation] _ in
-                MainActor.assumeIsolated {
-                    guard let animation else { return }
-                    let next = FixtureAnimationCadence.step(elapsed: ProcessInfo.processInfo.systemUptime - start)
-                    guard next != animation.step else { return }
-                    animation.step = next; animation.needsDisplay = true
-                }
-            }
-            RunLoop.main.add(animationTimer, forMode: .common)
-            self.animationTimer = animationTimer
-        }
+            let region = FixtureAnimationRegion(frame: FixtureAnimationCadence.frame(in: pattern.bounds))
+            region.wantsLayer = true
+            pattern.addSubview(region)
+            animation = region
+        } else { animation = nil }
         window.contentView = pattern; window.level = optical ? .screenSaver : .floating
         window.isReleasedWhenClosed = false
         if optical {
@@ -215,6 +227,14 @@ final class Observer: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sen
             window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
         } else { window.orderFrontRegardless() }
         self.window = window
+        if let animation {
+            guard #available(macOS 14.0, *) else { throw NSError(domain: "Display-linked animation requires macOS 14", code: 1) }
+            let link = animation.displayLink(target: animation, selector: #selector(FixtureAnimationRegion.displayTick(_:)))
+            link.preferredFrameRateRange = FixtureAnimationCadence.requestedRange
+            link.add(to: .main, forMode: .common)
+            animationLink = link
+        }
+        defer { animationLink?.invalidate(); animationLink = nil }
         let markerX: CGFloat = optical ? 36 : frame.minX + 16
         let markerY: CGFloat = optical ? 370 : h - frame.maxY + 40
         let observer = Observer(x: markerX, y: markerY, cell: cell, width: w, height: h)
@@ -251,7 +271,8 @@ final class Observer: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sen
         finishSignal.resume()
         try? await sleeper.value
         finishSignal.cancel()
-        timer?.invalidate(); animationTimer?.invalidate(); try await observer.stream?.stopCapture()
+        timer?.invalidate(); animationLink?.invalidate(); animationLink = nil
+        try await observer.stream?.stopCapture()
         let rows = observer.snapshot()
         let result: [String: Any] = ["kind": "device_host_marker", "clock": "host_monotonic_seconds", "duration_s": duration, "initial_marker_observed_before_timing": true,
             "animation_enabled": animate, "animation_target_fps": animate ? 60 : 0, "geometry": ["x": markerX, "y": markerY, "cell": cell, "screen_width": w, "screen_height": h], "markers": rows]

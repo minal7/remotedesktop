@@ -18,6 +18,21 @@ import AppKit
         }
         let frame = FixtureAnimationCadence.frame(in: NSRect(x: 0, y: 0, width: 1000, height: 800))
         precondition(frame.minY >= 0 && frame.maxY < 370, "Animation must not cover marker cells")
-        print("17 cadence and marker-separation checks passed")
+        let range = FixtureAnimationCadence.requestedRange
+        precondition(range.minimum == 60 && range.maximum == 60 && range.preferred == 60,
+                     "Animation requests a fixed 60 Hz display link")
+        precondition(FixtureAnimationCadence.validTarget(10, after: nil))
+        precondition(FixtureAnimationCadence.validTarget(11, after: 10))
+        precondition(!FixtureAnimationCadence.validTarget(10, after: 10))
+        precondition(!FixtureAnimationCadence.validTarget(9, after: 10))
+        precondition(!FixtureAnimationCadence.validTarget(.nan, after: nil))
+        precondition(!FixtureAnimationCadence.validTarget(0, after: nil))
+        for index in 0...120 {
+            let anchor = 10_000.0
+            let target = anchor + Double(index) / 60 - (index == 0 ? 0 : 0.000_01)
+            precondition(FixtureAnimationCadence.displayStep(target: target, anchor: anchor) == index,
+                         "Display target must advance one 60 Hz step")
+        }
+        print("145 cadence, marker-separation and display-link checks passed")
     }
 }
