@@ -123,7 +123,8 @@ class LifecycleTests(unittest.TestCase):
         self.assertEqual(result['counts']['requests_observed'], 1)
         self.assertEqual(result['counts']['responses_observed'], 1)
         self.assertNotIn('192.0.2.1', json.dumps(result))
-        self.assertEqual(children[0].args[:5], ['/sbin/ping', '-n', '-i', '0.1', '--apple-print-req'])
+        self.assertEqual(children[0].args[:5], ['/sbin/ping', '-n', '-i', '0.09', '--apple-print-req'])
+        self.assertEqual(result['requested_interval_s'], 0.09)
 
     def test_main_exclusive_private_output_and_no_raw_data(self):
         with tempfile.TemporaryDirectory() as temp:

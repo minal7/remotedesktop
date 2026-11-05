@@ -22,7 +22,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-INTERVAL_SECONDS = 0.1
+INTERVAL_SECONDS = 0.09
 MAX_SECONDS = 120.0
 MAX_RECORDS = 1250
 MAX_LINE = 4096
@@ -205,7 +205,7 @@ def collect(router: str, seconds: float, clock, stop_requested, popen=subprocess
     end_reason = 0
     stop_time = None
     try:
-        child = popen(['/sbin/ping', '-n', '-i', '0.1', '--apple-print-req', router],
+        child = popen(['/sbin/ping', '-n', '-i', str(INTERVAL_SECONDS), '--apple-print-req', router],
                       stdin=subprocess.DEVNULL, stdout=slave, stderr=subprocess.DEVNULL,
                       close_fds=True)
         os.close(slave)
