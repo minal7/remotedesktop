@@ -80,6 +80,38 @@ final class Pattern: NSView {
     }
     required init?(coder: NSCoder) { fatalError() }
     override var isFlipped: Bool { true }
+
+    static let textReferenceROI = NSRect(x: 64, y: 144, width: 256, height: 64)
+
+    /// Draw only the owned synthetic text view into a bounded bitmap, never a desktop capture.
+    func writeTextReference(to url: URL, screenWidth: Int, screenHeight: Int, backingScale: CGFloat) throws {
+        let roi = Self.textReferenceROI
+        guard optical, photo != nil, !photoScene, backingScale == 2,
+              bounds.contains(roi), screenWidth == Int(bounds.width), screenHeight == Int(bounds.height),
+              let bitmap = bitmapImageRepForCachingDisplay(in: roi),
+              bitmap.pixelsWide == 512, bitmap.pixelsHigh == 128 else {
+            throw NSError(domain: "Synthetic text reference geometry unavailable", code: 1)
+        }
+        cacheDisplay(in: roi, to: bitmap)
+        var luma = Data(); luma.reserveCapacity(512 * 128)
+        for y in 0..<128 {
+            for x in 0..<512 {
+                guard let c = bitmap.colorAt(x: x, y: y)?.usingColorSpace(.sRGB), c.alphaComponent >= 0.999 else {
+                    throw NSError(domain: "Synthetic text reference color unavailable", code: 1)
+                }
+                let value = max(0, min(255, (0.2126 * c.redComponent + 0.7152 * c.greenComponent + 0.0722 * c.blueComponent) * 255))
+                luma.append(UInt8(value.rounded()))
+            }
+        }
+        guard let min = luma.min(), let max = luma.max(), min < 32, max > 223 else {
+            throw NSError(domain: "Synthetic text reference lacks contrast", code: 1)
+        }
+        let object: [String: Any] = ["version": 1, "screenWidth": screenWidth, "screenHeight": screenHeight,
+            "width": 512, "height": 128, "x": 64, "y": 144, "scale": 2, "luma": luma.base64EncodedString()]
+        let data = try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
+        try data.write(to: url, options: .withoutOverwriting)
+    }
+
     override func draw(_ dirtyRect: NSRect) {
         NSColor.darkGray.setFill(); bounds.fill()
         if let photo {
@@ -245,6 +277,13 @@ final class Observer: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sen
             window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
         } else { window.orderFrontRegardless() }
         self.window = window
+        if let path = env["LATENCY_TEXT_REFERENCE_PATH"] {
+            guard env["LATENCY_LAB"] == "1", !path.isEmpty else {
+                throw NSError(domain: "Synthetic text reference requires lab opt-in", code: 1)
+            }
+            try pattern.writeTextReference(to: URL(fileURLWithPath: path), screenWidth: Int(w), screenHeight: Int(h),
+                                           backingScale: screen.backingScaleFactor)
+        }
         if let animation {
             guard #available(macOS 14.0, *) else { throw NSError(domain: "Display-linked animation requires macOS 14", code: 1) }
             let link = animation.displayLink(target: animation, selector: #selector(FixtureAnimationRegion.displayTick(_:)))

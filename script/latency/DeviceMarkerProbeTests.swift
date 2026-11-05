@@ -47,6 +47,10 @@ import AppKit
             precondition(FixtureAnimationCadence.displayStep(target: target, anchor: anchor) == index,
                          "Display target must advance one 60 Hz step")
         }
-        print("167 fixture checks passed")
+        let roi = Pattern.textReferenceROI
+        precondition(roi == NSRect(x: 64, y: 144, width: 256, height: 64))
+        precondition(!roi.intersects(frame), "Text reference must not include animation")
+        precondition(roi.maxY < 370, "Text reference must not include marker")
+        print("170 fixture checks passed")
     }
 }
