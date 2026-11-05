@@ -335,6 +335,10 @@ final class HostPeerSession: NSObject {
     private var stage2CaptureFrames: UInt64 = 0
     private var stage2CodecAllowed = false
     private var stage2LossUnavailableLogged = false
+    private let send10Enabled: Bool
+    private var send10Timer: DispatchSourceTimer?
+    private var send10Gate = LabSendPollGate()
+    private var send10Sampler = LabSendIntervalSampler()
     private var f3AppliedPath: LatencyLabSenderPolicy.Path?
     private var f3OriginalPriorities: [(LKRTCPriority, Double)]?
     #endif
@@ -457,6 +461,9 @@ final class HostPeerSession: NSObject {
         let enableStage2 = LatencyLabSenderPolicy.stage2Allowed(labInstrumentation: labInstrumentation && !LatencyStatsCollector.resourcesOnly,
             ordinaryPeer: acceptedOrdinaryPeer, arguments: ProcessInfo.processInfo.arguments,
             environment: ProcessInfo.processInfo.environment)
+        self.send10Enabled = LabSendIntervalSampler.enabled(labAdmitted: labInstrumentation,
+            ordinaryPeer: acceptedOrdinaryPeer, resourcesOnly: LatencyStatsCollector.resourcesOnly,
+            arguments: ProcessInfo.processInfo.arguments, environment: ProcessInfo.processInfo.environment)
         self.stage2Enabled = enableStage2
         self.stage2State = enableStage2 ? LatencyLabSenderPolicy.Stage2State(candidate: enableF3) : nil
         let keyframeControl: LatencyKeyframeControl? = enableStage2 && enableF3 ? LatencyKeyframeControl { [weak stats] event in
@@ -633,9 +640,43 @@ final class HostPeerSession: NSObject {
         }
         latencyTimer = timer
         timer.resume()
+        #if DEBUG
+        startSend10Polling(connection)
+        #endif
     }
 
     #if DEBUG
+    private func startSend10Polling(_ connection: RTCPeerConnection) {
+        closeStateLock.lock()
+        guard send10Enabled, !ended, peerConnection === connection, send10Timer == nil else { closeStateLock.unlock(); return }
+        let timer = DispatchSource.makeTimerSource(queue: DispatchQueue(label: "host.latency.send10"))
+        send10Timer = timer
+        timer.schedule(deadline: .now(), repeating: .milliseconds(100), leeway: .milliseconds(2))
+        timer.setEventHandler { [weak self, weak connection] in
+            guard let self, let connection else { return }
+            self.closeStateLock.lock()
+            guard !self.ended, self.peerConnection === connection, let token = self.send10Gate.begin() else {
+                self.closeStateLock.unlock(); return
+            }
+            let requested = ProcessInfo.processInfo.systemUptime
+            self.latencyStats.trace(["type": "send_10hz_request", "time": requested])
+            connection.statistics { [weak self, weak connection] report in
+                guard let self, let connection else { return }
+                let completed = ProcessInfo.processInfo.systemUptime
+                let reports = report.statistics.values.map { LatencyStatsReport(id: $0.id, type: $0.type, values: $0.values) }
+                let times = Dictionary(report.statistics.values.map { ($0.id, $0.timestamp_us) }, uniquingKeysWith: { first, _ in first })
+                self.closeStateLock.lock(); defer { self.closeStateLock.unlock() }
+                guard !self.ended, self.peerConnection === connection, self.send10Gate.finish(token) else { return }
+                let row = self.send10Sampler.sample(request: requested, completion: completed,
+                    reportTimestampUs: report.timestamp_us, reports: reports, times: times)
+                self.latencyStats.trace(row)
+            }
+            self.closeStateLock.unlock()
+        }
+        timer.resume()
+        closeStateLock.unlock()
+    }
+
     private func applyLatencySenderPolicy(_ reports: [LatencyStatsReport], connection: RTCPeerConnection, sampledAt: Double, capturedFrames: UInt64,
                                           reportTimestampUs: Double, reportTimes: [String: Double]) {
         if stage2Enabled {
@@ -777,6 +818,8 @@ final class HostPeerSession: NSObject {
             #if DEBUG
             self.stage2KeyframeControl?.invalidate()
             self.stage2State = nil
+            self.send10Gate.cancel()
+            self.send10Timer?.cancel(); self.send10Timer = nil
             #endif
             self.latencyTimer?.cancel()
             self.latencyTimer = nil

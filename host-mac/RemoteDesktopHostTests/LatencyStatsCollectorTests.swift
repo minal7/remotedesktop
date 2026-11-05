@@ -3,6 +3,81 @@ import XCTest
 
 final class LatencyStatsCollectorTests: XCTestCase {
     #if DEBUG
+    func testSend10RequiresStrictOrdinaryIsolatedLabOptIn() {
+        let id = UUID().uuidString
+        let env = ["LATENCY_LAB": "1", "LATENCY_SEND_TRACE_10HZ": "1", "REMOTE_DESKTOP_LATENCY_HOST_ID": id]
+        let args = ["host", "--debug-latency-host"]
+        func allowed(_ e: [String: String], ordinary: Bool = true, admitted: Bool = true, resources: Bool = false, arguments: [String]? = nil) -> Bool {
+            LabSendIntervalSampler.enabled(labAdmitted: admitted, ordinaryPeer: ordinary, resourcesOnly: resources,
+                                           arguments: arguments ?? args, environment: e)
+        }
+        XCTAssertTrue(allowed(env)); XCTAssertFalse(allowed(env, ordinary: false)); XCTAssertFalse(allowed(env, admitted: false))
+        XCTAssertFalse(allowed(env, resources: true)); XCTAssertFalse(allowed(env, arguments: ["host"]))
+        for key in ["LATENCY_LAB", "LATENCY_SEND_TRACE_10HZ", "REMOTE_DESKTOP_LATENCY_HOST_ID"] {
+            var missing = env; missing.removeValue(forKey: key); XCTAssertFalse(allowed(missing))
+        }
+        var wrong = env; wrong["LATENCY_SEND_TRACE_10HZ"] = "true"; XCTAssertFalse(allowed(wrong))
+        wrong = env; wrong["REMOTE_DESKTOP_R0_HOST_ID"] = id; XCTAssertFalse(allowed(wrong))
+    }
+
+    func testSend10GateAllowsOneRequestAndFencesCancellation() throws {
+        var gate = LabSendPollGate()
+        let first = try XCTUnwrap(gate.begin()); XCTAssertNil(gate.begin())
+        XCTAssertFalse(gate.finish(first + 1)); XCTAssertTrue(gate.finish(first)); XCTAssertFalse(gate.finish(first))
+        let second = try XCTUnwrap(gate.begin()); gate.cancel()
+        XCTAssertFalse(gate.finish(second)); XCTAssertNil(gate.begin())
+    }
+
+    private func sendReports(id: String = "private-video", bytes: Any? = 100, packets: Any? = 10,
+                             delay: Any? = 0.1, pair: Bool = true) -> [LatencyStatsReport] {
+        var v: [String: Any] = ["kind": "video", "targetBitrate": 1_000_000]
+        v["bytesSent"] = bytes; v["packetsSent"] = packets; v["totalPacketSendDelay"] = delay
+        var reports = [LatencyStatsReport(id: id, type: "outbound-rtp", values: v)]
+        if pair {
+            reports += [LatencyStatsReport(id: "private-transport", type: "transport", values: ["selectedCandidatePairId": "private-pair"]),
+                        LatencyStatsReport(id: "private-pair", type: "candidate-pair", values: ["availableOutgoingBitrate": 2_000_000])]
+        }
+        return reports
+    }
+
+    func testSend10DeltasUseTimestampIntervalsAndRemainPrivate() throws {
+        var sampler = LabSendIntervalSampler()
+        let first = sampler.sample(request: 1, completion: 1.01, reportTimestampUs: 1_000_000,
+            reports: sendReports(), times: ["private-video": 1_000_000, "private-pair": 1_000_000])
+        XCTAssertEqual(first["bytesStatus"] as? String, "baseline"); XCTAssertNil(first["bytesSentDelta"])
+        let next = sampler.sample(request: 1.1, completion: 1.11, reportTimestampUs: 1_100_000,
+            reports: sendReports(bytes: 300, packets: 20, delay: 0.3), times: ["private-video": 1_100_000, "private-pair": 1_100_000])
+        XCTAssertEqual(next["outboundStatus"] as? String, "advanced_timestamp")
+        XCTAssertEqual(next["intervalSeconds"] as? Double ?? -1, 0.1, accuracy: 0.0001)
+        XCTAssertEqual(next["bytesSentDelta"] as? Double, 200); XCTAssertEqual(next["packetsSentDelta"] as? Double, 10)
+        XCTAssertEqual(next["packetSendIntervalMeanMs"] as? Double ?? -1, 20, accuracy: 0.0001)
+        XCTAssertEqual(next["targetBitrateBps"] as? Double, 1_000_000)
+        XCTAssertEqual(next["availableOutgoingBitrateBps"] as? Double, 2_000_000)
+        let text = String(decoding: try JSONSerialization.data(withJSONObject: next), as: UTF8.self)
+        XCTAssertFalse(text.contains("private-")); XCTAssertFalse(text.contains("candidate"))
+    }
+
+    func testSend10MissingResetStaleAndIdentityChangesDoNotInventDeltas() {
+        var sampler = LabSendIntervalSampler()
+        func sample(_ t: Double, _ reports: [LatencyStatsReport], _ id: String = "private-video", _ ts: Double? = nil) -> [String: Any] {
+            sampler.sample(request: t, completion: t + 0.01, reportTimestampUs: t * 1_000_000,
+                           reports: reports, times: [id: ts ?? t * 1_000_000])
+        }
+        _ = sample(1, sendReports())
+        let stale = sample(1.1, sendReports(bytes: 200), "private-video", 1_000_000)
+        XCTAssertEqual(stale["outboundStatus"] as? String, "stale_timestamp"); XCTAssertNil(stale["bytesSentDelta"])
+        let reset = sample(1.2, sendReports(bytes: 2, packets: nil, delay: Double.nan))
+        XCTAssertEqual(reset["bytesStatus"] as? String, "reset"); XCTAssertEqual(reset["packetsStatus"] as? String, "missing")
+        XCTAssertEqual(reset["delayStatus"] as? String, "missing"); XCTAssertNil(reset["packetSendIntervalMeanMs"])
+        let baseline = sample(1.3, sendReports(id: "new-private-video", bytes: 4), "new-private-video")
+        XCTAssertEqual(baseline["bytesStatus"] as? String, "baseline"); XCTAssertNil(baseline["bytesSentDelta"])
+        let absent = sampler.sample(request: 2, completion: 2.01, reportTimestampUs: nil, reports: [], times: [:])
+        XCTAssertEqual(absent["outboundStatus"] as? String, "missing"); XCTAssertEqual(absent["estimateStatus"] as? String, "missing")
+    }
+
+    #endif
+
+    #if DEBUG
     func testResourceEnvironmentIsLimitedToIsolatedLatencyHost() {
         let id = UUID().uuidString
         let env = ["REMOTE_DESKTOP_LATENCY_HOST_ID": id, "LATENCY_LAB_RESOURCES_ONLY": "1"]

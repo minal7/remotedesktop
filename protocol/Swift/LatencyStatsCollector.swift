@@ -40,6 +40,123 @@ struct LatencyProcessCPUSampler {
 }
 #endif
 
+#if DEBUG && os(macOS)
+/// All state is owned by the peer lock; a canceled generation cannot complete.
+struct LabSendPollGate {
+    private var active = true
+    private var pending: UInt64?
+    private var serial: UInt64 = 0
+    mutating func begin() -> UInt64? {
+        guard active, pending == nil else { return nil }
+        serial &+= 1; pending = serial; return serial
+    }
+    mutating func finish(_ token: UInt64) -> Bool {
+        guard active, pending == token else { return false }
+        pending = nil; return true
+    }
+    mutating func cancel() { active = false; pending = nil }
+}
+
+/// Per-peer numerical observations only. WebRTC object identities never leave this state.
+struct LabSendIntervalSampler {
+    private var previousID: String?
+    private var previousReportTime: Double?
+    private var previousOutboundTime: Double?
+    private var previousPairID: String?
+    private var previousPairTime: Double?
+    private var counters: [String: Double] = [:]
+
+    static func enabled(labAdmitted: Bool, ordinaryPeer: Bool, resourcesOnly: Bool,
+                        arguments: [String], environment: [String: String]) -> Bool {
+        guard labAdmitted, ordinaryPeer, !resourcesOnly,
+              Array(arguments.dropFirst()) == ["--debug-latency-host"],
+              environment["LATENCY_LAB"] == "1", environment["LATENCY_SEND_TRACE_10HZ"] == "1",
+              environment["REMOTE_DESKTOP_R0_HOST_ID"] == nil,
+              let id = environment["REMOTE_DESKTOP_LATENCY_HOST_ID"], id.utf8.count == 36,
+              UUID(uuidString: id) != nil else { return false }
+        return true
+    }
+
+    private static func number(_ value: Any?) -> Double? {
+        guard let n = value as? NSNumber, CFGetTypeID(n) != CFBooleanGetTypeID(),
+              n.doubleValue.isFinite, n.doubleValue >= 0 else { return nil }
+        return n.doubleValue
+    }
+    private static func positive(_ value: Double?) -> Double? {
+        guard let value, value.isFinite, value > 0 else { return nil }; return value
+    }
+    mutating func sample(request: Double, completion: Double, reportTimestampUs: Double?,
+                         reports: [LatencyStatsReport], times: [String: Double]) -> [String: Any] {
+        var row: [String: Any] = ["type": "send_10hz", "requestTime": request, "completionTime": completion]
+        let reportTime = Self.positive(reportTimestampUs)
+        if let reportTime { row["reportTimestampUs"] = reportTime }
+        if reportTime == nil { row["reportStatus"] = "missing_timestamp" }
+        else if let previousReportTime { row["reportStatus"] = reportTime! > previousReportTime ? "advanced_timestamp" : "stale_timestamp" }
+        else { row["reportStatus"] = "baseline" }
+        let selectedIDs = Set(reports.filter { $0.type == "transport" }.compactMap { $0.values["selectedCandidatePairId"] as? String })
+        let pairs = reports.filter { $0.type == "candidate-pair" && selectedIDs.contains($0.id) }
+        if selectedIDs.count == 1, pairs.count == 1, let pair = pairs.first {
+            let pairTime = Self.positive(times[pair.id])
+            if let pairTime { row["pairTimestampUs"] = pairTime }
+            let pairSame = previousPairID == pair.id
+            row["pairStatus"] = pairTime == nil ? "missing_timestamp" :
+                (pairSame && previousPairTime != nil && pairTime! <= previousPairTime! ? "stale_timestamp" : (pairSame ? "advanced_timestamp" : "baseline"))
+            if let estimate = Self.number(pair.values["availableOutgoingBitrate"]) {
+                row["estimateStatus"] = "available"; row["availableOutgoingBitrateBps"] = estimate
+            } else { row["estimateStatus"] = "missing" }
+            if !pairSame || previousPairTime == nil || (pairTime != nil && pairTime! > previousPairTime!) {
+                previousPairID = pair.id; previousPairTime = pairTime
+            }
+        } else {
+            row["pairStatus"] = "unavailable"; row["estimateStatus"] = "missing"
+            previousPairID = nil; previousPairTime = nil
+        }
+        let video = reports.filter { $0.type == "outbound-rtp" &&
+            ($0.values["kind"] as? String ?? $0.values["mediaType"] as? String) == "video" }
+        guard video.count == 1, let outbound = video.first else {
+            previousID = nil; previousReportTime = nil; previousOutboundTime = nil; counters.removeAll()
+            row["outboundStatus"] = video.isEmpty ? "missing" : "ambiguous"
+            row["bytesStatus"] = "missing"; row["packetsStatus"] = "missing"; row["delayStatus"] = "missing"
+            row["targetStatus"] = "missing"
+            return row
+        }
+        let outboundTime = Self.positive(times[outbound.id])
+        if let outboundTime { row["outboundTimestampUs"] = outboundTime }
+        let same = previousID == outbound.id
+        let comparable = same && reportTime != nil && outboundTime != nil && previousReportTime != nil && previousOutboundTime != nil
+        let stale = comparable && (reportTime! <= previousReportTime! || outboundTime! <= previousOutboundTime!)
+        row["outboundStatus"] = reportTime == nil || outboundTime == nil ? "missing_timestamp" : (stale ? "stale_timestamp" : (comparable ? "advanced_timestamp" : "baseline"))
+        if comparable && !stale { row["intervalSeconds"] = (outboundTime! - previousOutboundTime!) / 1_000_000 }
+        for (source, status, delta) in [("bytesSent", "bytesStatus", "bytesSentDelta"),
+                                         ("packetsSent", "packetsStatus", "packetsSentDelta"),
+                                         ("totalPacketSendDelay", "delayStatus", "packetSendDelaySecondsDelta")] {
+            guard let value = Self.number(outbound.values[source]) else { row[status] = "missing"; counters.removeValue(forKey: source); continue }
+            if stale { row[status] = "stale"; continue }
+            if reportTime == nil || outboundTime == nil { row[status] = "missing_timestamp"; counters.removeValue(forKey: source); continue }
+            if same, let old = counters[source] {
+                if value >= old { row[status] = "ok"; row[delta] = value - old }
+                else { row[status] = "reset" }
+            } else { row[status] = "baseline" }
+            counters[source] = value
+        }
+        if !stale {
+            if !same { // Do not compare new identities against the preceding stream.
+                counters = counters.filter { outbound.values[$0.key] != nil }
+            }
+            previousID = outbound.id; previousReportTime = reportTime; previousOutboundTime = outboundTime
+        }
+        if let d = row["packetSendDelaySecondsDelta"] as? Double,
+           let p = row["packetsSentDelta"] as? Double, p > 0 {
+            row["packetSendIntervalMeanMs"] = d / p * 1_000
+        }
+        if let target = Self.number(outbound.values["targetBitrate"]) {
+            row["targetStatus"] = "available"; row["targetBitrateBps"] = target
+        } else { row["targetStatus"] = "missing" }
+        return row
+    }
+}
+#endif
+
 struct LatencyStatsReport {
     let id: String
     let type: String
