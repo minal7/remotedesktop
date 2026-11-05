@@ -330,7 +330,8 @@ final class DesktopLowLatencyH264Encoder: NSObject, LKRTCVideoEncoder, @unchecke
             return fallback.encode(frame, codecSpecificInfo: info, frameTypes: frameTypes)
         }
         guard let native = frame.buffer as? LKRTCCVPixelBuffer, let settings,
-              frame.width == Int32(settings.width), frame.height == Int32(settings.height),
+              cbr ? (frame.width >= Int32(settings.width) && frame.height >= Int32(settings.height))
+                  : (frame.width == Int32(settings.width) && frame.height == Int32(settings.height)),
               cbr || (Self.acceptsCBRFrame(native, frameWidth: frame.width, frameHeight: frame.height, settings: settings) &&
                       CVPixelBufferGetWidth(native.pixelBuffer) == Int(settings.width) &&
                       CVPixelBufferGetHeight(native.pixelBuffer) == Int(settings.height)) else {
@@ -360,7 +361,8 @@ final class DesktopLowLatencyH264Encoder: NSObject, LKRTCVideoEncoder, @unchecke
         if cbr { applyPendingCBRRate(current) }
         if cbr { lock.lock(); cbrInFlight += 1; lock.unlock() }
         let timestamp = frame.timeStamp, timestampNs = frame.timeStampNs, rotation = frame.rotation
-        let width = frame.width, height = frame.height
+        // With a scale-down, WebRTC passes the full frame and VideoToolbox scales it to the session size.
+        let width = cbr ? Int32(settings.width) : frame.width, height = cbr ? Int32(settings.height) : frame.height
         let status = VTCompressionSessionEncodeFrame(current, imageBuffer: pixelBuffer,
             presentationTimeStamp: CMTime(value: timestampNs, timescale: 1_000_000_000), duration: .invalid,
             frameProperties: properties, infoFlagsOut: nil) { [weak self] status, flags, sample in
@@ -683,7 +685,7 @@ final class LabHEVCEncoder: NSObject, LKRTCVideoEncoder, @unchecked Sendable {
             return result
         }
         guard let current, let settings, let source = frame.buffer as? LKRTCCVPixelBuffer,
-              frame.width == Int32(settings.width), frame.height == Int32(settings.height) else {
+              frame.width >= Int32(settings.width), frame.height >= Int32(settings.height) else {
             gate.complete(deliveryTicket)
             guard startFallback() == 0 else { return -1 }; return encode(frame, codecSpecificInfo: codecSpecificInfo, frameTypes: [3])
         }
@@ -701,7 +703,7 @@ final class LabHEVCEncoder: NSObject, LKRTCVideoEncoder, @unchecked Sendable {
         }
         applyPendingRate(current) // The reserved gate means no frame is in flight here.
         let force = keyTicket != nil ? [kVTEncodeFrameOptionKey_ForceKeyFrame: true] as CFDictionary : nil
-        let ts = frame.timeStamp, ns = frame.timeStampNs, rot = frame.rotation, width = frame.width, height = frame.height
+        let ts = frame.timeStamp, ns = frame.timeStampNs, rot = frame.rotation, width = Int32(settings.width), height = Int32(settings.height)
         let status = VTCompressionSessionEncodeFrame(current, imageBuffer: pixel, presentationTimeStamp: CMTime(value: ns, timescale: 1_000_000_000), duration: .invalid, frameProperties: force, infoFlagsOut: nil) { [weak self] status, flags, sample in
             self?.deliver(status: status, flags: flags, sample: sample, ticket: ticket, deliveryTicket: deliveryTicket, keyTicket: keyTicket, ts: ts, ns: ns, rotation: rot, width: width, height: height)
         }

@@ -1442,9 +1442,20 @@ final class HostPeerSession: NSObject {
             encoding.maxFramerate = NSNumber(value: senderFrameRate)
             encoding.scaleResolutionDownBy = 1
         }
+        #if DEBUG
+        // Lab: hold one width and let constant bitrate trade sharpness instead of resolution.
+        let labPinScale = labInstrumentation && labOrdinaryPeer
+            ? ProcessInfo.processInfo.environment["LATENCY_PIN_SCALE"].flatMap(Double.init) : nil
+        let labFloor = labInstrumentation && labOrdinaryPeer
+            ? ProcessInfo.processInfo.environment["LATENCY_BWE_FLOOR_BPS"].flatMap(Int.init) : nil
+        if let labPinScale { encodings.forEach { $0.scaleResolutionDownBy = NSNumber(value: labPinScale) } }
+        #endif
         parameters.encodings = encodings
         parameters.degradationPreference = NSNumber(
             value: policy.degradationPreference.rawValue)
+        #if DEBUG
+        if labPinScale != nil { parameters.degradationPreference = NSNumber(value: LKRTCDegradationPreference.maintainResolution.rawValue) }
+        #endif
         videoSender.parameters = parameters
 
         #if DEBUG
@@ -1459,8 +1470,13 @@ final class HostPeerSession: NSObject {
                 "transportSequenceExtensionPresent": transportSequence, "runtimeProbingVerified": false])
         }
         #endif
+        #if DEBUG
+        let bweMinimum = labFloor.map { NSNumber(value: $0) }
+        #else
+        let bweMinimum: NSNumber? = nil
+        #endif
         let bweUpdated = peerConnection?.setBweMinBitrateBps(
-            nil,
+            bweMinimum,
             currentBitrateBps: nil,
             maxBitrateBps: NSNumber(value: maximumBitrate)) ?? false
         #if DEBUG
