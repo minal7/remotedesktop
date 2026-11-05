@@ -10,6 +10,52 @@ extension ICEConfig {
     }
 }
 
+#if DEBUG
+/// Process-wide field trials must be chosen once before any peer factory.
+/// The isolated lab process never mutates or resets trials after that choice.
+final class LabALRFieldTrialBootstrap: @unchecked Sendable {
+    private let lock = NSLock()
+    private var decided = false
+    private var configuredMode = 0
+
+    static func requestedMode(labInstrumentation: Bool, ordinaryPeer: Bool, f2Enabled: Bool, f3Enabled: Bool,
+                              arguments: [String], environment: [String: String]) -> Int {
+        guard labInstrumentation, ordinaryPeer, !f2Enabled, !f3Enabled,
+              Array(arguments.dropFirst()) == ["--debug-latency-host"], environment["LATENCY_LAB"] == "1",
+              environment["LATENCY_UDP_CAPACITY"] != "1", environment["LATENCY_STAGE2_FLOOR"] != "1",
+              environment["REMOTE_DESKTOP_R0_HOST_ID"] == nil,
+              let rawID = environment["REMOTE_DESKTOP_LATENCY_HOST_ID"],
+              rawID.utf8.count == 36, UUID(uuidString: rawID) != nil else { return 0 }
+        switch environment["LATENCY_ALR_TRIAL"] {
+        case "1": return 1
+        case "2": return 2
+        default: return 0
+        }
+    }
+
+    static func trialString(mode: Int) -> String? {
+        let screen = "WebRTC-ProbingScreenshareBwe/1.0,2875,80,40,-60,3/"
+        switch mode {
+        case 1: return screen
+        case 2: return screen + "WebRTC-Pacer-PadInSilence/Enabled/"
+        default: return nil
+        }
+    }
+
+    func configureOnce(requestedMode: Int, configure: (String) -> Void) -> Int {
+        lock.lock(); defer { lock.unlock() }
+        if !decided {
+            decided = true
+            if let trial = Self.trialString(mode: requestedMode) {
+                configure(trial)
+                configuredMode = requestedMode
+            }
+        }
+        return configuredMode
+    }
+}
+#endif
+
 /// Serializes direct-input authority separately from media teardown. The
 /// change callback must not re-enter this object; it runs inside the same lock
 /// so authorization notifications keep the order of native transitions.
@@ -303,6 +349,8 @@ final class HostPeerSession: NSObject {
     private let latencyF2Enabled: Bool
     #if DEBUG
     private let labOrdinaryPeer: Bool
+    private let labALRTrialMode: Int
+    private static let labALRBootstrap = LabALRFieldTrialBootstrap()
     private let lab60Requested: Bool
     private var lab60Selected = false // protected by closeStateLock
     #endif
@@ -513,6 +561,15 @@ final class HostPeerSession: NSObject {
         onLatencyF1RestartRequest: (@Sendable (String, @escaping @Sendable () -> Void) -> Void)? = nil,
         onEnded: @escaping @Sendable (String) -> Void
     ) {
+        #if DEBUG
+        let requestedALRMode = LabALRFieldTrialBootstrap.requestedMode(
+            labInstrumentation: labInstrumentation, ordinaryPeer: acceptedOrdinaryPeer,
+            f2Enabled: latencyF2Enabled, f3Enabled: latencyF3Enabled,
+            arguments: ProcessInfo.processInfo.arguments, environment: ProcessInfo.processInfo.environment)
+        let configuredALRMode = Self.labALRBootstrap.configureOnce(requestedMode: requestedALRMode) {
+            RTCPeerConnectionFactory.configureFieldTrials($0)
+        }
+        #endif
         RTCInitializeSSL()
         self.signaling = signaling
         self.capture = capture
@@ -529,6 +586,7 @@ final class HostPeerSession: NSObject {
         self.labInstrumentation = labInstrumentation
         #if DEBUG
         self.labOrdinaryPeer = acceptedOrdinaryPeer
+        self.labALRTrialMode = configuredALRMode
         self.lab60Requested = lab60Requested
         #endif
         let stats = LatencyStatsCollector(side: "host", enabled: labInstrumentation && LatencyStatsCollector.enabled)
@@ -1275,6 +1333,18 @@ final class HostPeerSession: NSObject {
             value: policy.degradationPreference.rawValue)
         videoSender.parameters = parameters
 
+        #if DEBUG
+        if labInstrumentation && labOrdinaryPeer {
+            let extensions = videoSender.parameters.headerExtensions
+            let transportSequence = extensions.contains {
+                $0.uri == "http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01" ||
+                $0.uri == "http://www.webrtc.org/experiments/rtp-hdrext/transport-wide-cc-02"
+            }
+            latencyStats.trace(["type": "alr_field_trial", "time": ProcessInfo.processInfo.systemUptime,
+                "configuredMode": labALRTrialMode, "screenShareSource": true,
+                "transportSequenceExtensionPresent": transportSequence, "runtimeProbingVerified": false])
+        }
+        #endif
         let bweUpdated = peerConnection?.setBweMinBitrateBps(
             nil,
             currentBitrateBps: nil,

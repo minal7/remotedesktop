@@ -8,6 +8,65 @@ import XCTest
 
 final class ScreenCaptureSizingTests: XCTestCase {
     #if DEBUG
+    func testALRTrialRequiresIsolatedOrdinaryLabAndExactMode() {
+        let args = ["host", "--debug-latency-host"]
+        let env = ["LATENCY_LAB": "1", "LATENCY_ALR_TRIAL": "1",
+                   "REMOTE_DESKTOP_LATENCY_HOST_ID": "8f8f6c31-7bf6-4c51-ae04-5b94b01a59a2"]
+        func mode(_ lab: Bool = true, _ ordinary: Bool = true, _ f2: Bool = false, _ f3: Bool = false,
+                  _ arguments: [String]? = nil, _ environment: [String: String]? = nil) -> Int {
+            LabALRFieldTrialBootstrap.requestedMode(labInstrumentation: lab, ordinaryPeer: ordinary,
+                f2Enabled: f2, f3Enabled: f3, arguments: arguments ?? args, environment: environment ?? env)
+        }
+        XCTAssertEqual(mode(), 1)
+        XCTAssertEqual(mode(false), 0); XCTAssertEqual(mode(true, false), 0)
+        XCTAssertEqual(mode(true, true, true), 0); XCTAssertEqual(mode(true, true, false, true), 0)
+        XCTAssertEqual(mode(true, true, false, false, ["host"]), 0)
+        for key in ["LATENCY_LAB", "REMOTE_DESKTOP_LATENCY_HOST_ID"] {
+            var changed = env; changed.removeValue(forKey: key); XCTAssertEqual(mode(true, true, false, false, args, changed), 0)
+        }
+        for raw in ["", "0", "3", "01", "true", "-1"] {
+            var changed = env; changed["LATENCY_ALR_TRIAL"] = raw
+            XCTAssertEqual(mode(true, true, false, false, args, changed), 0)
+        }
+        var unset = env; unset.removeValue(forKey: "LATENCY_ALR_TRIAL")
+        XCTAssertEqual(mode(true, true, false, false, args, unset), 0)
+        var two = env; two["LATENCY_ALR_TRIAL"] = "2"
+        XCTAssertEqual(mode(true, true, false, false, args, two), 2)
+        for forbidden in ["LATENCY_UDP_CAPACITY", "LATENCY_STAGE2_FLOOR", "REMOTE_DESKTOP_R0_HOST_ID"] {
+            var changed = env; changed[forbidden] = "1"; XCTAssertEqual(mode(true, true, false, false, args, changed), 0)
+        }
+    }
+
+    func testALRExactStringsAndOnceBeforeFactory() {
+        let screen = "WebRTC-ProbingScreenshareBwe/1.0,2875,80,40,-60,3/"
+        XCTAssertNil(LabALRFieldTrialBootstrap.trialString(mode: 0))
+        XCTAssertEqual(LabALRFieldTrialBootstrap.trialString(mode: 1), screen)
+        XCTAssertEqual(LabALRFieldTrialBootstrap.trialString(mode: 2), screen + "WebRTC-Pacer-PadInSilence/Enabled/")
+        let bootstrap = LabALRFieldTrialBootstrap()
+        var events: [String] = []
+        XCTAssertEqual(bootstrap.configureOnce(requestedMode: 1) { events.append($0) }, 1)
+        events.append("factory")
+        XCTAssertEqual(bootstrap.configureOnce(requestedMode: 2) { events.append($0) }, 1)
+        XCTAssertEqual(events, [screen, "factory"])
+        let stock = LabALRFieldTrialBootstrap()
+        XCTAssertEqual(stock.configureOnce(requestedMode: 0) { events.append($0) }, 0)
+        XCTAssertEqual(stock.configureOnce(requestedMode: 1) { events.append($0) }, 0)
+        XCTAssertEqual(events, [screen, "factory"])
+    }
+
+    func testALRConcurrentBootstrapConfiguresOnlyOnce() {
+        let bootstrap = LabALRFieldTrialBootstrap()
+        let lock = NSLock()
+        var configured = 0
+        DispatchQueue.concurrentPerform(iterations: 32) { _ in
+            let result = bootstrap.configureOnce(requestedMode: 2) { _ in
+                lock.lock(); configured += 1; lock.unlock()
+            }
+            XCTAssertEqual(result, 2)
+        }
+        XCTAssertEqual(configured, 1)
+    }
+
     func testLabVideoCeilingRequiresExactIsolatedOrdinaryOptIn() {
         let args = ["host", "--debug-latency-host"]
         let env = ["LATENCY_LAB": "1", "LATENCY_VIDEO_CEILING_BPS": "5000000",
