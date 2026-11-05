@@ -4,11 +4,42 @@ import UIKit
 @testable import RemoteDesktop
 
 final class RemoteScreenInteractionTests: XCTestCase {
+    @MainActor
+    func test_zoomLayoutChangeKeepsTheScreenReady() {
+        let first = UUID(), second = UUID(), third = UUID()
+        let presentation = RemoteVideoSurfacePresentation(context: first)
+        var published: [RemoteVideoSurfacePresentation.State] = []
+        presentation.observe { published.append($0) }
+        presentation.present(context: first, frame: UUID(), time: 1)
+        let ready = presentation.state
+        published.removeAll()
+
+        presentation.begin(context: second, keepingScreenReady: true)
+        XCTAssertTrue(published.isEmpty)
+        XCTAssertEqual(presentation.state, ready)
+
+        presentation.present(context: second, frame: UUID(), time: 2)
+        XCTAssertEqual(published.count, 1)
+
+        // A real interruption still reads as one.
+        presentation.begin(context: third)
+        XCTAssertEqual(presentation.state, .waiting(context: third))
+    }
+
+    @MainActor
+    func test_zoomLayoutChangeDoesNotClaimReadinessItNeverHad() {
+        let first = UUID(), second = UUID()
+        let presentation = RemoteVideoSurfacePresentation(context: first)
+        presentation.begin(context: second, keepingScreenReady: true)
+        XCTAssertEqual(presentation.state, .waiting(context: second))
+    }
+
     func test_zoomControlsVisibilityFollowsChromeRecentChangeAndTouch() {
-        XCTAssertFalse(SessionZoomControlsPolicy.showsControls(chromeVisible: false, recentlyChanged: false, touching: false))
-        XCTAssertTrue(SessionZoomControlsPolicy.showsControls(chromeVisible: true, recentlyChanged: false, touching: false))
-        XCTAssertTrue(SessionZoomControlsPolicy.showsControls(chromeVisible: false, recentlyChanged: true, touching: false))
-        XCTAssertTrue(SessionZoomControlsPolicy.showsControls(chromeVisible: false, recentlyChanged: false, touching: true))
+        XCTAssertFalse(SessionZoomControlsPolicy.showsControls(chromeVisible: false, recentlyChanged: false, touching: false, moveScreenEnabled: false))
+        XCTAssertTrue(SessionZoomControlsPolicy.showsControls(chromeVisible: true, recentlyChanged: false, touching: false, moveScreenEnabled: false))
+        XCTAssertTrue(SessionZoomControlsPolicy.showsControls(chromeVisible: false, recentlyChanged: true, touching: false, moveScreenEnabled: false))
+        XCTAssertTrue(SessionZoomControlsPolicy.showsControls(chromeVisible: false, recentlyChanged: false, touching: true, moveScreenEnabled: false))
+        XCTAssertTrue(SessionZoomControlsPolicy.showsControls(chromeVisible: false, recentlyChanged: false, touching: false, moveScreenEnabled: true))
         XCTAssertEqual(SessionZoomControlsPolicy.hideDelay, .seconds(3))
     }
 

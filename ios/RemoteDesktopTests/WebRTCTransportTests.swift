@@ -1206,6 +1206,92 @@ final class WebRTCTransportTests: XCTestCase {
         model.reset()
     }
 
+    func test_endingASessionGoesStraightBackToTheDeviceList() async {
+        let connected = expectation(description: "connect")
+        let transport = RecordingTargetTransport(connected: connected)
+        let model = SessionModel(initialInputActivity: .active, applicationNotificationCenter: NotificationCenter(),
+                                 transportFactory: { transport })
+        model.connect(code: "123456", computerUseHostID: "HOST-B", hostName: "Studio Mac")
+        await fulfillment(of: [connected], timeout: 1)
+
+        model.disconnect()
+
+        XCTAssertEqual(model.state, .idle)
+        XCTAssertNil(model.error)
+        XCTAssertEqual(transport.disconnectReasons, ["user"])
+    }
+
+    func test_failedFirstConnectionQuietlyTriesAgain() async {
+        let firstConnected = expectation(description: "first connect")
+        let first = RecordingTargetTransport(connected: firstConnected)
+        first.retriesFailedFirstConnection = true
+        let secondConnected = expectation(description: "second connect")
+        let second = RecordingTargetTransport(connected: secondConnected)
+        var candidates = [first, second]
+        let model = SessionModel(initialInputActivity: .active, applicationNotificationCenter: NotificationCenter(),
+                                 transportFactory: { candidates.removeFirst() })
+        model.connect(code: "123456", computerUseHostID: "HOST-B", hostName: "Studio Mac")
+        await fulfillment(of: [firstConnected], timeout: 1)
+
+        first.onDisconnect?("Can't connect")
+
+        XCTAssertEqual(model.state, .connecting)
+        XCTAssertFalse(model.isReconnecting)
+        await fulfillment(of: [secondConnected], timeout: 4)
+        model.reset()
+    }
+
+    func test_accountNoticeWhileConnectingRestartsWhenTheOwnerIsTheSame() async {
+        let notifications = NotificationCenter()
+        let firstConnected = expectation(description: "first connect")
+        let first = RecordingTargetTransport(connected: firstConnected)
+        let secondConnected = expectation(description: "second connect")
+        let second = RecordingTargetTransport(connected: secondConnected)
+        var candidates = [first, second]
+        var checks = 0
+        let model = SessionModel(initialInputActivity: .active, applicationNotificationCenter: NotificationCenter(),
+                                 transportFactory: { candidates.removeFirst() },
+                                 localAccountBindingValidator: { _ in
+                                     checks += 1
+                                     if checks == 1 { throw CloudKitAccountBindingResolutionError.temporarilyUnavailable }
+                                 },
+                                 accountChangeNotificationCenter: notifications)
+        model.connect(code: "123456", computerUseHostID: "HOST-B", hostName: "Studio Mac",
+                      localCloudAccountBinding: accountBinding)
+        await fulfillment(of: [firstConnected], timeout: 1)
+
+        notifications.post(name: NSNotification.Name.CKAccountChanged, object: nil)
+
+        await fulfillment(of: [secondConnected], timeout: 8)
+        XCTAssertEqual(model.state, .connecting)
+        XCTAssertEqual(checks, 2)
+        XCTAssertEqual(second.pairingCode, "123456")
+        model.reset()
+    }
+
+    func test_accountNoticeWhileConnectingEndsWhenTheOwnerDiffers() async throws {
+        let notifications = NotificationCenter()
+        let connected = expectation(description: "connect")
+        let transport = RecordingTargetTransport(connected: connected)
+        let model = SessionModel(initialInputActivity: .active, applicationNotificationCenter: NotificationCenter(),
+                                 transportFactory: { transport },
+                                 localAccountBindingValidator: { _ in throw LocalComputerUseCloudPairingError.accountMismatch },
+                                 accountChangeNotificationCenter: notifications)
+        model.connect(code: "123456", computerUseHostID: "HOST-B", hostName: "Studio Mac",
+                      localCloudAccountBinding: accountBinding)
+        await fulfillment(of: [connected], timeout: 1)
+
+        notifications.post(name: NSNotification.Name.CKAccountChanged, object: nil)
+
+        let deadline = ContinuousClock.now + .seconds(3)
+        while model.state == .connecting, ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        guard case .ended(let reason) = model.state else { return XCTFail("A different owner must end the attempt") }
+        XCTAssertTrue(reason.contains("Apple Account changed"))
+        model.reset()
+    }
+
     func test_deliberateEndDoesNotReconnect() async {
         let connected = expectation(description: "connect")
         let transport = RecordingTargetTransport(connected: connected)
@@ -1907,6 +1993,7 @@ private final class RecordingTargetTransport: VideoRenderingTransport {
     var onFirstVideoFrame: (@MainActor () -> Void)?
     var onDisconnect: (@MainActor (String) -> Void)?
     var lastDisconnectIsRecoverable = false
+    var retriesFailedFirstConnection = false
 
     private(set) var attachedRenderers: [any RemoteVideoSurface] = []
     private(set) var detachedRenderers: [any RemoteVideoSurface] = []

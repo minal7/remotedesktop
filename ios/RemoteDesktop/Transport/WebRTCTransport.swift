@@ -319,6 +319,7 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
     private var connectionRecoveryTask: Task<Void, Never>?
     private var connectedOnce = false
     private(set) var lastDisconnectIsRecoverable = false
+    var retriesFailedFirstConnection: Bool { mediaPolicy == .remoteSession }
     private var directInputState = DirectInputClientState()
     private var inputHandshakeDeadlineTask: Task<Void, Never>?
     private(set) var answerApplied = false

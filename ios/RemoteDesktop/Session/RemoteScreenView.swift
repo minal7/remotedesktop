@@ -146,9 +146,7 @@ struct RemoteScreenZoomControls: View {
         .buttonStyle(.plain)
         .foregroundStyle(.primary)
         .padding(4)
-        .background(.regularMaterial, in: Capsule())
-        .overlay { Capsule().strokeBorder(Color.primary.opacity(0.1)) }
-        .shadow(color: .black.opacity(0.16), radius: 8, y: 3)
+        .sessionGlass(in: Capsule())
         .accessibilityIdentifier("remoteScreenZoomControls")
     }
 }

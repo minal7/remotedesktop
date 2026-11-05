@@ -62,6 +62,8 @@ protocol Transport: AnyObject {
     /// True when the session that just ended was live and nobody chose to end it,
     /// so the client should connect again on its own.
     var lastDisconnectIsRecoverable: Bool { get }
+    /// True when a slow or failed first attempt is worth repeating before telling anyone.
+    var retriesFailedFirstConnection: Bool { get }
 
     func connect(pairingCode: String, expectedHostID: String?) async throws
     func send(_ message: ControlMessage, seq: UInt32, ts: UInt64)
@@ -70,6 +72,7 @@ protocol Transport: AnyObject {
 
 extension Transport {
     var lastDisconnectIsRecoverable: Bool { false }
+    var retriesFailedFirstConnection: Bool { false }
 
     func connect(pairingCode: String) async throws {
         try await connect(pairingCode: pairingCode, expectedHostID: nil)

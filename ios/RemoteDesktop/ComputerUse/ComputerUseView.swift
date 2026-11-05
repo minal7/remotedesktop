@@ -194,9 +194,9 @@ struct ComputerUseView: View {
             }
             if isTakingControl,
                model.isConnected,
-               accessories.hasHardwareKeyboard,
+               accessories.keyboardListed,
                !remoteKeyboardOpen {
-                KeyboardCapture()
+                KeyboardCapture(onPhysicalKeyPress: accessories.noteHardwareKeyPress)
                     .id(session.remoteKeyboardCaptureIdentity)
                     .frame(width: 0, height: 0)
             }
@@ -506,6 +506,7 @@ struct ComputerUseView: View {
                     .buttonStyle(.borderedProminent)
                     .controlSize(.small)
                     .accessibilityHint("Types directly into the Mac, not into AI chat")
+                    .accessibilityIdentifier(remoteKeyboardOpen ? "computer-use-hide-remote-keyboard" : "computer-use-remote-keyboard")
                 }
 
                 if accessories.hasHardwareKeyboard {

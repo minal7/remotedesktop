@@ -24,10 +24,18 @@ final class RemoteVideoSurfacePresentation {
         observer(state)
     }
 
-    func begin(context: UUID) {
+    /// `keepingScreenReady` is for zoom and pan: the picture stays on screen while
+    /// frames move to the new layout, so the session must not read as interrupted.
+    func begin(context: UUID, keepingScreenReady: Bool = false) {
         guard self.context != nil, !terminal else { return }
         self.context = context
         lastPresentationTime = 0
+        if keepingScreenReady {
+            switch state {
+            case .presented, .rendered: return
+            case .waiting, .failed, .retired: break
+            }
+        }
         publish(.waiting(context: context))
     }
 

@@ -119,6 +119,10 @@ final class SessionModel: ObservableObject, VideoRendererTarget {
             if state == .connected {
                 connectedAt = Date()
                 isReconnecting = false
+                if firstConnectionPending {
+                    firstConnectionPending = false
+                    reconnectDeadline = nil
+                }
             }
             #if DEBUG
             if state != oldValue { SessionEventLog.record("session_state \(state) reconnecting=\(reconnectDeadline != nil)") }
@@ -139,6 +143,11 @@ final class SessionModel: ObservableObject, VideoRendererTarget {
     private static let reconnectWindow: TimeInterval = 180
     /// A session that lasted this long starts a new window, so a repeat drop is not cut short.
     private static let reconnectResetAfter: TimeInterval = 60
+    /// A first attempt keeps trying this long, without alarming anyone, before it fails.
+    private static let firstConnectionWindow: TimeInterval = 75
+    private static let accountCheckAttempts = 20
+    private static let accountCheckRetryDelay: Duration = .seconds(3)
+    private var firstConnectionPending = false
     private var reconnectRoute: ReconnectRoute?
     private var reconnectDeadline: Date?
     private var reconnectTask: Task<Void, Never>?
@@ -151,6 +160,7 @@ final class SessionModel: ObservableObject, VideoRendererTarget {
         didSet {
             #if DEBUG
             traceScreenReadiness()
+            if hasReceivedVideoFrame != oldValue { SessionEventLog.record("video_ready \(hasReceivedVideoFrame)") }
             #endif
         }
     }
@@ -676,11 +686,16 @@ final class SessionModel: ObservableObject, VideoRendererTarget {
             computerUseSession = nil
         }
 
+        self.hostName = hostName
         let t = transportFactory?() ?? WebRTCTransport(
             useLANPlayoutCap: Self.usesLANPlayoutCap(discoverySource),
             requestAdaptive60: Self.requestsAdaptive60(for: experience))
         bind(t)
         transport = t
+        if !resuming, t.retriesFailedFirstConnection {
+            firstConnectionPending = true
+            reconnectDeadline = Date().addingTimeInterval(Self.firstConnectionWindow)
+        }
 
         Task { @MainActor in
             do {
@@ -695,7 +710,10 @@ final class SessionModel: ObservableObject, VideoRendererTarget {
                 #if DEBUG
                 SessionEventLog.record("connect_failed resuming=\(self.reconnectDeadline != nil) error=\(String(describing: error))")
                 #endif
-                if self.reconnectDeadline != nil, self.scheduleReconnect() { return }
+                var accountProblem = false
+                if case TransportError.signalingUnavailable = error { accountProblem = self.firstConnectionPending }
+                if !accountProblem, self.reconnectDeadline != nil, self.scheduleReconnect() { return }
+                self.cancelReconnect()
                 self.sessionAccountBinding = nil
                 self.error = (error as? LocalizedError)?.errorDescription ?? "Couldn't connect: \(error.localizedDescription)"
                 self.state = .idle
@@ -927,7 +945,7 @@ final class SessionModel: ObservableObject, VideoRendererTarget {
             return false
         }
         reconnectDeadline = deadline
-        isReconnecting = true
+        isReconnecting = !firstConnectionPending
         state = .connecting
         reconnectTask?.cancel()
         reconnectTask = Task { @MainActor [weak self] in
@@ -948,22 +966,13 @@ final class SessionModel: ObservableObject, VideoRendererTarget {
         reconnectTask = nil
         reconnectDeadline = nil
         connectedAt = nil
+        firstConnectionPending = false
         isReconnecting = false
     }
 
+    /// The person ended the session, so go straight back to the list of Macs.
     func disconnect() {
-        cancelReconnect()
-        reconnectRoute = nil
-        invalidateAccountRevalidation(clearBinding: true)
-        releaseRemoteInputSources()
-        stopComputerUseVisualSidecar(preserveConfiguration: false)
-        localConnectionTask?.cancel()
-        localConnectionTask = nil
-        computerUseSession?.stop()
-        transport?.disconnect(reason: "user")
-        transport = nil
-        state = .ended("Disconnected")
-        invalidateRemoteInput()
+        reset()
     }
 
     func reset() {
@@ -993,8 +1002,15 @@ final class SessionModel: ObservableObject, VideoRendererTarget {
         LocalCloudAccountBindingPolicy.invalidateForAccountChange()
         guard state == .connecting || state == .connected else { return }
 
-        // A connection still being established cannot be resumed safely: its
-        // signaling or TLS handshake may already belong to the old owner.
+        // iCloud also posts this when it reconnects or the network changes, so a
+        // remote-control attempt checks the account before calling it changed. It then
+        // starts over, because the attempt in flight may belong to the old owner.
+        if state == .connecting, experience == .remoteControl, let expectedBinding = sessionAccountBinding {
+            restartConnectionAfterAccountCheck(expectedBinding)
+            return
+        }
+
+        // A local AI handshake cannot be resumed safely: it may belong to the old owner.
         guard state == .connected,
               let expectedBinding = sessionAccountBinding else {
             endForCloudAccountChange()
@@ -1021,7 +1037,7 @@ final class SessionModel: ObservableObject, VideoRendererTarget {
         accountRevalidationTask = Task { @MainActor [weak self] in
             guard let self else { return }
             do {
-                try await self.localAccountBindingValidator(expectedBinding)
+                try await self.confirmSameAccount(expectedBinding)
                 guard !Task.isCancelled,
                       self.accountRevalidationGeneration == generation,
                       self.state == .connected,
@@ -1044,7 +1060,56 @@ final class SessionModel: ObservableObject, VideoRendererTarget {
         }
     }
 
+    /// An unreachable iCloud is not a changed account. Only a definite answer ends
+    /// anything; if iCloud stays unreachable, the account check gives up after about a minute.
+    private func confirmSameAccount(_ expected: CloudKitAccountBinding) async throws {
+        var attempts = 0
+        while true {
+            do {
+                try await localAccountBindingValidator(expected)
+                return
+            } catch let resolution as CloudKitAccountBindingResolutionError where resolution.preservesConfirmedBinding {
+                attempts += 1
+                #if DEBUG
+                SessionEventLog.record("account_check_unavailable attempt=\(attempts) error=\(resolution)")
+                #endif
+                guard attempts < Self.accountCheckAttempts else { throw resolution }
+                try await Task.sleep(for: Self.accountCheckRetryDelay)
+            }
+        }
+    }
+
+    private func restartConnectionAfterAccountCheck(_ expected: CloudKitAccountBinding) {
+        accountRevalidationGeneration &+= 1
+        let generation = accountRevalidationGeneration
+        accountRevalidationTask?.cancel()
+        accountRevalidationTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                try await self.confirmSameAccount(expected)
+                guard !Task.isCancelled, self.accountRevalidationGeneration == generation,
+                      self.state == .connecting else { return }
+                self.accountRevalidationTask = nil
+                #if DEBUG
+                SessionEventLog.record("account_check_same_owner restarting_connection")
+                #endif
+                let previous = self.transport
+                self.transport = nil
+                previous?.disconnect(reason: "account-recheck")
+                if !self.scheduleReconnect() { self.endForCloudAccountChange() }
+            } catch is CancellationError {
+                return
+            } catch {
+                guard !Task.isCancelled, self.accountRevalidationGeneration == generation else { return }
+                self.endForCloudAccountChange()
+            }
+        }
+    }
+
     private func endForCloudAccountChange() {
+        #if DEBUG
+        SessionEventLog.record("account_changed state=\(state)")
+        #endif
         cancelReconnect()
         reconnectRoute = nil
         let reason = "The Apple Account changed or is no longer available. Sign into the same Apple Account and pair again."

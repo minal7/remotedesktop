@@ -2,6 +2,7 @@ import Foundation
 import CloudKit
 import Security
 import UIKit
+import GameController
 import XCTest
 @testable import RemoteDesktop
 
@@ -263,6 +264,15 @@ final class InputAndDiscoveryTests: XCTestCase {
         XCTAssertFalse(SharedNetwork.isShared(
             peerAddresses: [socketAddress(ipv6: [0x26, 0x01, 0, 9, 0, 2, 0, 3] + [UInt8](repeating: 9, count: 8))],
             subnets: [subnet]))
+    }
+
+    func test_nearbyRowKeepsTheMacsICloudName() throws {
+        let cloud = LocalHostAdvertisement(hostname: "Studio Mac", code: "123456", source: .cloudKit,
+                                           senderID: hostID, accountBinding: accountBinding)
+        let local = LocalHostAdvertisement(hostname: "Studio Mac (2)", code: "123456", source: .localNetwork,
+                                           senderID: hostID)
+        let row = try XCTUnwrap(LocalHostDiscovery.mergedHosts(localHosts: [local], cloudHosts: [cloud]).first)
+        XCTAssertEqual(row.hostname, "Studio Mac")
     }
 
     func test_availabilityTitle_followsTheNetworkNotHowTheMacWasFound() throws {
@@ -1001,11 +1011,8 @@ final class InputAndDiscoveryTests: XCTestCase {
         let replacement = SoftKeyboardCapture.CaptureField()
         replacement.onKeyboardDismiss = { nextDismissals += 1 }
         try keyboardWindow.focus(replacement, in: session)
-        // Both the deferred native resignation callback and an old accessory
-        // action refer to the retired field, even in the same input generation.
-        let toolbar = try XCTUnwrap(field.inputAccessoryView as? UIToolbar)
-        let oldButton = try XCTUnwrap(toolbar.items?.compactMap { $0.customView as? UIButton }.first)
-        oldButton.sendActions(for: .touchUpInside)
+        // The deferred native resignation callback refers to the retired
+        // field, even in the same input generation.
         await Task.yield()
         field.insertText("retired"); replacement.insertText("current")
         XCTAssertEqual(oldDismissals, 0); XCTAssertEqual(nextDismissals, 0)
@@ -1495,25 +1502,77 @@ final class InputAndDiscoveryTests: XCTestCase {
     }
 
     @MainActor
-    func test_softKeyboardCapture_exposesHittableDismissAccessory() throws {
+    func test_softKeyboardCapture_addsNoSecondHideControl() throws {
         let (_, session, field, keyboardWindow) = try makeCompositionFixture()
         defer { keyboardWindow.close(); session.reset() }
-        var didDismiss = false
-        field.onKeyboardDismiss = { didDismiss = true }
+        XCTAssertNil(field.inputAccessoryView)
+        XCTAssertTrue(field.inputAssistantItem.leadingBarButtonGroups.isEmpty)
+        XCTAssertTrue(field.inputAssistantItem.trailingBarButtonGroups.isEmpty)
+    }
 
-        let toolbar = try XCTUnwrap(field.inputAccessoryView as? UIToolbar)
-        let dismissButton = try XCTUnwrap(
-            toolbar.items?.compactMap { $0.customView as? UIButton }.first)
+    @MainActor
+    func test_accessoryMonitor_namedKeyboardCountsBothWays() {
+        let center = NotificationCenter()
+        var name: String?
+        let monitor = AccessoryMonitor(center: center, memory: .init(), keyboardName: { name })
+        XCTAssertFalse(monitor.hasHardwareKeyboard)
 
-        XCTAssertEqual(
-            dismissButton.accessibilityIdentifier,
-            "computer-use-hide-remote-keyboard")
-        XCTAssertEqual(dismissButton.accessibilityLabel, "Hide remote keyboard")
-        XCTAssertGreaterThan(dismissButton.intrinsicContentSize.width, 0)
-        XCTAssertGreaterThan(toolbar.intrinsicContentSize.height, 0)
+        name = "Magic Keyboard"
+        center.post(name: .GCKeyboardDidConnect, object: nil)
+        XCTAssertTrue(monitor.hasHardwareKeyboard)
 
-        dismissButton.sendActions(for: .touchUpInside)
-        XCTAssertTrue(didDismiss)
+        name = nil
+        center.post(name: .GCKeyboardDidDisconnect, object: nil)
+        XCTAssertFalse(monitor.hasHardwareKeyboard)
+        XCTAssertFalse(monitor.keyboardListed)
+    }
+
+    @MainActor
+    func test_accessoryMonitor_genericKeyboardNeedsARealKeyPress() {
+        let center = NotificationCenter()
+        var name: String? = "Generic Keyboard"
+        let memory = AccessoryMonitor.HardwareKeyboardMemory()
+        let monitor = AccessoryMonitor(center: center, memory: memory, keyboardName: { name })
+        XCTAssertTrue(monitor.keyboardListed)
+        XCTAssertFalse(monitor.hasHardwareKeyboard)
+
+        monitor.noteHardwareKeyPress()
+        XCTAssertTrue(monitor.hasHardwareKeyboard)
+
+        // The next session starts with the right controls.
+        let next = AccessoryMonitor(center: center, memory: memory, keyboardName: { name })
+        XCTAssertTrue(next.hasHardwareKeyboard)
+
+        name = nil
+        center.post(name: .GCKeyboardDidDisconnect, object: nil)
+        name = "Generic Keyboard"
+        center.post(name: .GCKeyboardDidConnect, object: nil)
+        XCTAssertFalse(monitor.hasHardwareKeyboard)
+    }
+
+    @MainActor
+    func test_accessoryMonitor_noticesAKeyboardRemovedAsTheDisconnectArrives() async throws {
+        let center = NotificationCenter()
+        var name: String? = "Magic Keyboard"
+        let monitor = AccessoryMonitor(center: center, memory: .init(), keyboardName: { name })
+
+        // Still listed while the notification is delivered, gone a moment later.
+        center.post(name: .GCKeyboardDidDisconnect, object: nil)
+        XCTAssertTrue(monitor.hasHardwareKeyboard)
+        name = nil
+        try await Task.sleep(for: .milliseconds(500))
+        XCTAssertFalse(monitor.hasHardwareKeyboard)
+    }
+
+    @MainActor
+    func test_accessoryMonitor_rechecksWhenTheAppReturns() {
+        let center = NotificationCenter()
+        var name: String?
+        let monitor = AccessoryMonitor(center: center, memory: .init(), keyboardName: { name })
+
+        name = "Magic Keyboard"
+        center.post(name: UIApplication.didBecomeActiveNotification, object: nil)
+        XCTAssertTrue(monitor.hasHardwareKeyboard)
     }
 }
 

@@ -242,7 +242,10 @@ final class RemoteHardwareKeyboardCapture: UIView {
         return unhandled
     }
 
+    var onPhysicalKeyPress: (() -> Void)?
+
     override func pressesBegan(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
+        if presses.contains(where: { $0.key != nil }) { onPhysicalKeyPress?() }
         let remaining = route(presses, phase: .began)
         if !remaining.isEmpty { super.pressesBegan(remaining, with: event) }
     }

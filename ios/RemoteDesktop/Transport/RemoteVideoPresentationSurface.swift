@@ -64,6 +64,7 @@ final class RemoteVideoPresentationSurface: NSObject, RTCVideoRenderer {
     private var deadlineID: UUID?
     private var failedAttempts = 0
     private var failedRetryFrameID: UUID?
+    private static let retriesBeforeWaiting = 3
     private var layoutChangeCount = 0
     private var lastLayoutWasContinuous = false
     private var lastLayoutHadPendingFrame = false
@@ -216,7 +217,7 @@ final class RemoteVideoPresentationSurface: NSObject, RTCVideoRenderer {
                                preservingLatestFrom: continuous ? previousContext : nil,
                                excludingFrameID: failedRetryFrameID)
         failedRetryFrameID = nil
-        presentation.begin(context: context)
+        presentation.begin(context: context, keepingScreenReady: continuous)
         #if DEBUG
         if labSkipRetry, next != nil { labSkipRecovery.begin(context: context, time: CACurrentMediaTime()) }
         #endif
@@ -571,7 +572,12 @@ final class RemoteVideoPresentationSurface: NSObject, RTCVideoRenderer {
                 if self.labRetryDiagnostics, let reason = Self.retryReason(for: admission) { self.traceRetry(reason) }
                 #endif
                 self.mailbox.restoreUnlessNewer(entry)
-                self.retryLater(context)
+                let realFailure: Bool
+                switch admission {
+                case .preparationFailed, .encodingFailed: realFailure = true
+                default: realFailure = false
+                }
+                self.retryLater(context, realFailure: realFailure)
             case .unsupportedFrame:
                 self.fail(context, message: "This remote screen format is not supported. Reconnect to try again.", category: .unsupportedFrame)
             }
@@ -580,7 +586,7 @@ final class RemoteVideoPresentationSurface: NSObject, RTCVideoRenderer {
             #if DEBUG
             traceRetry(.acquirerRejected)
             #endif
-            phase = .idle; retryLater(context)
+            phase = .idle; retryLater(context, realFailure: false)
         }
     }
 
@@ -648,7 +654,9 @@ final class RemoteVideoPresentationSurface: NSObject, RTCVideoRenderer {
             // Retry the exact latest frame on a fresh drawable. A newer
             // decode wins; failed images never cross a layout context.
             mailbox.restoreUnlessNewer(entry)
-            retryLater(context)
+            var realFailure = false
+            if case .failed = result { realFailure = true }
+            retryLater(context, realFailure: realFailure)
         case .expired:
             break // Handled before layout refresh.
         }
@@ -712,7 +720,7 @@ final class RemoteVideoPresentationSurface: NSObject, RTCVideoRenderer {
     }
     #endif
 
-    private func retryLater(_ context: UUID) {
+    private func retryLater(_ context: UUID, realFailure: Bool = true) {
         guard isCurrent(context), layout != nil else { return }
         #if DEBUG
         if labSkipRetry { cancelLabSkipNotice() }
@@ -721,7 +729,9 @@ final class RemoteVideoPresentationSurface: NSObject, RTCVideoRenderer {
         guard failedAttempts <= 30 else {
             fail(context, message: "The remote screen could not be refreshed. Reconnect to try again.", category: .retryExhausted); return
         }
-        presentation.wait(context: context)
+        // A missed drawable or two, common during zoom, is not an interruption: the
+        // last picture is still on screen. The deadline still catches a real stall.
+        if realFailure || failedAttempts > Self.retriesBeforeWaiting { presentation.wait(context: context) }
         guard isCurrent(context) else { return }
         ensureDeadline(context)
         guard retry == nil else { return }

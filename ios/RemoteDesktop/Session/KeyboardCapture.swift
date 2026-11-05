@@ -5,14 +5,17 @@ import UIKit
 /// never forward keystrokes into the Mac.
 struct KeyboardCapture: UIViewRepresentable {
     @EnvironmentObject private var session: SessionModel
+    var onPhysicalKeyPress: () -> Void = {}
 
     func makeUIView(context: Context) -> RemoteHardwareKeyboardCapture {
         let view = RemoteHardwareKeyboardCapture()
+        view.onPhysicalKeyPress = onPhysicalKeyPress
         view.install(session: session)
         return view
     }
 
     func updateUIView(_ uiView: RemoteHardwareKeyboardCapture, context: Context) {
+        uiView.onPhysicalKeyPress = onPhysicalKeyPress
         uiView.update(session: session)
     }
 
@@ -88,6 +91,7 @@ struct SoftKeyboardCapture: UIViewRepresentable {
         private var dismissalTask: Task<Void, Never>?
         private var dismissalID: UUID?
         private var windowObserver: NSObjectProtocol?
+        private var keyboardHideObserver: NSObjectProtocol?
         private var nativeMutationDepth = 0
         private var mutationStartedWithMarkedText = false
         private var isDiscardingNativeText = false
@@ -159,6 +163,8 @@ struct SoftKeyboardCapture: UIViewRepresentable {
             if Self.active === self { Self.active = nil }
             if let windowObserver { NotificationCenter.default.removeObserver(windowObserver) }
             windowObserver = nil
+            if let keyboardHideObserver { NotificationCenter.default.removeObserver(keyboardHideObserver) }
+            keyboardHideObserver = nil
             session = nil
             captureIdentity = nil
             onKeyboardDismiss = nil
@@ -232,7 +238,8 @@ struct SoftKeyboardCapture: UIViewRepresentable {
         private static func firstResponder(in root: UIView) -> UIView? {
             var pending = [root]
             while let view = pending.popLast() {
-                if view.isFirstResponder { return view }
+                // The hardware listener gives way to the keyboard the person just asked for.
+                if view.isFirstResponder { return view is RemoteHardwareKeyboardCapture ? nil : view }
                 pending.append(contentsOf: view.subviews)
             }
             return nil
@@ -282,12 +289,23 @@ struct SoftKeyboardCapture: UIViewRepresentable {
             delegate = self
             text = ""
             addTarget(self, action: #selector(nativeTextDidChange), for: .editingChanged)
-            inputAccessoryView = makeKeyboardAccessory()
+            // The app's own controls show and hide the keyboard, so no extra bar sits on top of it.
+            inputAssistantItem.leadingBarButtonGroups = []
+            inputAssistantItem.trailingBarButtonGroups = []
             windowObserver = NotificationCenter.default.addObserver(forName: UIWindow.didResignKeyNotification,
                 object: nil, queue: .main) { [weak self] notification in
                 MainActor.assumeIsolated {
                     guard let self, let window = notification.object as? UIWindow,
                           window === self.window || window === self.owningWindow else { return }
+                    self.retireBinding(notifyDismissal: true)
+                }
+            }
+            // The system hide key removes the keyboard but leaves this field focused,
+            // so nothing else reports that it closed and it could not be reopened.
+            keyboardHideObserver = NotificationCenter.default.addObserver(forName: UIResponder.keyboardDidHideNotification,
+                object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    guard let self, self.hasBoundSource, self.isFirstResponder else { return }
                     self.retireBinding(notifyDismissal: true)
                 }
             }
@@ -442,43 +460,10 @@ struct SoftKeyboardCapture: UIViewRepresentable {
             retireBinding(notifyDismissal: true)
         }
 
-        private func makeKeyboardAccessory() -> UIView {
-            let toolbar = UIToolbar()
-            toolbar.sizeToFit()
-
-            var configuration = UIButton.Configuration.plain()
-            configuration.title = "Hide keyboard"
-            configuration.image = UIImage(
-                systemName: "keyboard.chevron.compact.down")
-            configuration.imagePadding = 6
-
-            let dismissButton = UIButton(configuration: configuration)
-            dismissButton.accessibilityIdentifier =
-                "computer-use-hide-remote-keyboard"
-            dismissButton.accessibilityLabel = "Hide remote keyboard"
-            dismissButton.addTarget(
-                self,
-                action: #selector(dismissKeyboardFromAccessory),
-                for: .touchUpInside)
-
-            toolbar.items = [
-                UIBarButtonItem(systemItem: .flexibleSpace),
-                UIBarButtonItem(customView: dismissButton),
-            ]
-            return toolbar
-        }
-
-        @objc private func dismissKeyboardFromAccessory() {
-            let ownsDismissal = canSendInput
-            let owner = session, identity = captureIdentity
-            retireBinding()
-            if ownsDismissal, Self.active === self, session === owner,
-               identity == owner?.remoteKeyboardCaptureIdentity { onKeyboardDismiss?() }
-        }
-
         deinit {
             focusTask?.cancel(); dismissalTask?.cancel(); deferredCommit?.cancel()
             if let windowObserver { NotificationCenter.default.removeObserver(windowObserver) }
+            if let keyboardHideObserver { NotificationCenter.default.removeObserver(keyboardHideObserver) }
         }
     }
 }

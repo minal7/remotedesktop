@@ -12,10 +12,9 @@ import UIKit
 /// with a visual progress indicator.
 struct SessionView: View {
     @EnvironmentObject private var session: SessionModel
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @StateObject private var accessories = AccessoryMonitor()
     @StateObject private var zoom = RemoteScreenZoomController()
-    @State private var touchMode: TouchInputMode = .direct
-    private let touchPreferences = TouchInputPreferenceStore()
     @State private var softKeyboardOpen = false
     @State private var restoreSoftKeyboardAfterHardwareDisconnect = false
     @State private var chromeRevealed = false
@@ -46,37 +45,26 @@ struct SessionView: View {
         !specialKeysIdle || softKeyboardOpen || session.softModifierMask != 0
     }
 
-    private var inputModeTitle: String {
-        switch (accessories.hasHardwareKeyboard, accessories.hasIndirectPointer) {
-        case (true, true):
-            return "Keyboard and pointer"
-        case (true, false):
-            return "Keyboard and touch cursor"
-        case (false, true):
-            return "Pointer and soft keys"
-        case (false, false):
-            return "Touch cursor and soft keys"
-        }
-    }
-
     private var specialKeysIdleOpacity: Double {
         // Keep the composited controls above SwiftUI's low-opacity hit-test edge.
         0.56
     }
 
     private var zoomControlsVisible: Bool {
-        SessionZoomControlsPolicy.showsControls(chromeVisible: shouldShowChrome,
-            recentlyChanged: zoomRecentlyChanged, touching: touchingZoomControls)
+        session.hasInteractiveRemoteScreen
+            && SessionZoomControlsPolicy.showsControls(chromeVisible: shouldShowChrome,
+                recentlyChanged: zoomRecentlyChanged, touching: touchingZoomControls,
+                moveScreenEnabled: zoom.moveScreenEnabled)
     }
 
     var body: some View {
         ZStack(alignment: .top) {
             // ── Remote screen ──────────────────────────────────
             #if DEBUG
-            RemoteScreenView(accessories: accessories, zoom: zoom, allowF4Renderer: true, onLatencyGesture: { showsVideoStatistics.toggle() }, touchMode: touchMode)
+            RemoteScreenView(accessories: accessories, zoom: zoom, allowF4Renderer: true, onLatencyGesture: { showsVideoStatistics.toggle() })
                 .ignoresSafeArea()
             #else
-            RemoteScreenView(accessories: accessories, zoom: zoom, touchMode: touchMode)
+            RemoteScreenView(accessories: accessories, zoom: zoom)
                 .ignoresSafeArea()
             #endif
 
@@ -88,17 +76,16 @@ struct SessionView: View {
                             ConnectionWaitNotice(
                                 title: session.isReconnecting ? "Reconnecting to your computer…"
                                     : (session.state == .connecting ? "Connecting to your computer…" : "Restoring the remote screen…"),
-                                recovery: session.state == .connecting
-                                    ? "Still connecting to your computer. Check that both devices are online and the host app is open."
-                                    : "Still restoring the remote screen. Check that both devices are online and the host app is open.",
+                                recovery: "Check that both devices are online and the host app is open.",
                                 retry: { session.reset() })
                         } else {
                             Text("Return to this window to control your Mac.")
                                 .foregroundStyle(.primary)
                         }
                     }
-                    .padding(16)
-                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+                    .padding(20)
+                    .frame(maxWidth: 360)
+                    .sessionGlass(in: RoundedRectangle(cornerRadius: 20, style: .continuous))
                 }
                 .accessibilityIdentifier("remote-input-unavailable")
             }
@@ -140,23 +127,26 @@ struct SessionView: View {
                                         touching = true
                                     }
                             )
-                        if !zoomControlsVisible && zoom.isZoomed {
-                            Button(action: zoom.reset) {
+                        if !zoomControlsVisible && session.hasInteractiveRemoteScreen {
+                            Button(action: showZoomControlsTemporarily) {
                                 Text("\(Int((zoom.scale * 100).rounded()))%")
                                     .font(.caption.monospacedDigit().weight(.semibold))
                                     .frame(minWidth: 44, minHeight: 44)
-                                    .background(.regularMaterial, in: Capsule())
+                                    .padding(.horizontal, 4)
+                                    .sessionGlass(in: Capsule())
                             }
                             .buttonStyle(.plain)
                             .opacity(specialKeysIdleOpacity)
-                            .accessibilityLabel("Fit screen")
+                            .accessibilityLabel("Show zoom controls")
                             .accessibilityValue("\(Int((zoom.scale * 100).rounded())) percent")
+                            .accessibilityIdentifier("zoomPercentPill")
                         }
                     }
                     Spacer()
                 }
                 .padding(.leading, 12)
-                .padding(.top, shouldShowChrome ? 60 : 10)
+                // Wide layouts have room beside the status pill; narrow ones sit below it.
+                .padding(.top, shouldShowChrome && horizontalSizeClass != .regular ? 68 : 8)
                 Spacer()
             }
 
@@ -170,8 +160,9 @@ struct SessionView: View {
             }
 
             // ── Hardware-keyboard capture ──────────────────────
-            if session.hasInteractiveRemoteScreen && accessories.hasHardwareKeyboard {
-                KeyboardCapture()
+            if session.hasInteractiveRemoteScreen && accessories.keyboardListed
+                && !(softKeyboardOpen && !accessories.hasHardwareKeyboard) {
+                KeyboardCapture(onPhysicalKeyPress: accessories.noteHardwareKeyPress)
                     .id(session.remoteKeyboardCaptureIdentity)
                     .frame(width: 0, height: 0)
             }
@@ -204,6 +195,21 @@ struct SessionView: View {
             let arguments = ProcessInfo.processInfo.arguments
             if arguments.contains("LatencyQuality"), LatencyStatsCollector.enabled {
                 showsVideoStatistics = true
+            }
+            if LatencyStatsCollector.enabled, arguments.contains("LatencySoftKeyboardOpen") {
+                while !session.hasInteractiveRemoteScreen {
+                    do { try await Task.sleep(for: .milliseconds(200)) } catch { return }
+                }
+                softKeyboardOpen = true
+            }
+            // Lab check that zooming never interrupts the session.
+            if LatencyStatsCollector.enabled, arguments.contains("LatencyZoomCycle") {
+                while !Task.isCancelled {
+                    if session.hasInteractiveRemoteScreen {
+                        if zoom.scale >= RemoteZoomPolicy.maximumScale { zoom.reset() } else { zoom.zoomIn() }
+                    }
+                    do { try await Task.sleep(for: .seconds(1)) } catch { return }
+                }
             }
             guard LatencyStatsCollector.enabled,
                   let scenario = arguments.firstIndex(of: "LatencyProbeScenario"),
@@ -242,7 +248,6 @@ struct SessionView: View {
         .animation(.smooth(duration: 0.32), value: accessories.hasHardwareKeyboard)
         .animation(.smooth(duration: 0.32), value: accessories.hasIndirectPointer)
         .onAppear {
-            if let hostID = session.touchPreferenceHostID { touchMode = touchPreferences.mode(for: hostID) }
             synchronizeChrome(with: session.state)
         }
         .onChange(of: session.state) { _, state in
@@ -366,81 +371,46 @@ struct SessionView: View {
 
     private var statusStrip: some View {
         HStack(spacing: 10) {
-            // Connection indicator
-            HStack(spacing: 8) {
-                Circle()
-                    .fill(Color.green)
-                    .frame(width: 8, height: 8)
-                    .shadow(color: .green.opacity(0.6), radius: 4, y: 0)
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(session.hostName ?? "Connecting...")
-                        .font(.subheadline.weight(.semibold))
-                        .lineLimit(1)
-                    Text(inputModeTitle)
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                }
-            }
-
-            Spacer()
-
-            Menu {
-                ForEach(TouchInputMode.allCases, id: \.self) { mode in
-                    Button {
-                        touchMode = mode
-                        if let hostID = session.touchPreferenceHostID { touchPreferences.set(mode, for: hostID) }
-                    } label: {
-                        if touchMode == mode { Label(mode == .direct ? "Direct" : "Trackpad", systemImage: "checkmark") }
-                        else { Text(mode == .direct ? "Direct" : "Trackpad") }
-                    }
-                }
-            } label: {
-                Text("Touch: \(touchMode == .direct ? "Direct" : "Trackpad")")
-                    .font(.caption.weight(.semibold))
-                    .frame(minHeight: 44)
-            }
-            .accessibilityLabel("Touch mode")
-
-            // Disconnect button
+            Circle()
+                .fill(session.hasInteractiveRemoteScreen ? Color.green : Color.orange)
+                .frame(width: 8, height: 8)
+                .padding(.leading, 8)
+            Text(session.hostName ?? "Connecting…")
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.primary)
+                .lineLimit(1)
             Button(role: .destructive) {
                 session.disconnect()
             } label: {
-                Image(systemName: "xmark.circle.fill")
-                    .font(.system(size: 18))
-                    .foregroundStyle(.red.opacity(0.86))
-                    .frame(width: 32, height: 32)
-                    .background(.thinMaterial, in: Circle())
+                Text(session.state == .connected ? "Disconnect" : "Cancel")
+                    .font(.footnote.weight(.semibold))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 14)
+                    .frame(minHeight: 36)
+                    .background(Color.red.opacity(0.85), in: Capsule())
+                    .contentShape(Capsule())
             }
-            .accessibilityLabel("Disconnect")
+            .buttonStyle(.plain)
+            .accessibilityLabel(session.state == .connected ? "Disconnect" : "Cancel")
         }
+        .padding(6)
+        .sessionGlass(in: Capsule())
         .padding(.horizontal, 16)
-        .padding(.vertical, 8)
-        .background(
-            .regularMaterial,
-            in: RoundedRectangle(cornerRadius: 0)
-        )
-        .overlay(alignment: .bottom) {
-            // Hairline separator
-            Rectangle()
-                .fill(Color.white.opacity(0.08))
-                .frame(height: 0.5)
-        }
+        .padding(.top, 8)
         .accessibilityIdentifier("sessionStatusStrip")
     }
 
     // MARK: - Input dock (orientation-aware)
 
+    /// Shown only while there is no hardware keyboard to do this job.
     @ViewBuilder
     private var inputDock: some View {
-        let needsKeyboard = !accessories.hasHardwareKeyboard
-        let needsModifiers = !accessories.hasHardwareKeyboard
-
-        if needsKeyboard || needsModifiers {
+        if !accessories.hasHardwareKeyboard {
             VStack(spacing: 0) {
                 Spacer()
-                inputDockContent(needsKeyboard: needsKeyboard,
-                                 needsModifiers: needsModifiers)
+                inputDockBar
+                    .padding(.horizontal, 16)
+                    .padding(.bottom, 10)
             }
             .opacity(specialKeysAttentive ? 1.0 : specialKeysIdleOpacity)
             .animation(.easeInOut(duration: 0.35), value: specialKeysAttentive)
@@ -467,27 +437,16 @@ struct SessionView: View {
         }
     }
 
-    @ViewBuilder
-    private func inputDockContent(needsKeyboard: Bool,
-                                  needsModifiers: Bool) -> some View {
-        inputDockRow(needsKeyboard: needsKeyboard,
-                     needsModifiers: needsModifiers)
-        .padding(.horizontal, 20)
-        .padding(.bottom, 10)
-    }
-
-    private func inputDockRow(needsKeyboard: Bool,
-                              needsModifiers: Bool) -> some View {
-        HStack(spacing: 12) {
-            if needsModifiers {
-                ModifierBar(attentive: specialKeysAttentive,
-                            onInteraction: wakeSpecialKeys)
-            }
-            Spacer(minLength: 8)
-            if needsKeyboard {
-                softKeyboardButton
-            }
+    private var inputDockBar: some View {
+        HStack(spacing: 6) {
+            ModifierKeys(onInteraction: wakeSpecialKeys)
+            Rectangle()
+                .fill(Color.white.opacity(0.18))
+                .frame(width: 1, height: 24)
+            softKeyboardButton
         }
+        .padding(4)
+        .sessionGlass(in: Capsule())
     }
 
     private func handleHardwareKeyboardChange(_ connected: Bool) {
@@ -525,10 +484,7 @@ struct SessionView: View {
         }
     }
 
-    @ViewBuilder
     private var softKeyboardButton: some View {
-        let attentive = specialKeysAttentive
-
         Button {
             softKeyboardOpen.toggle()
             wakeSpecialKeys()
@@ -536,35 +492,11 @@ struct SessionView: View {
             Image(systemName: softKeyboardOpen
                   ? "keyboard.chevron.compact.down"
                   : "keyboard")
-                .font(.system(size: 20, weight: .semibold))
-                .foregroundStyle(.white.opacity(softKeyboardOpen ? 1 : (attentive ? 0.88 : 0.64)))
-                .frame(width: 52, height: 52)
-                .background {
-                    Circle()
-                        .fill(.ultraThinMaterial)
-                    Circle()
-                        .fill(
-                            softKeyboardOpen
-                                ? Color.accentColor.opacity(0.86)
-                                : Color.black.opacity(attentive ? 0.16 : 0.04)
-                        )
-                }
-                .overlay {
-                    Circle()
-                        .strokeBorder(
-                            Color.white.opacity(softKeyboardOpen ? 0.26 : (attentive ? 0.16 : 0.08)),
-                            lineWidth: 1
-                        )
-                }
-                .shadow(color: .black.opacity(attentive ? 0.3 : 0.12),
-                        radius: attentive ? 12 : 4,
-                        y: attentive ? 4 : 1)
-                .scaleEffect(softKeyboardOpen ? 1.05 : 1)
+                .contentTransition(.symbolEffect(.replace))
         }
-        .buttonStyle(.plain)
+        .buttonStyle(SessionKeyStyle())
         .accessibilityLabel(softKeyboardOpen ? "Hide keyboard" : "Show keyboard")
-        .animation(.easeInOut(duration: 0.25), value: softKeyboardOpen)
-        .animation(.easeInOut(duration: 0.3), value: attentive)
+        .accessibilityIdentifier("sessionKeyboardButton")
     }
 
     // MARK: - Swipe-right to disconnect
@@ -660,36 +592,49 @@ enum SessionChromePolicy {
 enum SessionZoomControlsPolicy {
     static let hideDelay: Duration = .seconds(3)
 
-    static func showsControls(chromeVisible: Bool, recentlyChanged: Bool, touching: Bool) -> Bool {
-        chromeVisible || recentlyChanged || touching
+    /// Zoom & move stops touches reaching the Mac, so its switch stays in reach while on.
+    static func showsControls(chromeVisible: Bool, recentlyChanged: Bool, touching: Bool,
+                              moveScreenEnabled: Bool) -> Bool {
+        chromeVisible || recentlyChanged || touching || moveScreenEnabled
     }
 }
 
-/// A slow connection remains recoverable, but never leaves an indefinite spinner.
+/// A slow connection is normal, so it keeps looking like progress. Only a wait far
+/// beyond the usual time asks the person to check anything, and it never hangs forever.
 struct ConnectionWaitNotice: View {
     let title: String
     let recovery: String
     let retry: () -> Void
+    @State private var isSlow = false
     @State private var needsHelp = false
 
     var body: some View {
         VStack(spacing: 10) {
+            ProgressView()
+            Text(title)
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
             if needsHelp {
                 Text(recovery)
-                    .font(.callout)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
                     .fixedSize(horizontal: false, vertical: true)
-                Button("Retry", action: retry)
+                Button("Back to Devices", action: retry)
                     .buttonStyle(.borderedProminent)
-            } else {
-                ProgressView()
-                Text(title)
+            } else if isSlow {
+                Text("This can take a little longer on some networks.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
-        .task {
-            needsHelp = false
-            do { try await Task.sleep(for: .seconds(10)) } catch { return }
+        .task(id: title) {
+            isSlow = false; needsHelp = false
+            do { try await Task.sleep(for: .seconds(20)) } catch { return }
+            isSlow = true
+            do { try await Task.sleep(for: .seconds(60)) } catch { return }
             needsHelp = true
         }
     }

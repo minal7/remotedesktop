@@ -1059,8 +1059,9 @@ final class LocalHostDiscovery: NSObject, ObservableObject {
                     // Exact private-CloudKit identity confirms the nearby
                     // advertisement belongs to the reachable environment.
                     // Prefer its monitored capability for prompt progress.
+                    // Bonjour renames a Mac "Name (2)" when two hosts run, so show iCloud's name.
                     let authenticatedNearby = LocalHostAdvertisement(
-                        hostname: localHost.hostname,
+                        hostname: matchingCloud.hostname,
                         code: localHost.code,
                         source: .localNetwork,
                         senderID: localHost.senderID,
