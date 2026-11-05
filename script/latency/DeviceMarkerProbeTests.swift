@@ -1,4 +1,5 @@
 import Foundation
+import AppKit
 
 @main struct DeviceMarkerProbeTests {
     static func main() {
@@ -9,6 +10,14 @@ import Foundation
             precondition(LargeChangeCadence.isPhoto(elapsed: elapsed) == expected,
                          "Unexpected scene at \(elapsed) seconds")
         }
-        print("9 cadence checks passed")
+        let steps: [(TimeInterval, Int)] = [(-1, 0), (0, 0), (1.0 / 120, 0),
+                                             (1.0 / 60, 1), (0.5, 30), (1, 60), (601, 36_000)]
+        for (elapsed, expected) in steps {
+            precondition(FixtureAnimationCadence.step(elapsed: elapsed) == expected,
+                         "Unexpected animation step at \(elapsed)")
+        }
+        let frame = FixtureAnimationCadence.frame(in: NSRect(x: 0, y: 0, width: 1000, height: 800))
+        precondition(frame.minY >= 0 && frame.maxY < 370, "Animation must not cover marker cells")
+        print("17 cadence and marker-separation checks passed")
     }
 }

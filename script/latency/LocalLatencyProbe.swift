@@ -38,6 +38,39 @@ final class Measurements: @unchecked Sendable {
     func withLock<T>(_ f: () -> T) -> T { lock.lock(); defer { lock.unlock() }; return f() }
 }
 
+/// Bounded numerical observations from the production ScreenCapture callback.
+final class CaptureCadenceRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var firstFrame = false
+    private var start = Double.infinity
+    private var end = Double.infinity
+    private var samples: [[String: Any]] = []
+    private var overflowed = false
+    private var stopped = false
+    private var stopping = false
+    func arm(start: Double, duration: Double) {
+        lock.lock(); defer { lock.unlock() }
+        self.start = start; self.end = start + duration
+        samples.removeAll(keepingCapacity: true); overflowed = false
+    }
+    func record(_ frame: CapturedVideoFrame) {
+        let t = Double(frame.metadata.captureTimeNanoseconds) / 1_000_000_000
+        let width = frame.metadata.width, height = frame.metadata.height
+        guard t.isFinite, t > 0, width > 0, height > 0 else { return }
+        lock.lock(); defer { lock.unlock() }
+        firstFrame = true
+        guard t >= start, t <= end else { return }
+        guard samples.count < 7_200 else { overflowed = true; return }
+        samples.append(["display_s": t, "width": width, "height": height])
+    }
+    func markStopped() { lock.lock(); if !stopping { stopped = true }; lock.unlock() }
+    func markStopping() { lock.lock(); stopping = true; lock.unlock() }
+    func isReady() -> Bool { lock.lock(); defer { lock.unlock() }; return firstFrame }
+    func snapshot() -> (samples: [[String: Any]], overflowed: Bool, stopped: Bool) {
+        lock.lock(); defer { lock.unlock() }; return (samples, overflowed, stopped)
+    }
+}
+
 struct MarkerGeometry: Sendable {
     let screenWidth: Double
     let screenHeight: Double
@@ -423,10 +456,26 @@ private let f3PacerFieldTrial = "WebRTC-ProbingScreenshareBwe/2.5,2875,80,40,-60
     let duration = ProcessInfo.processInfo.environment["LATENCY_PAIR_FIX"] != nil
         ? 30.0 : (Double(ProcessInfo.processInfo.environment["LATENCY_SECONDS"] ?? "60") ?? 60)
     func applicationDidFinishLaunching(_ notification: Notification) {
-        Task { do { try await run() } catch { print("ERROR \(error)"); try? Data("\(error)".utf8).write(to: URL(fileURLWithPath: output + ".error")); NSApp.terminate(nil) } }
+        Task { do { try await run() } catch {
+            if CommandLine.arguments.contains("--capture-cadence-seconds") {
+                fputs("Capture cadence probe failed.\n", stderr); exit(1)
+            }
+            print("ERROR \(error)"); try? Data("\(error)".utf8).write(to: URL(fileURLWithPath: output + ".error")); NSApp.terminate(nil)
+        } }
     }
     func run() async throws {
         let environment = ProcessInfo.processInfo.environment
+        if let index = CommandLine.arguments.firstIndex(of: "--capture-cadence-seconds") {
+            guard CommandLine.arguments.indices.contains(index + 1),
+                  let seconds = Double(CommandLine.arguments[index + 1]), seconds.isFinite,
+                  seconds > 0, seconds <= 60, let path = environment["LATENCY_OUTPUT"], !path.isEmpty,
+                  !FileManager.default.fileExists(atPath: path) else {
+                throw NSError(domain: "Invalid capture cadence request", code: 1)
+            }
+            try await runCaptureCadence(seconds: seconds, outputPath: path, environment: environment)
+            NSApp.terminate(nil)
+            return
+        }
         if let fix = environment["LATENCY_PAIR_FIX"], ["F1", "F2", "F3", "F3Pacer"].contains(fix) {
             let count = max(4, Int(environment["LATENCY_PAIRS"] ?? "4") ?? 4)
             let prefix = output
@@ -462,6 +511,50 @@ private let f3PacerFieldTrial = "WebRTC-ProbingScreenshareBwe/2.5,2875,80,40,-60
         }
         NSApp.terminate(nil)
     }
+    /// Capture only: no peer, codec, observer, viewer, or pixel persistence.
+    func runCaptureCadence(seconds: Double, outputPath: String, environment: [String: String]) async throws {
+        guard CGPreflightScreenCaptureAccess() else { throw NSError(domain: "Screen Recording unavailable", code: 1) }
+        let recorder = CaptureCadenceRecorder()
+        let owner = capture.beginSession(callbacks: .init(onVideoFrame: { frame, _ in
+            recorder.record(frame)
+        }, onAudioSample: nil, onVideoUnavailable: { _ in recorder.markStopped() },
+            onStopped: { _, _ in recorder.markStopped() }))
+        let selected120 = ScreenCapture.labCapture120Enabled(framesPerSecond: 60, environment: environment)
+        do {
+            try await capture.start(for: owner, audioEnabled: false,
+                maximumMacroblocksPerFrame: DesktopVideoQuality.adaptiveMaximumMacroblocksPerFrame, framesPerSecond: 60)
+            let deadline = now() + 10
+            while !recorder.isReady() {
+                guard now() < deadline, !recorder.snapshot().stopped else { throw NSError(domain: "No complete frame", code: 1) }
+                try await Task.sleep(for: .milliseconds(10))
+            }
+            print("CAPTURE_SOURCE_READY"); fflush(stdout)
+            try await Task.sleep(for: .seconds(3))
+            let start = now()
+            recorder.arm(start: start, duration: seconds)
+            print("CAPTURE_MEASURING"); fflush(stdout)
+            try await Task.sleep(for: .seconds(seconds))
+            recorder.markStopping()
+            await capture.stop()
+            let result = recorder.snapshot()
+            guard !result.stopped, !result.overflowed, result.samples.count >= 2 else {
+                throw NSError(domain: "Incomplete capture cadence", code: 1)
+            }
+            let output: [String: Any] = ["kind": "production_capture_cadence", "clock": "host_monotonic_seconds",
+                "duration_s": seconds, "warmup_s": 3, "source_ready": true,
+                "measurement_start_s": start, "measurement_end_s": start + seconds,
+                "requested_capture_fps": 60, "requested_max_macroblocks": DesktopVideoQuality.adaptiveMaximumMacroblocksPerFrame,
+                "configured_minimum_frame_interval_denominator": selected120 ? 120 : 60,
+                "configured_display_time_limiter": selected120, "samples": result.samples]
+            let data = try JSONSerialization.data(withJSONObject: output, options: [.sortedKeys])
+            try data.write(to: URL(fileURLWithPath: outputPath), options: .withoutOverwriting)
+        } catch {
+            recorder.markStopping()
+            await capture.stop()
+            throw error
+        }
+    }
+
     func runTrial(f3Pacer: Bool = false) async throws {
         let lab = LatencyLabConfiguration.current
         let f1Receiver = lab.f1Playout

@@ -9,6 +9,30 @@ enum LargeChangeCadence {
     }
 }
 
+/// Independent bounded animation, deliberately outside the 10 Hz marker cells.
+enum FixtureAnimationCadence {
+    static func step(elapsed: TimeInterval) -> Int {
+        guard elapsed.isFinite, elapsed > 0 else { return 0 }
+        return Int(min(36_000, (elapsed * 60).rounded(.down)))
+    }
+    static func frame(in bounds: NSRect) -> NSRect {
+        NSRect(x: max(0, bounds.width - 240), y: 24,
+               width: min(200, bounds.width), height: min(80, max(0, bounds.height - 24)))
+    }
+}
+
+final class FixtureAnimationRegion: NSView {
+    var step = 0
+    override var isFlipped: Bool { true }
+    override func draw(_ dirtyRect: NSRect) {
+        NSColor(calibratedHue: CGFloat(step % 120) / 120, saturation: 0.8, brightness: 0.9, alpha: 1).setFill()
+        bounds.fill()
+        NSColor.white.setFill()
+        NSRect(x: CGFloat(step % 40) * max(1, bounds.width / 40), y: 0,
+               width: max(2, bounds.width / 16), height: bounds.height).intersection(bounds).fill()
+    }
+}
+
 final class Pattern: NSView {
     var id = 1
     let cell: CGFloat
@@ -140,7 +164,7 @@ final class Observer: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sen
     func stream(_ stream: SCStream, didStopWithError error: Error) { fputs("Observer stopped: \(error)\n", stderr) }
 }
 @MainActor final class Runner: NSObject, NSApplicationDelegate {
-    var window: NSWindow?, timer: Timer?, observer: Observer?
+    var window: NSWindow?, timer: Timer?, animationTimer: Timer?, observer: Observer?
     let env = ProcessInfo.processInfo.environment
     func applicationDidFinishLaunching(_ notification: Notification) {
         Task { do { try await run() } catch { fputs("Marker probe: \(error)\n", stderr); exit(1) } }
@@ -149,6 +173,8 @@ final class Observer: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sen
         guard CGPreflightScreenCaptureAccess() else { throw NSError(domain: "Screen Recording permission required", code: 1) }
         guard let screen = NSScreen.screens.first(where: { ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value == CGMainDisplayID() }), let output = env["LATENCY_HOST_TRACE"], let duration = Double(env["LATENCY_SECONDS"] ?? "60"), duration > 0 else { throw NSError(domain: "Missing output, screen, or duration", code: 1) }
         let optical = env["LATENCY_OPTICAL"] == "1"
+        let animate = env["LATENCY_FIXTURE_ANIMATION_60"] == "1"
+        guard !animate || optical else { throw NSError(domain: "Animation requires optical fixture mode", code: 1) }
         let photo: NSImage?
         if let photoPath = env["LATENCY_LARGE_CHANGE_PHOTO"] {
             guard optical, !photoPath.isEmpty,
@@ -166,6 +192,22 @@ final class Observer: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sen
         let pattern = Pattern(frame: NSRect(origin: .zero, size: frame.size), cell: cell, optical: optical, photo: photo)
         let window = optical ? OpticalWindow(contentRect: frame, styleMask: [.borderless], backing: .buffered, defer: false)
             : NSWindow(contentRect: frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        if animate {
+            let animation = FixtureAnimationRegion(frame: FixtureAnimationCadence.frame(in: pattern.bounds))
+            animation.wantsLayer = true
+            pattern.addSubview(animation)
+            let start = ProcessInfo.processInfo.systemUptime
+            let animationTimer = Timer(timeInterval: 1.0 / 60, repeats: true) { [weak animation] _ in
+                MainActor.assumeIsolated {
+                    guard let animation else { return }
+                    let next = FixtureAnimationCadence.step(elapsed: ProcessInfo.processInfo.systemUptime - start)
+                    guard next != animation.step else { return }
+                    animation.step = next; animation.needsDisplay = true
+                }
+            }
+            RunLoop.main.add(animationTimer, forMode: .common)
+            self.animationTimer = animationTimer
+        }
         window.contentView = pattern; window.level = optical ? .screenSaver : .floating
         window.isReleasedWhenClosed = false
         if optical {
@@ -209,9 +251,10 @@ final class Observer: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sen
         finishSignal.resume()
         try? await sleeper.value
         finishSignal.cancel()
-        timer?.invalidate(); try await observer.stream?.stopCapture()
+        timer?.invalidate(); animationTimer?.invalidate(); try await observer.stream?.stopCapture()
         let rows = observer.snapshot()
-        let result: [String: Any] = ["kind": "device_host_marker", "clock": "host_monotonic_seconds", "duration_s": duration, "initial_marker_observed_before_timing": true, "geometry": ["x": markerX, "y": markerY, "cell": cell, "screen_width": w, "screen_height": h], "markers": rows]
+        let result: [String: Any] = ["kind": "device_host_marker", "clock": "host_monotonic_seconds", "duration_s": duration, "initial_marker_observed_before_timing": true,
+            "animation_enabled": animate, "animation_target_fps": animate ? 60 : 0, "geometry": ["x": markerX, "y": markerY, "cell": cell, "screen_width": w, "screen_height": h], "markers": rows]
         try JSONSerialization.data(withJSONObject: result, options: [.prettyPrinted, .sortedKeys]).write(to: URL(fileURLWithPath: output), options: .atomic)
         window.close(); NSApp.terminate(nil)
     }
