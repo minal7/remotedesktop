@@ -377,6 +377,22 @@ struct CaptureVideoFrameOrder {
     }
 }
 
+#if DEBUG
+/// A per-attempt limiter of genuine complete frames, using the display clock.
+struct LabCaptureFrameLimiter {
+    private var last: Int64?
+    mutating func admit(displayTimeNanoseconds: Int64) -> Bool {
+        guard displayTimeNanoseconds >= 0 else { return false }
+        if let last {
+            guard displayTimeNanoseconds > last,
+                  displayTimeNanoseconds - last >= 16_666_667 else { return false }
+        }
+        last = displayTimeNanoseconds
+        return true
+    }
+}
+#endif
+
 /// Status-only events need no image buffer. In particular, idle means no
 /// display change, while blank/suspended explicitly withdraw usable output.
 enum CaptureVideoStatus: Equatable {
@@ -892,8 +908,9 @@ final class ScreenCapture: NSObject, @unchecked Sendable {
         let configuration: SCStreamConfiguration
         let display: CaptureDisplayGeometry
         let cursorUpdates: CaptureCursorVisibilityUpdates
-        init(stream: SCStream, filter: SCContentFilter, configuration: SCStreamConfiguration, display: CaptureDisplayGeometry) {
-            self.stream = stream; self.filter = filter; self.configuration = configuration; self.display = display
+        let labCapture120: Bool
+        init(stream: SCStream, filter: SCContentFilter, configuration: SCStreamConfiguration, display: CaptureDisplayGeometry, labCapture120: Bool) {
+            self.stream = stream; self.filter = filter; self.configuration = configuration; self.display = display; self.labCapture120 = labCapture120
             cursorUpdates = CaptureCursorVisibilityUpdates { visible in
                 configuration.showsCursor = visible
                 try await stream.updateConfiguration(configuration)
@@ -911,6 +928,10 @@ final class ScreenCapture: NSObject, @unchecked Sendable {
     private var loggedFirstVideoAttempt: CaptureAttemptLease?
     private var loggedFirstAudioAttempt: CaptureAttemptLease?
     private var videoFrameOrder = CaptureVideoFrameOrder()
+    #if DEBUG
+    private var labLimiterAttempt: CaptureAttemptLease?
+    private var labFrameLimiter = LabCaptureFrameLimiter()
+    #endif
     private var videoAvailability = CaptureVideoAvailability()
     private var displayObservation: CaptureDisplayChangeMonitor.Observation?
 
@@ -1051,10 +1072,15 @@ final class ScreenCapture: NSObject, @unchecked Sendable {
             height: sourceSize.height,
             maximumMacroblocksPerFrame: maximumMacroblocksPerFrame)
 
+        #if DEBUG
+        let labCapture120 = Self.labCapture120Enabled(framesPerSecond: framesPerSecond, environment: ProcessInfo.processInfo.environment)
+        #else
+        let labCapture120 = false
+        #endif
         let config = Self.streamConfiguration(
             width: captureSize.width,
             height: captureSize.height,
-            audioEnabled: audioEnabled, framesPerSecond: framesPerSecond)
+            audioEnabled: audioEnabled, framesPerSecond: framesPerSecond, labCapture120: labCapture120)
 
         let s = SCStream(filter: filter, configuration: config, delegate: self)
         try s.addStreamOutput(self, type: .screen, sampleHandlerQueue: videoQueue)
@@ -1064,7 +1090,7 @@ final class ScreenCapture: NSObject, @unchecked Sendable {
 
         log.info(
             "capture configured points=\(display.width, privacy: .public)x\(display.height, privacy: .public) backing=\(sourceSize.width, privacy: .public)x\(sourceSize.height, privacy: .public) output=\(captureSize.width, privacy: .public)x\(captureSize.height, privacy: .public) macroblockLimit=\(maximumMacroblocksPerFrame, privacy: .public) fps=\(framesPerSecond, privacy: .public) audio=\(audioEnabled, privacy: .public)")
-        return NativeStream(stream: s, filter: filter, configuration: config, display: geometry)
+        return NativeStream(stream: s, filter: filter, configuration: config, display: geometry, labCapture120: labCapture120)
     }
 
     func stop() async {
@@ -1073,13 +1099,19 @@ final class ScreenCapture: NSObject, @unchecked Sendable {
 }
 
 extension ScreenCapture {
+    #if DEBUG
+    static func labCapture120Enabled(framesPerSecond: Int32, environment: [String: String]) -> Bool {
+        framesPerSecond == 60 && environment["LATENCY_LAB"] == "1" && environment["LATENCY_CAPTURE_120"] == "1"
+    }
+    #endif
     /// Kept as a pure configuration factory so tests can prove that declining
     /// optional microphone access also disables ScreenCaptureKit audio capture.
     static func streamConfiguration(
         width: Int,
         height: Int,
         audioEnabled: Bool,
-        framesPerSecond: Int32 = CaptureSizing.targetFramesPerSecond
+        framesPerSecond: Int32 = CaptureSizing.targetFramesPerSecond,
+        labCapture120: Bool = false
     ) -> SCStreamConfiguration {
         let config = SCStreamConfiguration()
         config.width = width
@@ -1091,9 +1123,12 @@ extension ScreenCapture {
         config.preservesAspectRatio = false
         config.destinationRect = CGRect(x: 0, y: 0, width: width, height: height)
         config.pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarFullRange
-        config.minimumFrameInterval = CMTime(
-            value: 1,
-            timescale: framesPerSecond)
+        #if DEBUG
+        let requestedRate = labCapture120 && framesPerSecond == 60 ? 120 : framesPerSecond
+        #else
+        let requestedRate = framesPerSecond
+        #endif
+        config.minimumFrameInterval = CMTime(value: 1, timescale: requestedRate)
         config.queueDepth = DesktopVideoQuality.captureQueueDepth
         config.showsCursor = true
         config.capturesAudio = audioEnabled
@@ -1153,6 +1188,12 @@ extension ScreenCapture: SCStreamDelegate, SCStreamOutput {
                 }
                 #endif
                 guard videoAvailability.permits(frame.metadata), videoFrameOrder.admit(frame.metadata) else { return }
+                #if DEBUG
+                if native.labCapture120 {
+                    if labLimiterAttempt != attempt { labLimiterAttempt = attempt; labFrameLimiter = LabCaptureFrameLimiter() }
+                    guard labFrameLimiter.admit(displayTimeNanoseconds: frame.metadata.captureTimeNanoseconds) else { return }
+                }
+                #endif
                 videoAvailability.recordDeliveredFrame(from: attempt)
                 if loggedFirstVideoAttempt != attempt {
                     loggedFirstVideoAttempt = attempt

@@ -1428,6 +1428,29 @@ final class ScreenCaptureSizingTests: XCTestCase {
     }
 
     #if DEBUG
+    func test_labCapture120RequiresExplicitOptInAndSelected60() {
+        let enabled = ["LATENCY_LAB": "1", "LATENCY_CAPTURE_120": "1"]
+        XCTAssertTrue(ScreenCapture.labCapture120Enabled(framesPerSecond: 60, environment: enabled))
+        XCTAssertFalse(ScreenCapture.labCapture120Enabled(framesPerSecond: 30, environment: enabled))
+        XCTAssertFalse(ScreenCapture.labCapture120Enabled(framesPerSecond: 60, environment: ["LATENCY_CAPTURE_120": "1"]))
+        XCTAssertFalse(ScreenCapture.labCapture120Enabled(framesPerSecond: 60, environment: ["LATENCY_LAB": "1", "LATENCY_CAPTURE_120": "true"]))
+        XCTAssertEqual(ScreenCapture.streamConfiguration(width: 1280, height: 720, audioEnabled: false, framesPerSecond: 60, labCapture120: true).minimumFrameInterval, CMTime(value: 1, timescale: 120))
+        XCTAssertEqual(ScreenCapture.streamConfiguration(width: 1280, height: 720, audioEnabled: false, framesPerSecond: 30, labCapture120: true).minimumFrameInterval, CMTime(value: 1, timescale: 30))
+    }
+
+    func test_labCaptureLimiterAdmitsOnlyIncreasingFramesAtOrBelow60() {
+        var limiter = LabCaptureFrameLimiter()
+        XCTAssertTrue(limiter.admit(displayTimeNanoseconds: 1_000_000_000))
+        XCTAssertFalse(limiter.admit(displayTimeNanoseconds: 1_008_333_333))
+        XCTAssertFalse(limiter.admit(displayTimeNanoseconds: 1_016_666_666))
+        XCTAssertTrue(limiter.admit(displayTimeNanoseconds: 1_016_666_667))
+        XCTAssertFalse(limiter.admit(displayTimeNanoseconds: 1_016_666_667))
+        XCTAssertFalse(limiter.admit(displayTimeNanoseconds: 1_000_000_000))
+        XCTAssertTrue(limiter.admit(displayTimeNanoseconds: 1_033_333_334))
+        var newAttempt = LabCaptureFrameLimiter()
+        XCTAssertTrue(newAttempt.admit(displayTimeNanoseconds: 1))
+    }
+
     func test_optInEncoderUses60FpsAndPreservesAspectAndLegacyCodecEligibility() {
         let safe = CaptureSizing.encoderSafe(width: 3456, height: 2234, maximumMacroblocksPerFrame: 16_384)
         let macroblocks = CaptureSizing.macroblockCount(width: safe.width, height: safe.height)
