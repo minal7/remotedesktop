@@ -213,11 +213,14 @@ final class DesktopLowLatencyH264EncoderTests: XCTestCase {
         XCTAssertEqual(encoder.startEncode(with: settings, numberOfCores: 1), 0)
         guard fallback.startCount == 0 else { _ = encoder.release(); throw XCTSkip("Hardware CBR/VBV unavailable") }
         rejectRate = true
+        var pixel: CVPixelBuffer?
+        XCTAssertEqual(CVPixelBufferCreate(kCFAllocatorDefault, 1280, 720, kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange, nil, &pixel), kCVReturnSuccess)
+        let frame = LKRTCVideoFrame(buffer: LKRTCCVPixelBuffer(pixelBuffer: try XCTUnwrap(pixel)), rotation: ._0, timeStampNs: 1)
         XCTAssertEqual(encoder.setBitrate(3_000, framerate: 60), 0)
         XCTAssertFalse(sawRejectedUpdate, "Rate changes wait for encode() so they cannot race a frame in flight")
-        XCTAssertEqual(encoder.encode(try encoderFrame(1), codecSpecificInfo: nil, frameTypes: [4]), 0)
+        XCTAssertEqual(encoder.encode(frame, codecSpecificInfo: nil, frameTypes: [4]), 0)
         XCTAssertTrue(sawRejectedUpdate)
-        XCTAssertEqual(encoder.encode(try encoderFrame(2), codecSpecificInfo: nil, frameTypes: [4]), 0)
+        XCTAssertEqual(encoder.encode(frame, codecSpecificInfo: nil, frameTypes: [4]), 0)
         XCTAssertEqual(fallback.startCount, 1)
         XCTAssertEqual(fallback.bitrates.last?.0, 3_000)
         XCTAssertEqual(encoder.release(), 0)
