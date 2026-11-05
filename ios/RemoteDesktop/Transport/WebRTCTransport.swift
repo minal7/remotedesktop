@@ -116,6 +116,79 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
     private var labApplied = LatencyLabSelection(f1MaximumDelayMs: nil, f2: false, f3: false, f4: false)
     private var labPending: LatencyLabSelection?
     private var labLastHello: HostHello?
+    private var capacityReceiver: LatencyUDPCapacityReceiver?
+    private var capacityGeneration: UUID?
+    private var capacityRequested = false
+    private var capacityBackgroundObserver: NSObjectProtocol?
+
+    private var capacityProbeEnabled: Bool {
+        let environment = ProcessInfo.processInfo.environment
+        return labInstrumentation && mediaPolicy == .remoteSession &&
+            environment["LATENCY_LAB"] == "1" && environment["LATENCY_UDP_CAPACITY"] == "1" &&
+            ProcessInfo.processInfo.arguments.contains("LatencyUDPCapacity")
+    }
+
+    private func requestCapacityProbe(on channel: RTCDataChannel) {
+        guard capacityProbeEnabled, !capacityRequested, answerApplied,
+              LatencyUDPCapacityForegroundPolicy.permitsStart(isActive: UIApplication.shared.applicationState == .active),
+              channel === dataChannel, channel.readyState == .open else { return }
+        let request: [String: Any] = ["type": "latencyUdpCapacityRequest"]
+        guard let data = try? JSONSerialization.data(withJSONObject: request),
+              channel.sendData(RTCDataBuffer(data: data, isBinary: false)) else { return }
+        capacityRequested = true
+    }
+
+    private func consumeCapacityOffer(_ data: Data, on channel: RTCDataChannel) -> Bool {
+        guard let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              let type = object["type"] as? String,
+              type == "latencyUdpCapacityOffer" || type == "latencyUdpCapacitySnapshotRequest" else { return false }
+        if type == "latencyUdpCapacitySnapshotRequest" {
+            guard capacityProbeEnabled, capacityRequested, answerApplied,
+                  channel === dataChannel, channel.readyState == .open else { return true }
+            capacityReceiver?.requestFinalSnapshot()
+            return true
+        }
+        guard capacityProbeEnabled, capacityRequested, capacityReceiver == nil,
+              LatencyUDPCapacityForegroundPolicy.permitsStart(isActive: UIApplication.shared.applicationState == .active),
+              answerApplied, channel === dataChannel, channel.readyState == .open,
+              let host = object["host"] as? String, let rawPort = object["port"] as? Int,
+              let port = UInt16(exactly: rawPort), let encoded = object["key"] as? String,
+              let key = Data(base64Encoded: encoded), key.count == 32 else { return true }
+        let generation = UUID()
+        guard let receiver = LatencyUDPCapacityReceiver(host: host, port: port, keyData: key,
+            progress: { [weak self, weak channel] steps, overflowed, final in
+                Task { @MainActor [weak self] in
+                    guard let self, self.capacityGeneration == generation, !self.isClosing,
+                          self.answerApplied, let channel, self.dataChannel === channel,
+                          channel.readyState == .open else { return }
+                    let values = steps.map { ["unique": $0.unique, "duplicate": $0.duplicate,
+                        "reordered": $0.reordered, "late": $0.late, "bytes": $0.bytes] }
+                    let message: [String: Any] = ["type": "latencyUdpCapacityProgress",
+                                                  "steps": values, "overflowed": overflowed, "final": final]
+                    if let payload = try? JSONSerialization.data(withJSONObject: message) {
+                        _ = channel.sendData(RTCDataBuffer(data: payload, isBinary: false))
+                    }
+                }
+            }) else { return true }
+        capacityGeneration = generation
+        capacityReceiver = receiver
+        capacityBackgroundObserver = NotificationCenter.default.addObserver(
+            forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self, self.capacityGeneration == generation else { return }
+                if let channel = self.dataChannel, channel.readyState == .open,
+                   let data = try? JSONSerialization.data(withJSONObject: ["type": "latencyUdpCapacityStop"]) {
+                    _ = channel.sendData(RTCDataBuffer(data: data, isBinary: false))
+                }
+                self.capacityReceiver?.stop()
+                self.capacityReceiver = nil
+                self.capacityGeneration = nil
+            }
+        }
+        receiver.start()
+        return true
+    }
     private var labActiveNonce: String?
     private var labObserver: NSObjectProtocol?
     private var labPairRun: LatencyLabPairRun?
@@ -634,6 +707,14 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
 
     private func close(reason: String, notifyRemote: Bool) {
         #if DEBUG
+        capacityGeneration = nil
+        capacityReceiver?.stop()
+        capacityReceiver = nil
+        if let observer = capacityBackgroundObserver { NotificationCenter.default.removeObserver(observer) }
+        capacityBackgroundObserver = nil
+        capacityRequested = false
+        #endif
+        #if DEBUG
         (peerLatencyCollector ?? latencyCollector)?.trace(["type": "transport_close", "time": ProcessInfo.processInfo.systemUptime,
                                  "origin": notifyRemote ? "requested_disconnect" : "transport_disconnect",
                                  "notifyRemote": notifyRemote])
@@ -1146,6 +1227,9 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
                             codecSupported: DesktopVideoQuality.supportsAdaptive60(answerSDP: sdp), currentPeer: currentPeer)
                         guard currentPeer else { continue }
                         answerApplied = true
+                        #if DEBUG
+                        if capacityProbeEnabled, let channel = dataChannel { requestCapacityProbe(on: channel) }
+                        #endif
                         diagnosticStage = "ice_checking"
                         #if DEBUG
                         recordConnectivity(event: "stage", fields: ["stage": "answer_applied"])
@@ -1213,6 +1297,12 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
     }
 
     private func sendHelloIfPossible(timeout: Duration = .seconds(10)) {
+        #if DEBUG
+        if capacityProbeEnabled {
+            if let channel = dataChannel { requestCapacityProbe(on: channel) }
+            return // No direct-input hello or authorization in this diagnostic mode.
+        }
+        #endif
         guard !isClosing, let hello = directInputState.helloToSend,
               let dataChannel, dataChannel.readyState == .open else {
             return
@@ -1702,6 +1792,7 @@ extension WebRTCTransport: RTCDataChannelDelegate {
             guard let self, !self.isClosing, self.dataChannel === dataChannel,
                   dataChannel.readyState == .open else { return }
             #if DEBUG
+            if self.consumeCapacityOffer(buffer.data, on: dataChannel) { return }
             if self.consumeF1Ready(buffer.data) { return }
             if let latencyReceivedAt, self.receiveLatencyPong(buffer.data, receivedAt: latencyReceivedAt) { return }
             #endif
@@ -1745,6 +1836,7 @@ extension WebRTCTransport: RTCDataChannelDelegate {
                 log.info("host acknowledged the WebRTC control channel")
                 #if DEBUG
                 self.labLastHello = hello
+                self.requestCapacityProbe(on: dataChannel)
                 #endif
                 onHostHello?(hello)
                 #if DEBUG

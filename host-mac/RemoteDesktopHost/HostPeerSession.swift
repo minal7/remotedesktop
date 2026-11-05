@@ -333,6 +333,97 @@ final class HostPeerSession: NSObject {
     private let stage2KeyframeControl: LatencyKeyframeControl?
     private var stage2State: LatencyLabSenderPolicy.Stage2State?
     private var stage2CaptureFrames: UInt64 = 0
+    private var capacitySender: LatencyUDPCapacitySender?
+    private var capacityLANAddress: String?
+    private var capacityRequested = false
+
+    private var capacityProbeEnabled: Bool {
+        let environment = ProcessInfo.processInfo.environment
+        return labInstrumentation && labOrdinaryPeer && environment["LATENCY_LAB"] == "1" &&
+            environment["LATENCY_UDP_CAPACITY"] == "1" &&
+            Array(ProcessInfo.processInfo.arguments.dropFirst()) == ["--debug-latency-host"] &&
+            environment["REMOTE_DESKTOP_R0_HOST_ID"] == nil &&
+            environment["REMOTE_DESKTOP_LATENCY_HOST_ID"].flatMap(UUID.init(uuidString:)) != nil
+    }
+
+    private func consumeCapacityMessage(_ data: Data, channel: RTCDataChannel) -> Bool {
+        guard let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              let type = object["type"] as? String,
+              type == "latencyUdpCapacityRequest" || type == "latencyUdpCapacityProgress" || type == "latencyUdpCapacityStop" else { return false }
+        guard capacityProbeEnabled, !isEnded, dataChannel === channel,
+              channel.readyState == .open, inputAuthorization.ownsChannel(ObjectIdentifier(channel)) else { return true }
+        if type == "latencyUdpCapacityStop" {
+            closeStateLock.lock(); let sender = capacitySender; closeStateLock.unlock()
+            sender?.stop()
+            return true
+        }
+        if type == "latencyUdpCapacityProgress" {
+            guard let rows = object["steps"] as? [[String: Any]], rows.count == 6,
+                  let overflowed = object["overflowed"] as? Bool,
+                  let final = object["final"] as? Bool else { return true }
+            var values: [LatencyUDPCapacitySender.ReceiverStep] = []
+            for row in rows {
+                func integer(_ key: String) -> Int? {
+                    guard let number = row[key] as? NSNumber,
+                          CFGetTypeID(number) != CFBooleanGetTypeID(),
+                          number.doubleValue.isFinite, number.doubleValue == Double(number.intValue),
+                          number.intValue >= 0 else { return nil }
+                    return number.intValue
+                }
+                guard let unique = integer("unique"), let duplicate = integer("duplicate"),
+                      let reordered = integer("reordered"), let late = integer("late"),
+                      let bytes = integer("bytes") else { return true }
+                values.append(.init(unique: unique, duplicate: duplicate, reordered: reordered, late: late, bytes: bytes))
+            }
+            closeStateLock.lock(); let sender = capacitySender; closeStateLock.unlock()
+            sender?.updateReceiver(values, overflowed: overflowed, final: final)
+            return true
+        }
+        diagnosticLock.lock(); let address = capacityLANAddress; diagnosticLock.unlock()
+        guard let address else { return true }
+        closeStateLock.lock()
+        guard !ended, !capacityRequested else { closeStateLock.unlock(); return true }
+        capacityRequested = true
+        let sender = LatencyUDPCapacitySender(lanAddress: address,
+            offer: { [weak self, weak channel] offer in
+                guard let self, let channel, let offer, !self.isEnded,
+                      self.dataChannel === channel, channel.readyState == .open,
+                      self.inputAuthorization.ownsChannel(ObjectIdentifier(channel)) else { return }
+                let payload: [String: Any] = ["type": "latencyUdpCapacityOffer", "host": offer.host,
+                    "port": Int(offer.port), "key": offer.key.base64EncodedString()]
+                if let data = try? JSONSerialization.data(withJSONObject: payload) {
+                    _ = channel.sendData(RTCDataBuffer(data: data, isBinary: false))
+                }
+            }, requestSnapshot: { [weak self, weak channel] in
+                guard let self, let channel, !self.isEnded, self.dataChannel === channel,
+                      channel.readyState == .open, self.inputAuthorization.ownsChannel(ObjectIdentifier(channel)),
+                      let data = try? JSONSerialization.data(withJSONObject: ["type": "latencyUdpCapacitySnapshotRequest"]) else { return }
+                _ = channel.sendData(RTCDataBuffer(data: data, isBinary: false))
+            }, completion: { [weak self, weak channel] result in
+                guard let self else { return }
+                Self.writeCapacitySummary(result)
+                guard let channel, !self.isEnded, self.dataChannel === channel,
+                      channel.readyState == .open, self.inputAuthorization.ownsChannel(ObjectIdentifier(channel)) else { return }
+                var payload = result; payload["type"] = "latencyUdpCapacityResult"
+                if let data = try? JSONSerialization.data(withJSONObject: payload) {
+                    _ = channel.sendData(RTCDataBuffer(data: data, isBinary: false))
+                }
+            })
+        capacitySender = sender
+        closeStateLock.unlock()
+        sender?.start()
+        return true
+    }
+
+    private static func writeCapacitySummary(_ result: [String: Any]) {
+        guard let path = ProcessInfo.processInfo.environment["LATENCY_UDP_CAPACITY_OUTPUT"],
+              path.hasPrefix("/"), let data = try? JSONSerialization.data(withJSONObject: result, options: [.sortedKeys]) else { return }
+        let fd = open(path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, mode_t(0o600))
+        guard fd >= 0 else { return }
+        let file = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
+        try? file.write(contentsOf: data)
+        try? file.close()
+    }
     private var stage2CodecAllowed = false
     private var stage2LossUnavailableLogged = false
     private let send10Enabled: Bool
@@ -578,7 +669,11 @@ final class HostPeerSession: NSObject {
                            "lowLatencyRequested": capturePolicy.lowLatencyEncoder])
         #endif
         applyVideoSenderPolicy(selectedAdaptive ? DesktopVideoQuality.adaptivePolicy : DesktopVideoQuality.sharpnessPolicy, isDefault: true)
+        #if DEBUG
+        if !capacityProbeEnabled { startAudioRecordingIfNeeded() }
+        #else
         startAudioRecordingIfNeeded()
+        #endif
         var answerPayload = ["sdp": answer.sdp, "sdpType": "answer"]
         if selectedAdaptive { answerPayload["adaptiveVideo60"] = "1" }
         try await signaling.send(SignalingEnvelope(
@@ -592,7 +687,11 @@ final class HostPeerSession: NSObject {
 
         // Capture discovery/start and first-frame delivery have their own
         // bounded worker. Keep signaling free to deliver ICE and disconnects.
+        #if DEBUG
+        if !capacityProbeEnabled { try requestCaptureStartup() }
+        #else
         try requestCaptureStartup()
+        #endif
     }
 
     private func startLatencyPolling(_ connection: RTCPeerConnection) {
@@ -816,6 +915,8 @@ final class HostPeerSession: NSObject {
             self.closeStateLock.lock()
             self.ended = true
             #if DEBUG
+            self.capacitySender?.stop()
+            self.capacitySender = nil
             self.stage2KeyframeControl?.invalidate()
             self.stage2State = nil
             self.send10Gate.cancel()
@@ -1896,6 +1997,12 @@ extension HostPeerSession: RTCPeerConnectionDelegate {
     func peerConnection(_ peerConnection: RTCPeerConnection, didGenerate candidate: RTCIceCandidate) {
         diagnosticLock.lock()
         diagnosticLocal.record(candidate.sdp)
+        #if DEBUG
+        if capacityProbeEnabled, capacityLANAddress == nil,
+           let mapping = HostMappingCandidate(sdp: candidate.sdp, mid: candidate.sdpMid, lineIndex: candidate.sdpMLineIndex) {
+            capacityLANAddress = mapping.lanAddress
+        }
+        #endif
         diagnosticLock.unlock()
         bufferOrSendLocalICE(signalingPayload(for: candidate))
         portMappingSession?.gather(sdp: candidate.sdp, mid: candidate.sdpMid, lineIndex: candidate.sdpMLineIndex)
@@ -1957,6 +2064,10 @@ extension HostPeerSession: RTCDataChannelDelegate {
             closeStateLock.unlock()
             guard isCurrentChannel else { return }
             inputAuthorization.closeChannel(ObjectIdentifier(dataChannel))
+            #if DEBUG
+            closeStateLock.lock(); let capacity = capacitySender; closeStateLock.unlock()
+            capacity?.stop()
+            #endif
             stopClientCursor()
         }
     }
@@ -1983,6 +2094,7 @@ extension HostPeerSession: RTCDataChannelDelegate {
             }
             return
         }
+        if consumeCapacityMessage(buffer.data, channel: dataChannel) { return }
         if let receiveTime,
            inputAuthorization.inputSession(for: ObjectIdentifier(dataChannel)) != nil,
            let object = (try? JSONSerialization.jsonObject(with: buffer.data)) as? [String: Any],
