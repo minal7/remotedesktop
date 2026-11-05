@@ -750,7 +750,7 @@ final class HostPeerSession: NSObject {
         guard send10Enabled, !ended, peerConnection === connection, send10Timer == nil else { closeStateLock.unlock(); return }
         let timer = DispatchSource.makeTimerSource(queue: DispatchQueue(label: "host.latency.send10"))
         send10Timer = timer
-        timer.schedule(deadline: .now(), repeating: .milliseconds(100), leeway: .milliseconds(2))
+        timer.schedule(deadline: .now(), repeating: .milliseconds(90), leeway: .milliseconds(2))
         timer.setEventHandler { [weak self, weak connection] in
             guard let self, let connection else { return }
             self.closeStateLock.lock()
