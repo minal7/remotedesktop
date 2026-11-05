@@ -329,6 +329,12 @@ final class HostPeerSession: NSObject {
     private let latencyF1Nonce: String?
     private let onLatencyF1RestartRequest: (@Sendable (String, @escaping @Sendable () -> Void) -> Void)?
     private let latencyCapabilities: LatencyLabConfiguration
+    private let stage2Enabled: Bool
+    private let stage2KeyframeControl: LatencyKeyframeControl?
+    private var stage2State: LatencyLabSenderPolicy.Stage2State?
+    private var stage2CaptureFrames: UInt64 = 0
+    private var stage2CodecAllowed = false
+    private var stage2LossUnavailableLogged = false
     private var f3AppliedPath: LatencyLabSenderPolicy.Path?
     private var f3OriginalPriorities: [(LKRTCPriority, Double)]?
     #endif
@@ -448,13 +454,29 @@ final class HostPeerSession: NSObject {
         #if DEBUG
         let observeEncodedBytes: ((Int) -> Void)? = labInstrumentation && LatencyStatsCollector.enabled && !LatencyStatsCollector.resourcesOnly
             ? { [weak stats] bytes in stats?.recordEncodedFrameBytes(bytes) } : nil
+        let enableStage2 = LatencyLabSenderPolicy.stage2Allowed(labInstrumentation: labInstrumentation && !LatencyStatsCollector.resourcesOnly,
+            ordinaryPeer: acceptedOrdinaryPeer, arguments: ProcessInfo.processInfo.arguments,
+            environment: ProcessInfo.processInfo.environment)
+        self.stage2Enabled = enableStage2
+        self.stage2State = enableStage2 ? LatencyLabSenderPolicy.Stage2State(candidate: enableF3) : nil
+        let keyframeControl: LatencyKeyframeControl? = enableStage2 && enableF3 ? LatencyKeyframeControl { [weak stats] event in
+            stats?.trace(["type": "stage2_keyframe", "time": ProcessInfo.processInfo.systemUptime,
+                          "event": event.rawValue])
+        } : nil
+        self.stage2KeyframeControl = keyframeControl
         #else
         let observeEncodedBytes: ((Int) -> Void)? = nil
+        #endif
+        #if DEBUG
+        let encoderFactory = DesktopVideoEncoderFactory(f2Enabled: enableF2, frameByteObserver: observeEncodedBytes,
+                                                        keyframeControl: keyframeControl)
+        #else
+        let encoderFactory = DesktopVideoEncoderFactory(f2Enabled: enableF2, frameByteObserver: observeEncodedBytes)
         #endif
         self.factory = RTCPeerConnectionFactory(
             audioDeviceModuleType: .audioEngine,
             bypassVoiceProcessing: true,
-            encoderFactory: DesktopVideoEncoderFactory(f2Enabled: enableF2, frameByteObserver: observeEncodedBytes),
+            encoderFactory: encoderFactory,
             decoderFactory: DesktopVideoDecoderFactory(),
             audioProcessingModule: nil)
         let voiceProcessingStatus = factory.audioDeviceModule.setVoiceProcessingEnabled(false)
@@ -515,6 +537,15 @@ final class HostPeerSession: NSObject {
         try configureLocalMedia(on: peerConnection)
         let answer = try await createAnswer(on: peerConnection)
         try await setLocalDescription(answer, on: peerConnection)
+        #if DEBUG
+        let stage2Supported = DesktopVideoQuality.supportsAdaptive60(answerSDP: answer.sdp)
+        closeStateLock.lock()
+        stage2CodecAllowed = stage2Supported
+        closeStateLock.unlock()
+        if stage2Enabled && !stage2Supported {
+            neutralizeStage2(peerConnection, at: ProcessInfo.processInfo.systemUptime, reason: .codecUnavailable)
+        }
+        #endif
         let codecs = videoSender?.parameters.codecs ?? []
         let capturePolicy = DesktopVideoQuality.capturePolicy(
             negotiatedCodecs: codecs, f2Requested: latencyF2Enabled)
@@ -569,6 +600,12 @@ final class HostPeerSession: NSObject {
             guard let self, let connection, !self.isEnded else { return }
             #if DEBUG
             let time = ProcessInfo.processInfo.systemUptime
+            let capturedFramesAtPoll: UInt64
+            if self.stage2Enabled {
+                self.closeStateLock.lock()
+                capturedFramesAtPoll = self.stage2CaptureFrames
+                self.closeStateLock.unlock()
+            } else { capturedFramesAtPoll = 0 }
             self.latencyStats.flushEncodedFrameSizes(at: time)
             if let cpu = cpuSampler.sample(at: time) {
                 self.latencyStats.trace(["type": "resource", "time": time,
@@ -583,7 +620,10 @@ final class HostPeerSession: NSObject {
                     LatencyStatsReport(id: $0.id, type: $0.type, values: $0.values)
                 }
                 #if DEBUG
-                self.applyLatencySenderPolicy(items, connection: connection)
+                let reportTimes = Dictionary(report.statistics.values.map { ($0.id, $0.timestamp_us) },
+                                             uniquingKeysWith: { first, _ in first })
+                self.applyLatencySenderPolicy(items, connection: connection, sampledAt: time, capturedFrames: capturedFramesAtPoll,
+                                              reportTimestampUs: report.timestamp_us, reportTimes: reportTimes)
                 #endif
                 self.latencyStats.ingest(items, at: ProcessInfo.processInfo.systemUptime)
                 if shouldLog {
@@ -596,7 +636,13 @@ final class HostPeerSession: NSObject {
     }
 
     #if DEBUG
-    private func applyLatencySenderPolicy(_ reports: [LatencyStatsReport], connection: RTCPeerConnection) {
+    private func applyLatencySenderPolicy(_ reports: [LatencyStatsReport], connection: RTCPeerConnection, sampledAt: Double, capturedFrames: UInt64,
+                                          reportTimestampUs: Double, reportTimes: [String: Double]) {
+        if stage2Enabled {
+            applyStage2(reports, connection: connection, sampledAt: sampledAt, capturedFrames: capturedFrames,
+                        reportTimestampUs: reportTimestampUs, reportTimes: reportTimes)
+            return
+        }
         guard latencyF3Enabled, let path = LatencyLabSenderPolicy.selectedPath(in: reports) else { return }
         closeStateLock.lock(); defer { closeStateLock.unlock() }
         guard !ended, peerConnection === connection, let videoSender, f3AppliedPath != path else { return }
@@ -624,6 +670,79 @@ final class HostPeerSession: NSObject {
                            "localType": path.localType, "remoteType": path.remoteType,
                            "minimumBitrate": path.minimumBitrate, "startingBitrate": path.startingBitrate,
                            "maximumBitrate": path.maximumBitrate, "highPriority": path.isLAN])
+    }
+
+    private func neutralizeStage2(_ connection: RTCPeerConnection, at time: Double,
+                                  reason: LatencyLabSenderPolicy.Stage2Action.Reason) {
+        closeStateLock.lock(); defer { closeStateLock.unlock() }
+        guard !ended, peerConnection === connection, var state = stage2State else { return }
+        let decision = state.unavailable(at: time, reason: reason) { action in
+            connection.setBweMinBitrateBps(NSNumber(value: action.floor), currentBitrateBps: nil, maxBitrateBps: nil)
+        }
+        stage2State = state
+        if let decision {
+            latencyStats.trace(["type": "stage2_floor", "time": time, "reason": reason.rawValue,
+                                "floorBps": 0, "applied": decision.applied])
+        }
+    }
+
+    private func applyStage2(_ reports: [LatencyStatsReport], connection: RTCPeerConnection, sampledAt: Double, capturedFrames: UInt64,
+                             reportTimestampUs: Double, reportTimes: [String: Double]) {
+        let now = ProcessInfo.processInfo.systemUptime
+        guard sampledAt.isFinite, now >= sampledAt, now - sampledAt <= 2 else { return }
+        closeStateLock.lock(); let supported = !ended && peerConnection === connection && stage2CodecAllowed; closeStateLock.unlock()
+        guard supported else { neutralizeStage2(connection, at: sampledAt, reason: .codecUnavailable); return }
+        guard let path = LatencyLabSenderPolicy.selectedPath(in: reports) else {
+            neutralizeStage2(connection, at: sampledAt, reason: .pathUnavailable); return
+        }
+        let video = reports.filter { report in
+            report.type == "outbound-rtp" && (report.values["kind"] as? String ?? report.values["mediaType"] as? String) == "video"
+        }
+        guard video.count == 1, let outbound = video.first,
+              let frames = (outbound.values["framesEncoded"] as? NSNumber)?.doubleValue else { return }
+        let remote = reports.filter { report in
+            report.type == "remote-inbound-rtp" && ((report.values["localId"] as? String) == outbound.id ||
+                (outbound.values["remoteId"] as? String) == report.id)
+        }
+        guard remote.count <= 1 else { return }
+        let selected = reports.first { $0.id == path.id && $0.type == "candidate-pair" }
+        func number(_ report: LatencyStatsReport?, _ key: String) -> Double? {
+            (report?.values[key] as? NSNumber)?.doubleValue
+        }
+        closeStateLock.lock(); defer { closeStateLock.unlock() }
+        guard !ended, peerConnection === connection, stage2CodecAllowed, videoSender != nil,
+              var next = stage2State else { return }
+        let fraction = number(remote.first, "fractionLost")
+        let remoteTimestamp = remote.first.flatMap { reportTimes[$0.id] }
+        if fraction == nil || remoteTimestamp == nil {
+            if !stage2LossUnavailableLogged {
+                latencyStats.trace(["type": "stage2_loss", "time": now, "status": "unavailable"])
+                stage2LossUnavailableLogged = true
+            }
+        } else { stage2LossUnavailableLogged = false }
+        let sample = LatencyLabSenderPolicy.Stage2Sample(time: sampledAt, path: path, outboundID: outbound.id,
+            remoteID: remote.first?.id, captureFrames: capturedFrames, framesEncoded: frames,
+            rttSeconds: number(selected, "currentRoundTripTime"), rttResponses: number(selected, "responsesReceived"),
+            fractionLost: fraction, lossTimestampUs: remoteTimestamp, reportTimestampUs: reportTimestampUs,
+            targetBitrate: number(outbound, "targetBitrate"))
+        let decision = next.apply(sample) { action in
+            connection.setBweMinBitrateBps(NSNumber(value: action.floor),
+                currentBitrateBps: action.current.map { NSNumber(value: $0) },
+                maxBitrateBps: NSNumber(value: path.maximumBitrate))
+        }
+        stage2State = next
+        guard let decision else { return }
+        let action = decision.action
+        var event: [String: Any] = ["type": "stage2_floor", "time": now, "reason": action.reason.rawValue,
+                                    "floorBps": action.floor, "applied": decision.applied,
+                                    "localType": path.localType, "remoteType": path.remoteType]
+        if let current = action.current { event["currentBps"] = current }
+        latencyStats.trace(event)
+        if action.reason == .stall && decision.applied {
+            let result = stage2KeyframeControl?.requestKeyframe()
+            latencyStats.trace(["type": "stage2_keyframe", "time": now, "event": "requested",
+                                "result": result?.rawValue ?? "unavailable"])
+        }
     }
     #endif
 
@@ -655,6 +774,10 @@ final class HostPeerSession: NSObject {
             self.portMappingSession?.close()
             self.closeStateLock.lock()
             self.ended = true
+            #if DEBUG
+            self.stage2KeyframeControl?.invalidate()
+            self.stage2State = nil
+            #endif
             self.latencyTimer?.cancel()
             self.latencyTimer = nil
             self.cursorRequested = false
@@ -826,7 +949,7 @@ final class HostPeerSession: NSObject {
     static func lab60Allowed(labInstrumentation: Bool, ordinaryPeer: Bool, clientRequested: Bool, f2Enabled: Bool, f3Enabled: Bool,
                              arguments: [String], environment: [String: String], codecName: String?,
                              profileLevelID: String?, packetizationMode: String?) -> Bool {
-        guard labInstrumentation, ordinaryPeer, clientRequested, !f2Enabled, !f3Enabled,
+        guard labInstrumentation, ordinaryPeer, clientRequested,
               Array(arguments.dropFirst()) == [DebugResidentHostConfiguration.latencyArgument],
               let rawID = environment[DebugResidentHostConfiguration.latencyIdentityEnvironmentKey],
               rawID.utf8.count == 36, UUID(uuidString: rawID) != nil,
@@ -1244,6 +1367,13 @@ final class HostPeerSession: NSObject {
     }
 
     private func pushVideoFrame(_ captured: CapturedVideoFrame) {
+        #if DEBUG
+        if stage2Enabled {
+            closeStateLock.lock()
+            if !ended { stage2CaptureFrames &+= 1 }
+            closeStateLock.unlock()
+        }
+        #endif
         if labInstrumentation && LatencyStatsCollector.enabled {
             let display = CMTimeGetSeconds(CMClockMakeHostTimeFromSystemUnits(captured.metadata.displayTimeHostTicks))
             let now = CMTimeGetSeconds(CMClockGetTime(CMClockGetHostTimeClock()))
@@ -1734,12 +1864,13 @@ extension HostPeerSession: RTCPeerConnectionDelegate {
         switch stateChanged {
         case .connected:
             #if DEBUG
-            if latencyF3Enabled {
+            if latencyF3Enabled && !stage2Enabled {
                 peerConnection.statistics { [weak self, weak peerConnection] report in
                     guard let self, let peerConnection else { return }
                     self.applyLatencySenderPolicy(report.statistics.values.map {
                         LatencyStatsReport(id: $0.id, type: $0.type, values: $0.values)
-                    }, connection: peerConnection)
+                    }, connection: peerConnection, sampledAt: ProcessInfo.processInfo.systemUptime, capturedFrames: 0,
+                       reportTimestampUs: report.timestamp_us, reportTimes: [:])
                 }
             }
             #endif
