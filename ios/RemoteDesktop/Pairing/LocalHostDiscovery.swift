@@ -1,6 +1,75 @@
 import CloudKit
 import CryptoKit
 import Foundation
+import Network
+
+/// Decides whether a Mac found over Bonjour shares a real network with this device.
+/// Bonjour also answers over a USB cable, where both sides hold only link-local
+/// addresses, so being found does not mean being on the same network.
+enum SharedNetwork {
+    struct Subnet: Equatable {
+        let address: [UInt8]
+        let mask: [UInt8]
+
+        func contains(_ peer: [UInt8]) -> Bool {
+            guard peer.count == address.count, mask.count == address.count else { return false }
+            return zip(zip(peer, address), mask).allSatisfy { pair, mask in
+                pair.0 & mask == pair.1 & mask
+            }
+        }
+    }
+
+    static func isLinkLocal(_ address: [UInt8]) -> Bool {
+        switch address.count {
+        case 4: return address[0] == 169 && address[1] == 254
+        case 16: return address[0] == 0xFE && address[1] & 0xC0 == 0x80
+        default: return true
+        }
+    }
+
+    /// Raw IPv4 or IPv6 bytes from a socket address, as NetService reports them.
+    static func ipBytes(fromSocketAddress data: Data) -> [UInt8]? {
+        guard data.count >= 2 else { return nil }
+        let bytes = [UInt8](data)
+        switch Int32(bytes[1]) {
+        case AF_INET where bytes.count >= 8: return Array(bytes[4..<8])
+        case AF_INET6 where bytes.count >= 24: return Array(bytes[8..<24])
+        default: return nil
+        }
+    }
+
+    static func isShared(peerAddresses: [Data], subnets: [Subnet]) -> Bool {
+        peerAddresses.compactMap(ipBytes(fromSocketAddress:)).contains { peer in
+            !isLinkLocal(peer) && subnets.contains { $0.contains(peer) }
+        }
+    }
+
+    /// Wi-Fi and Ethernet subnets this device is on now. Cellular and VPN never count.
+    static func currentSubnets() -> [Subnet] {
+        var head: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&head) == 0, let first = head else { return [] }
+        defer { freeifaddrs(head) }
+        var subnets: [Subnet] = []
+        for entry in sequence(first: first, next: { $0.pointee.ifa_next }) {
+            let item = entry.pointee
+            let required = UInt32(IFF_UP | IFF_RUNNING)
+            guard item.ifa_flags & required == required,
+                  String(cString: item.ifa_name).hasPrefix("en"),
+                  let addressPointer = item.ifa_addr,
+                  let maskPointer = item.ifa_netmask else { continue }
+            let length = Int(addressPointer.pointee.sa_len)
+            let address = Data(bytes: addressPointer, count: length)
+            guard let bytes = ipBytes(fromSocketAddress: address), !isLinkLocal(bytes) else { continue }
+            // Netmask entries can be shorter than a full socket address; the rest is zero.
+            var maskData = Data(bytes: maskPointer, count: Int(maskPointer.pointee.sa_len))
+            if maskData.count < length { maskData.append(Data(count: length - maskData.count)) }
+            maskData[1] = address[1]
+            guard let mask = ipBytes(fromSocketAddress: maskData) else { continue }
+            subnets.append(Subnet(address: bytes, mask: mask))
+        }
+        return subnets
+    }
+}
 
 struct LocalHostAdvertisement: Identifiable, Equatable {
     static let serviceType = "_remotedesktop._tcp."
@@ -28,6 +97,14 @@ struct LocalHostAdvertisement: Identifiable, Equatable {
     /// Opaque owner of the private CloudKit snapshot that authenticated this
     /// row. Bonjour never supplies or overrides this value.
     let accountBinding: CloudKitAccountBinding?
+    /// The Mac has an address on a network this device is on right now.
+    let isOnSharedNetwork: Bool
+
+    /// Video and control use iCloud signaling either way, so this only says
+    /// whether the two devices are on the same network.
+    var availabilityTitle: String {
+        isOnSharedNetwork ? "Ready nearby" : "Ready through iCloud"
+    }
 
     var canOfferComputerUse: Bool {
         guard senderID?.isEmpty == false else { return false }
@@ -89,8 +166,10 @@ struct LocalHostAdvertisement: Identifiable, Equatable {
         hasAuthenticatedCloudMatch: Bool? = nil,
         accountBinding: CloudKitAccountBinding? = nil,
         localEndpoint: LocalComputerUseEndpoint? = nil,
-        localCredentialID: String? = nil
+        localCredentialID: String? = nil,
+        isOnSharedNetwork: Bool = false
     ) {
+        self.isOnSharedNetwork = isOnSharedNetwork
         self.hostname = hostname
         self.code = code
         self.source = source
@@ -208,6 +287,20 @@ struct LocalHostNearbyServiceStore {
 
     var hosts: [LocalHostAdvertisement] {
         Array(advertisements.values)
+    }
+
+    /// The advertisements, marked with whether each Mac is on one of these subnets.
+    func hosts(on subnets: [SharedNetwork.Subnet]) -> [LocalHostAdvertisement] {
+        advertisements.map { key, host in
+            let shared = SharedNetwork.isShared(
+                peerAddresses: instances[key]?.addresses ?? [], subnets: subnets)
+            return LocalHostAdvertisement(
+                hostname: host.hostname, code: host.code, source: host.source,
+                senderID: host.senderID, computerUseCapability: host.computerUseCapability,
+                hasAuthenticatedCloudMatch: host.hasAuthenticatedCloudMatch,
+                accountBinding: host.accountBinding, localEndpoint: host.localEndpoint,
+                localCredentialID: host.localCredentialID, isOnSharedNetwork: shared)
+        }
     }
 
     mutating func retain(_ service: NetService) {
@@ -407,6 +500,10 @@ final class LocalHostDiscovery: NSObject, ObservableObject {
         LocalCloudAccountPairingStatus?
 
     private let browser = NetServiceBrowser()
+    private var pathMonitor: NWPathMonitor?
+    #if DEBUG
+    private var lastDiscoverySummary = ""
+    #endif
     private var nearbyServices = LocalHostNearbyServiceStore()
     private var ckHosts: [LocalHostAdvertisement] = []
     private var ckTask: Task<Void, Never>?
@@ -464,11 +561,21 @@ final class LocalHostDiscovery: NSObject, ObservableObject {
             return
         }
         browser.searchForServices(ofType: LocalHostAdvertisement.serviceType, inDomain: "local.")
+        // Joining or leaving a network changes what counts as nearby.
+        pathMonitor?.cancel()
+        let monitor = NWPathMonitor()
+        monitor.pathUpdateHandler = { [weak self] _ in
+            Task { @MainActor in self?.syncHosts() }
+        }
+        monitor.start(queue: .global(qos: .utility))
+        pathMonitor = monitor
 
         startCloudKitPolling()
     }
 
     func stop() {
+        pathMonitor?.cancel()
+        pathMonitor = nil
         discoveryGeneration &+= 1
         isDiscovering = false
         browser.stop()
@@ -698,9 +805,17 @@ final class LocalHostDiscovery: NSObject, ObservableObject {
     }
 
     private func syncHosts() {
+        let subnets = SharedNetwork.currentSubnets()
         hosts = Self.mergedHosts(
-            localHosts: nearbyServices.hosts,
+            localHosts: nearbyServices.hosts(on: subnets),
             cloudHosts: ckHosts)
+        #if DEBUG
+        let summary = "discovery subnets=\(subnets.map(\.address)) peers=\(nearbyServices.instances.values.map { ($0.addresses ?? []).compactMap(SharedNetwork.ipBytes(fromSocketAddress:)) }) rows=\(hosts.map(\.availabilityTitle))"
+        if summary != lastDiscoverySummary {
+            lastDiscoverySummary = summary
+            SessionEventLog.record(summary)
+        }
+        #endif
         reconcileAutomaticLocalPairing()
     }
 
@@ -935,6 +1050,8 @@ final class LocalHostDiscovery: NSObject, ObservableObject {
             grouping: localHosts.filter { $0.senderID?.isEmpty != false },
             by: \.code).mapValues(\.count)
 
+        // The same Mac can be found over Wi-Fi and over a cable. Either way it counts if one is real.
+        let sharedNetworkIDs = Set(localHosts.filter(\.isOnSharedNetwork).map(\.id))
         var appliedNearbyIdentities: Set<String> = []
         for localHost in localHosts.sorted(by: hostMergeInputSortsBefore) {
             if let localIdentity = authenticatedIdentity(for: localHost) {
@@ -951,7 +1068,8 @@ final class LocalHostDiscovery: NSObject, ObservableObject {
                         hasAuthenticatedCloudMatch: true,
                         accountBinding: matchingCloud.accountBinding,
                         localEndpoint: localHost.localEndpoint,
-                        localCredentialID: localHost.localCredentialID)
+                        localCredentialID: localHost.localCredentialID,
+                        isOnSharedNetwork: sharedNetworkIDs.contains(localHost.id))
                     if appliedNearbyIdentities.insert(
                         authenticatedNearby.id).inserted {
                         mergedByIdentity[authenticatedNearby.id] =
@@ -982,7 +1100,8 @@ final class LocalHostDiscovery: NSObject, ObservableObject {
                     hasAuthenticatedCloudMatch: true,
                     accountBinding: cloudHost.accountBinding,
                     localEndpoint: localHost.localEndpoint,
-                    localCredentialID: localHost.localCredentialID)
+                    localCredentialID: localHost.localCredentialID,
+                    isOnSharedNetwork: sharedNetworkIDs.contains(localHost.id))
                 if appliedNearbyIdentities.insert(
                     enrichedLegacy.id).inserted {
                     mergedByIdentity[enrichedLegacy.id] = enrichedLegacy

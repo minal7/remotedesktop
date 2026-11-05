@@ -223,6 +223,62 @@ final class InputAndDiscoveryTests: XCTestCase {
         XCTAssertEqual(parsed?.computerUseCapability, .unavailable)
     }
 
+    private func socketAddress(ipv4 bytes: [UInt8]) -> Data {
+        Data([16, UInt8(AF_INET), 0, 0] + bytes + [UInt8](repeating: 0, count: 8))
+    }
+
+    private func socketAddress(ipv6 bytes: [UInt8]) -> Data {
+        Data([28, UInt8(AF_INET6), 0, 0, 0, 0, 0, 0] + bytes + [0, 0, 0, 0])
+    }
+
+    private let wifiSubnet = SharedNetwork.Subnet(address: [192, 168, 4, 20], mask: [255, 255, 252, 0])
+
+    func test_sharedNetwork_macOnSameWiFiCounts() {
+        XCTAssertTrue(SharedNetwork.isShared(
+            peerAddresses: [socketAddress(ipv4: [192, 168, 4, 41])], subnets: [wifiSubnet]))
+    }
+
+    func test_sharedNetwork_macFoundOnlyOverCableDoesNotCount() {
+        let cable = [socketAddress(ipv4: [169, 254, 214, 138]),
+                     socketAddress(ipv6: [0xFE, 0x80] + [UInt8](repeating: 0, count: 13) + [2])]
+        XCTAssertFalse(SharedNetwork.isShared(peerAddresses: cable, subnets: [wifiSubnet]))
+        XCTAssertFalse(SharedNetwork.isShared(peerAddresses: cable, subnets: []))
+        // Link-local is never a shared network, even against a link-local subnet.
+        XCTAssertFalse(SharedNetwork.isShared(peerAddresses: cable, subnets: [
+            SharedNetwork.Subnet(address: [169, 254, 1, 1], mask: [255, 255, 0, 0])]))
+    }
+
+    func test_sharedNetwork_macOnAnotherNetworkDoesNotCount() {
+        XCTAssertFalse(SharedNetwork.isShared(
+            peerAddresses: [socketAddress(ipv4: [192, 168, 8, 41])], subnets: [wifiSubnet]))
+    }
+
+    func test_sharedNetwork_globalIPv6UsesThePrefix() {
+        let prefix: [UInt8] = [0x26, 0x01, 0, 1, 0, 2, 0, 3]
+        let subnet = SharedNetwork.Subnet(
+            address: prefix + [UInt8](repeating: 1, count: 8),
+            mask: [UInt8](repeating: 0xFF, count: 8) + [UInt8](repeating: 0, count: 8))
+        XCTAssertTrue(SharedNetwork.isShared(
+            peerAddresses: [socketAddress(ipv6: prefix + [UInt8](repeating: 9, count: 8))], subnets: [subnet]))
+        XCTAssertFalse(SharedNetwork.isShared(
+            peerAddresses: [socketAddress(ipv6: [0x26, 0x01, 0, 9, 0, 2, 0, 3] + [UInt8](repeating: 9, count: 8))],
+            subnets: [subnet]))
+    }
+
+    func test_availabilityTitle_followsTheNetworkNotHowTheMacWasFound() throws {
+        let cloud = LocalHostAdvertisement(hostname: "Studio Mac", code: "123456", source: .cloudKit,
+                                           senderID: hostID, accountBinding: accountBinding)
+        func row(_ shared: Bool) throws -> LocalHostAdvertisement {
+            let local = LocalHostAdvertisement(hostname: "Studio Mac", code: "123456", source: .localNetwork,
+                                               senderID: hostID, isOnSharedNetwork: shared)
+            return try XCTUnwrap(LocalHostDiscovery.mergedHosts(localHosts: [local], cloudHosts: [cloud]).first)
+        }
+        XCTAssertEqual(try row(false).source, .localNetwork)
+        XCTAssertEqual(try row(false).availabilityTitle, "Ready through iCloud")
+        XCTAssertEqual(try row(true).availabilityTitle, "Ready nearby")
+        XCTAssertEqual(cloud.availabilityTitle, "Ready through iCloud")
+    }
+
     func test_localHostDiscovery_retainsCloudKitMergeForLegacyBonjourHosts() throws {
         let local = try XCTUnwrap(LocalHostAdvertisement.parse(
             serviceName: "Studio Mac [123456]"))

@@ -591,8 +591,7 @@ struct PairingView: View {
     private func hostAvailabilityLabel(
         _ host: LocalHostAdvertisement
     ) -> String {
-        let readiness = host.source == .cloudKit
-            ? "Ready through iCloud" : "Ready nearby"
+        let readiness = host.availabilityTitle
         guard let discriminator = host.presentationDiscriminator else {
             return readiness
         }
