@@ -3,6 +3,9 @@ import Foundation
 import LiveKitWebRTC
 import Network
 import UIKit
+#if DEBUG
+import VideoToolbox
+#endif
 import os
 
 extension ICEConfig {
@@ -255,6 +258,10 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
     private let mediaPolicy: MediaPolicy
     private let requestAdaptive60: Bool
     private var adaptiveSelection = AdaptiveVideoSelection()
+    #if DEBUG
+    private var labHEVCOffered = false
+    private let labHEVCDecoderEnabled: Bool
+    #endif
     var adaptive60Selected: Bool { adaptiveSelection.selected }
 
     struct AdaptiveVideoSelection {
@@ -333,6 +340,11 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
         self.requestAdaptive60 = requestAdaptive60 && mediaPolicy == .remoteSession
         #if DEBUG
         self.labInstrumentation = mediaPolicy == .remoteSession
+        let environment = ProcessInfo.processInfo.environment
+        let labDecoderEnabled = mediaPolicy == .remoteSession && requestAdaptive60 &&
+            environment["LATENCY_LAB"] == "1" && environment["LATENCY_HEVC"] == "1" &&
+            VTIsHardwareDecodeSupported(kCMVideoCodecType_HEVC)
+        self.labHEVCDecoderEnabled = labDecoderEnabled
         self.initialLANPlayoutCap = useLANPlayoutCap
         let labOptedIn = mediaPolicy == .remoteSession && LatencyStatsCollector.enabled
         self.labControlsActive = labOptedIn
@@ -346,11 +358,16 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
         // Field trials are copied into the factory at creation; restore the
         // process setting immediately so later remote factories remain adaptive.
         RTCPeerConnectionFactory.configureFieldTrials(initialTrial)
+        #if DEBUG
+        let initialDecoder = DesktopVideoDecoderFactory(labHEVC: labDecoderEnabled)
+        #else
+        let initialDecoder = DesktopVideoDecoderFactory()
+        #endif
         self.factory = RTCPeerConnectionFactory(
             audioDeviceModuleType: .platformDefault,
             bypassVoiceProcessing: true,
             encoderFactory: DesktopVideoEncoderFactory(),
-            decoderFactory: DesktopVideoDecoderFactory(),
+            decoderFactory: initialDecoder,
             audioProcessingModule: nil)
         RTCPeerConnectionFactory.configureFieldTrials(nil)
         self.signalingFactory = signalingFactory ?? { code, expectedHostID in
@@ -416,7 +433,7 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
                 initialFactoryDelay.map { "WebRTC-ForcePlayoutDelay/min_ms:0,max_ms:\($0)/" })
             factory = RTCPeerConnectionFactory(
                 audioDeviceModuleType: .platformDefault, bypassVoiceProcessing: true,
-                encoderFactory: DesktopVideoEncoderFactory(), decoderFactory: DesktopVideoDecoderFactory(),
+                encoderFactory: DesktopVideoEncoderFactory(), decoderFactory: DesktopVideoDecoderFactory(labHEVC: labHEVCDecoderEnabled),
                 audioProcessingModule: nil)
             RTCPeerConnectionFactory.configureFieldTrials(nil)
             f1FactoryConfigured = false
@@ -514,7 +531,11 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
         if mediaPolicy.receivesHostAudio {
             addReceiveOnlyTransceiver(of: .audio, on: peerConnection)
         }
+        #if DEBUG
+        labHEVCOffered = addReceiveOnlyTransceiver(of: .video, on: peerConnection)
+        #else
         addReceiveOnlyTransceiver(of: .video, on: peerConnection)
+        #endif
 
         let dataChannelConfiguration = RTCDataChannelConfiguration()
         dataChannelConfiguration.isOrdered = true
@@ -529,6 +550,9 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
         try await setLocalDescription(offer, on: peerConnection)
         var offerPayload = ["client": UIDevice.current.name, "sdp": offer.sdp, "sdpType": "offer"]
         if requestAdaptive60 { offerPayload["adaptiveVideo60"] = "1" }
+        #if DEBUG
+        if labHEVCOffered { offerPayload["latencyLabHEVC"] = "1" }
+        #endif
         #if DEBUG
         offerPayload = Self.lab60OfferPayload(offerPayload, environment: ProcessInfo.processInfo.environment,
                                               ordinarySession: mediaPolicy == .remoteSession)
@@ -618,6 +642,17 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
     }
 
     #if DEBUG
+    static func labHEVCAnswerConfirmed(offered: Bool, answer: [String: String], sdp: String) -> Bool {
+        offered && answer["latencyLabHEVC"] == "1" && DesktopVideoQuality.supportsLabHEVC60(answerSDP: sdp)
+    }
+
+    static func labHEVCEnabled(environment: [String: String], ordinarySession: Bool,
+                               adaptiveRequested: Bool, hasDecoder: Bool,
+                               hasHEVCCapability: Bool, hasH264Capability: Bool) -> Bool {
+        environment["LATENCY_LAB"] == "1" && environment["LATENCY_HEVC"] == "1" &&
+            ordinarySession && adaptiveRequested && hasDecoder && hasHEVCCapability && hasH264Capability
+    }
+
     static func lab60OfferPayload(_ payload: [String: String], environment: [String: String],
                                   ordinarySession: Bool) -> [String: String] {
         var payload = payload
@@ -807,10 +842,29 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
         return peerConnection
     }
 
-    private func addReceiveOnlyTransceiver(of mediaType: RTCRtpMediaType, on peerConnection: RTCPeerConnection) {
+    @discardableResult
+    private func addReceiveOnlyTransceiver(of mediaType: RTCRtpMediaType, on peerConnection: RTCPeerConnection) -> Bool {
         let transceiverInit = RTCRtpTransceiverInit()
         transceiverInit.direction = .recvOnly
-        _ = peerConnection.addTransceiver(of: mediaType, init: transceiverInit)
+        guard let transceiver = peerConnection.addTransceiver(of: mediaType, init: transceiverInit) else { return false }
+        #if DEBUG
+        let environment = ProcessInfo.processInfo.environment
+        guard mediaType == .video, requestAdaptive60, mediaPolicy == .remoteSession,
+              environment["LATENCY_LAB"] == "1", environment["LATENCY_HEVC"] == "1" else { return false }
+        let hasDecoder = DesktopVideoDecoderFactory(labHEVC: labHEVCDecoderEnabled).supportedCodecs().contains { $0.name.uppercased() == "H265" }
+        let capabilities = factory.rtpReceiverCapabilities(forKind: "video").codecs
+        let hevc = capabilities.filter { $0.name.uppercased() == "H265" &&
+            $0.parameters["profile-id"] == "1" && $0.parameters["tier-flag"] == "0" &&
+            $0.parameters["level-id"] == "153" }
+        guard Self.labHEVCEnabled(environment: environment, ordinarySession: mediaPolicy == .remoteSession,
+                                  adaptiveRequested: requestAdaptive60, hasDecoder: hasDecoder,
+                                  hasHEVCCapability: !hevc.isEmpty,
+                                  hasH264Capability: capabilities.contains(where: { $0.name.uppercased() == "H264" })) else { return false }
+        let ordered = hevc + capabilities.filter { $0.name.uppercased() != "H265" }
+        do { try transceiver.setCodecPreferences(ordered, error: ()); return true } catch { return false }
+        #else
+        return false
+        #endif
     }
 
     private func configureAudioSession() {
@@ -1017,7 +1071,7 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
             }
             replacementFactory = RTCPeerConnectionFactory(
                 audioDeviceModuleType: .platformDefault, bypassVoiceProcessing: true,
-                encoderFactory: DesktopVideoEncoderFactory(), decoderFactory: DesktopVideoDecoderFactory(),
+                encoderFactory: DesktopVideoEncoderFactory(), decoderFactory: DesktopVideoDecoderFactory(labHEVC: labHEVCDecoderEnabled),
                 audioProcessingModule: nil)
             RTCPeerConnectionFactory.configureFieldTrials(nil)
         } else {
@@ -1051,7 +1105,7 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
                 self.finishDisconnect(reason: "The latency experiment could not reconnect.", category: .peerConnection)
             }
             if mediaPolicy.receivesHostAudio { addReceiveOnlyTransceiver(of: .audio, on: replacement) }
-            addReceiveOnlyTransceiver(of: .video, on: replacement)
+            labHEVCOffered = addReceiveOnlyTransceiver(of: .video, on: replacement)
             let config = RTCDataChannelConfiguration(); config.isOrdered = true; config.isNegotiated = false
             guard let channel = replacement.dataChannel(forLabel: "control", configuration: config) else {
                 throw TransportError.negotiationFailed("The latency experiment could not create its control channel.")
@@ -1065,6 +1119,7 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
             var payload = ["client": UIDevice.current.name, "sdp": offer.sdp, "sdpType": "offer",
                            "latencyF1Restart": nonce]
             if requestAdaptive60 { payload["adaptiveVideo60"] = "1" }
+            if labHEVCOffered { payload["latencyLabHEVC"] = "1" }
             payload = Self.lab60OfferPayload(payload, environment: ProcessInfo.processInfo.environment,
                                              ordinarySession: mediaPolicy == .remoteSession)
             if f2ApplyToReplacement { payload["latencyF2Encoder"] = "1" }
@@ -1223,8 +1278,24 @@ final class WebRTCTransport: NSObject, VideoRenderingTransport {
                         #if DEBUG
                         guard labActiveNonce == answerNonce else { continue }
                         #endif
+                        var supportedAnswer = DesktopVideoQuality.supportsAdaptive60(answerSDP: sdp)
+                        #if DEBUG
+                        if labHEVCOffered {
+                            guard currentPeer else { continue }
+                            guard let primary = DesktopVideoQuality.labAnswerPrimaryCodec(answerSDP: sdp) else {
+                                throw TransportError.negotiationFailed("The video answer could not be validated.")
+                            }
+                            if primary == "H265" {
+                                guard Self.labHEVCAnswerConfirmed(offered: labHEVCOffered,
+                                        answer: envelope.payload, sdp: sdp) else {
+                                    throw TransportError.negotiationFailed("The selected video codec was not confirmed.")
+                                }
+                                supportedAnswer = true
+                            }
+                        }
+                        #endif
                         adaptiveSelection.applyAnswer(requested: requestAdaptive60, answer: envelope.payload,
-                            codecSupported: DesktopVideoQuality.supportsAdaptive60(answerSDP: sdp), currentPeer: currentPeer)
+                            codecSupported: supportedAnswer, currentPeer: currentPeer)
                         guard currentPeer else { continue }
                         answerApplied = true
                         #if DEBUG

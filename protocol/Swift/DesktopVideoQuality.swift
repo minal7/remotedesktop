@@ -128,6 +128,74 @@ enum DesktopVideoQuality {
         return false
     }
 
+    #if DEBUG
+    /// Identify the selected primary codec without trusting advertised sender parameters.
+    static func labAnswerPrimaryCodec(answerSDP: String) -> String? {
+        guard answerSDP.utf8.count <= 1_000_000 else { return nil }
+        let lines = answerSDP.components(separatedBy: .newlines).map {
+            $0.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        let starts = lines.indices.filter { lines[$0].hasPrefix("m=video ") }
+        guard starts.count == 1, let start = starts.first else { return nil }
+        let media = lines[start].split(separator: " ")
+        guard media.count > 3, let port = Int(media[1]), port > 0, port <= 65_535,
+              Set(media.dropFirst(3)).count == media.count - 3 else { return nil }
+        let end = lines[(start + 1)...].firstIndex(where: { $0.hasPrefix("m=") }) ?? lines.endIndex
+        let section = lines[(start + 1)..<end]
+        guard !section.contains("a=inactive"), !section.contains("a=recvonly") else { return nil }
+        for payload in media.dropFirst(3) {
+            let prefix = "a=rtpmap:\(payload) "
+            let mappings = section.filter { $0.hasPrefix(prefix) }
+            guard mappings.count == 1, let mapping = mappings.first,
+                  let name = mapping.dropFirst(prefix.count).split(separator: "/").first else { return nil }
+            let codec = name.uppercased()
+            if ["RTX", "RED", "ULPFEC", "FLEXFEC-03"].contains(codec) { continue }
+            return codec
+        }
+        return nil
+    }
+
+    /// Lab-only: accept only the explicitly supported negotiated HEVC profile.
+    static func supportsLabHEVC60(answerSDP: String) -> Bool {
+        guard answerSDP.utf8.count <= 1_000_000 else { return false }
+        let lines = answerSDP.components(separatedBy: .newlines).map {
+            $0.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        let videoSections = lines.indices.filter { lines[$0].hasPrefix("m=video ") }
+        guard videoSections.count == 1, let videoStart = videoSections.first else { return false }
+        let media = lines[videoStart].split(separator: " ")
+        guard media.count > 3, let port = Int(media[1]), port > 0, port <= 65_535,
+              Set(media.dropFirst(3)).count == media.count - 3 else { return false }
+        let end = lines[(videoStart + 1)...].firstIndex(where: { $0.hasPrefix("m=") }) ?? lines.endIndex
+        let section = lines[(videoStart + 1)..<end]
+        guard !section.contains("a=inactive"), !section.contains("a=recvonly") else { return false }
+        for payload in media.dropFirst(3) {
+            let prefix = "a=rtpmap:\(payload) "
+            let mappings = section.filter { $0.hasPrefix(prefix) }
+            guard mappings.count == 1, let mapping = mappings.first else { return false }
+            let name = mapping.dropFirst(prefix.count).split(separator: "/").first.map(String.init) ?? ""
+            if ["RTX", "RED", "ULPFEC", "FLEXFEC-03"].contains(name.uppercased()) { continue }
+            let fmtpPrefix = "a=fmtp:\(payload) "
+            let formatParameters = section.filter { $0.hasPrefix(fmtpPrefix) }
+            guard formatParameters.count == 1, let fmtp = formatParameters.first else { return false }
+            let pairs = fmtp.dropFirst(fmtpPrefix.count).split(separator: ";")
+            var parameters: [String: String] = [:]
+            for pair in pairs {
+                let parts = pair.split(separator: "=", maxSplits: 1).map {
+                    $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+                }
+                guard parts.count == 2, parameters[parts[0]] == nil else { return false }
+                parameters[parts[0]] = parts[1]
+            }
+            return name.uppercased() == "H265" && parameters["profile-id"] == "1" &&
+                parameters["tier-flag"] == "0" && parameters["level-id"] == "153" &&
+                (parameters["tx-mode"] == nil || parameters["tx-mode"] == "srst")
+        }
+        return false
+    }
+
+    #endif
+
     static let adaptivePolicy = SenderPolicy(maximumFramesPerSecond: adaptiveFramesPerSecond,
                                              maximumBitrateBps: maximumBitrateBps,
                                              degradationPreference: .maintainFramerate)
@@ -476,6 +544,10 @@ final class LatencyObservedVideoEncoder: NSObject, LKRTCVideoEncoder {
 
 final class DesktopVideoDecoderFactory: NSObject, LKRTCVideoDecoderFactory {
     private let base = LKRTCDefaultVideoDecoderFactory()
+    #if DEBUG
+    private let labHEVC: Bool
+    init(labHEVC: Bool = false) { self.labHEVC = labHEVC; super.init() }
+    #endif
 
     func createDecoder(
         _ info: LKRTCVideoCodecInfo
@@ -484,6 +556,19 @@ final class DesktopVideoDecoderFactory: NSObject, LKRTCVideoDecoderFactory {
     }
 
     func supportedCodecs() -> [LKRTCVideoCodecInfo] {
-        DesktopVideoQuality.upgradedCodecs(base.supportedCodecs())
+        let codecs = DesktopVideoQuality.upgradedCodecs(base.supportedCodecs())
+        #if DEBUG
+        guard labHEVC else { return codecs }
+        return codecs.map { codec in
+            guard codec.name.uppercased() == "H265" else { return codec }
+            var parameters = codec.parameters
+            parameters["profile-id"] = "1"
+            parameters["tier-flag"] = "0"
+            parameters["level-id"] = "153"
+            return LKRTCVideoCodecInfo(name: codec.name, parameters: parameters, scalabilityModes: codec.scalabilityModes)
+        }
+        #else
+        return codecs
+        #endif
     }
 }

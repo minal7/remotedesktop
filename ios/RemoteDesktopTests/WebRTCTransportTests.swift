@@ -32,6 +32,63 @@ final class WebRTCTransportTests: XCTestCase {
         XCTAssertFalse(state.selected, "A late answer cannot revive a closed connection")
     }
 
+    func test_labHEVCRequiresBothFlagsOrdinaryAdaptiveAndBothDecoders() {
+        let enabled = ["LATENCY_LAB": "1", "LATENCY_HEVC": "1"]
+        func admitted(_ env: [String: String], _ ordinary: Bool = true, _ adaptive: Bool = true,
+                      _ decoder: Bool = true, _ hevc: Bool = true, _ h264: Bool = true) -> Bool {
+            WebRTCTransport.labHEVCEnabled(environment: env, ordinarySession: ordinary, adaptiveRequested: adaptive,
+                                           hasDecoder: decoder, hasHEVCCapability: hevc, hasH264Capability: h264)
+        }
+        XCTAssertTrue(admitted(enabled))
+        XCTAssertFalse(admitted([:]))
+        XCTAssertFalse(admitted(["LATENCY_HEVC": "1"]))
+        XCTAssertFalse(admitted(["LATENCY_LAB": "1"]))
+        XCTAssertFalse(admitted(enabled, false))
+        XCTAssertFalse(admitted(enabled, true, false))
+        XCTAssertFalse(admitted(enabled, true, true, false))
+        XCTAssertFalse(admitted(enabled, true, true, true, false))
+        XCTAssertFalse(admitted(enabled, true, true, true, true, false))
+    }
+
+    func test_labHEVCRequiresExactNegotiatedAnswer() {
+        let sdp = "m=video 9 UDP/TLS/RTP/SAVPF 98 99\r\na=sendonly\r\na=rtpmap:98 H265/90000\r\na=fmtp:98 profile-id=1;tier-flag=0;level-id=153;tx-mode=SRST\r\na=rtpmap:99 H264/90000\r\na=fmtp:99 profile-level-id=640c33;packetization-mode=1\r\n"
+        XCTAssertTrue(DesktopVideoQuality.supportsLabHEVC60(answerSDP: sdp))
+        XCTAssertEqual(DesktopVideoQuality.labAnswerPrimaryCodec(answerSDP: sdp), "H265")
+        XCTAssertTrue(WebRTCTransport.labHEVCAnswerConfirmed(offered: true, answer: ["latencyLabHEVC": "1"], sdp: sdp))
+        XCTAssertFalse(WebRTCTransport.labHEVCAnswerConfirmed(offered: false, answer: ["latencyLabHEVC": "1"], sdp: sdp))
+        XCTAssertFalse(WebRTCTransport.labHEVCAnswerConfirmed(offered: true, answer: [:], sdp: sdp))
+        XCTAssertFalse(WebRTCTransport.labHEVCAnswerConfirmed(offered: true, answer: ["latencyLabHEVC": "true"], sdp: sdp))
+        for invalid in [sdp.replacingOccurrences(of: "level-id=153", with: "level-id=120"),
+                        sdp.replacingOccurrences(of: "profile-id=1", with: "profile-id=2"),
+                        sdp.replacingOccurrences(of: "tier-flag=0", with: "tier-flag=1"),
+                        sdp.replacingOccurrences(of: "sendonly", with: "inactive"),
+                        sdp.replacingOccurrences(of: "level-id=153", with: "level-id=153;level-id=153"),
+                        sdp.replacingOccurrences(of: "H265/90000", with: "VP8/90000")] {
+            XCTAssertFalse(DesktopVideoQuality.supportsLabHEVC60(answerSDP: invalid))
+        }
+        XCTAssertFalse(DesktopVideoQuality.supportsAdaptive60(answerSDP: sdp))
+        let h264Fallback = sdp.replacingOccurrences(of: "SAVPF 98 99", with: "SAVPF 99 98")
+        XCTAssertEqual(DesktopVideoQuality.labAnswerPrimaryCodec(answerSDP: h264Fallback), "H264")
+        XCTAssertTrue(DesktopVideoQuality.supportsAdaptive60(answerSDP: h264Fallback))
+        XCTAssertFalse(DesktopVideoQuality.supportsLabHEVC60(answerSDP: h264Fallback))
+    }
+
+    func test_labHEVCDecoderFactoryRetainsFallbackAndCreatesAdvertisedDecoder() throws {
+        let baseline = DesktopVideoDecoderFactory().supportedCodecs()
+        let factory = DesktopVideoDecoderFactory(labHEVC: true)
+        let promoted = factory.supportedCodecs()
+        XCTAssertEqual(baseline.filter { $0.name.uppercased() == "H264" }.count,
+                       promoted.filter { $0.name.uppercased() == "H264" }.count)
+        guard baseline.contains(where: { $0.name.uppercased() == "H265" }) else {
+            throw XCTSkip("Bundled decoder does not advertise H265 on this simulator")
+        }
+        let hevc = try XCTUnwrap(promoted.first { $0.name.uppercased() == "H265" })
+        XCTAssertEqual(hevc.parameters["profile-id"], "1")
+        XCTAssertEqual(hevc.parameters["tier-flag"], "0")
+        XCTAssertEqual(hevc.parameters["level-id"], "153")
+        XCTAssertNotNil(factory.createDecoder(hevc))
+    }
+
     func test_lab60OfferRequiresBothFlagsAndOrdinarySession() {
         let payload = ["sdpType": "offer"]
         let enabled = ["LATENCY_LAB": "1", "LATENCY_QOS_FPS": "60"]
