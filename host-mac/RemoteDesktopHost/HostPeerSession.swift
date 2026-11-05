@@ -753,24 +753,24 @@ final class HostPeerSession: NSObject {
         timer.schedule(deadline: .now(), repeating: .milliseconds(90), leeway: .milliseconds(2))
         timer.setEventHandler { [weak self, weak connection] in
             guard let self, let connection else { return }
-            self.closeStateLock.lock()
-            guard !self.ended, self.peerConnection === connection, let token = self.send10Gate.begin() else {
-                self.closeStateLock.unlock(); return
-            }
-            let requested = ProcessInfo.processInfo.systemUptime
-            self.latencyStats.trace(["type": "send_10hz_request", "time": requested])
-            connection.statistics { [weak self, weak connection] report in
+            LabSendPollInvocation.start(reserve: { () -> (UInt64, TimeInterval)? in
+                self.closeStateLock.lock(); defer { self.closeStateLock.unlock() }
+                guard !self.ended, self.peerConnection === connection, let token = self.send10Gate.begin() else { return nil }
+                return (token, ProcessInfo.processInfo.systemUptime)
+            }, invoke: { reservation, completion in
+                self.latencyStats.trace(["type": "send_10hz_request", "time": reservation.1])
+                connection.statistics(completionHandler: completion)
+            }, complete: { [weak self, weak connection] reservation, report in
                 guard let self, let connection else { return }
                 let completed = ProcessInfo.processInfo.systemUptime
                 let reports = report.statistics.values.map { LatencyStatsReport(id: $0.id, type: $0.type, values: $0.values) }
                 let times = Dictionary(report.statistics.values.map { ($0.id, $0.timestamp_us) }, uniquingKeysWith: { first, _ in first })
                 self.closeStateLock.lock(); defer { self.closeStateLock.unlock() }
-                guard !self.ended, self.peerConnection === connection, self.send10Gate.finish(token) else { return }
-                let row = self.send10Sampler.sample(request: requested, completion: completed,
+                guard !self.ended, self.peerConnection === connection, self.send10Gate.finish(reservation.0) else { return }
+                let row = self.send10Sampler.sample(request: reservation.1, completion: completed,
                     reportTimestampUs: report.timestamp_us, reports: reports, times: times)
                 self.latencyStats.trace(row)
-            }
-            self.closeStateLock.unlock()
+            })
         }
         timer.resume()
         closeStateLock.unlock()

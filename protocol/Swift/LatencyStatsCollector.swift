@@ -57,6 +57,17 @@ struct LabSendPollGate {
     mutating func cancel() { active = false; pending = nil }
 }
 
+/// Splits reservation from native invocation so a synchronous or reentrant
+/// statistics callback never runs while the caller's peer lock is held.
+enum LabSendPollInvocation {
+    static func start<Token, Report>(reserve: () -> Token?,
+                                      invoke: (Token, @escaping (Report) -> Void) -> Void,
+                                      complete: @escaping (Token, Report) -> Void) {
+        guard let token = reserve() else { return }
+        invoke(token) { report in complete(token, report) }
+    }
+}
+
 /// Per-peer numerical observations only. WebRTC object identities never leave this state.
 struct LabSendIntervalSampler {
     private var previousID: String?

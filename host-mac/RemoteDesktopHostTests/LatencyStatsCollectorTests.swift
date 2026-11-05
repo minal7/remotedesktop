@@ -302,3 +302,106 @@ final class LatencyStatsCollectorTests: XCTestCase {
     }
     #endif
 }
+
+#if DEBUG
+/// Exercises the same reservation/invocation/completion coordinator used by
+/// HostPeerSession, with the peer lock and peer identity represented explicitly.
+private final class SendPollInvocationHarness: @unchecked Sendable {
+    private let lock = NSLock()
+    private var gate = LabSendPollGate()
+    private var ended = false
+    private var peer = 1
+    private var accepted: [Int] = []
+
+    func poll(invoke: (Int, @escaping (Int) -> Void) -> Void) {
+        LabSendPollInvocation.start(reserve: { () -> (UInt64, Int)? in
+            self.lock.lock(); defer { self.lock.unlock() }
+            guard !self.ended, let token = self.gate.begin() else { return nil }
+            return (token, self.peer)
+        }, invoke: { reservation, callback in
+            invoke(reservation.1, callback)
+        }, complete: { reservation, value in
+            self.lock.lock(); defer { self.lock.unlock() }
+            guard !self.ended, self.peer == reservation.1, self.gate.finish(reservation.0) else { return }
+            self.accepted.append(value)
+        })
+    }
+    func cancel() {
+        lock.lock(); ended = true; gate.cancel(); lock.unlock()
+    }
+    func replacePeer() { lock.lock(); peer += 1; lock.unlock() }
+    func values() -> [Int] { lock.lock(); defer { lock.unlock() }; return accepted }
+    func peerLockAvailable() -> Bool { guard lock.try() else { return false }; lock.unlock(); return true }
+}
+
+extension LatencyStatsCollectorTests {
+    func testSendPollInvokesOutsidePeerLockAndAcceptsSynchronousCallback() {
+        let harness = SendPollInvocationHarness()
+        let finished = expectation(description: "synchronous callback finishes")
+        DispatchQueue.global().async {
+            harness.poll { _, callback in
+                XCTAssertTrue(harness.peerLockAvailable())
+                callback(7)
+            }
+            XCTAssertEqual(harness.values(), [7])
+            finished.fulfill()
+        }
+        wait(for: [finished], timeout: 2)
+    }
+
+    func testSendPollRejectsCallbackAfterCancelAndDuplicateCallback() {
+        let harness = SendPollInvocationHarness()
+        var callback: ((Int) -> Void)?
+        harness.poll { _, captured in callback = captured }
+        callback?(3); callback?(4)
+        XCTAssertEqual(harness.values(), [3])
+        harness.poll { _, captured in callback = captured }
+        harness.cancel(); callback?(5)
+        XCTAssertEqual(harness.values(), [3])
+    }
+
+    func testSendPollStopDoesNotWaitForBlockedInvocationOrMissingCallback() {
+        let harness = SendPollInvocationHarness()
+        let entered = expectation(description: "native invocation entered")
+        let returned = expectation(description: "native invocation returned")
+        let stopReturned = expectation(description: "stop returned before native invocation release")
+        let release = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async {
+            harness.poll { _, callback in
+                entered.fulfill()
+                _ = release.wait(timeout: .now() + 5)
+                callback(9)
+            }
+            XCTAssertEqual(harness.values(), [])
+            returned.fulfill()
+        }
+        wait(for: [entered], timeout: 2)
+        DispatchQueue.global().async { harness.cancel(); stopReturned.fulfill() }
+        let stoppedBeforeRelease = XCTWaiter.wait(for: [stopReturned], timeout: 1)
+        release.signal() // Always unblock the worker, including on failure.
+        XCTAssertEqual(stoppedBeforeRelease, .completed)
+        wait(for: [returned], timeout: 3)
+
+        let noCallbackDone = expectation(description: "stop returns with no callback")
+        DispatchQueue.global().async {
+            let never = SendPollInvocationHarness()
+            never.poll { _, _ in } // The callback is never called.
+            never.cancel()
+            var invokedAgain = false
+            never.poll { _, _ in invokedAgain = true }
+            XCTAssertFalse(invokedAgain)
+            noCallbackDone.fulfill()
+        }
+        wait(for: [noCallbackDone], timeout: 2)
+    }
+
+    func testSendPollRejectsOldPeerCompletionAfterReplacement() {
+        let harness = SendPollInvocationHarness()
+        var callback: ((Int) -> Void)?
+        harness.poll { _, captured in callback = captured }
+        harness.replacePeer()
+        callback?(8)
+        XCTAssertEqual(harness.values(), [])
+    }
+}
+#endif
