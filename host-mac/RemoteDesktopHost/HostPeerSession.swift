@@ -39,7 +39,12 @@ final class LabALRFieldTrialBootstrap: @unchecked Sendable {
         switch mode {
         case 1: return screen
         case 2: return screen + "WebRTC-Pacer-PadInSilence/Enabled/"
-        case 3: return "WebRTC-FrameDropper/Disabled/"
+        case 3:
+            // The screen-share default string starts with pacing factor 1.0, so a frame leaves
+            // only at the estimated rate. The first field is the only change from that default.
+            let factor = ProcessInfo.processInfo.environment["LATENCY_PACE_FACTOR"].flatMap(Double.init)
+            let pacing = factor.map { "WebRTC-ProbingScreenshareBwe/\($0),2875,80,40,-60,3/" } ?? ""
+            return "WebRTC-FrameDropper/Disabled/" + pacing
         default: return nil
         }
     }
