@@ -19,6 +19,10 @@ final class RemoteVideoPresentationSurface: NSObject, RTCVideoRenderer {
     nonisolated private let labInstrumentation: Bool
     private let labRetryDiagnostics: Bool
     private let labNonserial: Bool
+    private var labSkipRetry: Bool
+    private var labSkipRecovery = LabSkipRecovery()
+    private var labSkipNotice: Task<Void, Never>?
+    private var labSkipNoticeID: UUID?
     private var labPending: [UUID: RemoteVideoLatestFrameMailbox<RTCVideoFrame>.Entry] = [:]
     private var labGate = LabNonserialGate()
     private var retryTraceGeneration = 0
@@ -87,6 +91,8 @@ final class RemoteVideoPresentationSurface: NSObject, RTCVideoRenderer {
             environment: ProcessInfo.processInfo.environment)
         self.labNonserial = Self.labNonserialEnabled(labAdmitted: allowF4,
             f4: LatencyLabConfiguration.current.f4Renderer, environment: ProcessInfo.processInfo.environment)
+        self.labSkipRetry = Self.labSkipRetryEnabled(labAdmitted: allowF4,
+            f4: LatencyLabConfiguration.current.f4Renderer, environment: ProcessInfo.processInfo.environment)
         #endif
         presentation = RemoteVideoSurfacePresentation(context: producer.contextID)
         super.init()
@@ -94,7 +100,9 @@ final class RemoteVideoPresentationSurface: NSObject, RTCVideoRenderer {
         view.onGeometryChange = { [weak self] in self?.refreshLayout() }
         #if DEBUG
         view.onLabVisibilityChange = { [weak self] in
-            guard let self, self.f4 == nil,
+            guard let self else { return }
+            if self.labSkipRetry { self.refreshLayout(); return }
+            guard self.f4 == nil,
                   Self.labRefreshHintAction(labAdmitted: self.labInstrumentation, visible: true, hasLink: false,
                     environment: self.labRefreshEnvironmentOverride ?? ProcessInfo.processInfo.environment) != .stop else { return }
             self.refreshLayout()
@@ -163,6 +171,7 @@ final class RemoteVideoPresentationSurface: NSObject, RTCVideoRenderer {
         active = false; layout = nil; layoutWindow = nil; phase = .idle
         #if DEBUG
         stopHighRefresh(); f4?.retire()
+        cancelLabSkipNotice(); labSkipRecovery.reset()
         view.onLabVisibilityChange = nil
         submittedLatency = nil
         labPending.removeAll(); labGate.reset()
@@ -192,6 +201,7 @@ final class RemoteVideoPresentationSurface: NSObject, RTCVideoRenderer {
         #if DEBUG
         submittedLatency = nil
         labPending.removeAll(); labGate.reset()
+        cancelLabSkipNotice(); labSkipRecovery.reset()
         #endif
         // A pan/resize does not create another source image requirement or
         // replenish a failing surface's time/attempt budget. Hidden/windowless
@@ -207,6 +217,9 @@ final class RemoteVideoPresentationSurface: NSObject, RTCVideoRenderer {
                                excludingFrameID: failedRetryFrameID)
         failedRetryFrameID = nil
         presentation.begin(context: context)
+        #if DEBUG
+        if labSkipRetry, next != nil { labSkipRecovery.begin(context: context, time: CACurrentMediaTime()) }
+        #endif
         layoutChangeCount = min(layoutChangeCount + 1, 17)
         lastLayoutWasContinuous = continuous
         lastLayoutHadPendingFrame = mailbox.hasPending(context: context)
@@ -326,6 +339,89 @@ final class RemoteVideoPresentationSurface: NSObject, RTCVideoRenderer {
     #endif
 
     #if DEBUG
+    static func labSkipRetryEnabled(labAdmitted: Bool, f4: Bool, environment: [String: String]) -> Bool {
+        labAdmitted && !f4 && environment["LATENCY_LAB"] == "1" && environment["LATENCY_SKIP_RETRY"] == "1"
+    }
+
+    /// A context-scoped clock; only a genuine presentation resets the notice deadline.
+    struct LabSkipRecovery {
+        private(set) var context: UUID?
+        private(set) var referenceTime: TimeInterval = 0
+        mutating func begin(context: UUID, time: TimeInterval) {
+            guard time.isFinite, time >= 0 else { reset(); return }
+            self.context = context; referenceTime = time
+        }
+        mutating func presented(context: UUID, time: TimeInterval) -> Bool {
+            guard self.context == context, time.isFinite, time >= referenceTime else { return false }
+            referenceTime = time; return true
+        }
+        func deadline(context: UUID) -> TimeInterval? {
+            guard self.context == context else { return nil }
+            return referenceTime + 1
+        }
+        func shouldWait(context: UUID, time: TimeInterval) -> Bool {
+            guard time.isFinite, let deadline = deadline(context: context) else { return false }
+            return time >= deadline
+        }
+        mutating func reset() { context = nil; referenceTime = 0 }
+    }
+
+    // Test seams exercise the real receipt handler with a synthetic receipt;
+    // they do not create or claim a native presentation.
+    func labEnableSkipRetryForTesting() {
+        guard labInstrumentation, f4 == nil else { return }
+        labSkipRetry = true
+    }
+    var labRetryScheduledForTesting: Bool { retry != nil }
+    var labNoticeScheduledForTesting: Bool { labSkipNotice != nil }
+    var labFailedAttemptsForTesting: Int { failedAttempts }
+    var labContextForTesting: UUID { producer.contextID }
+    var labDeadlineIDForTesting: UUID? { deadlineID }
+    var labPendingForTesting: Bool { mailbox.hasPending(context: producer.contextID) }
+    var labRequestCountForTesting = 0
+    var labSuppressAcquisitionForTesting = false
+    func labReceiveForTesting(_ result: RemoteVideoPresentationLedger.Result, frame: RTCVideoFrame, newer: RTCVideoFrame? = nil) {
+        guard labSkipRetry, active, layout != nil, !labNonserial else { return }
+        let context = producer.contextID
+        mailbox.offer(frame)
+        guard let entry = mailbox.takeLatest(context: context) else { return }
+        if let newer { mailbox.offer(newer) }
+        phase = .submitted(entry.id)
+        received(result, frame: entry.id, entry: entry, context: context)
+    }
+
+    private func cancelLabSkipNotice() {
+        labSkipNotice?.cancel(); labSkipNotice = nil; labSkipNoticeID = nil
+    }
+
+    private func labPresented(context: UUID, time: TimeInterval) {
+        guard labSkipRetry, isCurrent(context), labSkipRecovery.presented(context: context, time: time) else { return }
+        cancelLabSkipNotice()
+    }
+
+    private func labSkipped(context: UUID) {
+        guard labSkipRetry, isCurrent(context), layout != nil,
+              let deadline = labSkipRecovery.deadline(context: context) else { return }
+        failedRetryFrameID = nil
+        traceRetry(.skipImmediate)
+        ensureDeadline(context)
+        if labSkipNotice == nil {
+            let id = UUID(); labSkipNoticeID = id
+            labSkipNotice = Task { @MainActor [weak self] in
+                while true {
+                    let delay = max(0, deadline - CACurrentMediaTime())
+                    do { try await Task.sleep(for: .seconds(delay)) } catch { return }
+                    guard let self, self.labSkipNoticeID == id, self.isCurrent(context), self.layout != nil else { return }
+                    if self.labSkipRecovery.shouldWait(context: context, time: CACurrentMediaTime()) { break }
+                }
+                guard let self, self.labSkipNoticeID == id, self.isCurrent(context), self.layout != nil else { return }
+                self.labSkipNotice = nil; self.labSkipNoticeID = nil
+                self.presentation.wait(context: context)
+            }
+        }
+        requestNext()
+    }
+
     static func labNonserialEnabled(labAdmitted: Bool, f4: Bool, environment: [String: String]) -> Bool {
         labAdmitted && !f4 && environment["LATENCY_LAB"] == "1" && environment["LATENCY_GPU_PIPELINE"] == "1"
     }
@@ -344,14 +440,15 @@ final class RemoteVideoPresentationSurface: NSObject, RTCVideoRenderer {
             inFlight[frame] = true; return true
         }
         enum Disposition: Equatable {
-            case presented(TimeInterval), rendered(TimeInterval), retry, expired
+            case presented(TimeInterval), rendered(TimeInterval), skipped, retry, expired
         }
         mutating func settle(_ frame: UUID, result: RemoteVideoPresentationLedger.Result) -> Disposition? {
             guard inFlight.removeValue(forKey: frame) != nil else { return nil }
             switch result {
             case .presented(let time): return .presented(time)
             case .rendered(let time): return .rendered(time)
-            case .skipped, .failed: return .retry
+            case .skipped: return .skipped
+            case .failed: return .retry
             case .expired: return .expired
             }
         }
@@ -363,7 +460,7 @@ final class RemoteVideoPresentationSurface: NSObject, RTCVideoRenderer {
         case acquirerRejected = "acquirer_rejected", drawableNil = "drawable_nil"
         case producerBusy = "producer_busy", producerUnavailable = "producer_unavailable"
         case preparationFailed = "preparation_failed", encodingFailed = "encoding_failed"
-        case receiptSkipped = "receipt_skipped", receiptFailed = "receipt_failed"
+        case receiptSkipped = "receipt_skipped", receiptFailed = "receipt_failed", skipImmediate = "skip_immediate"
         case receiptExpired = "receipt_expired", retryScheduled = "retry_scheduled"
     }
 
@@ -417,6 +514,7 @@ final class RemoteVideoPresentationSurface: NSObject, RTCVideoRenderer {
         let context = producer.contextID
         guard mailbox.hasPending(context: context) else { return }
         #if DEBUG
+        if labSuppressAcquisitionForTesting { labRequestCountForTesting += 1; return }
         if labNonserial && !labGate.canSubmit { return }
         #endif
         ensureDeadline(context)
@@ -502,6 +600,9 @@ final class RemoteVideoPresentationSurface: NSObject, RTCVideoRenderer {
         #if DEBUG
         if labRetryDiagnostics, let reason = Self.retryReason(for: result) { traceRetry(reason) }
         #endif
+        #if DEBUG
+        if labSkipRetry, case .skipped = result { mailbox.discard(frame: frame, context: context) }
+        #endif
         // Observe a current failure before refreshing geometry. Otherwise a
         // layout discovered by this callback could transfer the failed image
         // and suppress the failure as belonging to the replaced context.
@@ -524,10 +625,26 @@ final class RemoteVideoPresentationSurface: NSObject, RTCVideoRenderer {
             submittedLatency = nil
             #endif
             cancelWaits(); failedAttempts = 0; failedRetryFrameID = nil
-            if case .presented = result { presentation.present(context: context, frame: frame, time: time) }
-            else { presentation.render(context: context, frame: frame, time: time) }
+            if case .presented = result {
+                presentation.present(context: context, frame: frame, time: time)
+                #if DEBUG
+                if presentation.state == .presented(context: context, frame: frame, time: time) { labPresented(context: context, time: time) }
+                #endif
+            } else {
+                presentation.render(context: context, frame: frame, time: time)
+                #if DEBUG
+                if labSkipRetry { cancelLabSkipNotice() }
+                #endif
+            }
             if isCurrent(context) { requestNext() }
         case .skipped, .failed:
+            #if DEBUG
+            if labSkipRetry, case .skipped = result {
+                submittedLatency = nil
+                labSkipped(context: context)
+                return
+            }
+            #endif
             // Retry the exact latest frame on a fresh drawable. A newer
             // decode wins; failed images never cross a layout context.
             mailbox.restoreUnlessNewer(entry)
@@ -559,8 +676,9 @@ final class RemoteVideoPresentationSurface: NSObject, RTCVideoRenderer {
         if phase == .submitted(frame) { phase = .idle }
         let receiptDeliveryTime = CACurrentMediaTime()
         if labRetryDiagnostics, let reason = Self.retryReason(for: result) { traceRetry(reason) }
+        if labSkipRetry, case .skipped = disposition { mailbox.discard(frame: frame, context: context) }
         switch disposition {
-        case .retry: failedRetryFrameID = frame
+        case .retry, .skipped: failedRetryFrameID = frame
         case .expired:
             fail(context, message: "The remote screen stopped refreshing. Reconnect to try again.", category: .presentationExpired)
             return
@@ -575,9 +693,17 @@ final class RemoteVideoPresentationSurface: NSObject, RTCVideoRenderer {
                 RemoteVideoLatencyProbe.shared.presented(latency, time: time)
             }
             cancelWaits(); failedAttempts = 0; failedRetryFrameID = nil
-            if case .presented = disposition { presentation.present(context: context, frame: frame, time: time) }
-            else { presentation.render(context: context, frame: frame, time: time) }
+            if case .presented = disposition {
+                presentation.present(context: context, frame: frame, time: time)
+                if presentation.state == .presented(context: context, frame: frame, time: time) { labPresented(context: context, time: time) }
+            } else {
+                presentation.render(context: context, frame: frame, time: time)
+                if labSkipRetry { cancelLabSkipNotice() }
+            }
             if isCurrent(context) { requestNext() }
+        case .skipped:
+            if labSkipRetry { labSkipped(context: context) }
+            else { mailbox.restoreUnlessNewer(entry); retryLater(context) }
         case .retry:
             mailbox.restoreUnlessNewer(entry)
             retryLater(context)
@@ -588,6 +714,9 @@ final class RemoteVideoPresentationSurface: NSObject, RTCVideoRenderer {
 
     private func retryLater(_ context: UUID) {
         guard isCurrent(context), layout != nil else { return }
+        #if DEBUG
+        if labSkipRetry { cancelLabSkipNotice() }
+        #endif
         failedAttempts += 1
         guard failedAttempts <= 30 else {
             fail(context, message: "The remote screen could not be refreshed. Reconnect to try again.", category: .retryExhausted); return
@@ -640,6 +769,7 @@ final class RemoteVideoPresentationSurface: NSObject, RTCVideoRenderer {
         active = false; layout = nil; layoutWindow = nil; phase = .idle
         #if DEBUG
         stopHighRefresh(); f4?.retire()
+        cancelLabSkipNotice(); labSkipRecovery.reset()
         view.onLabVisibilityChange = nil
         submittedLatency = nil
         labPending.removeAll(); labGate.reset()

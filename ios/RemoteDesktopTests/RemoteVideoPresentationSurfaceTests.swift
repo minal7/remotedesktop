@@ -10,6 +10,179 @@ import UIKit
 @MainActor
 final class RemoteVideoPresentationSurfaceTests: XCTestCase {
     #if DEBUG
+    func testSkipRetryRequiresLabAdmissionStockRendererAndExactOptIn() {
+        let enabled = ["LATENCY_LAB": "1", "LATENCY_SKIP_RETRY": "1"]
+        XCTAssertTrue(RemoteVideoPresentationSurface.labSkipRetryEnabled(labAdmitted: true, f4: false, environment: enabled))
+        XCTAssertFalse(RemoteVideoPresentationSurface.labSkipRetryEnabled(labAdmitted: false, f4: false, environment: enabled))
+        XCTAssertFalse(RemoteVideoPresentationSurface.labSkipRetryEnabled(labAdmitted: true, f4: true, environment: enabled))
+        XCTAssertFalse(RemoteVideoPresentationSurface.labSkipRetryEnabled(labAdmitted: true, f4: false, environment: [:]))
+        XCTAssertFalse(RemoteVideoPresentationSurface.labSkipRetryEnabled(labAdmitted: true, f4: false, environment: ["LATENCY_SKIP_RETRY": "1"]))
+        XCTAssertFalse(RemoteVideoPresentationSurface.labSkipRetryEnabled(labAdmitted: true, f4: false, environment: ["LATENCY_LAB": "1", "LATENCY_SKIP_RETRY": "true"]))
+    }
+
+    func testSkipRecoveryUsesGenuineContextAndOneSecondBoundary() {
+        let a = UUID(), b = UUID()
+        var recovery = RemoteVideoPresentationSurface.LabSkipRecovery()
+        recovery.begin(context: a, time: 10)
+        XCTAssertFalse(recovery.shouldWait(context: a, time: 10.999))
+        XCTAssertTrue(recovery.shouldWait(context: a, time: 11))
+        XCTAssertFalse(recovery.presented(context: b, time: 12))
+        XCTAssertTrue(recovery.presented(context: a, time: 12))
+        XCTAssertFalse(recovery.shouldWait(context: a, time: 12.999))
+        XCTAssertTrue(recovery.shouldWait(context: a, time: 13))
+        recovery.begin(context: b, time: 14)
+        XCTAssertFalse(recovery.shouldWait(context: a, time: 99))
+        XCTAssertFalse(recovery.shouldWait(context: b, time: 14.999))
+        recovery.reset(); XCTAssertNil(recovery.deadline(context: b))
+    }
+
+    func testNonserialSkipSettlesWithoutLosingTicketAccounting() {
+        var gate = RemoteVideoPresentationSurface.LabNonserialGate()
+        let older = UUID(), newer = UUID()
+        XCTAssertTrue(gate.submit(older)); XCTAssertTrue(gate.completedGPU(older, succeeded: true))
+        XCTAssertTrue(gate.submit(newer)); XCTAssertEqual(gate.count, 2)
+        XCTAssertEqual(gate.settle(older, result: .skipped), .skipped)
+        XCTAssertEqual(gate.count, 1); XCTAssertNil(gate.settle(older, result: .skipped))
+        XCTAssertTrue(gate.completedGPU(newer, succeeded: true)); XCTAssertEqual(gate.settle(newer, result: .failed), .retry)
+    }
+
+    func testSkipReceiptPreservesReadinessAndNewPresentationCancelsNotice() async throws {
+        let old = LatencyLabConfiguration.current
+        defer { LatencyLabConfiguration.setRuntime(old) }
+        var config = old; config.f4Renderer = false; LatencyLabConfiguration.setRuntime(config)
+        let host = try RemoteKeyboardTestWindow(); defer { host.close() }
+        let surface = try XCTUnwrap(RemoteVideoPresentationSurface.make(allowF4: true)); defer { surface.retire() }
+        surface.labEnableSkipRetryForTesting()
+        surface.view.frame = CGRect(x: 0, y: 0, width: 64, height: 64)
+        try XCTUnwrap(host.window.rootViewController?.view).addSubview(surface.view)
+        surface.configure(mode: .aspectFit, viewport: surface.view.bounds)
+        var pixels: CVPixelBuffer?
+        XCTAssertEqual(CVPixelBufferCreate(kCFAllocatorDefault, 64, 64, kCVPixelFormatType_32BGRA, nil, &pixels), kCVReturnSuccess)
+        let frame = RTCVideoFrame(buffer: RTCCVPixelBuffer(pixelBuffer: try XCTUnwrap(pixels)), rotation: ._0, timeStampNs: 1)
+        surface.labReceiveForTesting(.presented(CACurrentMediaTime()), frame: frame)
+        let ready = surface.presentation.state
+        surface.labReceiveForTesting(.skipped, frame: frame)
+        XCTAssertEqual(surface.presentation.state, ready)
+        XCTAssertTrue(surface.labNoticeScheduledForTesting)
+        XCTAssertFalse(surface.labRetryScheduledForTesting)
+        XCTAssertEqual(surface.labFailedAttemptsForTesting, 0)
+        surface.labReceiveForTesting(.rendered(CACurrentMediaTime()), frame: frame)
+        guard case .rendered = surface.presentation.state else { return XCTFail("Simulator rendered receipt must retain its existing readiness") }
+        XCTAssertFalse(surface.labNoticeScheduledForTesting)
+        surface.labReceiveForTesting(.skipped, frame: frame)
+        XCTAssertTrue(surface.labNoticeScheduledForTesting)
+        surface.labReceiveForTesting(.presented(CACurrentMediaTime()), frame: frame)
+        XCTAssertFalse(surface.labNoticeScheduledForTesting)
+        try await Task.sleep(for: .milliseconds(1100))
+        guard case .presented = surface.presentation.state else { return XCTFail("Late notice replaced a newer presentation") }
+    }
+
+    func testSkipWaitsOnlyAfterOneSecondAndHideCancelsNotice() async throws {
+        let old = LatencyLabConfiguration.current
+        defer { LatencyLabConfiguration.setRuntime(old) }
+        var config = old; config.f4Renderer = false; LatencyLabConfiguration.setRuntime(config)
+        let host = try RemoteKeyboardTestWindow(); defer { host.close() }
+        let surface = try XCTUnwrap(RemoteVideoPresentationSurface.make(allowF4: true)); defer { surface.retire() }
+        surface.labEnableSkipRetryForTesting()
+        surface.view.frame = CGRect(x: 0, y: 0, width: 64, height: 64)
+        try XCTUnwrap(host.window.rootViewController?.view).addSubview(surface.view)
+        surface.configure(mode: .aspectFit, viewport: surface.view.bounds)
+        var pixels: CVPixelBuffer?
+        XCTAssertEqual(CVPixelBufferCreate(kCFAllocatorDefault, 64, 64, kCVPixelFormatType_32BGRA, nil, &pixels), kCVReturnSuccess)
+        let frame = RTCVideoFrame(buffer: RTCCVPixelBuffer(pixelBuffer: try XCTUnwrap(pixels)), rotation: ._0, timeStampNs: 1)
+        surface.labReceiveForTesting(.presented(CACurrentMediaTime()), frame: frame)
+        surface.labReceiveForTesting(.skipped, frame: frame)
+        try await Task.sleep(for: .milliseconds(500))
+        guard case .presented = surface.presentation.state else { return XCTFail("Wait notice appeared too early") }
+        try await Task.sleep(for: .milliseconds(700))
+        guard case .waiting = surface.presentation.state else { return XCTFail("Wait notice did not appear") }
+        surface.labReceiveForTesting(.presented(CACurrentMediaTime()), frame: frame)
+        surface.labReceiveForTesting(.skipped, frame: frame)
+        surface.view.isHidden = true
+        XCTAssertFalse(surface.labNoticeScheduledForTesting)
+        surface.retire()
+        try await Task.sleep(for: .milliseconds(1100))
+        XCTAssertEqual(surface.presentation.state, .retired)
+    }
+
+    func testSkipDiscardsRetainedFrameButSchedulesNewestPendingFrame() throws {
+        let old = LatencyLabConfiguration.current
+        defer { LatencyLabConfiguration.setRuntime(old) }
+        var config = old; config.f4Renderer = false; LatencyLabConfiguration.setRuntime(config)
+        let host = try RemoteKeyboardTestWindow(); defer { host.close() }
+        let surface = try XCTUnwrap(RemoteVideoPresentationSurface.make(allowF4: true)); defer { surface.retire() }
+        surface.labEnableSkipRetryForTesting(); surface.labSuppressAcquisitionForTesting = true
+        surface.view.frame = CGRect(x: 0, y: 0, width: 64, height: 64)
+        try XCTUnwrap(host.window.rootViewController?.view).addSubview(surface.view)
+        surface.configure(mode: .aspectFit, viewport: surface.view.bounds)
+        var pixels: CVPixelBuffer?
+        XCTAssertEqual(CVPixelBufferCreate(kCFAllocatorDefault, 64, 64, kCVPixelFormatType_32BGRA, nil, &pixels), kCVReturnSuccess)
+        let buffer = try XCTUnwrap(pixels)
+        let frame = RTCVideoFrame(buffer: RTCCVPixelBuffer(pixelBuffer: buffer), rotation: ._0, timeStampNs: 1)
+        let newer = RTCVideoFrame(buffer: RTCCVPixelBuffer(pixelBuffer: buffer), rotation: ._0, timeStampNs: 2)
+        surface.labReceiveForTesting(.skipped, frame: frame)
+        XCTAssertFalse(surface.labPendingForTesting)
+        surface.configure(mode: .aspectFit, viewport: CGRect(x: 1, y: 0, width: 63, height: 64))
+        XCTAssertFalse(surface.labPendingForTesting, "A skipped image must not be transferred by a later layout")
+        let before = surface.labRequestCountForTesting
+        surface.labReceiveForTesting(.skipped, frame: frame, newer: newer)
+        XCTAssertTrue(surface.labPendingForTesting)
+        XCTAssertGreaterThan(surface.labRequestCountForTesting, before, "A newer decode must be scheduled immediately")
+        surface.configure(mode: .aspectFit, viewport: CGRect(x: 2, y: 0, width: 62, height: 64))
+        XCTAssertTrue(surface.labPendingForTesting, "The newer decode survives a continuous layout")
+    }
+
+    func testSkipKeepsExistingDeadlineAndRealFailuresRetainLimits() async throws {
+        let old = LatencyLabConfiguration.current
+        defer { LatencyLabConfiguration.setRuntime(old) }
+        var config = old; config.f4Renderer = false; LatencyLabConfiguration.setRuntime(config)
+        let host = try RemoteKeyboardTestWindow(); defer { host.close() }
+        let surface = try XCTUnwrap(RemoteVideoPresentationSurface.make(allowF4: true)); defer { surface.retire() }
+        surface.labEnableSkipRetryForTesting(); surface.labSuppressAcquisitionForTesting = true
+        surface.view.frame = CGRect(x: 0, y: 0, width: 64, height: 64)
+        try XCTUnwrap(host.window.rootViewController?.view).addSubview(surface.view)
+        surface.configure(mode: .aspectFit, viewport: surface.view.bounds)
+        var pixels: CVPixelBuffer?
+        XCTAssertEqual(CVPixelBufferCreate(kCFAllocatorDefault, 64, 64, kCVPixelFormatType_32BGRA, nil, &pixels), kCVReturnSuccess)
+        let frame = RTCVideoFrame(buffer: RTCCVPixelBuffer(pixelBuffer: try XCTUnwrap(pixels)), rotation: ._0, timeStampNs: 1)
+        surface.labReceiveForTesting(.presented(CACurrentMediaTime()), frame: frame)
+        surface.labReceiveForTesting(.skipped, frame: frame)
+        let deadline = try XCTUnwrap(surface.labDeadlineIDForTesting)
+        surface.labReceiveForTesting(.skipped, frame: frame)
+        XCTAssertEqual(surface.labDeadlineIDForTesting, deadline, "Skip must not replenish the five-second deadline")
+        surface.labReceiveForTesting(.failed, frame: frame)
+        XCTAssertEqual(surface.labFailedAttemptsForTesting, 1)
+        XCTAssertTrue(surface.labRetryScheduledForTesting)
+        XCTAssertFalse(surface.labNoticeScheduledForTesting)
+        guard case .waiting = surface.presentation.state else { return XCTFail("A real failure must publish waiting") }
+        XCTAssertEqual(surface.labDeadlineIDForTesting, deadline)
+        try await Task.sleep(for: .milliseconds(50))
+        XCTAssertTrue(surface.labRetryScheduledForTesting, "A real failure retains the 100 ms retry delay")
+        try await Task.sleep(for: .milliseconds(120))
+        XCTAssertFalse(surface.labRetryScheduledForTesting)
+        for _ in 2...31 { surface.labReceiveForTesting(.failed, frame: frame) }
+        guard case .failed = surface.presentation.state else { return XCTFail("The 31st real failure must exhaust the existing limit") }
+    }
+
+    func testSkipEpisodeStillExpiresAtFiveSecondDeadline() async throws {
+        let old = LatencyLabConfiguration.current
+        defer { LatencyLabConfiguration.setRuntime(old) }
+        var config = old; config.f4Renderer = false; LatencyLabConfiguration.setRuntime(config)
+        let host = try RemoteKeyboardTestWindow(); defer { host.close() }
+        let surface = try XCTUnwrap(RemoteVideoPresentationSurface.make(allowF4: true)); defer { surface.retire() }
+        surface.labEnableSkipRetryForTesting(); surface.labSuppressAcquisitionForTesting = true
+        surface.view.frame = CGRect(x: 0, y: 0, width: 64, height: 64)
+        try XCTUnwrap(host.window.rootViewController?.view).addSubview(surface.view)
+        surface.configure(mode: .aspectFit, viewport: surface.view.bounds)
+        var pixels: CVPixelBuffer?
+        XCTAssertEqual(CVPixelBufferCreate(kCFAllocatorDefault, 64, 64, kCVPixelFormatType_32BGRA, nil, &pixels), kCVReturnSuccess)
+        let frame = RTCVideoFrame(buffer: RTCCVPixelBuffer(pixelBuffer: try XCTUnwrap(pixels)), rotation: ._0, timeStampNs: 1)
+        surface.labReceiveForTesting(.presented(CACurrentMediaTime()), frame: frame)
+        surface.labReceiveForTesting(.skipped, frame: frame)
+        try await Task.sleep(for: .milliseconds(5100))
+        guard case .failed = surface.presentation.state else { return XCTFail("The existing recovery deadline must remain active") }
+    }
+
     func testLabNonserialRequiresExplicitLabAdmissionAndStockRenderer() {
         let enabled = ["LATENCY_LAB": "1", "LATENCY_GPU_PIPELINE": "1"]
         XCTAssertTrue(RemoteVideoPresentationSurface.labNonserialEnabled(labAdmitted: true, f4: false, environment: enabled))
