@@ -377,10 +377,11 @@ final class DesktopLowLatencyH264Encoder: NSObject, LKRTCVideoEncoder, @unchecke
         guard let current = session else { lock.unlock(); return -1 }
         let currentGeneration = generation
         let requestedKeyframe = frameTypes.contains { $0.uintValue == 3 }
-        let keyframeTicket = cbr ? nil : keyframeGate.shouldForce(requested: requestedKeyframe,
+        // After loss, each repair keyframe can reach about 1 MB. Repeated requests must not stack them.
+        let keyframeTicket = keyframeGate.shouldForce(requested: requestedKeyframe,
                                                       now: ProcessInfo.processInfo.systemUptime)
         lock.unlock()
-        let properties = (cbr ? requestedKeyframe : keyframeTicket != nil) ? [kVTEncodeFrameOptionKey_ForceKeyFrame: true] as CFDictionary : nil
+        let properties = keyframeTicket != nil ? [kVTEncodeFrameOptionKey_ForceKeyFrame: true] as CFDictionary : nil
         if cbr { applyPendingCBRRate(current) }
         if cbr { lock.lock(); cbrInFlight += 1; lock.unlock() }
         let timestamp = frame.timeStamp, timestampNs = frame.timeStampNs, rotation = frame.rotation
