@@ -214,8 +214,10 @@ final class DesktopLowLatencyH264EncoderTests: XCTestCase {
         guard fallback.startCount == 0 else { _ = encoder.release(); throw XCTSkip("Hardware CBR/VBV unavailable") }
         rejectRate = true
         XCTAssertEqual(encoder.setBitrate(3_000, framerate: 60), 0)
-        XCTAssertTrue(sawRejectedUpdate)
+        XCTAssertFalse(sawRejectedUpdate, "Rate changes wait for encode() so they cannot race a frame in flight")
         XCTAssertEqual(encoder.encode(try encoderFrame(1), codecSpecificInfo: nil, frameTypes: [4]), 0)
+        XCTAssertTrue(sawRejectedUpdate)
+        XCTAssertEqual(encoder.encode(try encoderFrame(2), codecSpecificInfo: nil, frameTypes: [4]), 0)
         XCTAssertEqual(fallback.startCount, 1)
         XCTAssertEqual(fallback.bitrates.last?.0, 3_000)
         XCTAssertEqual(encoder.release(), 0)
@@ -315,13 +317,13 @@ final class DesktopLowLatencyH264EncoderTests: XCTestCase {
         XCTAssertEqual(encoder.startEncode(with: settings, numberOfCores: 1), 0)
         XCTAssertTrue(events.contains("configured"), "The test must exercise CBR, not its native fallback")
         XCTAssertEqual(encoder.setBitrate(2500, framerate: 60), 0)
-        XCTAssertTrue(events.appliedRateUpdate)
         var pixel: CVPixelBuffer?
         XCTAssertEqual(CVPixelBufferCreate(kCFAllocatorDefault, 640, 480, kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange, nil, &pixel), kCVReturnSuccess)
         let nativeBuffer = LKRTCCVPixelBuffer(pixelBuffer: try XCTUnwrap(pixel), adaptedWidth: 320, adaptedHeight: 240, cropWidth: 320, cropHeight: 240, cropX: 0, cropY: 0)
         let frame = LKRTCVideoFrame(buffer: nativeBuffer, rotation: ._0, timeStampNs: 1_000_000)
         XCTAssertEqual(encoder.encode(frame, codecSpecificInfo: nil, frameTypes: [3]), 0)
         wait(for: [decoded], timeout: 5)
+        XCTAssertTrue(events.appliedRateUpdate)
         XCTAssertFalse(events.contains("native_hevc_fallback"))
         XCTAssertEqual(encoder.release(), 0); XCTAssertEqual(decoder.release(), 0)
     }
