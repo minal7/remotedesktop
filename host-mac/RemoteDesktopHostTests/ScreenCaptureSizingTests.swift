@@ -8,6 +8,36 @@ import XCTest
 
 final class ScreenCaptureSizingTests: XCTestCase {
     #if DEBUG
+    func testLabVideoCeilingRequiresExactIsolatedOrdinaryOptIn() {
+        let args = ["host", "--debug-latency-host"]
+        let env = ["LATENCY_LAB": "1", "LATENCY_VIDEO_CEILING_BPS": "5000000",
+                   "REMOTE_DESKTOP_LATENCY_HOST_ID": "8f8f6c31-7bf6-4c51-ae04-5b94b01a59a2"]
+        func ceiling(_ lab: Bool = true, _ ordinary: Bool = true, _ f3: Bool = false,
+                     _ args: [String]? = nil, _ environment: [String: String]? = nil) -> Int? {
+            HostPeerSession.labVideoCeiling(labInstrumentation: lab, ordinaryPeer: ordinary,
+                f3Enabled: f3, arguments: args ?? ["host", "--debug-latency-host"], environment: environment ?? env)
+        }
+        XCTAssertEqual(ceiling(), 5_000_000)
+        XCTAssertNil(ceiling(false)); XCTAssertNil(ceiling(true, false)); XCTAssertNil(ceiling(true, true, true))
+        XCTAssertNil(ceiling(true, true, false, ["host"]))
+        for key in ["LATENCY_LAB", "LATENCY_VIDEO_CEILING_BPS", "REMOTE_DESKTOP_LATENCY_HOST_ID"] {
+            var changed = env; changed.removeValue(forKey: key); XCTAssertNil(ceiling(true, true, false, args, changed))
+        }
+        for invalid in ["", "0", "4999999", "5000001", "05000000", "-1"] {
+            var changed = env; changed["LATENCY_VIDEO_CEILING_BPS"] = invalid
+            XCTAssertNil(ceiling(true, true, false, args, changed))
+        }
+        for forbidden in ["LATENCY_UDP_CAPACITY", "LATENCY_STAGE2_FLOOR", "REMOTE_DESKTOP_R0_HOST_ID"] {
+            var changed = env; changed[forbidden] = "1"; XCTAssertNil(ceiling(true, true, false, args, changed))
+        }
+    }
+
+    func testLabVideoCeilingClampsWithoutRaisingLowerPolicy() {
+        XCTAssertEqual(HostPeerSession.labClampedVideoMaximum(30_000_000, ceiling: 5_000_000), 5_000_000)
+        XCTAssertEqual(HostPeerSession.labClampedVideoMaximum(3_000_000, ceiling: 5_000_000), 3_000_000)
+        XCTAssertEqual(HostPeerSession.labClampedVideoMaximum(30_000_000, ceiling: nil), 30_000_000)
+    }
+
     func testLab60RequiresIsolatedOptInAndExactSafeCodec() {
         let defaultArgs = ["host", DebugResidentHostConfiguration.latencyArgument]
         let env = [DebugResidentHostConfiguration.latencyIdentityEnvironmentKey: "8f8f6c31-7bf6-4c51-ae04-5b94b01a59a2",

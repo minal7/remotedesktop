@@ -1108,6 +1108,25 @@ final class HostPeerSession: NSObject {
         lab60 && captureRate == 60 && requested == 60 ? 60 : nil
     }
 
+    /// The common 5 Mbps lab ceiling is deliberately a single closed setting.
+    /// A missing or malformed opt-in leaves the sender policy unchanged.
+    static func labVideoCeiling(labInstrumentation: Bool, ordinaryPeer: Bool, f3Enabled: Bool,
+                                arguments: [String], environment: [String: String]) -> Int? {
+        guard labInstrumentation, ordinaryPeer, !f3Enabled,
+              Array(arguments.dropFirst()) == ["--debug-latency-host"],
+              environment["LATENCY_LAB"] == "1", environment["LATENCY_VIDEO_CEILING_BPS"] == "5000000",
+              environment["LATENCY_UDP_CAPACITY"] != "1", environment["LATENCY_STAGE2_FLOOR"] != "1",
+              environment["REMOTE_DESKTOP_R0_HOST_ID"] == nil,
+              let rawID = environment["REMOTE_DESKTOP_LATENCY_HOST_ID"],
+              rawID.utf8.count == 36, UUID(uuidString: rawID) != nil else { return nil }
+        return 5_000_000
+    }
+
+    static func labClampedVideoMaximum(_ requested: Int, ceiling: Int?) -> Int {
+        guard let ceiling else { return requested }
+        return min(requested, ceiling)
+    }
+
     static func lab60CaptureMacroblockLimit(negotiated: Int, labInstrumentation: Bool,
                                            environment: [String: String], lab60: Bool) -> Int {
         if lab60, labInstrumentation, environment["LATENCY_LAB"] == "1",
@@ -1238,8 +1257,16 @@ final class HostPeerSession: NSObject {
         senderFrameRate = DesktopVideoQuality.senderFrameRate(
             policyRate: policy.maximumFramesPerSecond, captureRate: captureFrameRate, isDefault: isDefault)
         #endif
+        #if DEBUG
+        let labCeiling = Self.labVideoCeiling(labInstrumentation: labInstrumentation, ordinaryPeer: labOrdinaryPeer,
+            f3Enabled: latencyF3Enabled, arguments: ProcessInfo.processInfo.arguments,
+            environment: ProcessInfo.processInfo.environment)
+        let maximumBitrate = Self.labClampedVideoMaximum(policy.maximumBitrateBps, ceiling: labCeiling)
+        #else
+        let maximumBitrate = policy.maximumBitrateBps
+        #endif
         for encoding in encodings {
-            encoding.maxBitrateBps = NSNumber(value: policy.maximumBitrateBps)
+            encoding.maxBitrateBps = NSNumber(value: maximumBitrate)
             encoding.maxFramerate = NSNumber(value: senderFrameRate)
             encoding.scaleResolutionDownBy = 1
         }
@@ -1251,10 +1278,27 @@ final class HostPeerSession: NSObject {
         let bweUpdated = peerConnection?.setBweMinBitrateBps(
             nil,
             currentBitrateBps: nil,
-            maxBitrateBps: NSNumber(value: policy.maximumBitrateBps)) ?? false
+            maxBitrateBps: NSNumber(value: maximumBitrate)) ?? false
+        #if DEBUG
+        if let labCeiling {
+            let readback = videoSender.parameters.encodings.compactMap { $0.maxBitrateBps?.intValue }
+            let transportSequenceExtension = videoSender.parameters.headerExtensions.contains {
+                $0.uri == "http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01" ||
+                $0.uri == "http://www.webrtc.org/experiments/rtp-hdrext/transport-wide-cc-02"
+            }
+            var event: [String: Any] = ["type": "video_ceiling", "time": ProcessInfo.processInfo.systemUptime,
+                "configuredBps": labCeiling, "requestedMaximumBps": maximumBitrate,
+                "encodingReadbackMatches": !readback.isEmpty && readback.count == encodings.count && readback.allSatisfy { $0 == maximumBitrate },
+                "bweMaximumApplied": bweUpdated, "transportSequenceExtensionPresent": transportSequenceExtension]
+            if readback.count == encodings.count, let first = readback.first, readback.allSatisfy({ $0 == first }) {
+                event["effectiveEncodingMaximumBps"] = first
+            }
+            latencyStats.trace(event)
+        }
+        #endif
         let captureLimit = (try? captureStartParameters().1) ?? 0
         log.info(
-            "desktop video quality captureMacroblocks=\(captureLimit, privacy: .public) maxBitrate=\(policy.maximumBitrateBps, privacy: .public) maxFps=\(senderFrameRate, privacy: .public) degradation=\(policy.degradationPreference.rawValue, privacy: .public) bweUpdated=\(bweUpdated, privacy: .public)")
+            "desktop video quality captureMacroblocks=\(captureLimit, privacy: .public) maxBitrate=\(maximumBitrate, privacy: .public) maxFps=\(senderFrameRate, privacy: .public) degradation=\(policy.degradationPreference.rawValue, privacy: .public) bweUpdated=\(bweUpdated, privacy: .public)")
     }
 
     private func handleCaptureStopped(_ receipt: CaptureStopReceipt, error: Error) {
