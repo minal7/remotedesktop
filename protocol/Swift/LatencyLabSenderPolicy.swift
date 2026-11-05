@@ -108,7 +108,7 @@ enum LatencyLabSenderPolicy {
                 clearObservations(); lastSampleTime = sample.time; return nil
             }
             lastSampleTime = sample.time
-            let maximum = candidate ? (qualityQualified ? 8_000_000 : 1_500_000) : 0
+            let maximum = candidate ? (qualityQualified ? 4_000_000 : 1_500_000) : 0
             if activePath != sample.path {
                 reset(); lastSampleTime = sample.time; activePath = sample.path; floor = candidate ? 1_500_000 : 0; previous = sample
                 if let rtt = sample.rttSeconds, rtt.isFinite, rtt > 0,
@@ -218,7 +218,7 @@ enum LatencyLabSenderPolicy {
             if candidate && !qualityQualified && newRTT, let start = qualityStart,
                sample.time - start >= 2, lossFreshAndLow, lossCongested == 0,
                floor == 1_500_000 {
-                qualityQualified = true; floor = 8_000_000
+                qualityQualified = true; floor = 4_000_000
                 return Stage2Action(reason: .quality, floor: floor, current: nil)
             }
             if candidate && (rttCongested >= 2 || lossCongested >= 2) && floor > 0 {

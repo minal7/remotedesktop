@@ -60,7 +60,7 @@ final class LatencyLabSenderPolicyTests: XCTestCase {
             XCTAssertNil(state.ingest(stage2Sample(2, path: path, captured: 2, encoded: 2, rtt: 0.01, responses: 1)))
             XCTAssertEqual(state.floor, 1_500_000)
             let qualified = state.ingest(stage2Sample(3, path: path, captured: 3, encoded: 3, rtt: 0.01, responses: 2))
-            XCTAssertEqual(qualified?.reason, .quality); XCTAssertEqual(qualified?.floor, 8_000_000)
+            XCTAssertEqual(qualified?.reason, .quality); XCTAssertEqual(qualified?.floor, 4_000_000)
         }
     }
 
@@ -95,17 +95,17 @@ final class LatencyLabSenderPolicyTests: XCTestCase {
         var state = LatencyLabSenderPolicy.Stage2State(candidate: true)
         _ = state.ingest(stage2Sample(0, path: path, captured: 0, encoded: 0, rtt: 0.01))
         _ = state.ingest(stage2Sample(1, path: path, captured: 1, encoded: 1, rtt: 0.01))
-        XCTAssertEqual(state.ingest(stage2Sample(2, path: path, captured: 2, encoded: 2, rtt: 0.01))?.floor, 8_000_000)
+        XCTAssertEqual(state.ingest(stage2Sample(2, path: path, captured: 2, encoded: 2, rtt: 0.01))?.floor, 4_000_000)
         XCTAssertNil(state.ingest(stage2Sample(7, path: path, captured: 7, encoded: 7, rtt: 0.01)))
         _ = state.ingest(stage2Sample(8, path: path, captured: 8, encoded: 8, rtt: 0.01))
         _ = state.ingest(stage2Sample(9, path: path, captured: 9, encoded: 9, rtt: 0.2))
         _ = state.ingest(stage2Sample(10, path: path, captured: 10, encoded: 10, rtt: 0.2))
-        XCTAssertEqual(state.ingest(stage2Sample(11, path: path, captured: 11, encoded: 11, rtt: 0.2))?.floor, 4_000_000)
+        XCTAssertEqual(state.ingest(stage2Sample(11, path: path, captured: 11, encoded: 11, rtt: 0.2))?.floor, 2_000_000)
         for second in 12...21 {
             XCTAssertNil(state.ingest(stage2Sample(Double(second), path: path, captured: UInt64(second), encoded: Double(second), rtt: 0.01)))
         }
-        XCTAssertEqual(state.floor, 4_000_000)
-        XCTAssertEqual(state.ingest(stage2Sample(22, path: path, captured: 22, encoded: 22, rtt: 0.01))?.floor, 8_000_000)
+        XCTAssertEqual(state.floor, 2_000_000)
+        XCTAssertEqual(state.ingest(stage2Sample(22, path: path, captured: 22, encoded: 22, rtt: 0.01))?.floor, 4_000_000)
     }
 
     func testStage2RecoveryRequiresContinuousFreshRTT() throws {
