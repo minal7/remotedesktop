@@ -8,6 +8,52 @@ import XCTest
 
 final class ScreenCaptureSizingTests: XCTestCase {
     #if DEBUG
+    func testLabCaptureDiagnosticsRequiresIsolatedOrdinaryHost() {
+        let args = ["host", "--debug-latency-host"]
+        let env = ["LATENCY_LAB": "1", "REMOTE_DESKTOP_LATENCY_HOST_ID": UUID().uuidString]
+        func allowed(_ lab: Bool = true, _ ordinary: Bool = true, _ resources: Bool = false,
+                     _ arguments: [String]? = nil, _ environment: [String: String]? = nil) -> Bool {
+            HostPeerSession.labCaptureDiagnosticsEnabled(labInstrumentation: lab, ordinaryPeer: ordinary,
+                resourcesOnly: resources, arguments: arguments ?? args, environment: environment ?? env)
+        }
+        XCTAssertTrue(allowed()); XCTAssertFalse(allowed(false)); XCTAssertFalse(allowed(true, false))
+        XCTAssertFalse(allowed(true, true, true)); XCTAssertFalse(allowed(true, true, false, ["host"]))
+        XCTAssertFalse(allowed(true, true, false, nil, [:]))
+        var r0 = env; r0["REMOTE_DESKTOP_R0_HOST_ID"] = UUID().uuidString
+        XCTAssertFalse(allowed(true, true, false, nil, r0))
+        var capacity = env; capacity["LATENCY_UDP_CAPACITY"] = "1"
+        XCTAssertFalse(allowed(true, true, false, nil, capacity))
+    }
+
+    func testCaptureDiagnosticsRetirementCannotRemoveSuccessorObserver() {
+        let diagnostics = LabCaptureDiagnostics(), trace = CaptureLifecycleTrace()
+        let first = CaptureOwnerLease(), next = CaptureOwnerLease()
+        diagnostics.install(owner: first) { trace.append("first:" + $0.rawValue) }
+        diagnostics.emit(.outputEntry)
+        let oldStreamSink = diagnostics.snapshot(owner: first)
+        diagnostics.install(owner: next) { trace.append("next:" + $0.rawValue) }
+        XCTAssertNil(diagnostics.snapshot(owner: first))
+        oldStreamSink?(.nativeStopEntry)
+        diagnostics.emit(.retireRequested, owner: first)
+        diagnostics.retire(owner: first)
+        diagnostics.emit(.outputEntry)
+        diagnostics.retire(owner: next)
+        diagnostics.emit(.outputEntry)
+        XCTAssertEqual(trace.values, ["first:output_entry", "first:native_stop_entry", "next:output_entry"])
+    }
+
+    func testCaptureDiagnosticSinkCanRetireItselfWithoutHoldingObserverLock() {
+        let diagnostics = LabCaptureDiagnostics(), owner = CaptureOwnerLease()
+        let received = expectation(description: "reentrant observer returned")
+        diagnostics.install(owner: owner) { _ in
+            diagnostics.retire(owner: owner)
+            received.fulfill()
+        }
+        DispatchQueue.global().async { diagnostics.emit(.outputEntry) }
+        wait(for: [received], timeout: 2)
+        XCTAssertNil(diagnostics.snapshot())
+    }
+
     func testHEVCRequiresBothPeersAndIsolatedDebugHost() {
         guard #available(macOS 26.0, *) else { return }
         let args = ["host", "--debug-latency-host"]

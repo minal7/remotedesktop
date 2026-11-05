@@ -386,6 +386,25 @@ final class HostPeerSession: NSObject {
     private var capacityLANAddress: String?
     private var capacityRequested = false
 
+    static func labCaptureDiagnosticsEnabled(labInstrumentation: Bool, ordinaryPeer: Bool,
+                                             resourcesOnly: Bool, arguments: [String],
+                                             environment: [String: String]) -> Bool {
+        guard labInstrumentation, ordinaryPeer, !resourcesOnly,
+              Array(arguments.dropFirst()) == ["--debug-latency-host"],
+              environment["LATENCY_LAB"] == "1", environment["REMOTE_DESKTOP_R0_HOST_ID"] == nil,
+              environment["LATENCY_UDP_CAPACITY"] != "1",
+              let id = environment["REMOTE_DESKTOP_LATENCY_HOST_ID"],
+              id.utf8.count == 36, UUID(uuidString: id) != nil else { return false }
+        return true
+    }
+
+    private let labCaptureDiagnosticsEnabled: Bool
+
+    private func traceCapturePhase(_ phase: String) {
+        guard labCaptureDiagnosticsEnabled else { return }
+        latencyStats.trace(["type": "capture_probe", "time": ProcessInfo.processInfo.systemUptime, "phase": phase])
+    }
+
     private var capacityProbeEnabled: Bool {
         let environment = ProcessInfo.processInfo.environment
         return labInstrumentation && labOrdinaryPeer && environment["LATENCY_LAB"] == "1" &&
@@ -588,6 +607,10 @@ final class HostPeerSession: NSObject {
         self.labInstrumentation = labInstrumentation
         #if DEBUG
         self.labOrdinaryPeer = acceptedOrdinaryPeer
+        self.labCaptureDiagnosticsEnabled = Self.labCaptureDiagnosticsEnabled(
+            labInstrumentation: labInstrumentation, ordinaryPeer: acceptedOrdinaryPeer,
+            resourcesOnly: LatencyStatsCollector.resourcesOnly, arguments: ProcessInfo.processInfo.arguments,
+            environment: ProcessInfo.processInfo.environment)
         self.labALRTrialMode = configuredALRMode
         self.lab60Requested = lab60Requested
         #endif
@@ -1000,11 +1023,20 @@ final class HostPeerSession: NSObject {
     /// task before installing new capture callbacks on the shared capturer.
     @discardableResult
     func close(reason: String) -> Task<Void, Never> {
+        #if DEBUG
+        traceCapturePhase("close_requested")
+        #endif
         return closeCoordinator.close(revokeInput: {
             self.inputAuthorization.close()
         }) {
             self.portMappingSession?.close()
+            #if DEBUG
+            self.traceCapturePhase("close_state_lock_entry")
+            #endif
             self.closeStateLock.lock()
+            #if DEBUG
+            self.traceCapturePhase("close_state_lock_return")
+            #endif
             self.ended = true
             #if DEBUG
             self.capacitySender?.stop()
@@ -1048,12 +1080,27 @@ final class HostPeerSession: NSObject {
             // Never acquire the capture gate under the peer lock: capture callbacks
             // may synchronously reenter native peer callbacks during teardown.
             let captureTeardown = owner.map { self.capture.endSession($0) } ?? Task {}
+            #if DEBUG
+            if self.labCaptureDiagnosticsEnabled {
+                self.traceCapturePhase("capture_barrier_created")
+                Task { [weak self] in
+                    await captureTeardown.value
+                    self?.traceCapturePhase("capture_barrier_finished")
+                }
+            }
+            #endif
             self.resetBufferedLocalICE()
             if let channelToClose, channelToClose.readyState == .open {
                 _ = channelToClose.sendData(RTCDataBuffer(data: byePayload, isBinary: false))
             }
             channelToClose?.close()
+            #if DEBUG
+            self.traceCapturePhase("peer_close_entry")
+            #endif
             peerConnectionToClose?.close()
+            #if DEBUG
+            self.traceCapturePhase("peer_close_return")
+            #endif
             if shouldDetachAudio {
                 self.audioBridge.detach(from: self.factory.audioDeviceModule)
             }
@@ -1155,7 +1202,7 @@ final class HostPeerSession: NSObject {
         } else {
             onAudioSample = nil
         }
-        captureOwner = capture.beginSession(callbacks: ScreenCapture.Callbacks(
+        var callbacks = ScreenCapture.Callbacks(
             onVideoFrame: { [weak self] frame, attempt in
                 self?.pushVideoFrame(frame)
                 self?.recordRecoveryFrame(from: attempt)
@@ -1167,7 +1214,13 @@ final class HostPeerSession: NSObject {
                 // Input closes synchronously; native peer teardown is deferred.
                 self?.revokeCaptureInput()
                 self?.handleCaptureStopped(receipt, error: error)
-            }))
+            })
+        #if DEBUG
+        if labCaptureDiagnosticsEnabled {
+            callbacks.onLabEvent = { [weak self] event in self?.traceCapturePhase(event.rawValue) }
+        }
+        #endif
+        captureOwner = capture.beginSession(callbacks: callbacks)
     }
 
     private func captureStartParameters() throws -> (CaptureOwnerLease, Int) {
@@ -1730,7 +1783,13 @@ final class HostPeerSession: NSObject {
         let rtcBuffer = RTCCVPixelBuffer(pixelBuffer: imageBuffer)
         let frame = RTCVideoFrame(buffer: rtcBuffer, rotation: ._0,
                                   timeStampNs: captured.metadata.captureTimeNanoseconds)
+        #if DEBUG
+        traceCapturePhase("push_entry")
+        #endif
         videoSource.capturer(videoCapturer, didCapture: frame)
+        #if DEBUG
+        traceCapturePhase("push_return")
+        #endif
     }
 
     private func send(_ message: ControlMessage) {

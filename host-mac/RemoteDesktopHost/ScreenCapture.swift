@@ -593,6 +593,34 @@ struct CaptureStreamTeardownFailure: Error {
     let underlying: Error
 }
 
+#if DEBUG
+enum LabCaptureDiagnosticEvent: String, Sendable {
+    case outputEntry = "output_entry"
+    case retireRequested = "retire_requested", retireReturned = "retire_returned"
+    case nativeStopEntry = "native_stop_entry", nativeStopReturn = "native_stop_return"
+    case nativeStopError = "native_stop_error"
+}
+
+/// Diagnostic observer is independent of the lifecycle gate, so a callback
+/// blocked entering that gate can still leave a timestamped entry event.
+final class LabCaptureDiagnostics: @unchecked Sendable {
+    private let lock = NSLock()
+    private var owner: CaptureOwnerLease?
+    private var sink: (@Sendable (LabCaptureDiagnosticEvent) -> Void)?
+
+    func install(owner: CaptureOwnerLease, sink: (@Sendable (LabCaptureDiagnosticEvent) -> Void)?) {
+        lock.withLock { self.owner = owner; self.sink = sink }
+    }
+    func retire(owner: CaptureOwnerLease) {
+        lock.withLock { if self.owner == owner { self.owner = nil; sink = nil } }
+    }
+    func snapshot(owner: CaptureOwnerLease? = nil) -> (@Sendable (LabCaptureDiagnosticEvent) -> Void)? {
+        lock.withLock { owner == nil || self.owner == owner ? sink : nil }
+    }
+    func emit(_ event: LabCaptureDiagnosticEvent, owner: CaptureOwnerLease? = nil) { snapshot(owner: owner)?(event) }
+}
+#endif
+
 /// Serializes admission with retirement without holding a lock across a native
 /// await. The synchronous consumer runs inside the gate: retiring a stream
 /// cannot return while that stream is still entering its consumer. Consumers
@@ -622,14 +650,26 @@ final class CaptureStreamLifecycle<Stream: AnyObject, Context: Sendable>: @unche
     }
 
     func beginOwner(context: Context) -> CaptureOwnerLease {
+        locked { installOwner(context: context) }
+    }
+
+    #if DEBUG
+    func beginOwner(context: Context, onInstalled: (CaptureOwnerLease) -> Void) -> CaptureOwnerLease {
         locked {
-            retireOwner()
-            let lease = CaptureOwnerLease()
-            owner = lease
-            self.context = context
-            lastStop = nil
+            let lease = installOwner(context: context)
+            onInstalled(lease)
             return lease
         }
+    }
+    #endif
+
+    private func installOwner(context: Context) -> CaptureOwnerLease {
+        retireOwner()
+        let lease = CaptureOwnerLease()
+        owner = lease
+        self.context = context
+        lastStop = nil
+        return lease
     }
 
     /// Concurrent requests from this owner join the same preparation/start.
@@ -923,6 +963,9 @@ final class ScreenCapture: NSObject, @unchecked Sendable {
         let display: CaptureDisplayGeometry
         let cursorUpdates: CaptureCursorVisibilityUpdates
         let labCapture120: Bool
+        #if DEBUG
+        var onLabEvent: (@Sendable (LabCaptureDiagnosticEvent) -> Void)?
+        #endif
         init(stream: SCStream, filter: SCContentFilter, configuration: SCStreamConfiguration, display: CaptureDisplayGeometry, labCapture120: Bool) {
             self.stream = stream; self.filter = filter; self.configuration = configuration; self.display = display; self.labCapture120 = labCapture120
             cursorUpdates = CaptureCursorVisibilityUpdates { visible in
@@ -945,6 +988,7 @@ final class ScreenCapture: NSObject, @unchecked Sendable {
     #if DEBUG
     private var labLimiterAttempt: CaptureAttemptLease?
     private var labFrameLimiter = LabCaptureFrameLimiter()
+    private let labDiagnostics = LabCaptureDiagnostics()
     #endif
     private var videoAvailability = CaptureVideoAvailability()
     private var displayObservation: CaptureDisplayChangeMonitor.Observation?
@@ -966,13 +1010,26 @@ final class ScreenCapture: NSObject, @unchecked Sendable {
         let onAudioSample: (@Sendable (CMSampleBuffer) -> Void)?
         let onVideoUnavailable: @Sendable (CaptureAttemptLease) -> Void
         let onStopped: @Sendable (CaptureStopReceipt, Error) -> Void
+        #if DEBUG
+        var onLabEvent: (@Sendable (LabCaptureDiagnosticEvent) -> Void)? = nil
+        #endif
     }
 
     private let lifecycle = CaptureStreamLifecycle<NativeStream, Callbacks> { native in
         // Serialize restoration behind any in-flight hide before native teardown.
         try? await native.cursorUpdates.restoreIfNeeded()?.value
-        do { try await native.stream.stopCapture() }
-        catch {
+        #if DEBUG
+        native.onLabEvent?(.nativeStopEntry)
+        #endif
+        do {
+            try await native.stream.stopCapture()
+            #if DEBUG
+            native.onLabEvent?(.nativeStopReturn)
+            #endif
+        } catch {
+            #if DEBUG
+            native.onLabEvent?(.nativeStopError)
+            #endif
             guard !ScreenCapture.isAlreadyStopped(error) else { return }
             Logger(subsystem: "com.threadmark.remotedesktop.host", category: "capture")
                 .error("stop failed: \(String(describing: error), privacy: .public)")
@@ -981,11 +1038,25 @@ final class ScreenCapture: NSObject, @unchecked Sendable {
     }
 
     func beginSession(callbacks: Callbacks) -> CaptureOwnerLease {
-        lifecycle.beginOwner(context: callbacks)
+        #if DEBUG
+        return lifecycle.beginOwner(context: callbacks) { [labDiagnostics] owner in
+            labDiagnostics.install(owner: owner, sink: callbacks.onLabEvent)
+        }
+        #else
+        return lifecycle.beginOwner(context: callbacks)
+        #endif
     }
 
     func endSession(_ owner: CaptureOwnerLease) -> Task<Void, Never> {
-        lifecycle.endOwner(owner)
+        #if DEBUG
+        labDiagnostics.emit(.retireRequested, owner: owner)
+        #endif
+        let barrier = lifecycle.endOwner(owner)
+        #if DEBUG
+        labDiagnostics.emit(.retireReturned, owner: owner)
+        labDiagnostics.retire(owner: owner)
+        #endif
+        return barrier
     }
 
     /// Updates only the stream owned by this session; callers must not advertise
@@ -1044,10 +1115,17 @@ final class ScreenCapture: NSObject, @unchecked Sendable {
         maximumMacroblocksPerFrame: Int,
         framesPerSecond: Int32 = CaptureSizing.targetFramesPerSecond
     ) async throws {
+        #if DEBUG
+        let diagnosticSink = labDiagnostics.snapshot(owner: owner)
+        #endif
         let task = try lifecycle.start(for: owner, prepare: { [self] in
-            try await makeStream(audioEnabled: audioEnabled,
+            let native = try await makeStream(audioEnabled: audioEnabled,
                                  maximumMacroblocksPerFrame: maximumMacroblocksPerFrame,
                                  framesPerSecond: framesPerSecond)
+            #if DEBUG
+            native.onLabEvent = diagnosticSink
+            #endif
+            return native
         }, startStream: { native in
             guard native.display.matches(CaptureDisplayState.read(native.display.state.displayID)) else {
                 throw CaptureError.displayChanged
@@ -1160,6 +1238,9 @@ extension ScreenCapture: SCStreamDelegate, SCStreamOutput {
         didOutputSampleBuffer sampleBuffer: CMSampleBuffer,
         of type: SCStreamOutputType
     ) {
+        #if DEBUG
+        if type == .screen { labDiagnostics.emit(.outputEntry) }
+        #endif
         guard let native = lifecycle.stream(matching: { $0.stream === stream }) else { return }
         lifecycle.withStream(native) { callbacks, attempt in
             switch type {
