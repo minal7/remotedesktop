@@ -9,10 +9,11 @@ enum LatencyUDPCapacityWire {
     static let maximumDatagramBytes = 1_200
     static let maximumPackets = 100_000
     static let maximumPayloadBytes = 90_000_000
-    static let ratesMbps = [2, 5, 8, 10, 12, 16]
-    static let stepSeconds: Double = 4
+    static let ratesMbps = [5, 6, 7, 8, 10]
+    static let baselineSeconds: Double = 10
+    static let stepSeconds: Double = 15
     static let cooldownSeconds: Double = 1
-    static let maximumSessionSeconds: Double = 60
+    static let maximumSessionSeconds: Double = 100
     private static let magic: [UInt8] = [0x55, 0x43, 0x50, 0x31]
     private static let headerBytes = 14
     private static let tagBytes = 32

@@ -9,10 +9,11 @@ enum LatencyUDPCapacityWire {
     static let maximumDatagramBytes = 1_200
     static let maximumPackets = 100_000
     static let maximumPayloadBytes = 90_000_000
-    static let ratesMbps = [2, 5, 8, 10, 12, 16]
-    static let stepSeconds: Double = 4
+    static let ratesMbps = [5, 6, 7, 8, 10]
+    static let baselineSeconds: Double = 10
+    static let stepSeconds: Double = 15
     static let cooldownSeconds: Double = 1
-    static let maximumSessionSeconds: Double = 60
+    static let maximumSessionSeconds: Double = 100
     private static let magic: [UInt8] = [0x55, 0x43, 0x50, 0x31]
     private static let headerBytes = 14
     private static let tagBytes = 32
@@ -174,19 +175,18 @@ final class LatencyUDPCapacitySender: @unchecked Sendable {
     private var tokens: Double = 0
     private var sequence: UInt64 = 0
     private var echoSequence: UInt64 = 0
-    private var pendingEcho: [UInt64: (Double, Int)] = [:]
+    private struct EchoObservation { let t0: Double; var t1: Double?; let step: Int; let phase: Double }
+    private var pendingEcho: [UInt64: (Double, Int, Int)] = [:]
+    private var echoRecords: [EchoObservation] = []
     private var baselineRTT: [Double] = []
     private var steps = Array(repeating: Step(), count: LatencyUDPCapacityWire.ratesMbps.count)
     private var totalAttemptedBytes = 0
     private var inFlight = 0
     private var stopped = false
     private var offered = false
-    private var stopAfterStep: Int?
     private var dataCompleteAt: Double?
     private var receiverSnapshotAt: Double?
     private var receiverFinal = false
-    private var heavySamples = 0
-    private var sentHistory: [(Double, Int, Int)] = []
 
     init?(lanAddress: String, mapper: any HostPortMapping = SystemHostPortMapper(),
           offer: @escaping OfferHandler, requestSnapshot: @escaping SnapshotRequest,
@@ -257,20 +257,7 @@ final class LatencyUDPCapacitySender: @unchecked Sendable {
             for (index, value) in values.enumerated() { self.steps[index].receiver = value }
             self.receiverSnapshotAt = ProcessInfo.processInfo.systemUptime
             if final { self.receiverFinal = true }
-            guard let started = self.authenticatedAt else { return }
-            let now = ProcessInfo.processInfo.systemUptime
-            let elapsed = now - started - 1
-            let step = Int(elapsed / 5)
-            guard elapsed >= 2, step >= 0, step < self.steps.count else { return }
-            let history = self.sentHistory.last { $0.1 == step && $0.0 <= now - 1 }
-            guard let sent = history?.2, sent >= 100 else { return }
-            let missing = max(0, sent - values[step].unique)
-            let recentRTT = self.steps[step].rttMs.suffix(10)
-            let baseline = self.baselineRTT.sorted()
-            let reference = baseline.isEmpty ? 0 : baseline[baseline.count / 2]
-            let highRTT = recentRTT.count >= 3 && recentRTT.sorted()[recentRTT.count / 2] > max(250, reference * 2)
-            self.heavySamples = (Double(missing) / Double(sent) > 0.10 || highRTT) ? self.heavySamples + 1 : 0
-            if self.heavySamples >= 2 { self.stopAfterStep = step }
+
         }
     }
 
@@ -329,9 +316,13 @@ final class LatencyUDPCapacitySender: @unchecked Sendable {
             lastTick = now
         case .echoReply:
             guard authenticatedAt != nil, let pending = pendingEcho.removeValue(forKey: packet.sequence) else { return }
-            let ms = (ProcessInfo.processInfo.systemUptime - pending.0) * 1000
+            let receivedAt = ProcessInfo.processInfo.systemUptime
+            let ms = (receivedAt - pending.0) * 1000
             guard ms.isFinite, ms >= 0, ms <= 10_000 else { return }
-            if pending.1 < 0 { baselineRTT.append(ms) } else { steps[pending.1].rttMs.append(ms) }
+            guard echoRecords.indices.contains(pending.2) else { return }
+            echoRecords[pending.2].t1 = receivedAt
+            if pending.1 < 0 { baselineRTT.append(ms) }
+            else if echoRecords[pending.2].phase == 1 { steps[pending.1].rttMs.append(ms) }
         default: break
         }
     }
@@ -347,27 +338,29 @@ final class LatencyUDPCapacitySender: @unchecked Sendable {
         guard let started = authenticatedAt else { if now - handshakeStarted >= 10 { finish(reason: 1) }; return }
         let elapsed = now - started
         guard handshake.permitsLoad(now: now), elapsed < LatencyUDPCapacityWire.maximumSessionSeconds else { finish(reason: 4); return }
-        let phase = elapsed - 1
-        let index = phase < 0 ? -1 : Int(phase / 5)
-        if index >= steps.count || (stopAfterStep != nil && index > stopAfterStep!) {
+        let phase = elapsed - LatencyUDPCapacityWire.baselineSeconds
+        let cycle = LatencyUDPCapacityWire.stepSeconds + LatencyUDPCapacityWire.cooldownSeconds
+        let index = phase < 0 ? -1 : Int(phase / cycle)
+        if index >= steps.count {
             if dataCompleteAt == nil { dataCompleteAt = now; requestSnapshot() }
-            if (receiverFinal && inFlight == 0) || now - (dataCompleteAt ?? now) >= 2 {
-                finish(reason: stopAfterStep == nil ? 0 : 5)
-            }
+            if (receiverFinal && inFlight == 0) || now - (dataCompleteAt ?? now) >= 2 { finish(reason: 0) }
             return
         }
         if now - lastEcho >= 0.1 {
             lastEcho = now; echoSequence &+= 1
-            pendingEcho[echoSequence] = (now, index)
-            pendingEcho = pendingEcho.filter { now - $0.value.0 <= 3 }
-            send(.echo, step: UInt8(max(0, index)), sequence: echoSequence, body: Data())
+            if echoRecords.count < 1_000 {
+                let recordIndex = echoRecords.count
+                let echoPhase = Self.echoPhase(step: index, phase: phase)
+                echoRecords.append(EchoObservation(t0: now, t1: nil, step: index, phase: echoPhase))
+                pendingEcho[echoSequence] = (now, index, recordIndex)
+                pendingEcho = pendingEcho.filter { now - $0.value.0 <= 3 }
+                send(.echo, step: UInt8(max(0, index)), sequence: echoSequence, body: Data())
+            }
         }
-        guard index >= 0, phase.truncatingRemainder(dividingBy: 5) < 4 else { lastTick = now; tokens = 0; return }
+        guard index >= 0, phase.truncatingRemainder(dividingBy: cycle) < LatencyUDPCapacityWire.stepSeconds else { lastTick = now; tokens = 0; return }
         let dt = max(0, min(0.05, now - (lastTick ?? now))); lastTick = now
         let rate = Double(LatencyUDPCapacityWire.ratesMbps[index]) * 1_000_000 / 8
         tokens = min(12_000, tokens + dt * rate)
-        sentHistory.append((now, index, steps[index].sent))
-        sentHistory.removeAll { now - $0.0 > 3 }
         let body = Data(repeating: 0, count: LatencyUDPCapacityWire.maximumDatagramBytes - 46)
         while tokens >= 1_200 && inFlight < 64 && sequence < UInt64(LatencyUDPCapacityWire.maximumPackets) {
             guard totalAttemptedBytes + 1_200 <= LatencyUDPCapacityWire.maximumPayloadBytes,
@@ -385,6 +378,23 @@ final class LatencyUDPCapacitySender: @unchecked Sendable {
         }
     }
 
+    static func echoPhase(step: Int, phase: Double) -> Double {
+        guard step >= 0 else { return 0 }
+        let cycle = LatencyUDPCapacityWire.stepSeconds + LatencyUDPCapacityWire.cooldownSeconds
+        return phase.truncatingRemainder(dividingBy: cycle) < LatencyUDPCapacityWire.stepSeconds ? 1 : 2
+    }
+
+    static func echoRecord(t0: Double, t1: Double?) -> [String: Double]? {
+        guard t0.isFinite, t0 >= 0 else { return nil }
+        var row = ["t0HostS": t0]
+        if let t1 {
+            guard t1.isFinite, t1 >= t0, t1 - t0 <= 10 else { return nil }
+            row["t1HostS"] = t1
+            row["rttMs"] = (t1 - t0) * 1000
+        }
+        return row
+    }
+
     static func lossThroughFinalSnapshot(sent: Int, received: Int, finalSnapshot: Bool, inFlight: Int) -> Int? {
         guard finalSnapshot, inFlight == 0, sent >= 0, received >= 0, received <= sent else { return nil }
         return sent - received
@@ -393,7 +403,8 @@ final class LatencyUDPCapacitySender: @unchecked Sendable {
     static func wallActiveSeconds(authenticatedAt: Double, step: Int, now: Double) -> Double {
         guard authenticatedAt.isFinite, now.isFinite, step >= 0,
               step < LatencyUDPCapacityWire.ratesMbps.count else { return 0 }
-        return min(4, max(0, now - (authenticatedAt + 1 + Double(step) * 5)))
+        let cycle = LatencyUDPCapacityWire.stepSeconds + LatencyUDPCapacityWire.cooldownSeconds
+        return min(LatencyUDPCapacityWire.stepSeconds, max(0, now - (authenticatedAt + LatencyUDPCapacityWire.baselineSeconds + Double(step) * cycle)))
     }
 
     private func finish(reason: Int) {
@@ -408,11 +419,24 @@ final class LatencyUDPCapacitySender: @unchecked Sendable {
         }
         let now = ProcessInfo.processInfo.systemUptime
         let finalValid = receiverFinal && inFlight == 0
+        func echoRows(step: Int) -> [[String: Double]] {
+            echoRecords.filter { $0.step == step }.compactMap { record in
+                guard var row = Self.echoRecord(t0: record.t0, t1: record.t1) else { return nil }
+                row["phase"] = record.phase // 0 idle baseline, 1 active step, 2 cooldown.
+                return row
+            }
+        }
         let values: [[String: Any]] = steps.enumerated().map { index, step in
             let activeSeconds = authenticatedAt.map { Self.wallActiveSeconds(authenticatedAt: $0, step: index, now: now) } ?? 0
             var row: [String: Any] = ["rateMbps": LatencyUDPCapacityWire.ratesMbps[index], "attempted": step.attempted,
                 "sent": step.sent, "sentBytes": step.sentBytes, "sendErrors": step.sendErrors,
-                "activeSeconds": activeSeconds, "rttMs": summary(step.rttMs)]
+                "activeSeconds": activeSeconds, "rttMs": summary(step.rttMs), "rttRecords": echoRows(step: index)]
+            if activeSeconds > 0, let authenticatedAt {
+                let cycle = LatencyUDPCapacityWire.stepSeconds + LatencyUDPCapacityWire.cooldownSeconds
+                let activeStart = authenticatedAt + LatencyUDPCapacityWire.baselineSeconds + Double(index) * cycle
+                row["activeStartHostS"] = activeStart
+                row["activeEndHostS"] = activeStart + activeSeconds
+            }
             if activeSeconds > 0 {
                 row["offeredBps"] = Double(step.attempted * 1_200 * 8) / activeSeconds
                 row["sentBps"] = Double(step.sentBytes * 8) / activeSeconds
@@ -431,6 +455,7 @@ final class LatencyUDPCapacitySender: @unchecked Sendable {
             return row
         }
         var result: [String: Any] = ["reason": reason, "baselineRTTMs": summary(baselineRTT),
+                                     "baselineRTTRecords": echoRows(step: -1),
                                      "finalSnapshotValid": finalValid, "steps": values]
         if let receiverSnapshotAt { result["receiverSnapshotAgeSeconds"] = max(0, now - receiverSnapshotAt) }
         completion(result)

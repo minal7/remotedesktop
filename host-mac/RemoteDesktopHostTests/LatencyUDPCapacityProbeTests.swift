@@ -6,13 +6,22 @@ import XCTest
 final class LatencyUDPCapacityProbeTests: XCTestCase {
     func testAuthenticatedPacketRoundTripAndTampering() throws {
         let key = SymmetricKey(data: Data(repeating: 7, count: 32))
-        let packet = LatencyUDPCapacityWire.Packet(kind: .data, step: 5, sequence: 987,
+        let packet = LatencyUDPCapacityWire.Packet(kind: .data, step: 4, sequence: 987,
                                                   body: Data(repeating: 3, count: 100))
         let bytes = try XCTUnwrap(LatencyUDPCapacityWire.encode(packet, key: key))
         XCTAssertEqual(LatencyUDPCapacityWire.decode(bytes, key: key), packet)
         var changed = bytes; changed[changed.startIndex + 20] ^= 1
         XCTAssertNil(LatencyUDPCapacityWire.decode(changed, key: key))
         XCTAssertNil(LatencyUDPCapacityWire.decode(bytes, key: SymmetricKey(data: Data(repeating: 8, count: 32))))
+    }
+
+    func testRepeatProfileIsBoundedAndExactlySpecified() {
+        XCTAssertEqual(LatencyUDPCapacityWire.ratesMbps, [5, 6, 7, 8, 10])
+        XCTAssertEqual(LatencyUDPCapacityWire.baselineSeconds, 10)
+        XCTAssertEqual(LatencyUDPCapacityWire.stepSeconds, 15)
+        XCTAssertEqual(LatencyUDPCapacityWire.cooldownSeconds, 1)
+        XCTAssertEqual(LatencyUDPCapacityWire.maximumSessionSeconds, 100)
+        XCTAssertLessThan(36 * 1_000_000 * 15 / 8, LatencyUDPCapacityWire.maximumPayloadBytes)
     }
 
     func testPacketBoundsFailClosed() {
@@ -56,16 +65,34 @@ extension LatencyUDPCapacityProbeTests {
         XCTAssertFalse(state.confirm(Data(repeating: 3, count: 32), now: 102))
         XCTAssertTrue(state.confirm(pair, now: 102))
         XCTAssertFalse(state.confirm(pair, now: 103))
-        XCTAssertTrue(state.permitsLoad(now: 161.9))
-        XCTAssertFalse(state.permitsLoad(now: 162))
+        XCTAssertTrue(state.permitsLoad(now: 201.9))
+        XCTAssertFalse(state.permitsLoad(now: 202))
         var expired = LatencyUDPCapacityHandshake(startedAt: 100)
         XCTAssertNil(expired.challenge(client: client, server: server, now: 110))
     }
 
     func testWallRateUsesElapsedStepTimeEvenWhenSenderStalls() {
-        XCTAssertEqual(LatencyUDPCapacitySender.wallActiveSeconds(authenticatedAt: 100, step: 0, now: 104), 3)
-        XCTAssertEqual(LatencyUDPCapacitySender.wallActiveSeconds(authenticatedAt: 100, step: 0, now: 108), 4)
-        XCTAssertEqual(LatencyUDPCapacitySender.wallActiveSeconds(authenticatedAt: 100, step: 1, now: 105), 0)
+        XCTAssertEqual(LatencyUDPCapacitySender.wallActiveSeconds(authenticatedAt: 100, step: 0, now: 113), 3)
+        XCTAssertEqual(LatencyUDPCapacitySender.wallActiveSeconds(authenticatedAt: 100, step: 0, now: 130), 15)
+        XCTAssertEqual(LatencyUDPCapacitySender.wallActiveSeconds(authenticatedAt: 100, step: 1, now: 125), 0)
+    }
+
+    func testEchoPhaseSeparatesBaselineLoadAndCooldown() {
+        XCTAssertEqual(LatencyUDPCapacitySender.echoPhase(step: -1, phase: -0.1), 0)
+        XCTAssertEqual(LatencyUDPCapacitySender.echoPhase(step: 0, phase: 14.9), 1)
+        XCTAssertEqual(LatencyUDPCapacitySender.echoPhase(step: 0, phase: 15), 2)
+        XCTAssertEqual(LatencyUDPCapacitySender.echoPhase(step: 1, phase: 16), 1)
+    }
+
+    func testEchoRowsRetainOnlyValidHostTimesAndRtt() throws {
+        let reply = try XCTUnwrap(LatencyUDPCapacitySender.echoRecord(t0: 100, t1: 100.025))
+        XCTAssertEqual(reply["t0HostS"], 100)
+        XCTAssertEqual(reply["t1HostS"], 100.025)
+        XCTAssertEqual(try XCTUnwrap(reply["rttMs"]), 25, accuracy: 0.001)
+        let missing = try XCTUnwrap(LatencyUDPCapacitySender.echoRecord(t0: 101, t1: nil))
+        XCTAssertNil(missing["rttMs"])
+        XCTAssertNil(LatencyUDPCapacitySender.echoRecord(t0: 101, t1: 100))
+        XCTAssertNil(LatencyUDPCapacitySender.echoRecord(t0: .nan, t1: nil))
     }
 
     func testStaleOrOutstandingCountersCannotClaimLoss() {

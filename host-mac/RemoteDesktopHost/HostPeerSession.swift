@@ -358,7 +358,7 @@ final class HostPeerSession: NSObject {
             return true
         }
         if type == "latencyUdpCapacityProgress" {
-            guard let rows = object["steps"] as? [[String: Any]], rows.count == 6,
+            guard let rows = object["steps"] as? [[String: Any]], rows.count == LatencyUDPCapacityWire.ratesMbps.count,
                   let overflowed = object["overflowed"] as? Bool,
                   let final = object["final"] as? Bool else { return true }
             var values: [LatencyUDPCapacitySender.ReceiverStep] = []

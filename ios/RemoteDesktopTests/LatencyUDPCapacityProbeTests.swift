@@ -6,7 +6,7 @@ import XCTest
 final class LatencyUDPCapacityProbeTests: XCTestCase {
     func testAuthenticatedPacketRoundTripAndTampering() throws {
         let key = SymmetricKey(data: Data(repeating: 7, count: 32))
-        let packet = LatencyUDPCapacityWire.Packet(kind: .data, step: 5, sequence: 987,
+        let packet = LatencyUDPCapacityWire.Packet(kind: .data, step: 4, sequence: 987,
                                                   body: Data(repeating: 3, count: 100))
         let bytes = try XCTUnwrap(LatencyUDPCapacityWire.encode(packet, key: key))
         XCTAssertEqual(LatencyUDPCapacityWire.decode(bytes, key: key), packet)
@@ -27,6 +27,15 @@ final class LatencyUDPCapacityProbeTests: XCTestCase {
     func testForegroundAdmissionRejectsBackgroundBeforeOffer() {
         XCTAssertTrue(LatencyUDPCapacityForegroundPolicy.permitsStart(isActive: true))
         XCTAssertFalse(LatencyUDPCapacityForegroundPolicy.permitsStart(isActive: false))
+    }
+
+    func testRepeatProfileIsBoundedAndExactlySpecified() {
+        XCTAssertEqual(LatencyUDPCapacityWire.ratesMbps, [5, 6, 7, 8, 10])
+        XCTAssertEqual(LatencyUDPCapacityWire.baselineSeconds, 10)
+        XCTAssertEqual(LatencyUDPCapacityWire.stepSeconds, 15)
+        XCTAssertEqual(LatencyUDPCapacityWire.cooldownSeconds, 1)
+        XCTAssertEqual(LatencyUDPCapacityWire.maximumSessionSeconds, 100)
+        XCTAssertLessThan(36 * 1_000_000 * 15 / 8, LatencyUDPCapacityWire.maximumPayloadBytes)
     }
 
     func testPacketBoundsFailClosed() {
