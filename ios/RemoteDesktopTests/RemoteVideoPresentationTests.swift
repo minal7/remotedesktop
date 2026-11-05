@@ -56,6 +56,22 @@ final class RemoteVideoPresentationTests: XCTestCase {
         }
     }
 
+    func test_twoGPUDoneTicketsSettleOutOfOrderWithoutForgingReadiness() throws {
+        var ledger = RemoteVideoPresentationLedger(capacity: 2)
+        let context = UUID(), firstDrawable = NSObject(), secondDrawable = NSObject(), thirdDrawable = NSObject()
+        let first = try XCTUnwrap(ledger.reserve(context: context, frame: UUID(), drawable: ObjectIdentifier(firstDrawable), drawableID: 1))
+        let second = try XCTUnwrap(ledger.reserve(context: context, frame: UUID(), drawable: ObjectIdentifier(secondDrawable), drawableID: 2))
+        XCTAssertTrue(ledger.commit(first)); XCTAssertTrue(ledger.commit(second))
+        XCTAssertTrue(ledger.completeGPU(first, succeeded: true).results.isEmpty)
+        XCTAssertTrue(ledger.completeGPU(second, succeeded: true).results.isEmpty)
+        XCTAssertEqual(ledger.count, 2)
+        XCTAssertNil(ledger.reserve(context: context, frame: UUID(), drawable: ObjectIdentifier(thirdDrawable), drawableID: 3))
+        let newer = ledger.presented(second, drawable: ObjectIdentifier(secondDrawable), drawableID: 2, time: 10)
+        XCTAssertEqual(newer.results.first?.1, .presented(10)); XCTAssertEqual(ledger.count, 1)
+        let older = ledger.presented(first, drawable: ObjectIdentifier(firstDrawable), drawableID: 1, time: 0)
+        XCTAssertEqual(older.results.first?.1, .skipped); XCTAssertEqual(ledger.count, 0)
+    }
+
     func test_skippedInvalidOrFailedPresentationCannotProduceAPresentedReceipt() throws {
         let drawable = NSObject()
         for time: TimeInterval in [0, -1, .nan, .infinity] {

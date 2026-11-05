@@ -28,6 +28,8 @@ final class RemoteVideoPresentationProducer {
     private(set) var contextID = UUID()
     #if DEBUG
     var onLatencySubmit: (() -> Void)?
+    var onLabGPUComplete: (@MainActor (UUID, UUID, Bool) -> Void)?
+    var onLabDiscarded: (@MainActor (UUID, UUID) -> Void)?
     private let labAdmission: Bool
     #endif
     private var active = true
@@ -102,11 +104,21 @@ final class RemoteVideoPresentationProducer {
             requiresPresentationCallback: requiresPresentationCallback,
             onResult: { [weak self] result in
                 guard let self, self.active, self.contextID == contextID,
-                      self.layer.drawableSize == size,
-                      self.lastReceiptDrawableID.map({ drawableID > $0 }) ?? true else { return }
+                      self.layer.drawableSize == size else { return }
+                guard Self.isNewerReceipt(drawableID: drawableID, last: self.lastReceiptDrawableID) else {
+                    #if DEBUG
+                    self.onLabDiscarded?(contextID, frameID)
+                    #endif
+                    return
+                }
                 switch result {
                 case .presented(let time), .rendered(let time):
-                    guard time >= self.lastReceiptTime else { return }
+                    guard time >= self.lastReceiptTime else {
+                        #if DEBUG
+                        self.onLabDiscarded?(contextID, frameID)
+                        #endif
+                        return
+                    }
                     self.lastReceiptTime = time
                     self.lastReceiptDrawableID = drawableID
                 default: break
@@ -159,6 +171,9 @@ final class RemoteVideoPresentationProducer {
         // The command's completion handler keeps image inputs alive until
         // the actual GPU completion, independently of observer/view lifetime.
         let resources = FrameResources(frame: frame, prepared: prepared, image: output, task: renderTask, context: imageContext)
+        #if DEBUG
+        let onLabGPUComplete = self.onLabGPUComplete
+        #endif
         command.addCompletedHandler { command in
             #if DEBUG
             gpuPermit?.release()
@@ -166,7 +181,12 @@ final class RemoteVideoPresentationProducer {
             withExtendedLifetime(resources) {
                 let succeeded = command.status == .completed
                 let completionTime = CACurrentMediaTime()
-                Task { @MainActor in budget.completeGPU(ticket, succeeded: succeeded, completionTime: completionTime) }
+                Task { @MainActor in
+                    budget.completeGPU(ticket, succeeded: succeeded, completionTime: completionTime)
+                    #if DEBUG
+                    onLabGPUComplete?(contextID, frameID, succeeded)
+                    #endif
+                }
             }
         }
         #if !targetEnvironment(simulator)
@@ -186,6 +206,10 @@ final class RemoteVideoPresentationProducer {
         gpuCommitted = true
         #endif
         return .submitted(ticket)
+    }
+
+    nonisolated static func isNewerReceipt(drawableID: Int, last: Int?) -> Bool {
+        last.map { drawableID > $0 } ?? true
     }
 
     nonisolated static func validDestination(width: Int, height: Int) -> Bool {

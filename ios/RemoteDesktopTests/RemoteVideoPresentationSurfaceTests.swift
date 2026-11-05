@@ -10,6 +10,72 @@ import UIKit
 @MainActor
 final class RemoteVideoPresentationSurfaceTests: XCTestCase {
     #if DEBUG
+    func testLabNonserialRequiresExplicitLabAdmissionAndStockRenderer() {
+        let enabled = ["LATENCY_LAB": "1", "LATENCY_GPU_PIPELINE": "1"]
+        XCTAssertTrue(RemoteVideoPresentationSurface.labNonserialEnabled(labAdmitted: true, f4: false, environment: enabled))
+        XCTAssertFalse(RemoteVideoPresentationSurface.labNonserialEnabled(labAdmitted: false, f4: false, environment: enabled))
+        XCTAssertFalse(RemoteVideoPresentationSurface.labNonserialEnabled(labAdmitted: true, f4: true, environment: enabled))
+        XCTAssertFalse(RemoteVideoPresentationSurface.labNonserialEnabled(labAdmitted: true, f4: false, environment: [:]))
+        XCTAssertFalse(RemoteVideoPresentationSurface.labNonserialEnabled(labAdmitted: true, f4: false,
+            environment: ["LATENCY_GPU_PIPELINE": "1"]))
+        XCTAssertFalse(RemoteVideoPresentationSurface.labNonserialEnabled(labAdmitted: true, f4: false,
+            environment: ["LATENCY_LAB": "1", "LATENCY_GPU_PIPELINE": "true"]))
+    }
+
+    func testLabNonserialGateRequiresGPUCompletionAndNeverExceedsTwo() {
+        var gate = RemoteVideoPresentationSurface.LabNonserialGate()
+        let first = UUID(), second = UUID(), third = UUID()
+        XCTAssertTrue(gate.canSubmit); XCTAssertTrue(gate.submit(first))
+        XCTAssertFalse(gate.canSubmit); XCTAssertFalse(gate.submit(second))
+        XCTAssertFalse(gate.completedGPU(first, succeeded: false)); XCTAssertFalse(gate.canSubmit)
+        XCTAssertTrue(gate.completedGPU(first, succeeded: true)); XCTAssertTrue(gate.canSubmit)
+        XCTAssertFalse(gate.completedGPU(first, succeeded: true))
+        XCTAssertTrue(gate.submit(second)); XCTAssertEqual(gate.count, 2)
+        XCTAssertFalse(gate.canSubmit); XCTAssertFalse(gate.submit(third))
+        XCTAssertTrue(gate.completedGPU(second, succeeded: true)); XCTAssertFalse(gate.canSubmit)
+        XCTAssertEqual(gate.settle(first, result: .presented(1)), .presented(1)); XCTAssertTrue(gate.canSubmit)
+        XCTAssertNil(gate.settle(first, result: .presented(1))); XCTAssertTrue(gate.submit(third))
+        gate.reset(); XCTAssertEqual(gate.count, 0)
+        XCTAssertFalse(gate.completedGPU(second, succeeded: true)); XCTAssertNil(gate.settle(third, result: .failed))
+    }
+
+    func testLabNonserialCallbackRoutingKeepsReceiptsAuthoritative() {
+        let older = UUID(), newer = UUID(), context = UUID()
+        let presentation = RemoteVideoSurfacePresentation(context: context)
+        var gate = RemoteVideoPresentationSurface.LabNonserialGate()
+        XCTAssertTrue(gate.submit(older))
+        XCTAssertTrue(gate.completedGPU(older, succeeded: true), "GPU completion permits scheduling only")
+        XCTAssertEqual(presentation.state, .waiting(context: context), "GPU completion must not grant presentation readiness")
+        XCTAssertTrue(gate.submit(newer))
+        XCTAssertTrue(gate.completedGPU(newer, succeeded: true))
+        XCTAssertEqual(gate.settle(newer, result: .presented(12)), .presented(12))
+        presentation.present(context: context, frame: newer, time: 12)
+        XCTAssertFalse(RemoteVideoPresentationProducer.isNewerReceipt(drawableID: 1, last: 2))
+        XCTAssertTrue(gate.discard(older), "An older filtered skip settles without a readiness disposition")
+        XCTAssertEqual(gate.count, 0)
+        XCTAssertEqual(presentation.state, .presented(context: context, frame: newer, time: 12))
+        XCTAssertFalse(gate.discard(older))
+
+        XCTAssertTrue(gate.submit(older)); XCTAssertTrue(gate.completedGPU(older, succeeded: true))
+        XCTAssertTrue(gate.submit(newer))
+        XCTAssertEqual(gate.settle(older, result: .failed), .retry,
+                       "A newer unproven frame does not establish readiness")
+        XCTAssertFalse(gate.canSubmit)
+        XCTAssertTrue(gate.completedGPU(newer, succeeded: true))
+        XCTAssertEqual(gate.settle(newer, result: .presented(13)), .presented(13))
+
+        XCTAssertTrue(gate.submit(older))
+        // The ledger may settle before its queued GPU scheduling notification.
+        XCTAssertEqual(gate.settle(older, result: .presented(14)), .presented(14))
+        XCTAssertTrue(gate.submit(newer))
+        XCTAssertFalse(gate.completedGPU(older, succeeded: true), "Late old notification cannot release newer work")
+        XCTAssertFalse(gate.canSubmit)
+        gate.reset() // hide, retirement or context replacement clears the surface generation
+        XCTAssertFalse(gate.completedGPU(newer, succeeded: true))
+        XCTAssertNil(gate.settle(newer, result: .skipped))
+        XCTAssertFalse(gate.discard(newer))
+    }
+
     func testRetryDiagnosticsRequireExplicitLabAdmissionAndOptIn() {
         let enabled = ["LATENCY_LAB": "1", "LATENCY_RENDER_DIAGNOSTICS": "1"]
         XCTAssertTrue(RemoteVideoPresentationSurface.retryDiagnosticsEnabled(labAdmitted: true, environment: enabled))
