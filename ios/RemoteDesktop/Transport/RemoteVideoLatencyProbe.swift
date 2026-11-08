@@ -65,8 +65,12 @@ enum LatencyTextPSNR {
         // Reject malformed/extreme geometry before allocating; this is one small ROI, not a frame copy.
         guard sourceCount > 0, sourceCount <= 2048 else { return nil }
         let n = reference.width, count = vDSP_Length(n)
-        let positions: [Float] = (0..<n).map { x in
-            Float(max(Double(cropX), min(Double(endX), firstX + (Double(x) + 0.5) * sx - 0.5)) - Double(startX))
+        let lowX = Double(cropX), highX = Double(endX), originX = Double(startX)
+        let positions: [Float] = (0..<n).map { (x: Int) -> Float in
+            // Split up so Xcode 26.2 can type-check it in time.
+            let sampled: Double = firstX + (Double(x) + 0.5) * sx - 0.5
+            let clamped: Double = max(lowX, min(highX, sampled))
+            return Float(clamped - originX)
         }
         var source0 = [Float](repeating: 0, count: sourceCount + 1), source1 = source0
         var row0 = [Float](repeating: 0, count: n), row1 = row0, combined = row0, scratch = row0
