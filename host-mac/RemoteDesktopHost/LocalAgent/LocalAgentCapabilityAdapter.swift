@@ -175,10 +175,12 @@ final class LocalAgentCapabilityAdapter: AgentTaskAdapting {
         if rootTaskID == taskID || hostTaskID == taskID, let harness, !harness.finished {
             return await drive(harness, progress: progress) { await harness.resumeAfterPause() }
         }
-        guard harness == nil || harness?.finished == true || pendingQuestion != nil else {
+        // Only a task that is running right now blocks a new request. One left waiting for an
+        // answer, an approval or a Resume is replaced, so a task that failed while waiting
+        // can't refuse every later request.
+        guard runCalls == 0 || harness?.finished != false else {
             throw LocalAgentError.taskAlreadyActive
         }
-        // A fresh request replaces a question nobody answered.
         harness?.cancelRequested = true
         let priorTurns = conversation.suffix(6).map { "\($0.role == .user ? "User" : "You"): \($0.text.prefix(200))" }
         let created = makeHarness(prompt, priorTurns)
@@ -220,10 +222,10 @@ final class LocalAgentCapabilityAdapter: AgentTaskAdapting {
             return .agentApprovalRequired(request)
         case let .needsAnswer(question):
             guard let goal, let hostTaskID else { return .unableToComplete("The question has no task to go with it.") }
-            let pairs = question.choices.enumerated().map { (Self.choiceID(question.id, $0.offset), $0.element) }
+            let pairs = Self.choiceLabels(question.choices).enumerated().map { (Self.choiceID(question.id, $0.offset), $0.element) }
             pendingQuestion = PendingQuestion(hostTaskID: hostTaskID, goal: goal, question: question,
                                               choicesByID: Dictionary(pairs, uniquingKeysWith: { first, _ in first }))
-            return .clarificationRequired(question.question)
+            return .clarificationRequired(Self.questionText(question.question))
         case let .handoff(reason):
             return .userInterventionRequired(reason)
         case .paused:
@@ -265,12 +267,14 @@ final class LocalAgentCapabilityAdapter: AgentTaskAdapting {
 
     func clarification(taskID: String) throws -> ComputerUseClarificationQuestion? {
         guard let pending = pendingQuestion, pending.hostTaskID == taskID else { return nil }
-        let choices = try pending.question.choices.enumerated().map { index, label in
+        let labels = Self.choiceLabels(pending.question.choices)
+        // The protocol rejects an empty list, so a free-text question sends none.
+        let choices = labels.isEmpty ? nil : try labels.enumerated().map { index, label in
             try ComputerUseClarificationChoice(id: Self.choiceID(pending.question.id, index), label: label)
         }
         try ComputerUseClarificationChoice.validate(choices)
         return ComputerUseClarificationQuestion(
-            taskID: taskID, goal: pending.goal, question: pending.question.question,
+            taskID: taskID, goal: pending.goal, question: Self.questionText(pending.question.question),
             scope: Self.scope(pending.question.id), expiresAt: Date().addingTimeInterval(600), choices: choices)
     }
 
@@ -295,7 +299,7 @@ final class LocalAgentCapabilityAdapter: AgentTaskAdapting {
             nextGoal = pending.goal
         } else {
             guard let latest = suppliedGoal.userTurns.last,
-                  let expected = try? pending.goal.answering(pending.question.question, with: latest),
+                  let expected = try? pending.goal.answering(Self.questionText(pending.question.question), with: latest),
                   expected == suppliedGoal else { throw LocalAgentError.invalidClarification }
             answer = latest
             nextGoal = suppliedGoal
@@ -336,6 +340,26 @@ final class LocalAgentCapabilityAdapter: AgentTaskAdapting {
         // Dropping the model request makes this quick, but never hang Stop on it.
         let deadline = Date().addingTimeInterval(3)
         while runCalls > 0, Date() < deadline { try? await Task.sleep(for: .milliseconds(30)) }
+    }
+
+    /// The model writes these, so keep only what the phone can show: non-blank, distinct,
+    /// short enough, and no more than the protocol allows.
+    static func choiceLabels(_ raw: [String]) -> [String] {
+        var seen = Set<String>()
+        var labels: [String] = []
+        for value in raw {
+            var label = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            while label.utf8.count > ComputerUseClarificationChoice.maximumDisplayBytes { label.removeLast() }
+            guard !label.isEmpty, seen.insert(label).inserted else { continue }
+            labels.append(label)
+            if labels.count == ComputerUseClarificationChoice.maximumChoices { break }
+        }
+        return labels
+    }
+
+    static func questionText(_ raw: String) -> String {
+        let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        return ComputerUseClarificationText.isValid(text) ? text : "What should I do next?"
     }
 
     private static func choiceID(_ id: UUID, _ index: Int) -> String {
