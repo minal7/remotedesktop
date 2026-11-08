@@ -13,8 +13,8 @@ iCloud (CloudKit) database.
 How to test
 1. On a Mac (macOS 14 or later, Apple silicon), download and open Remote Desktop Host 0.4.0:
    https://github.com/minal7/remotedesktop/releases/tag/v0.4.0
-   It is signed with our Developer ID and notarized by Apple. Allow Screen Recording and
-   Accessibility when macOS asks, so the Mac can be seen and controlled.
+   It is signed with our Developer ID and notarized by Apple. Allow Local Network, Screen
+   Recording and Accessibility when macOS asks, so the Mac can be found, seen and controlled.
 2. Sign the Mac and the iPhone or iPad in to the same Apple Account, with iCloud on, and keep
    both on the same Wi-Fi network.
 3. Open Remote Desktop on the iPhone or iPad. The Mac appears in the list within a minute. Tap it
