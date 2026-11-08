@@ -15,11 +15,23 @@ class ReleaseWorkflowSecurityContractTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
 
-    def test_published_windows_release_requires_authenticode_secrets(self) -> None:
+    def test_published_release_never_ships_an_unsigned_windows_installer(self) -> None:
+        # Without Authenticode secrets a release publishes the macOS host only.
         self.assertIn(
-            "Published Windows releases require Authenticode secrets",
+            "this release publishes the macOS host only",
             self.workflow,
         )
+        for upload in (
+            "- name: Upload Windows release installer",
+            "- name: Upload SHA-bound Windows candidate",
+        ):
+            start = self.workflow.index(upload)
+            step = self.workflow[start:self.workflow.index("\n      - name:", start + 1)]
+            self.assertIn(
+                "steps.windows-signing.outputs.configured == 'true'",
+                step,
+                upload,
+            )
         self.assertIn(
             "WINDOWS_CERTIFICATE_PFX: ${{ secrets.WINDOWS_CERTIFICATE_PFX }}",
             self.workflow,
