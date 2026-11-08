@@ -368,8 +368,11 @@ jobs:
             throw "WINDOWS_CERTIFICATE_PFX and WINDOWS_CERTIFICATE_PASSWORD must be configured together."
           }
           if (-not $hasPfx) {
+            # Never ship an unsigned installer. Without Authenticode secrets a
+            # published release carries the macOS host only, and the README
+            # keeps linking the last signed Windows installer.
             if ($env:PUBLISH -eq "true") {
-              throw "Published Windows releases require Authenticode secrets WINDOWS_CERTIFICATE_PFX and WINDOWS_CERTIFICATE_PASSWORD."
+              Write-Host "::warning::Authenticode signing is not configured; this release publishes the macOS host only."
             }
             "configured=false" >> $env:GITHUB_OUTPUT
             Write-Host "No Windows candidate will be packaged or uploaded because Authenticode signing is not configured."
@@ -1107,7 +1110,14 @@ jobs:
           RELEASE_TAG: ${{ needs.resolve-version.outputs.tag_name }}
           RELEASE_VERSION: ${{ needs.resolve-version.outputs.version }}
           TESTFLIGHT_URL: https://testflight.apple.com/join/tyHPrUny
-        run: node .github/scripts/update-readme-downloads.mjs
+        run: |
+          set -euo pipefail
+          if compgen -G "release-assets/RemoteDesktopHost-Setup-*.exe" > /dev/null; then
+            export WINDOWS_ASSET_PUBLISHED=true
+          else
+            export WINDOWS_ASSET_PUBLISHED=false
+          fi
+          node .github/scripts/update-readme-downloads.mjs
 
       - name: Commit README download links
         run: |

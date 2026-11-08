@@ -982,7 +982,10 @@ final class WebRTCTransportTests: XCTestCase {
         transport.disconnect(reason: "test")
 
         XCTAssertEqual(snapshot.claimCount, 1)
-        XCTAssertEqual(snapshot.sent.count, 1)
+        // Local ICE candidates may trickle out after the offer before the snapshot;
+        // only the single offer is under test.
+        XCTAssertEqual(snapshot.sent.filter { $0.kind == .offer }.count, 1)
+        XCTAssertTrue(snapshot.sent.dropFirst().allSatisfy { $0.kind == .ice })
         XCTAssertEqual(snapshot.sent.first?.kind, .offer)
         XCTAssertEqual(snapshot.sent.first?.payload["sdpType"], "offer")
         XCTAssertTrue(
@@ -1105,7 +1108,10 @@ final class WebRTCTransportTests: XCTestCase {
         transport.disconnect(reason: "test")
 
         XCTAssertEqual(snapshot.claimCount, 1)
-        XCTAssertEqual(snapshot.sent.count, 1)
+        // Local ICE candidates may trickle out after the offer before the snapshot;
+        // only the single offer is under test.
+        XCTAssertEqual(snapshot.sent.filter { $0.kind == .offer }.count, 1)
+        XCTAssertTrue(snapshot.sent.dropFirst().allSatisfy { $0.kind == .ice })
         let offer = try XCTUnwrap(snapshot.sent.first)
         XCTAssertEqual(offer.kind, .offer)
         XCTAssertNil(offer.payload["adaptiveVideo60"])

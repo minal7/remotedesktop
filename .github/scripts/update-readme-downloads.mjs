@@ -22,17 +22,23 @@ const githubReleaseBase = `https://github.com/${repository}/releases`;
 const macAsset = `RemoteDesktopHost-macOS-${version}.zip`;
 const windowsAsset = `RemoteDesktopHost-Setup-${version}.exe`;
 
+const readme = readFileSync(readmePath, "utf8");
+// A release without a signed Windows installer keeps linking the last one.
+const windowsLine =
+  process.env.WINDOWS_ASSET_PUBLISHED === "false"
+    ? readme.split("\n").find((line) => line.startsWith("- Windows host:"))
+    : `- Windows host: [${windowsAsset}](${githubReleaseBase}/download/${tag}/${windowsAsset})`;
+
 const replacement = [
   "<!-- download-links:start -->",
   `Latest host release: [${tag}](${githubReleaseBase}/tag/${tag})`,
   "",
   `- iPhone and iPad beta: [Join TestFlight](${testFlightUrl})`,
   `- macOS host: [${macAsset}](${githubReleaseBase}/download/${tag}/${macAsset})`,
-  `- Windows host: [${windowsAsset}](${githubReleaseBase}/download/${tag}/${windowsAsset})`,
+  ...(windowsLine ? [windowsLine] : []),
   "<!-- download-links:end -->",
 ].join("\n");
 
-const readme = readFileSync(readmePath, "utf8");
 const markerPattern =
   /<!-- download-links:start -->[\s\S]*?<!-- download-links:end -->/;
 
