@@ -14,6 +14,8 @@ struct ComputerUseArtifactManifest: Codable, Equatable, Sendable {
         case uiTars15_7B = "ui-tars15-7b"
         case guiOwl15_4B = "gui-owl15-4b"
         case holo31_4B = "holo31-4b"
+        /// Shipping local agent: Fara 9B acts, LFM3 1.7B plans.
+        case localAgentFara9BLFM3 = "local-agent-fara15-9b-lfm3-1.7b"
     }
 
     struct DownloadableArtifact: Codable, Equatable, Sendable {
@@ -64,7 +66,26 @@ struct ComputerUseArtifactManifest: Codable, Equatable, Sendable {
                 sha256: "373320845fb5539dd55a66d3faafcd8f123e83a7318334d557a04d604f5ef84d",
                 downloadURL: URL(string: "https://huggingface.co/bartowski/Fara1.5-4B-GGUF/resolve/b97f335231e01efbbad37bb89b5310340fc10735/mmproj-Fara1.5-4B-f16.gguf")!)],
         minimumMemoryBytes: 16 * 1_024 * 1_024 * 1_024)
-    static let current = fara15
+
+    /// The local agent: Fara1.5-9B acts on the screen and LFM3-1.7B plans, both at 128K context.
+    /// 24 GB minimum because the two servers with full context measured about 13-17 GB together.
+    static let localAgent = ComputerUseArtifactManifest(
+        installationVersion: "local-agent-fara15-9b-lfm3-1.7b-q4-k-m-b12144",
+        modelVariant: .localAgentFara9BLFM3,
+        modelRepository: "bartowski/Fara1.5-9B-GGUF",
+        modelRevision: "153cb27ac91d4a2b9391ecf278542e610d040178",
+        modelArtifacts: [
+            .init(kind: .textModelShard, fileName: "Fara1.5-9B-Q4_K_M.gguf", byteCount: 5_910_783_104,
+                sha256: "a02e7220337b87290bca7ef7225ba4afa7104efa05c0851de6c29ec9c5d04c7d",
+                downloadURL: URL(string: "https://huggingface.co/bartowski/Fara1.5-9B-GGUF/resolve/153cb27ac91d4a2b9391ecf278542e610d040178/Fara1.5-9B-Q4_K_M.gguf")!),
+            .init(kind: .visionProjector, fileName: "mmproj-Fara1.5-9B-f16.gguf", byteCount: 918_166_048,
+                sha256: "97b423c81719ffc367124a9739d6feb6f62d62f60869a6d385a701b963ce1906",
+                downloadURL: URL(string: "https://huggingface.co/bartowski/Fara1.5-9B-GGUF/resolve/153cb27ac91d4a2b9391ecf278542e610d040178/mmproj-Fara1.5-9B-f16.gguf")!),
+            .init(kind: .nativeTextPlannerModel, fileName: "LFM3-1.7B-Q4_K_M.gguf", byteCount: 1_099_627_808,
+                sha256: "3793e1e6e2266919d6e015287221b41100175a98eddaba92e111aed3b05c93c4",
+                downloadURL: URL(string: "https://huggingface.co/LiquidAI/LFM3-1.7B-GGUF/resolve/cd0c74c575b5c416f3011b5b4c298077f26ca8c2/LFM3-1.7B-Q4_K_M.gguf")!)],
+        minimumMemoryBytes: 24 * 1_024 * 1_024 * 1_024)
+    static let current = localAgent
 
     static let qwen35License = BundledArtifact(
         fileName: "QWEN35-APACHE-2.0-LICENSE.txt", byteCount: 11_544,
@@ -77,6 +98,8 @@ struct ComputerUseArtifactManifest: Codable, Equatable, Sendable {
     var legalArtifacts: [BundledArtifact] {
         switch modelVariant {
         case .fara15_4B: return [Self.faraLicense, Self.qwen35License, Self.llamaCPPLicense, Self.faraNotice]
+        case .localAgentFara9BLFM3:
+            return [Self.faraLicense, Self.qwen35License, Self.lfmLicense, Self.llamaCPPLicense, Self.localAgentNotice]
         case .holo31_4B: return [Self.qwen35License, Self.llamaCPPLicense, Self.holoNotice]
         case .nativeText4B: return [Self.qwen35License, Self.llamaCPPLicense, Self.qwen35Notice]
         case .guiOwl15_4B: return [Self.guiOwlLicense, Self.qwen35License, Self.llamaCPPLicense, Self.guiOwlNotice]
@@ -90,6 +113,12 @@ struct ComputerUseArtifactManifest: Codable, Equatable, Sendable {
         sha256: "961819a89dacd1f4f161e1d2ebf616b538bf095a2eecfa3ef40b7ccec633fac4")
     static let guiOwlNotice = BundledArtifact(fileName: "GUI-OWL-NOTICE.txt", byteCount: 1_010,
         sha256: "1a0f2fb053c4b3ef807dde28a132fc58946f5e7d38b87b1d7446314a9bb1a7f0")
+
+    static let lfmLicense = BundledArtifact(fileName: "LFM-OPEN-LICENSE-1.0.txt", byteCount: 10_574,
+        sha256: "4d28ca14dedc0b3d0fcc2b3339f0e79931faa33874f3d24f522183a8fc70068c")
+    static let lfmLicenseURL = URL(string: "https://huggingface.co/LiquidAI/LFM3-1.7B/blob/0dc4268b561499c648c7ba7c9466bf3d8d01517a/LICENSE")!
+    static let localAgentNotice = BundledArtifact(fileName: "LOCAL-AGENT-NOTICE.txt", byteCount: 1_779,
+        sha256: "e091957d4cd21b805266f82c8f097ffe619dadf843d588e13933d33e722ec9e4")
 
     static let faraLicense = BundledArtifact(fileName: "FARA-MIT-LICENSE.txt", byteCount: 1066,
         sha256: "98a96c38494df4963951e32b81ec4effebe4c8a812ab8d9e7d185d59e86fe2fc")

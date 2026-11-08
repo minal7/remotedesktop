@@ -1,0 +1,35 @@
+Remote Desktop Host - local computer-use agent models
+
+Two models run on this Mac. Neither is bundled in the app: setup downloads
+them as data files, checks every byte against the hashes below, and runs
+them in the app's own signed llama.cpp runtime.
+
+1. Fara1.5-9B (computer-use model)
+Fara1.5-9B is a trained computer-use model from Microsoft, distributed under
+the MIT License. Copyright (c) 2025 Microsoft. See FARA-MIT-LICENSE.txt.
+Model: https://huggingface.co/microsoft/Fara1.5-9B
+Model revision: 1a93677cd89d5601bc2ed759791e981f3a520032
+The model derives from Qwen3.5-9B. The upstream Qwen Apache License 2.0 text
+is included as QWEN35-APACHE-2.0-LICENSE.txt.
+Downloaded conversion: https://huggingface.co/bartowski/Fara1.5-9B-GGUF
+Revision: 153cb27ac91d4a2b9391ecf278542e610d040178
+Fara1.5-9B-Q4_K_M.gguf: 5910783104 bytes
+SHA-256: a02e7220337b87290bca7ef7225ba4afa7104efa05c0851de6c29ec9c5d04c7d
+mmproj-Fara1.5-9B-f16.gguf: 918166048 bytes
+SHA-256: 97b423c81719ffc367124a9739d6feb6f62d62f60869a6d385a701b963ce1906
+
+2. LFM3-1.7B (planner)
+LFM3-1.7B is made by Liquid AI, Inc. and licensed under the LFM Open License
+v1.0, included as LFM-OPEN-LICENSE-1.0.txt. The files are used unmodified.
+Model: https://huggingface.co/LiquidAI/LFM3-1.7B
+Model revision: 0dc4268b561499c648c7ba7c9466bf3d8d01517a
+Downloaded conversion: https://huggingface.co/LiquidAI/LFM3-1.7B-GGUF
+Revision: cd0c74c575b5c416f3011b5b4c298077f26ca8c2
+LFM3-1.7B-Q4_K_M.gguf: 1099627808 bytes
+SHA-256: 3793e1e6e2266919d6e015287221b41100175a98eddaba92e111aed3b05c93c4
+
+Runtime
+Inference uses the bundled llama.cpp b12144 runtime.
+Source revision: 69ee2ecc0150ba7d1204a7f7393dfd651569db8c
+See LLAMA-CPP-MIT-LICENSE.txt for its license.
+Model downloads contain data only; executable runtime code is bundled.

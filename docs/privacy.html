@@ -89,7 +89,9 @@
   a developer-operated AI service.</p>
 
   <h2>Computer use (Beta) on the Mac</h2>
-  <p>Computer use uses the Fara 1.5-4B vision-language model on the Mac. The task prompt
+  <p>Computer use runs two models on the Mac: Fara 1.5 9B, which reads screenshots and chooses
+  each action, and LFM3 1.7B, which plans the task. To work in apps and web pages, the host also
+  reads the on-screen text and controls that macOS accessibility exposes. The task prompt
   travels from your iPhone or iPad to your enrolled Mac over the authenticated local-network
   connection. The Mac processes the task locally; prompts, screenshots, and task results are
   not sent to a developer-operated AI service. Model files are downloaded during setup from

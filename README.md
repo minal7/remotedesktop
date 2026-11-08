@@ -94,13 +94,14 @@ continue to use the CloudKit and WebRTC flows described above.
 ## Computer use (Beta)
 
 Computer use lets you describe a task on your iPhone or iPad while a local
-vision-language model on your Mac works through the browser or a basic Mac app.
+agent on your Mac works through the browser and Mac apps the way you would.
 The Mac observes the screen, takes one action, and checks the next screen. The
 feature is in beta; its release-candidate smoke, safety, and physical-device
 results are pending.
 
-The shipped model is Fara 1.5-4B and inference runs on the Mac. An Apple silicon
-Mac with at least 16 GB of memory is required. The iPhone and Mac must be on the
+It runs two local models on the Mac: Fara 1.5 9B acts on the screen and LFM3 1.7B
+plans, both with 128K context, in the bundled llama.cpp b12144 runtime. An Apple
+silicon Mac with at least 24 GB of memory is required. The iPhone and Mac must be on the
 same local network for task traffic. Setup may use the account's private
 CloudKit database for bounded enrollment and model setup; after enrollment, prompts, task status,
 results, controls, and approvals use authenticated LAN TLS. Screen sharing and
@@ -109,7 +110,7 @@ a developer-operated AI service.
 
 Start model setup beside the Mac in the iPhone or iPad app. Setup shows download
 progress, verifies the model files, and can resume after an interruption. Allow
-about 4.3 GiB of free disk space for setup.
+about 9 GB of free disk space for setup (a 7.9 GB download).
 
 The iPhone shows brief progress narration, asks a question when information is
 missing, and presents an approval card before consequential actions such as

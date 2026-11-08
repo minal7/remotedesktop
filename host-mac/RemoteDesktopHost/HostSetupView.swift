@@ -206,7 +206,7 @@ struct HostSetupView: View {
             .padding(16)
             .background(.quaternary, in: RoundedRectangle(cornerRadius: 12))
 
-            Text("Computer use (Beta) runs Fara 1.5-4B locally on this Mac. Start setup beside this Mac in the Remote Desktop app on your iPhone or iPad.")
+            Text("Computer use (Beta) runs two local models on this Mac: Fara 1.5 9B and LFM3 1.7B. Start setup beside this Mac in the Remote Desktop app on your iPhone or iPad.")
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)

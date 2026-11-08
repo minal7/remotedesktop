@@ -309,7 +309,7 @@ final class EODSimpleTaskLiveE2ETests: XCTestCase {
 
 /// Only the explicitly expired question is eligible for the existing reset
 /// control. Active tasks, approvals, alerts, and unknown states remain untouched.
-private enum VisualDiagnosticComposer {
+enum VisualDiagnosticComposer {
     static func readyField(in app: XCUIApplication) -> XCUIElement {
         app.textFields.matching(NSPredicate(
             format: "placeholderValue == %@", "Tell your Mac what to do")).firstMatch

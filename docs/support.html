@@ -54,9 +54,9 @@
 
   <h3>Set up Computer use (Beta) on a Mac</h3>
   <ol>
-    <li>Use an <strong>Apple silicon Mac</strong> with at least <strong>16 GB of memory</strong>.
+    <li>Use an <strong>Apple silicon Mac</strong> with at least <strong>24 GB of memory</strong>.
       Keep about
-      <strong>4.3 GiB of free disk space</strong> for Fara 1.5-4B setup; free disk space if
+      <strong>9 GB of free disk space</strong> for model setup (a 7.9 GB download); free disk space if
       setup reports that there is not enough.</li>
     <li>In Remote Desktop on your iPhone or iPad, select the Mac and start Computer use setup.
       Follow the on-screen progress. Setup verifies downloaded model files and can resume an
@@ -69,7 +69,7 @@
       approvals use the authenticated local connection to the Mac.</li>
   </ol>
 
-  <p>Computer use runs Fara 1.5-4B on the Mac. It can narrate progress, ask a question, request
+  <p>Computer use runs two local models on the Mac, Fara 1.5 9B and LFM3 1.7B. It can narrate progress, ask a question, request
   approval before a consequential action, or stop and ask for help. The feature is in beta;
   final release-candidate measurements and physical iPhone or iPad checks are pending.</p>
 
@@ -125,6 +125,9 @@
   may reach a permission or system dialog. Answer the question or close the dialog on the Mac,
   then resume if the app offers that option. You can also stop or take over the live Mac view.
   Do not enter passwords or other credentials into a task.</p>
+  <p>If a website asks you to prove you're a person, Computer use stops before touching the
+  page and tells you. Complete the check yourself on the live Mac view, then tap Resume. It
+  never tries to solve these checks.</p>
 
   <h3>What permissions does the host app need?</h3>
   <p>On macOS, the host app needs <strong>Screen Recording</strong> and <strong>Accessibility</strong>

@@ -433,9 +433,12 @@ struct AgentEvalRequest: Decodable {
         if let url = start.url { surface = .web(url) }
         else if let app = start.app { surface = .app(app) }
         else { surface = nil }
-        return .init(maxSteps: maxSteps, initialSurface: surface,
+        var configuration = AgentHostFactory.Configuration(maxSteps: maxSteps, initialSurface: surface,
             fileRoots: Self.syntheticFileRoots, storageDirectory: storageDirectory, requireCleanStart: true,
             policy: AgentPolicyModel(rawValue: policy) ?? .fara15_4b)
+        // This driver scores the older loop's episode format.
+        configuration.engine = .legacyLoop
+        return configuration
     }
 
     var allowsFixtureCommit: Bool { approvalPolicy?.allowFixtureCommit == true }

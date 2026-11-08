@@ -139,6 +139,11 @@
             isEnabled = "YES">
          </EnvironmentVariable>
          <EnvironmentVariable
+            key = "RUN_LOCAL_AGENT_RELEASE_E2E"
+            value = "$(RUN_LOCAL_AGENT_RELEASE_E2E)"
+            isEnabled = "YES">
+         </EnvironmentVariable>
+         <EnvironmentVariable
             key = "RUN_OSATLAS_AGENT_DENY_SIMULATOR_E2E"
             value = "$(RUN_OSATLAS_AGENT_DENY_SIMULATOR_E2E)"
             isEnabled = "YES">

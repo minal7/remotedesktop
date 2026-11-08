@@ -9,12 +9,14 @@ settings:
   SWIFT_VERSION: "5.10"
   SWIFT_STRICT_CONCURRENCY: targeted
   ENABLE_USER_SCRIPT_SANDBOXING: YES
-  MARKETING_VERSION: 0.3.1
-  CURRENT_PROJECT_VERSION: 9
+  MARKETING_VERSION: 0.4.0
+  CURRENT_PROJECT_VERSION: 10
 
 packages:
   MemoryStoreKit:
     path: MemoryStoreKit
+  LocalAgentKit:
+    path: LocalAgentKit
   LiveKitWebRTC:
     url: https://github.com/livekit/webrtc-xcframework.git
     exactVersion: 144.7559.3
@@ -77,6 +79,8 @@ targets:
     dependencies:
       - package: MemoryStoreKit
         product: MemoryStoreKit
+      - package: LocalAgentKit
+        product: LocalAgentKit
       - package: LiveKitWebRTC
         product: LiveKitWebRTC
       - package: SwiftSystem
@@ -113,6 +117,36 @@ targets:
           - $(SRCROOT)/ThirdPartyRuntime/llama-b9992/libmtmd.0.dylib
         outputFiles:
           - $(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/ComputerUseRuntime/llama-b9992
+      - script: LLAMA_RUNTIME_TAG=b12144 /bin/bash "$SRCROOT/scripts/package_llama_runtime.sh"
+        name: Package and Sign Local Agent llama.cpp Runtime
+        shell: /bin/bash
+        showEnvVars: false
+        inputFiles:
+          - $(SRCROOT)/scripts/package_llama_runtime.sh
+          - $(SRCROOT)/scripts/verify_llama_runtime.py
+          - $(SRCROOT)/ThirdPartyRuntime/llama-b12144/runtime-manifest.json
+          - $(SRCROOT)/ThirdPartyRuntime/llama-b12144/libggml-base.0.29.0.dylib
+          - $(SRCROOT)/ThirdPartyRuntime/llama-b12144/libggml-base.0.dylib
+          - $(SRCROOT)/ThirdPartyRuntime/llama-b12144/libggml-blas.0.29.0.dylib
+          - $(SRCROOT)/ThirdPartyRuntime/llama-b12144/libggml-blas.0.dylib
+          - $(SRCROOT)/ThirdPartyRuntime/llama-b12144/libggml-cpu.0.29.0.dylib
+          - $(SRCROOT)/ThirdPartyRuntime/llama-b12144/libggml-cpu.0.dylib
+          - $(SRCROOT)/ThirdPartyRuntime/llama-b12144/libggml-metal.0.29.0.dylib
+          - $(SRCROOT)/ThirdPartyRuntime/llama-b12144/libggml-metal.0.dylib
+          - $(SRCROOT)/ThirdPartyRuntime/llama-b12144/libggml-rpc.0.29.0.dylib
+          - $(SRCROOT)/ThirdPartyRuntime/llama-b12144/libggml-rpc.0.dylib
+          - $(SRCROOT)/ThirdPartyRuntime/llama-b12144/libggml.0.29.0.dylib
+          - $(SRCROOT)/ThirdPartyRuntime/llama-b12144/libggml.0.dylib
+          - $(SRCROOT)/ThirdPartyRuntime/llama-b12144/libllama-common.0.9.0.dylib
+          - $(SRCROOT)/ThirdPartyRuntime/llama-b12144/libllama-common.0.dylib
+          - $(SRCROOT)/ThirdPartyRuntime/llama-b12144/libllama-server-impl.dylib
+          - $(SRCROOT)/ThirdPartyRuntime/llama-b12144/libllama.0.9.0.dylib
+          - $(SRCROOT)/ThirdPartyRuntime/llama-b12144/libllama.0.dylib
+          - $(SRCROOT)/ThirdPartyRuntime/llama-b12144/libmtmd.0.9.0.dylib
+          - $(SRCROOT)/ThirdPartyRuntime/llama-b12144/libmtmd.0.dylib
+          - $(SRCROOT)/ThirdPartyRuntime/llama-b12144/llama-server
+        outputFiles:
+          - $(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/ComputerUseRuntime/llama-b12144
     info:
       path: RemoteDesktopHost/Info.plist
       properties:
@@ -199,6 +233,8 @@ targets:
       - target: RemoteDesktopClientCore
       - package: MemoryStoreKit
         product: MemoryStoreKit
+      - package: LocalAgentKit
+        product: LocalAgentKit
     settings:
       base:
         CODE_SIGN_IDENTITY: Apple Development

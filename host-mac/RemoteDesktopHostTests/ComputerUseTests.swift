@@ -1131,8 +1131,41 @@ final class ComputerUseTests: XCTestCase {
         }
     }
 
-    func test_defaultComputerUsePackageSelectsPinnedFaraForSixteenGBMacs() throws {
+    func test_defaultComputerUsePackageSelectsLocalAgentForTwentyFourGBMacs() throws {
         let manifest = ComputerUseArtifactManifest.current
+        XCTAssertEqual(manifest.modelVariant.rawValue, "local-agent-fara15-9b-lfm3-1.7b")
+        XCTAssertEqual(manifest.installationVersion, "local-agent-fara15-9b-lfm3-1.7b-q4-k-m-b12144")
+        XCTAssertEqual(manifest.modelRepository, "bartowski/Fara1.5-9B-GGUF")
+        XCTAssertEqual(manifest.modelRevision, "153cb27ac91d4a2b9391ecf278542e610d040178")
+        XCTAssertEqual(manifest.minimumMemoryBytes, 24 * 1_024 * 1_024 * 1_024)
+        XCTAssertEqual(manifest.modelArtifacts.map(\.kind), [.textModelShard, .visionProjector, .nativeTextPlannerModel])
+        XCTAssertEqual(manifest.modelArtifacts.map(\.fileName),
+                       ["Fara1.5-9B-Q4_K_M.gguf", "mmproj-Fara1.5-9B-f16.gguf", "LFM3-1.7B-Q4_K_M.gguf"])
+        XCTAssertEqual(manifest.modelArtifacts.map(\.byteCount), [5_910_783_104, 918_166_048, 1_099_627_808])
+        XCTAssertEqual(manifest.modelArtifacts.map(\.sha256), [
+            "a02e7220337b87290bca7ef7225ba4afa7104efa05c0851de6c29ec9c5d04c7d",
+            "97b423c81719ffc367124a9739d6feb6f62d62f60869a6d385a701b963ce1906",
+            "3793e1e6e2266919d6e015287221b41100175a98eddaba92e111aed3b05c93c4"])
+        for artifact in manifest.modelArtifacts {
+            XCTAssertEqual(artifact.downloadURL.host, "huggingface.co")
+        }
+        XCTAssertTrue(manifest.modelArtifacts[0].downloadURL.path.contains("/resolve/" + manifest.modelRevision + "/"))
+        XCTAssertTrue(manifest.modelArtifacts[2].downloadURL.path.contains("/LiquidAI/LFM3-1.7B-GGUF/resolve/cd0c74c575b5c416f3011b5b4c298077f26ca8c2/"))
+        XCTAssertEqual(Set(manifest.legalArtifacts.map(\.fileName)), Set(["FARA-MIT-LICENSE.txt",
+            "QWEN35-APACHE-2.0-LICENSE.txt", "LFM-OPEN-LICENSE-1.0.txt", "LLAMA-CPP-MIT-LICENSE.txt", "LOCAL-AGENT-NOTICE.txt"]))
+        let notice = try String(contentsOf: XCTUnwrap(ComputerUseArtifactManifest.bundledLegalDocumentURL(
+            ComputerUseArtifactManifest.localAgentNotice)), encoding: .utf8)
+        for artifact in manifest.modelArtifacts { XCTAssertTrue(notice.contains(artifact.sha256)) }
+        for artifact in manifest.legalArtifacts {
+            let url = try XCTUnwrap(ComputerUseArtifactManifest.bundledLegalDocumentURL(artifact))
+            let data = try Data(contentsOf: url)
+            XCTAssertEqual(Int64(data.count), artifact.byteCount)
+            XCTAssertEqual(SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined(), artifact.sha256)
+        }
+    }
+
+    func test_previousFaraPackageStaysPinned() throws {
+        let manifest = ComputerUseArtifactManifest.fara15
         XCTAssertEqual(manifest.modelVariant.rawValue, "fara15-4b")
         XCTAssertEqual(manifest.installationVersion, "fara15-4b-q4-k-m-b9992")
         XCTAssertEqual(manifest.modelRepository, "bartowski/Fara1.5-4B-GGUF")
@@ -1166,7 +1199,7 @@ final class ComputerUseTests: XCTestCase {
         XCTAssertEqual(manifest.modelVariant, .pro4B)
         XCTAssertEqual(
             ComputerUseArtifactManifest.ModelVariant.allCases,
-            [.pro4B, .base4B, .nativeText4B, .fara15_4B, .uiTars15_7B, .guiOwl15_4B, .holo31_4B])
+            [.pro4B, .base4B, .nativeText4B, .fara15_4B, .uiTars15_7B, .guiOwl15_4B, .holo31_4B, .localAgentFara9BLFM3])
         XCTAssertEqual(manifest.modelRepository, "OS-Copilot/OS-Atlas-Pro-4B")
         XCTAssertEqual(
             manifest.modelRevision,

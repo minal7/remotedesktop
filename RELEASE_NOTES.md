@@ -1,15 +1,53 @@
-# Computer use (Beta) — release candidate
+# Computer use (Beta) — local agent release candidate
 
-Release candidate targets host **0.3.0 (1)** and iOS **1.2 (1)**. Final release
-validation is pending; these notes do not claim that the ship gates have passed.
+Release candidate targets host **0.4.0 (10)**. The iOS client is unchanged by this
+feature: the new agent uses the existing task, approval, Stop and take-over messages.
 
 ## What it does
 
-Computer use lets you describe a task on your iPhone or iPad while Fara 1.5-4B
-runs locally on your Mac. The iPhone shows a short progress narration for each
-step, asks a question when information is missing, and presents an approval
-card before consequential actions. You can deny an action, stop the task, or
-take over the live Mac view. When the task ends, the host returns a short result.
+Computer use lets you describe a task on your iPhone or iPad while a personal agent
+runs on your Mac and uses it the way you would: web pages, Mac apps, file pickers,
+print and save panels. Two local models work together, both with 128K context:
+**Fara 1.5 9B** looks at the screen and acts, and **LFM3 1.7B** plans the task and
+checks the result. The iPhone shows short progress notes, asks a question when
+information is missing, and shows an approval card before consequential actions.
+You can deny an action, stop the task, or take over the live Mac view. If a site
+asks you to prove you're a person, the agent stops before touching the page and
+asks you to do it, then continues when you tap Resume.
+
+Requires an Apple silicon Mac with at least **24 GB** of memory and about 9 GB of
+free disk space (a 7.9 GB download). Nothing is sent to a developer-operated AI service.
+
+## Local agent results (this candidate)
+
+Measured on a 32 GB Apple silicon Mac with the shipping models, one run per task,
+on the `eval/localagent` suite (invented sites and test apps, plus six public pages
+in a throwaway browser profile with no accounts and approvals denied):
+
+| Group | Passed |
+| --- | --- |
+| Everyday tasks (flights, mail, Drive upload, forms, legacy print-to-PDF and mail, a bot check…) | 17 / 17 |
+| Held-out tasks no fix was written against | 7 / 7 |
+| Public sites (Wikipedia, IRS, USPS, Open Library, Google Flights, reCAPTCHA demo) | 6 / 6 |
+| Desktop work (files, documents, spreadsheets, legacy apps, long forms) | 24 / 31 |
+| **All** | **54 / 61** (one interrupted) |
+
+Fara 1.5 9B alone scored 43 / 55 on the same tasks without the public sites, which
+is why the planner ships. The seven misses were long document and form jobs
+(`resume-apply`, `letters-from-template`, `expense-report`, `insurance-claim`,
+`job-application`, `tidy-downloads`, `legacy-to-sheet`). The reCAPTCHA check passed
+by stopping before any action. Peak model-server memory, excluding the mapped model
+files, was 10.3 GB; with the 7.9 GB of model files that is up to about 18 GB, which
+is why 24 GB is the minimum. A 16 GB Mac was not tested.
+
+Known limitations of this candidate:
+
+- Safety approvals are matched on English button and menu words, so on a Mac set to
+  another language the agent may not ask before some actions.
+- It can report a task done that isn't; when it can't confirm the result on screen it
+  says so in the answer.
+- Long multi-page documents and forms are the weakest area.
+- Physical iPhone and iPad checks of the new agent are pending.
 
 Computer Use (Beta) includes Memory for owner-saved preferences and ordinary
 facts. You review and explicitly save each item; the model does not automatically
@@ -20,7 +58,7 @@ records have separate seven-day cleanup. Incognito tasks skip Memory. Final
 Memory and Computer Use release validation remains pending; the historical
 measurements below do not validate Memory v1.
 
-## Validation results
+## Earlier validation (Fara 1.5-4B agent, historical)
 
 ### Historical candidate: B9 notarized signed Release, unaccepted
 
@@ -106,7 +144,7 @@ Native calibration remains below its agreed thresholds. The B9 web diagnostic al
 
 ## Privacy
 
-Fara 1.5-4B inference runs locally on the Mac. Task screenshots and action
+Both models run locally on the Mac. Task screenshots and action
 records are kept in the Mac user's local application support folder, removed
 when a new recording starts if they are more than seven days old, and can be
 deleted from Computer Use settings. Saved Memory has separate retention: items

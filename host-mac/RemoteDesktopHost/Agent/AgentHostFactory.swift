@@ -12,7 +12,11 @@ enum AgentHostFactory {
         case app(String)
     }
 
+    /// Which agent runs tasks. The legacy loop stays for the older evaluation driver.
+    enum Engine: Equatable { case localAgent, legacyLoop }
+
     struct Configuration: Equatable {
+        var engine: Engine = .localAgent
         let maxSteps: Int
         let policy: AgentPolicyModel
         let initialSurface: InitialSurface?

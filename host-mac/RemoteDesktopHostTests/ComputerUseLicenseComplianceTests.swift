@@ -80,7 +80,7 @@ final class ComputerUseLicenseComplianceTests: XCTestCase {
         let notice = try String(contentsOf: bundledURL(for: ComputerUseArtifactManifest.qwen35Notice), encoding: .utf8)
         XCTAssertTrue(notice.contains(ComputerUseArtifactManifest.nativeTextV2.modelRevision))
         XCTAssertTrue(notice.contains(ComputerUseArtifactManifest.nativeTextV2.modelArtifacts[0].sha256))
-        XCTAssertEqual(ComputerUseArtifactManifest.current, .fara15)
+        XCTAssertEqual(ComputerUseArtifactManifest.current, .localAgent)
     }
 #endif
 
@@ -202,7 +202,7 @@ final class ComputerUseLicenseComplianceTests: XCTestCase {
                     && $0.byteCount > 0 && $0.sha256.count == 64
             })
         }
-        XCTAssertEqual(ComputerUseArtifactManifest.current.modelVariant, .fara15_4B)
+        XCTAssertEqual(ComputerUseArtifactManifest.current.modelVariant, .localAgentFara9BLFM3)
 #if DEBUG
         let nativeText = ComputerUseArtifactManifest.nativeTextV2
         XCTAssertFalse(nativeText.modelArtifacts.isEmpty)

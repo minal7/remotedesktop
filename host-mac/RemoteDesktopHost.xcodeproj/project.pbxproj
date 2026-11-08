@@ -20,13 +20,14 @@
 		0C349EF094493E0A60B1B43B /* LatencyLabSenderPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6ABE5C47AB0C33628489EF08 /* LatencyLabSenderPolicy.swift */; };
 		0D09F6F8904907C58D87437B /* AgentEvalWireTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E90C422C26CDD31D6ACBDA1B /* AgentEvalWireTests.swift */; };
 		0DDA87FF0271676E8623946B /* PersonalMemoryRememberController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 88C6FF3C23C7BFDDA75A1A2A /* PersonalMemoryRememberController.swift */; };
+		0F3050199DEC7E5B40118ABF /* LFM-OPEN-LICENSE-1.0.txt in Resources */ = {isa = PBXBuildFile; fileRef = 131004158920F2E10FD49EA0 /* LFM-OPEN-LICENSE-1.0.txt */; };
 		111EDE4B2CAE2DCC971B37D4 /* ComputerUseNativeControlReader.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8320F09E2121874DFE549B9F /* ComputerUseNativeControlReader.swift */; };
 		126638C8688A102CDD3E0DA3 /* AgentEvalBootstrap.swift in Sources */ = {isa = PBXBuildFile; fileRef = F624E766FD26C9ECA552F11C /* AgentEvalBootstrap.swift */; };
 		12B4EB0D1FD7C2FD250A3C24 /* PixelEnvironmentTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B43C4DEEC978B4B9A8B83082 /* PixelEnvironmentTests.swift */; };
 		12D0601E86D6C1516694B76E /* AgentTrajectoryRecorderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 223DE94B0A9BC84EA5C29244 /* AgentTrajectoryRecorderTests.swift */; };
 		132CF5F7F52A948326D88F07 /* AudioInputEntitlements.swift in Sources */ = {isa = PBXBuildFile; fileRef = E92C4B9CB81E1F8B6CBE22DA /* AudioInputEntitlements.swift */; };
 		143828EECE365BB513EFCF41 /* AgentFileCatalog.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6CFACA7D33C3B99A2E032EA8 /* AgentFileCatalog.swift */; };
-		14C0A61C170946E483C2E07D /* SystemPackage in Frameworks */ = {isa = PBXBuildFile; productRef = BDCD8AEF5F8B7F191D3D34D4 /* SystemPackage */; };
+		14C0A61C170946E483C2E07D /* LiveKitWebRTC in Frameworks */ = {isa = PBXBuildFile; productRef = B32C5B551A8501593D407B76 /* LiveKitWebRTC */; };
 		171058C690276E55ABCDE63A /* HostComputerUseManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = CB753FA95C04BD2BE084E213 /* HostComputerUseManager.swift */; };
 		17A6F88D8EC53C06727CF4BD /* QWEN35-APACHE-2.0-LICENSE.txt in Resources */ = {isa = PBXBuildFile; fileRef = F144A5766AF6CD0F4844FCE2 /* QWEN35-APACHE-2.0-LICENSE.txt */; };
 		17C1FCD4914B0E4A34B0DBC4 /* LatencyF1RestartTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9C849C26EEFB24770352E94D /* LatencyF1RestartTests.swift */; };
@@ -42,6 +43,7 @@
 		2004875BA00AD23A2F4E26A6 /* MemoryFeatureConfiguration.swift in Sources */ = {isa = PBXBuildFile; fileRef = BC55D53B5583E78C31BC90B5 /* MemoryFeatureConfiguration.swift */; };
 		2170ABB3897D6C49046A2F50 /* PersonalMemoryRuntimeResolver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1F9F1D16E4DD65536276896D /* PersonalMemoryRuntimeResolver.swift */; };
 		221993D9F9E1569DEC6AF36F /* ComputerUseDefaultBrowserControlPlanner.swift in Sources */ = {isa = PBXBuildFile; fileRef = 35EECAED5FCFC0B74A3FF85A /* ComputerUseDefaultBrowserControlPlanner.swift */; };
+		236A7BA185C303D27A4229EE /* LOCAL-AGENT-NOTICE.txt in Resources */ = {isa = PBXBuildFile; fileRef = 661742A951E740ECE40FA282 /* LOCAL-AGENT-NOTICE.txt */; };
 		2385B00F501CA6054546CDD3 /* AgentFileCatalogTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A07946F58B5669AD3FD42A6B /* AgentFileCatalogTests.swift */; };
 		23BAFA18578E5392E276EA12 /* AgentEvalRunStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 61FC3547D73E81A2E0F2EB69 /* AgentEvalRunStore.swift */; };
 		242E2395DDBCEA3D6DE14F03 /* ComputerUseProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0D5CCAA4089039A88CDF73D6 /* ComputerUseProtocol.swift */; };
@@ -87,7 +89,7 @@
 		452232BDE7BB202C68595AAD /* PersonalMemoryForgetTaskContextTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5826F4180734C77F4AF9A2F9 /* PersonalMemoryForgetTaskContextTests.swift */; };
 		453DCAD598997A2C642D501A /* HostPeerSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5409F40C641B07FBB4D367EC /* HostPeerSession.swift */; };
 		4B0E002D6EC0F40C31D64AB8 /* AgentEvalRunStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3B3C945E96C3BD18C1AEF5E2 /* AgentEvalRunStoreTests.swift */; };
-		4B2A36D879E44A9EC6B98840 /* LiveKitWebRTC in Frameworks */ = {isa = PBXBuildFile; productRef = B32C5B551A8501593D407B76 /* LiveKitWebRTC */; };
+		4B2A36D879E44A9EC6B98840 /* LocalAgentKit in Frameworks */ = {isa = PBXBuildFile; productRef = 76C039D9235F004B24B5A68D /* LocalAgentKit */; };
 		4C9693292EA211546C26D75B /* OSAtlasLlamaRuntime.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5FCB3255850270CBF08A86D0 /* OSAtlasLlamaRuntime.swift */; };
 		4D0A50A254BB0D54EC971490 /* ComputerUseActionContracts.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8CF84D4A80B68A6B2E2BEEE6 /* ComputerUseActionContracts.swift */; };
 		4DB8C4806E959662069B0A91 /* ComputerUseCapabilityExecutorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 88E19E5B48DEDB41EEAA5BE0 /* ComputerUseCapabilityExecutorTests.swift */; };
@@ -117,6 +119,7 @@
 		63A185B24B8A07ABEC2DD9FC /* InputInjector.swift in Sources */ = {isa = PBXBuildFile; fileRef = EE8CCAE6B38CDDD22B43E761 /* InputInjector.swift */; };
 		64D95C752D71EAE54B576A2E /* LatencyStatsCollector.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8ACF8BA5DC1AF9A0AFB87661 /* LatencyStatsCollector.swift */; };
 		65BB6CAD70FC0C1C75F7C898 /* PersonalMemoryFaraRuntimeInputs.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5CA5CC46BEF0D39401857B95 /* PersonalMemoryFaraRuntimeInputs.swift */; };
+		663402E0DD43D0E9D2AED650 /* SystemPackage in Frameworks */ = {isa = PBXBuildFile; productRef = BDCD8AEF5F8B7F191D3D34D4 /* SystemPackage */; };
 		673D4ABA9DA55F4722FD1E53 /* EvalFaraHostExchangeCaptureConfiguration.swift in Sources */ = {isa = PBXBuildFile; fileRef = C968753A2B052BA6F238FEB3 /* EvalFaraHostExchangeCaptureConfiguration.swift */; };
 		67A685AE5F2C440FB19D4946 /* ComputerUseClarificationCompositionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FD9246779A5FFF58A130076A /* ComputerUseClarificationCompositionTests.swift */; };
 		67FB3417C339B1D410680D10 /* LocalComputerUseBrokerClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A57E2ED9808C6573BEC0737 /* LocalComputerUseBrokerClient.swift */; };
@@ -129,6 +132,7 @@
 		6D6AC21CC6C01821F4B30731 /* App.swift in Sources */ = {isa = PBXBuildFile; fileRef = 75EE7C6868D1A93B054508AE /* App.swift */; };
 		6E5EAA62D969FB8BC9216681 /* AgentLoopSteps.swift in Sources */ = {isa = PBXBuildFile; fileRef = E1699D2082516860BFE18FA8 /* AgentLoopSteps.swift */; };
 		6F65CFAE32021AA5B4FD2EBD /* AgentCapabilityAdapter.swift in Sources */ = {isa = PBXBuildFile; fileRef = A3C0746CA0F2BAE3C6FC54CD /* AgentCapabilityAdapter.swift */; };
+		70B4DD055E4A2D24CFBBBBE8 /* LocalAgentKit in Frameworks */ = {isa = PBXBuildFile; productRef = 18149092021E1C8656342686 /* LocalAgentKit */; };
 		70C653DEC3E5B469860A26BF /* PersonalMemoryRuntimeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 98B78524A4A1D9422699B118 /* PersonalMemoryRuntimeTests.swift */; };
 		70CD60F7F7C9999D9E6CA995 /* ComputerUseObservationWorker.swift in Sources */ = {isa = PBXBuildFile; fileRef = CD81C130C0A7FB1CA8798FF5 /* ComputerUseObservationWorker.swift */; };
 		71410AD4B0A006F48C88AED3 /* AgentMacOSCompatibilityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C77DC24D3618A0E2B4C3C484 /* AgentMacOSCompatibilityTests.swift */; };
@@ -144,6 +148,7 @@
 		80A0D4DB4E327F9F767D96DB /* UiTarsPolicyAdapterTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2C8F4DDA787B60AE0A7DBCD2 /* UiTarsPolicyAdapterTests.swift */; };
 		82C7714459A140DD1C7F4739 /* AgentEvalApprovalPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = D126E8A7329440FB81BC5C93 /* AgentEvalApprovalPolicy.swift */; };
 		842583A09A75DA6A699BB209 /* HostCursorPublisher.swift in Sources */ = {isa = PBXBuildFile; fileRef = B87BB248B71DAC45077C9EBE /* HostCursorPublisher.swift */; };
+		84B38DE60134BC9D3D5053B4 /* LocalAgentCapabilityAdapter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 31A567D94FFD002248624CD1 /* LocalAgentCapabilityAdapter.swift */; };
 		85759261E56EE1A21BDF9E6F /* LatencyLabConfiguration.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1D1E1019D318C453227355E1 /* LatencyLabConfiguration.swift */; };
 		866AD4205CA3EBAE48A41E10 /* DebugResidentHostConfigurationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 936BD11FA31D4BAB6D5B8D7B /* DebugResidentHostConfigurationTests.swift */; };
 		871E246E4A8D3DFF0F94D23D /* AgentServices.swift in Sources */ = {isa = PBXBuildFile; fileRef = 33EC9BB94559DCF3C1596E01 /* AgentServices.swift */; };
@@ -333,6 +338,7 @@
 		10A95BA0C09D6E6B9620E977 /* RemoteDesktopHost.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = RemoteDesktopHost.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		11941D3F38B1D9FBA3206FF2 /* NOTICE.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = NOTICE.txt; sourceTree = "<group>"; };
 		12DDF56F4FB65E1F21A69814 /* AgentFiles.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentFiles.swift; sourceTree = "<group>"; };
+		131004158920F2E10FD49EA0 /* LFM-OPEN-LICENSE-1.0.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = "LFM-OPEN-LICENSE-1.0.txt"; sourceTree = "<group>"; };
 		138F44F93B9F279F9495A485 /* ScreenCapture.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScreenCapture.swift; sourceTree = "<group>"; };
 		140CB2849F037763267610E0 /* ComputerUseFaraAction.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseFaraAction.swift; sourceTree = "<group>"; };
 		165EEC2BEFFFDBE9B22AA0CE /* ICEConfigServerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ICEConfigServerTests.swift; sourceTree = "<group>"; };
@@ -366,12 +372,14 @@
 		2F6CCD5E6FB7536A6EE441AF /* AgentEvalPolicyReplay.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentEvalPolicyReplay.swift; sourceTree = "<group>"; };
 		30C47E27132ED7037199B4DF /* AgentCredentialRule.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentCredentialRule.swift; sourceTree = "<group>"; };
 		30C841660E5FE28C2D7CF330 /* AgentCapabilityAdapterTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentCapabilityAdapterTests.swift; sourceTree = "<group>"; };
+		31A567D94FFD002248624CD1 /* LocalAgentCapabilityAdapter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalAgentCapabilityAdapter.swift; sourceTree = "<group>"; };
 		31B6128CD23689A80D1872D8 /* ComputerUseSessionModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseSessionModel.swift; sourceTree = "<group>"; };
 		31E99E17C4EB4A0D80C6B9EE /* CloudKitComputerUseChannel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CloudKitComputerUseChannel.swift; sourceTree = "<group>"; };
 		31EDE07A85A8A9BB70EE8AFA /* Environment.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Environment.swift; sourceTree = "<group>"; };
 		3349CC549DF18D316358D45F /* OSAtlasComputerUseExecutorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OSAtlasComputerUseExecutorTests.swift; sourceTree = "<group>"; };
 		33EC9BB94559DCF3C1596E01 /* AgentServices.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentServices.swift; sourceTree = "<group>"; };
 		353969343106BB0AC22079CA /* AgentHostFactory.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentHostFactory.swift; sourceTree = "<group>"; };
+		35C4AB4DD92636BF980BF86F /* LocalAgentKit */ = {isa = PBXFileReference; lastKnownFileType = folder; name = LocalAgentKit; path = LocalAgentKit; sourceTree = SOURCE_ROOT; };
 		35EECAED5FCFC0B74A3FF85A /* ComputerUseDefaultBrowserControlPlanner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseDefaultBrowserControlPlanner.swift; sourceTree = "<group>"; };
 		36969F0DE1F6A96906659CB6 /* ComputerUseSkillCatalog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseSkillCatalog.swift; sourceTree = "<group>"; };
 		36D33B9A52084CF7EABFA298 /* HostRelaunch.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HostRelaunch.swift; sourceTree = "<group>"; };
@@ -421,6 +429,7 @@
 		63433D0B8027A723A9C0090E /* HostSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HostSettingsView.swift; sourceTree = "<group>"; };
 		6460CCA0A65B538969D584F9 /* AgentTaskExecutor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentTaskExecutor.swift; sourceTree = "<group>"; };
 		649FFA80176CC09AC1254E95 /* MultiplexHostComputerUseChannel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MultiplexHostComputerUseChannel.swift; sourceTree = "<group>"; };
+		661742A951E740ECE40FA282 /* LOCAL-AGENT-NOTICE.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = "LOCAL-AGENT-NOTICE.txt"; sourceTree = "<group>"; };
 		66454D35C3E809688555785E /* DebugResidentHostConfiguration.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DebugResidentHostConfiguration.swift; sourceTree = "<group>"; };
 		66E1A3BCCCB20F05C6898FCF /* ComputerUseTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComputerUseTests.swift; sourceTree = "<group>"; };
 		6704F4EF5979DBED1CBB31D5 /* MenuContent.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MenuContent.swift; sourceTree = "<group>"; };
@@ -575,6 +584,7 @@
 			files = (
 				D19E030AF6236E31265434DD /* RemoteDesktopClientCore.framework in Frameworks */,
 				DE7639FAA6169C7CAFBE490E /* MemoryStoreKit in Frameworks */,
+				70B4DD055E4A2D24CFBBBBE8 /* LocalAgentKit in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -583,8 +593,9 @@
 			buildActionMask = 2147483647;
 			files = (
 				335F3049413654BA69CF7721 /* MemoryStoreKit in Frameworks */,
-				4B2A36D879E44A9EC6B98840 /* LiveKitWebRTC in Frameworks */,
-				14C0A61C170946E483C2E07D /* SystemPackage in Frameworks */,
+				4B2A36D879E44A9EC6B98840 /* LocalAgentKit in Frameworks */,
+				14C0A61C170946E483C2E07D /* LiveKitWebRTC in Frameworks */,
+				663402E0DD43D0E9D2AED650 /* SystemPackage in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -600,7 +611,9 @@
 				DE4A3ECA39F6F3E5711CBAB1 /* GUI-OWL-DESKTOP-MIT-LICENSE.txt */,
 				E9CD341A53A3077939B3E71A /* GUI-OWL-NOTICE.txt */,
 				7517D04078838715914F149B /* HOLO-NOTICE.txt */,
+				131004158920F2E10FD49EA0 /* LFM-OPEN-LICENSE-1.0.txt */,
 				07BE29E09643E04555FE686A /* LLAMA-CPP-MIT-LICENSE.txt */,
+				661742A951E740ECE40FA282 /* LOCAL-AGENT-NOTICE.txt */,
 				11941D3F38B1D9FBA3206FF2 /* NOTICE.txt */,
 				7D98C1008558E1DAD992F9B0 /* OS-ATLAS-APACHE-2.0-LICENSE.txt */,
 				F144A5766AF6CD0F4844FCE2 /* QWEN35-APACHE-2.0-LICENSE.txt */,
@@ -667,6 +680,7 @@
 		42422FDA8DA01C02C9535390 /* Packages */ = {
 			isa = PBXGroup;
 			children = (
+				35C4AB4DD92636BF980BF86F /* LocalAgentKit */,
 				266995C59F4FF125028428AD /* MemoryStoreKit */,
 			);
 			name = Packages;
@@ -882,6 +896,14 @@
 			path = RemoteDesktopHostTests;
 			sourceTree = "<group>";
 		};
+		A7C2CA1594CA720822FF42BE /* LocalAgent */ = {
+			isa = PBXGroup;
+			children = (
+				31A567D94FFD002248624CD1 /* LocalAgentCapabilityAdapter.swift */,
+			);
+			path = LocalAgent;
+			sourceTree = "<group>";
+		};
 		A9E867B3318E97567D8138E6 /* Evaluation */ = {
 			isa = PBXGroup;
 			children = (
@@ -985,6 +1007,7 @@
 				79DF5DF18012C03A0ABEAE3C /* Agent */,
 				B29901137009531DE2AB2EA4 /* ComputerUse */,
 				A9E867B3318E97567D8138E6 /* Evaluation */,
+				A7C2CA1594CA720822FF42BE /* LocalAgent */,
 				4B4B9A8EFC11F1B5CAB6A144 /* Resources */,
 				024558D97D74B61BE62C9D17 /* ThirdPartyNotices */,
 			);
@@ -1046,6 +1069,7 @@
 			name = RemoteDesktopHostTests;
 			packageProductDependencies = (
 				944F7E9CB5F023D79B84EB4D /* MemoryStoreKit */,
+				18149092021E1C8656342686 /* LocalAgentKit */,
 			);
 			productName = RemoteDesktopHostTests;
 			productReference = 1FDAD0CCA04F6601347F37EE /* RemoteDesktopHostTests.xctest */;
@@ -1059,6 +1083,7 @@
 				B5662E2745E42D0F64BEF37C /* Resources */,
 				A5C619AFE920969112122A57 /* Frameworks */,
 				FBFCD18DAF207639E367C773 /* Package and Sign Pinned llama.cpp Runtime */,
+				D751946C6975D7B60F250167 /* Package and Sign Local Agent llama.cpp Runtime */,
 			);
 			buildRules = (
 			);
@@ -1067,6 +1092,7 @@
 			name = RemoteDesktopHost;
 			packageProductDependencies = (
 				C35FDF79A7DEA937B8CFBF0C /* MemoryStoreKit */,
+				76C039D9235F004B24B5A68D /* LocalAgentKit */,
 				B32C5B551A8501593D407B76 /* LiveKitWebRTC */,
 				BDCD8AEF5F8B7F191D3D34D4 /* SystemPackage */,
 			);
@@ -1126,6 +1152,7 @@
 			packageReferences = (
 				B71750C11654D825677D35E4 /* XCRemoteSwiftPackageReference "webrtc-xcframework" */,
 				5A12B4AE0B5019E36FDE9E2B /* XCRemoteSwiftPackageReference "swift-system" */,
+				83E1A3A62D98149A0482146A /* XCLocalSwiftPackageReference "LocalAgentKit" */,
 				F668B0EAF751B6985585912D /* XCLocalSwiftPackageReference "MemoryStoreKit" */,
 			);
 			preferredProjectObjectVersion = 77;
@@ -1153,7 +1180,9 @@
 				EC1A5311095317E33885BB38 /* GUI-OWL-DESKTOP-MIT-LICENSE.txt in Resources */,
 				29755F8DBD433B7BF7D701A0 /* GUI-OWL-NOTICE.txt in Resources */,
 				F8F30A9A05B3C6DDE7989265 /* HOLO-NOTICE.txt in Resources */,
+				0F3050199DEC7E5B40118ABF /* LFM-OPEN-LICENSE-1.0.txt in Resources */,
 				8A37A3B49D4108FD8664CB63 /* LLAMA-CPP-MIT-LICENSE.txt in Resources */,
+				236A7BA185C303D27A4229EE /* LOCAL-AGENT-NOTICE.txt in Resources */,
 				E47AD513E1617BE306A6B446 /* NOTICE.txt in Resources */,
 				2A73337CEE303568F6881543 /* OS-ATLAS-APACHE-2.0-LICENSE.txt in Resources */,
 				17A6F88D8EC53C06727CF4BD /* QWEN35-APACHE-2.0-LICENSE.txt in Resources */,
@@ -1167,6 +1196,49 @@
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXShellScriptBuildPhase section */
+		D751946C6975D7B60F250167 /* Package and Sign Local Agent llama.cpp Runtime */ = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+				"$(SRCROOT)/scripts/package_llama_runtime.sh",
+				"$(SRCROOT)/scripts/verify_llama_runtime.py",
+				"$(SRCROOT)/ThirdPartyRuntime/llama-b12144/runtime-manifest.json",
+				"$(SRCROOT)/ThirdPartyRuntime/llama-b12144/libggml-base.0.29.0.dylib",
+				"$(SRCROOT)/ThirdPartyRuntime/llama-b12144/libggml-base.0.dylib",
+				"$(SRCROOT)/ThirdPartyRuntime/llama-b12144/libggml-blas.0.29.0.dylib",
+				"$(SRCROOT)/ThirdPartyRuntime/llama-b12144/libggml-blas.0.dylib",
+				"$(SRCROOT)/ThirdPartyRuntime/llama-b12144/libggml-cpu.0.29.0.dylib",
+				"$(SRCROOT)/ThirdPartyRuntime/llama-b12144/libggml-cpu.0.dylib",
+				"$(SRCROOT)/ThirdPartyRuntime/llama-b12144/libggml-metal.0.29.0.dylib",
+				"$(SRCROOT)/ThirdPartyRuntime/llama-b12144/libggml-metal.0.dylib",
+				"$(SRCROOT)/ThirdPartyRuntime/llama-b12144/libggml-rpc.0.29.0.dylib",
+				"$(SRCROOT)/ThirdPartyRuntime/llama-b12144/libggml-rpc.0.dylib",
+				"$(SRCROOT)/ThirdPartyRuntime/llama-b12144/libggml.0.29.0.dylib",
+				"$(SRCROOT)/ThirdPartyRuntime/llama-b12144/libggml.0.dylib",
+				"$(SRCROOT)/ThirdPartyRuntime/llama-b12144/libllama-common.0.9.0.dylib",
+				"$(SRCROOT)/ThirdPartyRuntime/llama-b12144/libllama-common.0.dylib",
+				"$(SRCROOT)/ThirdPartyRuntime/llama-b12144/libllama-server-impl.dylib",
+				"$(SRCROOT)/ThirdPartyRuntime/llama-b12144/libllama.0.9.0.dylib",
+				"$(SRCROOT)/ThirdPartyRuntime/llama-b12144/libllama.0.dylib",
+				"$(SRCROOT)/ThirdPartyRuntime/llama-b12144/libmtmd.0.9.0.dylib",
+				"$(SRCROOT)/ThirdPartyRuntime/llama-b12144/libmtmd.0.dylib",
+				"$(SRCROOT)/ThirdPartyRuntime/llama-b12144/llama-server",
+			);
+			name = "Package and Sign Local Agent llama.cpp Runtime";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+				"$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/ComputerUseRuntime/llama-b12144",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/bash;
+			shellScript = "LLAMA_RUNTIME_TAG=b12144 /bin/bash \"$SRCROOT/scripts/package_llama_runtime.sh\"";
+			showEnvVarsInLog = 0;
+		};
 		FBFCD18DAF207639E367C773 /* Package and Sign Pinned llama.cpp Runtime */ = {
 			isa = PBXShellScriptBuildPhase;
 			alwaysOutOfDate = 1;
@@ -1208,7 +1280,7 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/bash;
-			shellScript = "#!/usr/bin/env bash\nset -euo pipefail\n\n# Xcode executes this as the final target build phase, before it signs the\n# enclosing .app. The source payload is repository-local and checksum-pinned;\n# this script deliberately contains no network or archive extraction path.\n\nrequired_variables=(\n  SRCROOT\n  TARGET_BUILD_DIR\n  UNLOCALIZED_RESOURCES_FOLDER_PATH\n)\nfor variable in \"${required_variables[@]}\"; do\n  if [[ -z \"${!variable:-}\" ]]; then\n    echo \"Missing required Xcode build variable: $variable\" >&2\n    exit 65\n  fi\ndone\n\n# The unsigned path exists only so Xcode can compile and validate source\n# integration when signing credentials or embedded-product provisioning are\n# unavailable. It still verifies and copies the exact pinned payload below.\nif [[ \"${CODE_SIGNING_ALLOWED:-YES}\" != \"NO\" && -z \"${EXPANDED_CODE_SIGN_IDENTITY:-}\" ]]; then\n  echo \"Missing required Xcode build variable: EXPANDED_CODE_SIGN_IDENTITY\" >&2\n  exit 65\nfi\n\nsource_root=\"$SRCROOT/ThirdPartyRuntime/llama-b9992\"\nmanifest=\"$source_root/runtime-manifest.json\"\nverifier=\"$SRCROOT/scripts/verify_llama_runtime.py\"\ndestination_root=\"$TARGET_BUILD_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH/ComputerUseRuntime/llama-b9992\"\n\n/usr/bin/python3 \"$verifier\" \\\n  --root \"$source_root\" \\\n  --manifest \"$manifest\"\n\n# Source verification above proves that this closed directory contains only\n# the manifest's allowlisted real files and relative symlinks. ditto preserves\n# those symlinks; it never follows them into an unexpected path.\n/bin/rm -rf \"$destination_root\"\n/bin/mkdir -p \"$(/usr/bin/dirname \"$destination_root\")\"\n/usr/bin/ditto --noqtn \"$source_root\" \"$destination_root\"\n\n/usr/bin/python3 \"$verifier\" \\\n  --root \"$destination_root\" \\\n  --manifest \"$manifest\"\n\nif [[ \"${CODE_SIGNING_ALLOWED:-YES}\" == \"NO\" ]]; then\n  echo \"CODE_SIGNING_ALLOWED=NO: verified pinned llama runtime copied for compile-only unsigned build; code signing skipped.\"\n  exit 0\nfi\n\nsigning_identity=\"$EXPANDED_CODE_SIGN_IDENTITY\"\nif [[ \"$signing_identity\" == \"-\" ]]; then\n  echo \"A real host signing identity is required for the bundled llama runtime.\" >&2\n  exit 65\nfi\n\n# `codesign --verify` can accept a cryptographically intact signature whose\n# leaf certificate was later revoked. Prove the actual identity Xcode selected\n# with mandatory OCSP before it is applied to any bundled executable.\ncertificate_probe_dir=\"$(/usr/bin/mktemp -d /tmp/remotedesktop-runtime-signing.XXXXXX)\"\ncleanup_certificate_probe() {\n  /bin/rm -rf \"$certificate_probe_dir\"\n}\ntrap cleanup_certificate_probe EXIT\n/bin/cp /usr/bin/true \"$certificate_probe_dir/signing-probe\"\n/usr/bin/codesign \\\n  --force \\\n  --sign \"$signing_identity\" \\\n  --timestamp=none \\\n  \"$certificate_probe_dir/signing-probe\" >/dev/null 2>&1\n(\n  cd \"$certificate_probe_dir\"\n  /usr/bin/codesign -d --extract-certificates signing-probe >/dev/null 2>&1\n)\nif ! /usr/bin/security verify-cert \\\n  -c \"$certificate_probe_dir/codesign0\" \\\n  -p codeSign \\\n  -R ocsp \\\n  -R require \\\n  -q; then\n  echo \"The selected code-signing certificate is expired, revoked, or untrusted.\" >&2\n  exit 65\nfi\n/bin/rm -rf \"$certificate_probe_dir\"\ntrap - EXIT\n\nsigning_name=\"${EXPANDED_CODE_SIGN_IDENTITY_NAME:-${CODE_SIGN_IDENTITY:-}}\"\ntimestamp_option=\"--timestamp=none\"\nif [[ \"$signing_name\" == *\"Developer ID Application\"* ]]; then\n  timestamp_option=\"--timestamp\"\nfi\n\n# Sign dylibs before the executable that loads them. Symlink aliases are not\n# signed separately because they resolve to the already signed real files.\nwhile IFS= read -r runtime_file; do\n  /usr/bin/codesign \\\n    --force \\\n    --sign \"$signing_identity\" \\\n    --options runtime \\\n    \"$timestamp_option\" \\\n    \"$runtime_file\"\ndone < <(/usr/bin/find \"$destination_root\" -maxdepth 1 -type f -name '*.dylib' -print | /usr/bin/sort)\n\n/usr/bin/codesign \\\n  --force \\\n  --sign \"$signing_identity\" \\\n  --options runtime \\\n  \"$timestamp_option\" \\\n  \"$destination_root/llama-server\"\n\n/usr/bin/python3 \"$verifier\" \\\n  --root \"$destination_root\" \\\n  --manifest \"$manifest\" \\\n  --signed \\\n  --expected-team \"${DEVELOPMENT_TEAM:-}\"\n";
+			shellScript = "#!/usr/bin/env bash\nset -euo pipefail\n\n# Xcode executes this as the final target build phase, before it signs the\n# enclosing .app. The source payload is repository-local and checksum-pinned;\n# this script deliberately contains no network or archive extraction path.\n\nrequired_variables=(\n  SRCROOT\n  TARGET_BUILD_DIR\n  UNLOCALIZED_RESOURCES_FOLDER_PATH\n)\nfor variable in \"${required_variables[@]}\"; do\n  if [[ -z \"${!variable:-}\" ]]; then\n    echo \"Missing required Xcode build variable: $variable\" >&2\n    exit 65\n  fi\ndone\n\n# The unsigned path exists only so Xcode can compile and validate source\n# integration when signing credentials or embedded-product provisioning are\n# unavailable. It still verifies and copies the exact pinned payload below.\nif [[ \"${CODE_SIGNING_ALLOWED:-YES}\" != \"NO\" && -z \"${EXPANDED_CODE_SIGN_IDENTITY:-}\" ]]; then\n  echo \"Missing required Xcode build variable: EXPANDED_CODE_SIGN_IDENTITY\" >&2\n  exit 65\nfi\n\nruntime_name=\"llama-${LLAMA_RUNTIME_TAG:-b9992}\"\nsource_root=\"$SRCROOT/ThirdPartyRuntime/$runtime_name\"\nmanifest=\"$source_root/runtime-manifest.json\"\nverifier=\"$SRCROOT/scripts/verify_llama_runtime.py\"\ndestination_root=\"$TARGET_BUILD_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH/ComputerUseRuntime/$runtime_name\"\n\n/usr/bin/python3 \"$verifier\" \\\n  --root \"$source_root\" \\\n  --manifest \"$manifest\"\n\n# Source verification above proves that this closed directory contains only\n# the manifest's allowlisted real files and relative symlinks. ditto preserves\n# those symlinks; it never follows them into an unexpected path.\n/bin/rm -rf \"$destination_root\"\n/bin/mkdir -p \"$(/usr/bin/dirname \"$destination_root\")\"\n/usr/bin/ditto --noqtn \"$source_root\" \"$destination_root\"\n\n/usr/bin/python3 \"$verifier\" \\\n  --root \"$destination_root\" \\\n  --manifest \"$manifest\"\n\nif [[ \"${CODE_SIGNING_ALLOWED:-YES}\" == \"NO\" ]]; then\n  echo \"CODE_SIGNING_ALLOWED=NO: verified pinned llama runtime copied for compile-only unsigned build; code signing skipped.\"\n  exit 0\nfi\n\nsigning_identity=\"$EXPANDED_CODE_SIGN_IDENTITY\"\nif [[ \"$signing_identity\" == \"-\" ]]; then\n  echo \"A real host signing identity is required for the bundled llama runtime.\" >&2\n  exit 65\nfi\n\n# `codesign --verify` can accept a cryptographically intact signature whose\n# leaf certificate was later revoked. Prove the actual identity Xcode selected\n# with mandatory OCSP before it is applied to any bundled executable.\ncertificate_probe_dir=\"$(/usr/bin/mktemp -d /tmp/remotedesktop-runtime-signing.XXXXXX)\"\ncleanup_certificate_probe() {\n  /bin/rm -rf \"$certificate_probe_dir\"\n}\ntrap cleanup_certificate_probe EXIT\n/bin/cp /usr/bin/true \"$certificate_probe_dir/signing-probe\"\n/usr/bin/codesign \\\n  --force \\\n  --sign \"$signing_identity\" \\\n  --timestamp=none \\\n  \"$certificate_probe_dir/signing-probe\" >/dev/null 2>&1\n(\n  cd \"$certificate_probe_dir\"\n  /usr/bin/codesign -d --extract-certificates signing-probe >/dev/null 2>&1\n)\nif ! /usr/bin/security verify-cert \\\n  -c \"$certificate_probe_dir/codesign0\" \\\n  -p codeSign \\\n  -R ocsp \\\n  -R require \\\n  -q; then\n  echo \"The selected code-signing certificate is expired, revoked, or untrusted.\" >&2\n  exit 65\nfi\n/bin/rm -rf \"$certificate_probe_dir\"\ntrap - EXIT\n\nsigning_name=\"${EXPANDED_CODE_SIGN_IDENTITY_NAME:-${CODE_SIGN_IDENTITY:-}}\"\ntimestamp_option=\"--timestamp=none\"\nif [[ \"$signing_name\" == *\"Developer ID Application\"* ]]; then\n  timestamp_option=\"--timestamp\"\nfi\n\n# Sign dylibs before the executable that loads them. Symlink aliases are not\n# signed separately because they resolve to the already signed real files.\nwhile IFS= read -r runtime_file; do\n  /usr/bin/codesign \\\n    --force \\\n    --sign \"$signing_identity\" \\\n    --options runtime \\\n    \"$timestamp_option\" \\\n    \"$runtime_file\"\ndone < <(/usr/bin/find \"$destination_root\" -maxdepth 1 -type f -name '*.dylib' -print | /usr/bin/sort)\n\n/usr/bin/codesign \\\n  --force \\\n  --sign \"$signing_identity\" \\\n  --options runtime \\\n  \"$timestamp_option\" \\\n  \"$destination_root/llama-server\"\n\n/usr/bin/python3 \"$verifier\" \\\n  --root \"$destination_root\" \\\n  --manifest \"$manifest\" \\\n  --signed \\\n  --expected-team \"${DEVELOPMENT_TEAM:-}\"\n";
 			showEnvVarsInLog = 0;
 		};
 /* End PBXShellScriptBuildPhase section */
@@ -1414,6 +1486,7 @@
 				B5CCC80791E442EB9B114914 /* LatencyUDPCapacityProbe.swift in Sources */,
 				43BAB6482DB2451740A8116D /* LegacyModelManifests.swift in Sources */,
 				62D9EE4F9186AF0FF8F7C6B4 /* LlamaVLMPolicy.swift in Sources */,
+				84B38DE60134BC9D3D5053B4 /* LocalAgentCapabilityAdapter.swift in Sources */,
 				90F22628B233B06E096F5A47 /* LocalComputerUseBrokerServer.swift in Sources */,
 				3429236596E52F2EBF64A1A1 /* LocalComputerUseCredentials.swift in Sources */,
 				36D721C5C6B2CCB4E6382C1C /* LocalComputerUseRPC.swift in Sources */,
@@ -1566,7 +1639,7 @@
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 9;
+				CURRENT_PROJECT_VERSION = 10;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				ENABLE_NS_ASSERTIONS = NO;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
@@ -1580,7 +1653,7 @@
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
-				MARKETING_VERSION = 0.3.1;
+				MARKETING_VERSION = 0.4.0;
 				MTL_ENABLE_DEBUG_INFO = NO;
 				MTL_FAST_MATH = YES;
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -1720,7 +1793,7 @@
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 9;
+				CURRENT_PROJECT_VERSION = 10;
 				DEBUG_INFORMATION_FORMAT = dwarf;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
 				ENABLE_TESTABILITY = YES;
@@ -1740,7 +1813,7 @@
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
-				MARKETING_VERSION = 0.3.1;
+				MARKETING_VERSION = 0.4.0;
 				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
 				MTL_FAST_MATH = YES;
 				ONLY_ACTIVE_ARCH = YES;
@@ -1824,6 +1897,10 @@
 /* End XCConfigurationList section */
 
 /* Begin XCLocalSwiftPackageReference section */
+		83E1A3A62D98149A0482146A /* XCLocalSwiftPackageReference "LocalAgentKit" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = LocalAgentKit;
+		};
 		F668B0EAF751B6985585912D /* XCLocalSwiftPackageReference "MemoryStoreKit" */ = {
 			isa = XCLocalSwiftPackageReference;
 			relativePath = MemoryStoreKit;
@@ -1850,6 +1927,14 @@
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
+		18149092021E1C8656342686 /* LocalAgentKit */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = LocalAgentKit;
+		};
+		76C039D9235F004B24B5A68D /* LocalAgentKit */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = LocalAgentKit;
+		};
 		944F7E9CB5F023D79B84EB4D /* MemoryStoreKit */ = {
 			isa = XCSwiftPackageProductDependency;
 			productName = MemoryStoreKit;

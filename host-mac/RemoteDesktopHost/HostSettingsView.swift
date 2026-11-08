@@ -89,14 +89,14 @@ struct HostSettingsView: View {
             GroupBox("Local Computer Use") {
                 VStack(alignment: .leading, spacing: 10) {
                     HStack {
-                        Label("Fara 1.5 4B", systemImage: "globe")
+                        Label("Fara 1.5 9B + LFM3 1.7B", systemImage: "globe")
                             .font(.headline)
                         Spacer()
                         Text(modelStatus)
                             .font(.caption.weight(.semibold))
                             .foregroundStyle(modelStatusColor)
                     }
-                    Text("Uses the task window or browser tab to work locally. Requires a Mac with at least 16 GB of memory.")
+                    Text("Uses this Mac's apps and browser the way you would, on this Mac only. Requires a Mac with at least 24 GB of memory.")
                         .font(.callout)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -145,9 +145,16 @@ struct HostSettingsView: View {
             GroupBox {
                 VStack(spacing: 0) {
                     licenseRow(
-                        name: "Fara 1.5 4B",
+                        name: "Fara 1.5 9B",
                         license: "MIT License",
                         destination: ComputerUseArtifactManifest.displayedFaraLicenseURL)
+                    Divider().padding(.vertical, 10)
+                    licenseRow(
+                        name: "LFM3 1.7B (Liquid AI)",
+                        license: "LFM Open License v1.0",
+                        destination: ComputerUseArtifactManifest.bundledLegalDocumentURL(
+                            ComputerUseArtifactManifest.lfmLicense)
+                            ?? ComputerUseArtifactManifest.lfmLicenseURL)
                     Divider().padding(.vertical, 10)
                     licenseRow(
                         name: "Qwen 3.5 base model license",
@@ -166,6 +173,12 @@ struct HostSettingsView: View {
                 .padding(6)
             }
 
+            if let noticeURL = ComputerUseArtifactManifest.bundledLegalDocumentURL(
+                ComputerUseArtifactManifest.localAgentNotice) {
+                Link(destination: noticeURL) {
+                    Label("View model attribution notice", systemImage: "doc.plaintext")
+                }
+            }
             if let noticeURL = Bundle.main.url(forResource: "NOTICE", withExtension: "txt") {
                 Link(destination: noticeURL) {
                     Label("View attribution notice", systemImage: "doc.plaintext")

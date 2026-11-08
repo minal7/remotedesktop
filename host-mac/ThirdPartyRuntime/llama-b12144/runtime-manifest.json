@@ -1,0 +1,121 @@
+{
+  "schemaVersion": 1,
+  "runtimeName": "llama.cpp macOS arm64 inference runtime",
+  "destination": "Contents/Resources/ComputerUseRuntime/llama-b12144",
+  "release": {
+    "repository": "ggml-org/llama.cpp",
+    "tag": "b12144",
+    "revision": "69ee2ecc0150ba7d1204a7f7393dfd651569db8c",
+    "archiveName": "llama-b12144-bin-macos-arm64.tar.gz",
+    "archiveURL": "https://github.com/ggml-org/llama.cpp/releases/download/b12144/llama-b12144-bin-macos-arm64.tar.gz",
+    "archiveByteCount": 16672153,
+    "archiveSHA256": "2045e1d2dd7f06beed9a9a7594db1bb1c42e5b92bffcb3bd503679c8d7b6c8a9"
+  },
+  "architecture": "arm64",
+  "files": [
+    {
+      "path": "libggml-base.0.29.0.dylib",
+      "role": "dylib",
+      "byteCount": 772312,
+      "sha256": "d1b4f12098b2e527421834db1f70e43fcf6537c090ff9168600f02b308211ba2"
+    },
+    {
+      "path": "libggml-blas.0.29.0.dylib",
+      "role": "dylib",
+      "byteCount": 58776,
+      "sha256": "786754ac19bff80ad4ca76d44d3031f32593772f38d9da819b428dc702f63339"
+    },
+    {
+      "path": "libggml-cpu.0.29.0.dylib",
+      "role": "dylib",
+      "byteCount": 959296,
+      "sha256": "198d22e7db0842c2bdb12bc5878beef80b4ad9ff3455b3356b07b7ab2b1c6d19"
+    },
+    {
+      "path": "libggml-metal.0.29.0.dylib",
+      "role": "dylib",
+      "byteCount": 5671592,
+      "sha256": "8cdde0d9a98d04d6fae10b820fa33a6d5437245fb7bdc877c95fc11c4b16ad3c"
+    },
+    {
+      "path": "libggml-rpc.0.29.0.dylib",
+      "role": "dylib",
+      "byteCount": 243600,
+      "sha256": "1b4d7b2187abe3eda371ce6a72843125b4c6d07a7f14baea5929ede6b5b89d37"
+    },
+    {
+      "path": "libggml.0.29.0.dylib",
+      "role": "dylib",
+      "byteCount": 60016,
+      "sha256": "f2b3b1a494448bb17a7bfe6111873326ba2872bdbc52a95c6f1140c6868261b8"
+    },
+    {
+      "path": "libllama-common.0.9.0.dylib",
+      "role": "dylib",
+      "byteCount": 8052728,
+      "sha256": "ea0f258c23fce6b0bf2f6199bbca12049c1939ba6e1b25e19aa492400a53eb27"
+    },
+    {
+      "path": "libllama-server-impl.dylib",
+      "role": "dylib",
+      "byteCount": 9796136,
+      "sha256": "f45dacbf8e1a5787d9980e7fc5aa9fd17e6df4e50f39300847a59f92f8b5d0ac"
+    },
+    {
+      "path": "libllama.0.9.0.dylib",
+      "role": "dylib",
+      "byteCount": 3755248,
+      "sha256": "1b7ff5aca909a8b26ea0c85e60c7487a36c911a3de3ae19e4eeb381e57b8ca83"
+    },
+    {
+      "path": "libmtmd.0.9.0.dylib",
+      "role": "dylib",
+      "byteCount": 1884256,
+      "sha256": "ab5b1437830806ad66d09c182b6e08601d4a0fd3f4e7836ab23cf78f6d6fba71"
+    },
+    {
+      "path": "llama-server",
+      "role": "executable",
+      "byteCount": 49984,
+      "sha256": "e7e3c60a5e612460d095bfd219047040d6bb9d0b56466aae30a480980b676959"
+    }
+  ],
+  "symlinks": [
+    {
+      "path": "libggml-base.0.dylib",
+      "target": "libggml-base.0.29.0.dylib"
+    },
+    {
+      "path": "libggml-blas.0.dylib",
+      "target": "libggml-blas.0.29.0.dylib"
+    },
+    {
+      "path": "libggml-cpu.0.dylib",
+      "target": "libggml-cpu.0.29.0.dylib"
+    },
+    {
+      "path": "libggml-metal.0.dylib",
+      "target": "libggml-metal.0.29.0.dylib"
+    },
+    {
+      "path": "libggml-rpc.0.dylib",
+      "target": "libggml-rpc.0.29.0.dylib"
+    },
+    {
+      "path": "libggml.0.dylib",
+      "target": "libggml.0.29.0.dylib"
+    },
+    {
+      "path": "libllama-common.0.dylib",
+      "target": "libllama-common.0.9.0.dylib"
+    },
+    {
+      "path": "libllama.0.dylib",
+      "target": "libllama.0.9.0.dylib"
+    },
+    {
+      "path": "libmtmd.0.dylib",
+      "target": "libmtmd.0.9.0.dylib"
+    }
+  ]
+}

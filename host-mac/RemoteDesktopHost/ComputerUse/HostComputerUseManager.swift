@@ -4146,8 +4146,8 @@ final class HostComputerUseManager: ObservableObject {
     private let generalAgentFactory: ((ComputerUseInstallationReceipt) throws -> ComputerUseCapabilityExecutor)?
     private var agentLifecycleTask: Task<Void, Never>?
     var hasRetainedAgentTask: Bool { generalAgent?.hasRetainedTask == true }
-    private var generalAgent: AgentCapabilityAdapter? {
-        (executor as? ComputerUseCapabilityExecutor)?.agentAdapter ?? executor as? AgentCapabilityAdapter
+    private var generalAgent: (any AgentTaskAdapting)? {
+        (executor as? ComputerUseCapabilityExecutor)?.agentAdapter ?? executor as? any AgentTaskAdapting
     }
 #if DEBUG
     var hasGeneralAgentFactory: Bool { generalAgentFactory != nil }
@@ -4310,7 +4310,10 @@ final class HostComputerUseManager: ObservableObject {
             ?? .shared
         if executor == nil, visualExecutorLoader == nil {
             generalAgentFactory = { receipt in
-                try AgentHostFactory.make(receipt: receipt, injector: injector, mayAct: mayAct,
+                if agentConfiguration.engine == .localAgent {
+                    return try LocalAgentHostFactory.make(receipt: receipt, injector: injector, mayAct: mayAct)
+                }
+                return try AgentHostFactory.make(receipt: receipt, injector: injector, mayAct: mayAct,
                     configuration: agentConfiguration, taskMemoryContextSlot: taskMemoryContextSlot,
                     taskMemoryFaraRuntimeInputs: taskMemoryFaraRuntimeInputs,
                     runtime: agentRuntime)
@@ -6050,7 +6053,7 @@ final class HostComputerUseManager: ObservableObject {
     }
 
     private func continueApprovedAgent(_ request: AgentApprovalRequest, approved: Bool,
-                                       agent: AgentCapabilityAdapter, context: ExecutionContext) {
+                                       agent: any AgentTaskAdapting, context: ExecutionContext) {
         let token = UUID()
         currentExecution = context; currentExecutionToken = token
         activity = .working("Continuing the approved agent task…")
@@ -7344,10 +7347,12 @@ final class HostComputerUseManager: ObservableObject {
                 throw AgentLoopError.noMatchingApproval
             }
             let action = String(decoding: try JSONEncoder().encode(request.action), as: UTF8.self)
+            let reviewDetails = request.reviewFields.map { ComputerUseApprovalRequest.Detail(label: $0.label, value: $0.value) }
+            // The local agent explains itself in plain language; there's no raw action to show.
+            let details = request.fingerprint.hasPrefix(LocalAgentCapabilityAdapter.approvalMarker) ? reviewDetails
+                : [.init(label: "Action", value: action), .init(label: "Fingerprint", value: request.fingerprint)] + reviewDetails
             let presentation = ComputerUseApprovalRequest(requestID: request.id.uuidString, taskID: envelope.id,
-                message: request.reason,
-                details: [.init(label: "Action", value: action), .init(label: "Fingerprint", value: request.fingerprint)]
-                    + request.reviewFields.map { .init(label: $0.label, value: $0.value) })
+                message: request.reason, details: details)
             enterApproval(.init(request: presentation, context: context, operation: .agent(request)))
         case .completed(let response):
             retainCompletedMemoryConfirmationLease(for: context)

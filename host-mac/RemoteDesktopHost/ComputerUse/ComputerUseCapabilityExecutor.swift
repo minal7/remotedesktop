@@ -41,7 +41,7 @@ final class ComputerUseCapabilityExecutor: ComputerUseTaskAwareExecuting,
     private var routedClarifiedGoal: ComputerUseUnresolvedTextGoal?
     private var isExecuting = false
     private var nativeOnlyTask = false
-    let agentAdapter: AgentCapabilityAdapter?
+    let agentAdapter: (any AgentTaskAdapting)?
 
     init(nativeExecution: @escaping NativeExecution, desktopFactory: DesktopFactory? = nil,
          desktopIncludesVisualControl: Bool = true, nativeClarification: (any ComputerUseClarificationContinuing)? = nil) {
@@ -52,7 +52,7 @@ final class ComputerUseCapabilityExecutor: ComputerUseTaskAwareExecuting,
         self.desktopIncludesVisualControl = desktopFactory != nil && desktopIncludesVisualControl
     }
 
-    init(agentAdapter: AgentCapabilityAdapter) {
+    init(agentAdapter: any AgentTaskAdapting) {
         self.agentAdapter = agentAdapter
         self.nativeExecution = { _, _, _ in nil }
         self.nativeClarification = nil

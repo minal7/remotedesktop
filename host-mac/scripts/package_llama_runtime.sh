@@ -25,10 +25,11 @@ if [[ "${CODE_SIGNING_ALLOWED:-YES}" != "NO" && -z "${EXPANDED_CODE_SIGN_IDENTIT
   exit 65
 fi
 
-source_root="$SRCROOT/ThirdPartyRuntime/llama-b9992"
+runtime_name="llama-${LLAMA_RUNTIME_TAG:-b9992}"
+source_root="$SRCROOT/ThirdPartyRuntime/$runtime_name"
 manifest="$source_root/runtime-manifest.json"
 verifier="$SRCROOT/scripts/verify_llama_runtime.py"
-destination_root="$TARGET_BUILD_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH/ComputerUseRuntime/llama-b9992"
+destination_root="$TARGET_BUILD_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH/ComputerUseRuntime/$runtime_name"
 
 /usr/bin/python3 "$verifier" \
   --root "$source_root" \

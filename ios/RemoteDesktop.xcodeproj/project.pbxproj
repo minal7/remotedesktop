@@ -38,6 +38,7 @@
 		2B001C6924EEF44D52A072B1 /* ICEConfigFetcher.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5F3A4B847A3DCD0634B31ADD /* ICEConfigFetcher.swift */; };
 		2B199A23EA17297AB5910FE1 /* PersonalMemoryInitializationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1CE6B8B5E2545409EF74F9E3 /* PersonalMemoryInitializationTests.swift */; };
 		2B660C3A1179C8D69CC29B2A /* KeyboardCapture.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51568DFD16DD3F8C26E78FFF /* KeyboardCapture.swift */; };
+		2CF24A08379DCBEE5DF8C036 /* LocalAgentReleaseLiveE2ETests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FE638BA8AF9BE3F76DAC0D2E /* LocalAgentReleaseLiveE2ETests.swift */; };
 		2D14227736F8BB8BFA06F1DB /* PersonalMemoryViewModelTypes.swift in Sources */ = {isa = PBXBuildFile; fileRef = BC0908159D93A6B7B0F49E4A /* PersonalMemoryViewModelTypes.swift */; };
 		2E6ECD2CFAE51C1EB8EC4693 /* ComputerUseTaskMemoryControls.swift in Sources */ = {isa = PBXBuildFile; fileRef = C8EDC7A63C57C62981E9E87B /* ComputerUseTaskMemoryControls.swift */; };
 		2F99D84FEEC7608E3D03BFBE /* InputAndDiscoveryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 85753EE87FA0D11F4FBDE7BE /* InputAndDiscoveryTests.swift */; };
@@ -281,6 +282,7 @@
 		FA80FDA00FCE00DB22342ABC /* RemoteVideoSurfacePresentation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteVideoSurfacePresentation.swift; sourceTree = "<group>"; };
 		FB1B5B661D72871EE572230D /* AppLogo.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppLogo.swift; sourceTree = "<group>"; };
 		FE3E13A07013ADDB25E1A1B0 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		FE638BA8AF9BE3F76DAC0D2E /* LocalAgentReleaseLiveE2ETests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalAgentReleaseLiveE2ETests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -378,6 +380,7 @@
 				7ED3539FD7B096B729AA6870 /* EODSafetyTaskLiveE2ETests.swift */,
 				C11A3D2A6535B04083601ADA /* EODSimpleTaskLiveE2ETests.swift */,
 				2CC48DE4DEEC4B07CB78ACCD /* EODStopLiveE2ETests.swift */,
+				FE638BA8AF9BE3F76DAC0D2E /* LocalAgentReleaseLiveE2ETests.swift */,
 				805CFC833EA95929F3DFF54A /* MCPMailSendSimulatorLiveE2ETests.swift */,
 				17D550D3D7934F67DFE75DDF /* OSAtlasDoorDashGuestSignInSimulatorLiveE2ETests.swift */,
 				7F4F65461D5267F68E5D07E2 /* OSAtlasDoorDashSimulatorLiveE2ETests.swift */,
@@ -855,6 +858,7 @@
 				3154E53CFFE1A93278536E97 /* EODSafetyTaskLiveE2ETests.swift in Sources */,
 				059F269CA74D679B38E0EB86 /* EODSimpleTaskLiveE2ETests.swift in Sources */,
 				415DEB31ADE27941CDB85A68 /* EODStopLiveE2ETests.swift in Sources */,
+				2CF24A08379DCBEE5DF8C036 /* LocalAgentReleaseLiveE2ETests.swift in Sources */,
 				775BF1F4B8541D86EFE9E325 /* MCPMailSendSimulatorLiveE2ETests.swift in Sources */,
 				693732D4CE4F5ACD2955037A /* OSAtlasDoorDashGuestSignInSimulatorLiveE2ETests.swift in Sources */,
 				7D3FD32BC2121C7E22AE39F3 /* OSAtlasDoorDashSimulatorLiveE2ETests.swift in Sources */,
