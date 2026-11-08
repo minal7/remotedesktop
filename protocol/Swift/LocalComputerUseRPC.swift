@@ -41,6 +41,10 @@ public enum LocalComputerUseRPCLimits {
     public static let maximumAcknowledgementsPerFrame = 128
     public static let maximumFailureCodeBytes = 64
     public static let maximumFailureMessageBytes = 512
+    public static let maximumMemoryTextBytes = 4_096
+    public static let maximumMemoryMetadataPerReply = 32
+    public static let maximumMemoryRecordsPerReply = 32
+    public static let maximumMemorySearchQueryBytes = 2_048
 }
 
 /// One bounded request on the local Computer Use control plane. A request may
@@ -54,6 +58,9 @@ public struct LocalComputerUseRPCRequest: Codable, Equatable, Sendable {
     public let sessionID: String
     public let envelopes: [ComputerUseEnvelope]
     public let acknowledgedEnvelopeIDs: [String]
+    public let memoryCommand: LocalMemoryRPCCommand?
+    /// Explicit authenticated connection-session bind; omitted by legacy polls.
+    public let bindSession: Bool?
 
     public init(
         requestID: String = UUID().uuidString,
@@ -61,7 +68,9 @@ public struct LocalComputerUseRPCRequest: Codable, Equatable, Sendable {
         targetID: String,
         sessionID: String,
         envelopes: [ComputerUseEnvelope] = [],
-        acknowledgedEnvelopeIDs: [String] = []
+        acknowledgedEnvelopeIDs: [String] = [],
+        memoryCommand: LocalMemoryRPCCommand? = nil,
+        bindSession: Bool? = nil
     ) {
         version = LocalComputerUseRPCLimits.currentVersion
         self.requestID = requestID
@@ -70,6 +79,8 @@ public struct LocalComputerUseRPCRequest: Codable, Equatable, Sendable {
         self.sessionID = sessionID
         self.envelopes = envelopes
         self.acknowledgedEnvelopeIDs = acknowledgedEnvelopeIDs
+        self.memoryCommand = memoryCommand
+        self.bindSession = bindSession
     }
 
     public func validate() throws {
@@ -109,6 +120,14 @@ public struct LocalComputerUseRPCRequest: Codable, Equatable, Sendable {
                 acknowledgement,
                 field: "acknowledgedEnvelopeID")
         }
+        try memoryCommand?.validate()
+        if memoryCommand != nil && (!envelopes.isEmpty || !acknowledgedEnvelopeIDs.isEmpty) {
+            throw LocalComputerUseRPCValidationError.invalidField("memoryOnlyRequest")
+        }
+        if bindSession == true,
+           memoryCommand != nil || !envelopes.isEmpty || !acknowledgedEnvelopeIDs.isEmpty {
+            throw LocalComputerUseRPCValidationError.invalidField("sessionBindOnlyRequest")
+        }
     }
 }
 
@@ -123,6 +142,9 @@ public struct LocalComputerUseRPCResponse: Codable, Equatable, Sendable {
     public let envelopes: [ComputerUseEnvelope]
     public let acceptedEnvelopeIDs: [String]
     public let failure: LocalComputerUseRPCFailure?
+    public let memoryReply: LocalMemoryRPCReply?
+    /// Present only when the host processed an explicit session-bind request.
+    public let sessionBindingAccepted: Bool?
 
     public init(
         requestID: String,
@@ -130,7 +152,9 @@ public struct LocalComputerUseRPCResponse: Codable, Equatable, Sendable {
         targetID: String,
         envelopes: [ComputerUseEnvelope] = [],
         acceptedEnvelopeIDs: [String] = [],
-        failure: LocalComputerUseRPCFailure? = nil
+        failure: LocalComputerUseRPCFailure? = nil,
+        memoryReply: LocalMemoryRPCReply? = nil,
+        sessionBindingAccepted: Bool? = nil
     ) {
         version = LocalComputerUseRPCLimits.currentVersion
         self.requestID = requestID
@@ -139,6 +163,8 @@ public struct LocalComputerUseRPCResponse: Codable, Equatable, Sendable {
         self.envelopes = envelopes
         self.acceptedEnvelopeIDs = acceptedEnvelopeIDs
         self.failure = failure
+        self.memoryReply = memoryReply
+        self.sessionBindingAccepted = sessionBindingAccepted
     }
 
     public func validate() throws {
@@ -172,6 +198,138 @@ public struct LocalComputerUseRPCResponse: Codable, Equatable, Sendable {
                 field: "acceptedEnvelopeID")
         }
         try failure?.validate()
+        try memoryReply?.validate()
+        if sessionBindingAccepted != nil,
+           !envelopes.isEmpty || !acceptedEnvelopeIDs.isEmpty
+                || failure != nil || memoryReply != nil {
+            throw LocalComputerUseRPCValidationError.invalidField("sessionBindingReply")
+        }
+        if failure != nil && memoryReply != nil {
+            throw LocalComputerUseRPCValidationError.invalidField("contradictoryMemoryResponse")
+        }
+        if memoryReply != nil && (!envelopes.isEmpty || !acceptedEnvelopeIDs.isEmpty) {
+            throw LocalComputerUseRPCValidationError.invalidField("memoryOnlyResponse")
+        }
+    }
+
+    /// A legacy host may ignore this additive request field while returning a
+    /// valid ordinary RPC response. Such a response is never memory success.
+    public func memoryResult(
+        for request: LocalComputerUseRPCRequest
+    ) throws -> LocalMemoryRPCReply? {
+        try request.validate()
+        try validate()
+        guard requestID == request.requestID,
+              senderID == request.targetID,
+              targetID == request.senderID else {
+            throw LocalComputerUseRPCValidationError.invalidField("memoryResponseRoute")
+        }
+        guard request.memoryCommand != nil else {
+            guard memoryReply == nil else {
+                throw LocalComputerUseRPCValidationError.invalidField("unexpectedMemoryReply")
+            }
+            return nil
+        }
+        guard let memoryReply else {
+            throw LocalComputerUseRPCValidationError.memoryReplyMissing
+        }
+        try memoryReply.validate()
+        guard let command = request.memoryCommand,
+              memoryReply.operation == command.operation,
+              memoryReply.commandID == command.commandID,
+              memoryReply.rememberKind == command.rememberKind else {
+            throw LocalComputerUseRPCValidationError.invalidField("memoryReplyMismatch")
+        }
+        if command.operation == .forgetEverything || command.operation == .initializeMemoryGeneration {
+            guard memoryReply.generationReference == command.generationReference else {
+                throw LocalComputerUseRPCValidationError.invalidField("memoryReplyGenerationReference")
+            }
+        } else if command.operation != .captureMemoryGeneration {
+            guard memoryReply.generationReference == nil else {
+                throw LocalComputerUseRPCValidationError.invalidField("memoryReplyGenerationReference")
+            }
+        }
+        if memoryReply.status == .completed {
+            switch command.operation {
+            case .remember, .confirmProposal:
+                guard memoryReply.recordID != nil,
+                      memoryReply.idempotentRetry != nil,
+                      memoryReply.metadata.isEmpty, memoryReply.records.isEmpty else {
+                    throw LocalComputerUseRPCValidationError.invalidField("memoryReplyReceipt")
+                }
+            case .listMetadata:
+                guard memoryReply.recordID == nil,
+                      memoryReply.idempotentRetry == nil,
+                      memoryReply.records.isEmpty,
+                      memoryReply.metadata.count <= (command.limit ?? 0) else {
+                    throw LocalComputerUseRPCValidationError.invalidField("memoryReplyMetadata")
+                }
+            case .deleteMetadata:
+                guard memoryReply.recordID == nil,
+                      memoryReply.idempotentRetry == nil,
+                      memoryReply.metadata.isEmpty, memoryReply.records.isEmpty else {
+                    throw LocalComputerUseRPCValidationError.invalidField("memoryReplyDelete")
+                }
+            case .listRecords, .searchRecords:
+                guard memoryReply.recordID == nil, memoryReply.idempotentRetry == nil,
+                      memoryReply.metadata.isEmpty,
+                      memoryReply.records.count <= (command.limit ?? 0) else {
+                    throw LocalComputerUseRPCValidationError.invalidField("memoryReplyRecords")
+                }
+                var previousID = command.afterRecordID
+                for record in memoryReply.records {
+                    if let previousID,
+                       !previousID.utf8.lexicographicallyPrecedes(record.recordID.utf8) {
+                        throw LocalComputerUseRPCValidationError.invalidField("memoryReply.recordOrder")
+                    }
+                    previousID = record.recordID
+                }
+                if let nextRecordID = memoryReply.nextRecordID {
+                    guard memoryReply.records.count == command.limit,
+                          memoryReply.records.last?.recordID == nextRecordID,
+                          command.afterRecordID.map({ $0.utf8.lexicographicallyPrecedes(nextRecordID.utf8) }) ?? true else {
+                        throw LocalComputerUseRPCValidationError.invalidField("memoryReply.nextRecordID")
+                    }
+                }
+            case .editRecord:
+                guard memoryReply.recordID == command.recordID,
+                      memoryReply.idempotentRetry != nil,
+                      memoryReply.metadata.isEmpty, memoryReply.records.isEmpty else {
+                    throw LocalComputerUseRPCValidationError.invalidField("memoryReplyEditReceipt")
+                }
+            case .captureMemoryGeneration:
+                guard memoryReply.generationReference != nil,
+                      memoryReply.rememberKind == nil, memoryReply.recordID == nil,
+                      memoryReply.idempotentRetry == nil, memoryReply.metadata.isEmpty,
+                      memoryReply.records.isEmpty, memoryReply.nextRecordID == nil else {
+                    throw LocalComputerUseRPCValidationError.invalidField("memoryReplyGenerationCapture")
+                }
+            case .forgetEverything:
+                guard memoryReply.commandID == command.commandID,
+                      memoryReply.generationReference == command.generationReference,
+                      memoryReply.recordID == nil, memoryReply.idempotentRetry == nil,
+                      memoryReply.metadata.isEmpty, memoryReply.records.isEmpty,
+                      memoryReply.nextRecordID == nil else {
+                    throw LocalComputerUseRPCValidationError.invalidField("memoryReplyForgetReceipt")
+                }
+            case .initializeMemoryGeneration:
+                guard memoryReply.commandID == command.commandID,
+                      memoryReply.generationReference == command.generationReference,
+                      memoryReply.rememberKind == nil, memoryReply.recordID == nil,
+                      memoryReply.idempotentRetry == nil, memoryReply.metadata.isEmpty,
+                      memoryReply.records.isEmpty, memoryReply.nextRecordID == nil,
+                      let replacement = memoryReply.replacementGenerationReference,
+                      replacement != command.generationReference,
+                      LocalMemoryRPCCommand.isValidGenerationReference(replacement) else {
+                    throw LocalComputerUseRPCValidationError.invalidField("memoryReplyInitializationReceipt")
+                }
+            }
+            if command.operation == .remember,
+               memoryReply.rememberKind != command.rememberKind {
+                throw LocalComputerUseRPCValidationError.invalidField("memoryReplyKind")
+            }
+        }
+        return memoryReply
     }
 }
 
@@ -209,6 +367,8 @@ public enum LocalComputerUseRPCValidationError:
     case bodyTooLarge
     case tooManyEnvelopes
     case tooManyAcknowledgements
+    case tooManyMemoryMetadata
+    case memoryReplyMissing
     case frameTooLarge
     case malformedFrame
 
@@ -226,6 +386,10 @@ public enum LocalComputerUseRPCValidationError:
             return "The local Computer Use frame contains too many messages."
         case .tooManyAcknowledgements:
             return "The local Computer Use frame contains too many acknowledgements."
+        case .tooManyMemoryMetadata:
+            return "The local memory reply contains too much metadata."
+        case .memoryReplyMissing:
+            return "The Mac did not return a local memory result."
         case .frameTooLarge:
             return "The local Computer Use frame is too large."
         case .malformedFrame:
@@ -304,7 +468,26 @@ public enum LocalComputerUseRPCCodec {
     }
 }
 
-private enum LocalComputerUseRPCValidator {
+enum LocalComputerUseRPCValidator {
+    static func rejectUnknownKeys<K: CodingKey>(_ decoder: Decoder, allowed: [K]) throws {
+        let values = try decoder.container(keyedBy: LocalComputerUseDynamicCodingKey.self)
+        let accepted = Set(allowed.map(\.stringValue))
+        guard values.allKeys.allSatisfy({ accepted.contains($0.stringValue) }) else {
+            throw LocalComputerUseRPCValidationError.invalidField("unknownMemoryField")
+        }
+    }
+
+    static func memoryText(_ value: String, field: String) throws {
+        guard !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              value.utf8.count <= LocalComputerUseRPCLimits.maximumMemoryTextBytes,
+              value.unicodeScalars.allSatisfy({ scalar in
+                  !CharacterSet.controlCharacters.contains(scalar)
+                    || scalar == "\n" || scalar == "\t" || scalar == "\r"
+              }) else {
+            throw LocalComputerUseRPCValidationError.invalidField(field)
+        }
+    }
+
     static func envelope(_ envelope: ComputerUseEnvelope) throws {
         try identifier(envelope.id, field: "envelope.id")
         try identifier(envelope.senderID, field: "envelope.senderID")
@@ -351,4 +534,11 @@ private enum LocalComputerUseRPCValidator {
             throw LocalComputerUseRPCValidationError.fieldTooLarge(field)
         }
     }
+}
+
+private struct LocalComputerUseDynamicCodingKey: CodingKey {
+    let stringValue: String
+    let intValue: Int?
+    init?(stringValue: String) { self.stringValue = stringValue; intValue = nil }
+    init?(intValue: Int) { self.intValue = intValue; stringValue = String(intValue) }
 }

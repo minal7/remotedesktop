@@ -1,0 +1,96 @@
+{
+  "schemaVersion": 1,
+  "scope": "Unseen clarification phrasing frozen before quotation-preserving candidate inference. Twenty independent initial/answered proposal states; no desktop effects, no host/client continuation claim.",
+  "cases": [
+    {
+      "id": "QH06",
+      "prompt": "Please add \" / checked\" at the end of a field.",
+      "fields": [
+        "Project",
+        "Remarks"
+      ],
+      "expectedDisposition": "supported",
+      "clarificationAnswers": [
+        {
+          "question": "Which field should I edit, and what exact text should it contain?",
+          "text": "Remarks."
+        }
+      ],
+      "allowedPlans": [
+        [
+          {
+            "field": 1,
+            "mode": "append",
+            "value": " / checked"
+          }
+        ]
+      ]
+    },
+    {
+      "id": "QH07",
+      "prompt": "At the caret, insert \"→ \" in the field I select.",
+      "fields": [
+        "Entry",
+        "Details"
+      ],
+      "expectedDisposition": "clarification"
+    },
+    {
+      "id": "QH08",
+      "prompt": "At the caret, insert \"→ \" in the field I select.",
+      "fields": [
+        "Entry",
+        "Details"
+      ],
+      "expectedDisposition": "supported",
+      "clarificationAnswers": [
+        {
+          "question": "Which field should I edit, and what exact text should it contain?",
+          "text": "Use Details."
+        }
+      ],
+      "allowedPlans": [
+        [
+          {
+            "field": 1,
+            "mode": "insert",
+            "value": "→ "
+          }
+        ]
+      ]
+    },
+    {
+      "id": "QH09",
+      "prompt": "Set one of these fields to \"Code\".",
+      "fields": [
+        "Notes",
+        "Code"
+      ],
+      "expectedDisposition": "clarification"
+    },
+    {
+      "id": "QH10",
+      "prompt": "Set one of these fields to \"Code\".",
+      "fields": [
+        "Notes",
+        "Code"
+      ],
+      "expectedDisposition": "supported",
+      "clarificationAnswers": [
+        {
+          "question": "Which field should I edit, and what exact text should it contain?",
+          "text": "Notes."
+        }
+      ],
+      "allowedPlans": [
+        [
+          {
+            "field": 0,
+            "mode": "replaceAll",
+            "value": "Code"
+          }
+        ]
+      ]
+    }
+  ]
+}

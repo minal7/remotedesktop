@@ -8,7 +8,9 @@ enum ComputerUseActionSafetyPolicy {
     static func approvalReason(
         for action: ComputerUsePredictedAction,
         accessibilityContext: String,
-        forceConfirmation: Bool = false
+        forceConfirmation: Bool = false,
+        verifiedSearchSubmission: Bool = false,
+        verifiedLinkNavigation: Bool = false
     ) -> String? {
         let context = accessibilityContext.lowercased()
 
@@ -17,10 +19,18 @@ enum ComputerUseActionSafetyPolicy {
             return approvalReason(
                 for: proposedAction,
                 accessibilityContext: accessibilityContext,
-                forceConfirmation: true)
+                forceConfirmation: true,
+                verifiedSearchSubmission: verifiedSearchSubmission,
+                verifiedLinkNavigation: verifiedLinkNavigation)
 
         case .click:
-            if containsAny(highImpactKeywords, in: context) {
+            // The owned browser executes a bound destination load or section
+            // scroll, not the link's click handlers, forms or popup scripts.
+            if verifiedLinkNavigation {
+                return forceConfirmation ? described("Follow this exact browser link", context: accessibilityContext) : nil
+            }
+            let keywords = verifiedSearchSubmission ? highImpactKeywords.filter { $0 != "submit" } : highImpactKeywords
+            if containsAny(keywords, in: context) {
                 return described(
                     "Click a control that may send, purchase, save, delete, share, or change an account",
                     context: accessibilityContext)
@@ -51,7 +61,7 @@ enum ComputerUseActionSafetyPolicy {
                 return "Press Delete, which may permanently remove the selected item"
             }
             if usage == 0x28 {
-                if context.contains("search") {
+                if context.contains("search"), !containsAny(highImpactKeywords, in: context) {
                     return nil
                 }
                 return described(
@@ -78,7 +88,7 @@ enum ComputerUseActionSafetyPolicy {
             }
             if nonSeparators.isEmpty,
                digits.count == 6 || (13 ... 19).contains(digits.count) {
-                return "Enter a value that looks like a one-time code or payment-card number"
+                return described("Enter a value that looks like a one-time code or payment-card number", context: accessibilityContext)
             }
             return forceConfirmation
                 ? described(

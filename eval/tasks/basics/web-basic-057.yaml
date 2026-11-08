@@ -1,0 +1,8 @@
+id: "web-basic-057"
+surface: web
+start: {"url":"http://127.0.0.1:8765/read.html"}
+prompt: "Read the reference page and report the publisher of the Coastal Atlas."
+checker: {"type":"dom","expect":[{"selector":"#fact","text":"North Shore Press"}],"url_prefix":"http://127.0.0.1:8765/","answer_contains":["North Shore Press"]}
+max_steps: 10
+tags: ["read","answer"]
+approval_policy: {"allow_fixture_interaction":true}

@@ -1,0 +1,91 @@
+{
+  "schemaVersion": 1,
+  "scope": "First frozen explicit-clarification-input evaluation: initial requests, supplied answer states and one counterfactual constraint-retention probe. Proposal only, no desktop effects or client/host continuation qualification. Preselected batch 3/4.",
+  "cases": [
+    {
+      "id": "Q911",
+      "prompt": "Put this exact text in Notes.",
+      "fields": [
+        "Notes",
+        "Tag"
+      ],
+      "expectedDisposition": "clarification"
+    },
+    {
+      "id": "Q912",
+      "prompt": "Put this exact text in Notes.",
+      "fields": [
+        "Notes",
+        "Tag"
+      ],
+      "expectedDisposition": "supported",
+      "allowedPlans": [
+        [
+          {
+            "field": 0,
+            "mode": "replaceAll",
+            "value": "  mañana é 🧭\nline 2  "
+          }
+        ]
+      ],
+      "clarificationAnswers": [
+        {
+          "question": "Which field should I edit, and what exact text should it contain?",
+          "text": "\"  mañana é 🧭\nline 2  \""
+        }
+      ]
+    },
+    {
+      "id": "Q913",
+      "prompt": "Put a value in a field.",
+      "fields": [
+        "Notes",
+        "Tag"
+      ],
+      "expectedDisposition": "clarification"
+    },
+    {
+      "id": "Q914",
+      "prompt": "Put a value in a field.",
+      "fields": [
+        "Notes",
+        "Tag"
+      ],
+      "expectedDisposition": "clarification",
+      "clarificationAnswers": [
+        {
+          "question": "Which field should I edit, and what exact text should it contain?",
+          "text": "Notes"
+        }
+      ]
+    },
+    {
+      "id": "Q915",
+      "prompt": "Put a value in a field.",
+      "fields": [
+        "Notes",
+        "Tag"
+      ],
+      "expectedDisposition": "supported",
+      "allowedPlans": [
+        [
+          {
+            "field": 0,
+            "mode": "replaceAll",
+            "value": "ready"
+          }
+        ]
+      ],
+      "clarificationAnswers": [
+        {
+          "question": "Which field should I edit, and what exact text should it contain?",
+          "text": "Notes"
+        },
+        {
+          "question": "Which field should I edit, and what exact text should it contain?",
+          "text": "\"ready\""
+        }
+      ]
+    }
+  ]
+}

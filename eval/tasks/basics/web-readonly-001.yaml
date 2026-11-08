@@ -1,0 +1,8 @@
+id: "web-readonly-001"
+surface: web
+start: {"url":"https://en.wikipedia.org/wiki/Paris"}
+prompt: "Read the public page about Paris and report one fact stated there that includes the term Seine. Do not sign in or interact with forms."
+checker: {"type":"page_text","expect":{"contains":["Seine"],"url_prefix":"https://en.wikipedia.org/wiki/","answer_contains":["Seine"]}}
+max_steps: 12
+tags: ["read","public-web","read-only"]
+approval_policy: {"allow_start_interaction":true}

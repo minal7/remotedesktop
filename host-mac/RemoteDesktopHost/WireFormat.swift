@@ -3,9 +3,44 @@ import Foundation
 /// Wire protocol shared between the iOS client and the Mac host,
 /// as specified in `protocol/PROTOCOL.md` (v1 plus negotiated capabilities).
 ///
-/// The host primarily *decodes* client → host messages; encoding of
-/// host → client messages (`hello_ack`, `display`) is a Phase 3 task
-/// once the WebRTC data channel is wired up.
+/// Semantic messages are separate from the negotiated input-session envelope.
+
+struct ControlPacket {
+    let message: ControlMessage
+    let inputHello: DirectInputHello?
+    let inputStamp: DirectInputStamp?
+    let inputInvalidation: Int
+    let clientCursor: Bool
+
+    static func decode(_ data: Data) -> ControlPacket? {
+        guard let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              let message = ControlMessage.decode(object) else { return nil }
+        var hello: DirectInputHello?, stamp: DirectInputStamp?
+        if let metadata = object["inputSession"] {
+            switch message {
+            case .hello:
+                guard let value = DirectInputWire.decode(metadata, as: DirectInputHello.self), value.isValid else { return nil }
+                hello = value
+            case .pointer, .scroll, .key, .text:
+                guard let value = DirectInputWire.decode(metadata, as: DirectInputStamp.self), value.isValid else { return nil }
+                stamp = value
+            case .qos, .bye: break
+            }
+        }
+        var inputInvalidation = 0
+        var clientCursor = false
+        if case .hello = message {
+            let caps = object["caps"] as? [String: Any]
+            guard object["caps"] == nil || caps != nil,
+                  let version = DirectInputWire.invalidationCapability(in: caps),
+                  version == 0 || hello != nil else { return nil }
+            inputInvalidation = version
+            clientCursor = (caps?["clientCursor"] as? Int) == 1
+        }
+        return .init(message: message, inputHello: hello, inputStamp: stamp,
+                     inputInvalidation: inputInvalidation, clientCursor: clientCursor)
+    }
+}
 
 enum InputScrollPhase: String, Codable {
     case begin, changed, end, momentum
@@ -21,11 +56,11 @@ enum ControlMessage: Equatable {
     case bye(reason: String)
 
     static func decode(_ data: Data) -> ControlMessage? {
-        guard let raw = try? JSONSerialization.jsonObject(with: data),
-              let obj = raw as? [String: Any],
-              let t = obj["t"] as? String else {
-            return nil
-        }
+        ControlPacket.decode(data)?.message
+    }
+
+    fileprivate static func decode(_ obj: [String: Any]) -> ControlMessage? {
+        guard let t = obj["t"] as? String else { return nil }
         switch t {
         case "hello":
             let client = obj["client"] as? [String: Any]
@@ -77,6 +112,13 @@ enum ControlMessage: Equatable {
 }
 
 enum HostMessageEncoder {
+    #if DEBUG
+    static func latencyCapabilities(_ configuration: LatencyLabConfiguration) -> [String: Int] {
+        ["latencyF1Playout": 1, "latencyF2Encoder": configuration.f2Encoder ? 1 : 0,
+         "latencyF3Sender": configuration.f3Sender ? 1 : 0]
+    }
+    #endif
+
     static func helloAck(
         proto: Int,
         hostname: String,
@@ -84,9 +126,12 @@ enum HostMessageEncoder {
         audio: Bool,
         monitors: Int,
         seq: UInt32,
-        ts: UInt64
+        ts: UInt64,
+        inputSession: DirectInputAcknowledgement? = nil,
+        inputInvalidation: Int = 0,
+        clientCursor: Bool = false
     ) -> Data {
-        let obj: [String: Any] = [
+        var obj: [String: Any] = [
             "t": "hello_ack",
             "s": seq,
             "ts": ts,
@@ -105,9 +150,33 @@ enum HostMessageEncoder {
                 "maxFps": DesktopVideoQuality.targetFramesPerSecond,
                 "orderedComputerUseControls":
                     HostConfig.orderedComputerUseControlsVersion,
+                "inputSessions": DirectInputWire.version,
+                "inputInvalidation": inputInvalidation,
+                "clientCursor": clientCursor ? 1 : 0,
             ],
         ]
+        #if DEBUG
+        if var caps = obj["caps"] as? [String: Any] {
+            for (key, value) in latencyCapabilities(.current) { caps[key] = value }
+            obj["caps"] = caps
+        }
+        #endif
+        if let inputSession { obj["inputSession"] = DirectInputWire.object(inputSession) }
         return (try? JSONSerialization.data(withJSONObject: obj)) ?? Data()
+    }
+
+    static func inputUnavailable(_ inputSession: DirectInputAcknowledgement,
+                                 seq: UInt32, ts: UInt64) -> Data {
+        let object: [String: Any] = ["t": "input_unavailable", "s": seq, "ts": ts,
+            "inputSession": DirectInputWire.object(inputSession) ?? [:]]
+        return (try? JSONSerialization.data(withJSONObject: object)) ?? Data()
+    }
+
+    static func display(_ geometry: CaptureDisplayGeometry, seq: UInt32, ts: UInt64,
+                        inputSession: DirectInputAcknowledgement? = nil) -> Data {
+        display(width: geometry.state.width, height: geometry.state.height,
+                scale: geometry.backingScale, seq: seq, ts: ts, inputSession: inputSession,
+                fullDisplaySurface: true)
     }
 
     static func display(
@@ -115,9 +184,11 @@ enum HostMessageEncoder {
         height: Int,
         scale: Double,
         seq: UInt32,
-        ts: UInt64
+        ts: UInt64,
+        inputSession: DirectInputAcknowledgement? = nil,
+        fullDisplaySurface: Bool = false
     ) -> Data {
-        let obj: [String: Any] = [
+        var obj: [String: Any] = [
             "t": "display",
             "s": seq,
             "ts": ts,
@@ -125,6 +196,8 @@ enum HostMessageEncoder {
             "h": height,
             "scale": scale,
         ]
+        if let inputSession { obj["inputSession"] = DirectInputWire.object(inputSession) }
+        if fullDisplaySurface { obj["fullDisplaySurface"] = 1 }
         return (try? JSONSerialization.data(withJSONObject: obj)) ?? Data()
     }
 }

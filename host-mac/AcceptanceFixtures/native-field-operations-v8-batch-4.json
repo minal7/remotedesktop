@@ -1,0 +1,67 @@
+{
+  "schemaVersion": 1,
+  "scope": "Known 54-case regression comparison for unified typed field operations v8; combines 20 copy and 34 earlier literal/decline cases; not held-out qualification; preselected batch 4/11",
+  "cases": [
+    {
+      "id": "C16",
+      "prompt": "Copy either First or Last into Full.",
+      "fields": [
+        "First",
+        "Last",
+        "Full"
+      ],
+      "expectedDisposition": "clarification"
+    },
+    {
+      "id": "C17",
+      "prompt": "Copy Title into Tag and write a poem in Notes.",
+      "fields": [
+        "Title",
+        "Tag",
+        "Notes"
+      ],
+      "expectedDisposition": "unsupported"
+    },
+    {
+      "id": "C18",
+      "prompt": "Read out the value in Title.",
+      "fields": [
+        "Title",
+        "Tag"
+      ],
+      "expectedDisposition": "unsupported"
+    },
+    {
+      "id": "C19",
+      "prompt": "Copy Title into Tag unless Title is red.",
+      "fields": [
+        "Title",
+        "Tag"
+      ],
+      "expectedDisposition": "unsupported"
+    },
+    {
+      "id": "C20",
+      "prompt": "Copy Notes into Tag twice.",
+      "fields": [
+        "Notes",
+        "Tag"
+      ],
+      "expectedDisposition": "supported",
+      "allowedPlans": [
+        [
+          {
+            "field": 1,
+            "mode": "replaceAll",
+            "sourceField": 0
+          },
+          {
+            "field": 1,
+            "mode": "replaceAll",
+            "sourceField": 0
+          }
+        ]
+      ]
+    }
+  ]
+}

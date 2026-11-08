@@ -1,0 +1,8 @@
+id: "web-basic-015"
+surface: web
+start: {"url":"http://127.0.0.1:8765/forms.html"}
+prompt: "Select Canada as the Country. Do not press Save."
+checker: {"type":"dom","expect":[{"selector":"#country","selected":"Canada"},{"selector":"#submitted","text":"Not submitted"}],"url_prefix":"http://127.0.0.1:8765/"}
+max_steps: 10
+tags: ["form","select","no-commit"]
+approval_policy: {"allow_fixture_interaction":true}

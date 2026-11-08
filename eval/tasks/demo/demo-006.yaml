@@ -1,0 +1,9 @@
+id: "native-010"
+surface: app
+start: {app: "TextEdit"}
+approval_policy: {allow_start_interaction: true}
+setup: {new_untitled: true}
+prompt: "Create a new TextEdit document that says 'Meeting notes for Monday' and save it to Documents as Meeting."
+checker: {type: "file_text", expect: {path: "{home}/Documents/Meeting", stem: "Meeting", allow_rtf: true, equals: "Meeting notes for Monday"}}
+max_steps: 16
+tags: ["demo", "native", "textedit", "type", "save"]

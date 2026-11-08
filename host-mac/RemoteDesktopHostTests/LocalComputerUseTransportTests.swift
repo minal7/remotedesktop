@@ -7,6 +7,26 @@ import XCTest
 
 @MainActor
 final class LocalComputerUseTransportTests: XCTestCase {
+    func testLocalMailboxUsesFastPollingAndMultiplexKeepsSlowFallbackCadence() async {
+        let local = LocalHostComputerUseChannel(
+            hostID: "HOST-ID",
+            pairingCode: "123456")
+        let slow = BufferedHostComputerUseChannel(
+            hostID: "HOST-ID",
+            pairingCode: "123456")
+
+        let localInterval = await local.pollingInterval()
+        let fallbackInterval = await slow.pollingInterval()
+        XCTAssertEqual(localInterval, .milliseconds(100))
+        XCTAssertEqual(fallbackInterval, .seconds(2))
+
+        let multiplex = MultiplexHostComputerUseChannel(
+            channels: [slow, local])
+        let multiplexInterval = await multiplex.pollingInterval()
+        XCTAssertEqual(multiplexInterval, .milliseconds(100))
+        await multiplex.stopPolling()
+    }
+
     private let hostID = "8A2269A1-A94C-4FA2-BD63-BEAEEA79A97A"
     private let peerID = "53A8D639-5DE2-4786-BE26-2AC9F853D3B6"
     private let pairingCode = "123456"
@@ -343,6 +363,75 @@ final class LocalComputerUseTransportTests: XCTestCase {
         XCTAssertThrowsError(try LocalComputerUseRPCCodec.encode(invalid))
     }
 
+    func testMemoryCommandRPCBindsTypedReplyToRequest() throws {
+        let command = LocalMemoryRPCCommand(
+            rememberKind: .fact,
+            text: "My home airport is SFO",
+            commandID: "memory-save-1")
+        let request = LocalComputerUseRPCRequest(
+            requestID: "memory-request-1",
+            senderID: peerID,
+            targetID: hostID,
+            sessionID: sessionID,
+            memoryCommand: command)
+
+        let decodedRequest = try LocalComputerUseRPCCodec.decodeRequest(
+            LocalComputerUseRPCCodec.encode(request))
+        XCTAssertEqual(decodedRequest.memoryCommand, command)
+        XCTAssertTrue(decodedRequest.envelopes.isEmpty)
+        XCTAssertTrue(decodedRequest.acknowledgedEnvelopeIDs.isEmpty)
+
+        let reply = LocalMemoryRPCReply(
+            operation: .remember,
+            commandID: "memory-save-1",
+            rememberKind: .fact,
+            status: .completed,
+            recordID: "fact-home-airport",
+            idempotentRetry: false)
+        let response = LocalComputerUseRPCResponse(
+            requestID: "memory-request-1",
+            senderID: hostID,
+            targetID: peerID,
+            memoryReply: reply)
+        let decodedResponse = try LocalComputerUseRPCCodec.decodeResponse(
+            LocalComputerUseRPCCodec.encode(response))
+        XCTAssertEqual(try decodedResponse.memoryResult(for: decodedRequest), reply)
+
+        let missingReply = LocalComputerUseRPCResponse(
+            requestID: "memory-request-1",
+            senderID: hostID,
+            targetID: peerID)
+        XCTAssertThrowsError(try missingReply.memoryResult(for: decodedRequest)) { error in
+            XCTAssertEqual(error as? LocalComputerUseRPCValidationError, .memoryReplyMissing)
+        }
+
+        let mismatchedReply = LocalComputerUseRPCResponse(
+            requestID: "memory-request-1",
+            senderID: hostID,
+            targetID: peerID,
+            memoryReply: LocalMemoryRPCReply(
+                operation: .remember,
+                commandID: "other-command",
+                rememberKind: .fact,
+                status: .completed,
+                recordID: "fact-home-airport",
+                idempotentRetry: false))
+        XCTAssertThrowsError(try mismatchedReply.memoryResult(for: decodedRequest))
+    }
+
+    func testInitializationRequiredReplyIsAZeroRecordListOnly() throws {
+        let absent = LocalMemoryRPCReply(operation: .listRecords,
+            status: .initializationRequired)
+        XCTAssertNoThrow(try absent.validate())
+        XCTAssertThrowsError(try LocalMemoryRPCReply(operation: .remember,
+            status: .initializationRequired).validate())
+        XCTAssertThrowsError(try LocalMemoryRPCReply(operation: .listRecords,
+            status: .initializationRequired, records: [LocalMemoryRPCRecord(
+                recordID: "unexpected", kind: .fact, text: "Synthetic",
+                observedAtMilliseconds: 1, active: true,
+                revision: String(repeating: "0", count: 64), source: .ownerMessage)]).validate())
+    }
+
     private func addTestCredential(
         _ credential: LocalComputerUseCredential,
         service: String,
@@ -484,6 +573,115 @@ final class LocalComputerUseTransportTests: XCTestCase {
             try endpoint("8.8.8.8")))
         XCTAssertFalse(LocalComputerUseBrokerServer.isPrivateLocalEndpoint(
             try endpoint("172.32.0.1")))
+    }
+
+    func testLargeQuestionsBatchByEncodedFrameAndRemainQueuedUntilAcknowledged() async throws {
+        let channel = LocalHostComputerUseChannel(hostID: hostID, pairingCode: pairingCode)
+        let request = LocalComputerUseRPCRequest(requestID: "large-question-poll", senderID: peerID, targetID: hostID, sessionID: sessionID)
+        let text = "Which location?\n" + String(repeating: "␁", count: 40_000)
+        var sent: [ComputerUseEnvelope] = []
+        for index in 0..<12 {
+            let reference = try ComputerUseClarificationReference(taskID: "large-task-\(index)", expiresAt: Date().addingTimeInterval(600))
+            let body = try ComputerUseTaskUpdate(taskID: reference.taskID, text: text,
+                outcome: .userInterventionRequired, clarification: reference).encodedBody()
+            XCTAssertGreaterThan(body.utf8.count, LocalHostComputerUseChannel.maximumBodyBytes)
+            sent.append(try await channel.send(kind: .assistant, body: body, to: peerID, sessionID: sessionID,
+                messageID: String(format: "large-question-%02d", index)))
+        }
+        var receivedIDs: [String] = [], batches = 0
+        for _ in 0..<12 {
+            let pending = try await channel.pollForClient(authenticatedSenderID: peerID, sessionID: sessionID)
+            if pending.isEmpty { break }
+            let response = try LocalComputerUseBrokerServer.boundedResponse(to: request, envelopes: pending,
+                acceptedEnvelopeIDs: ["accepted-prompt"])
+            XCTAssertFalse(response.envelopes.isEmpty)
+            XCTAssertEqual(response.envelopes.map(\.id), Array(pending.prefix(response.envelopes.count)).map(\.id))
+            XCTAssertEqual(response.acceptedEnvelopeIDs, ["accepted-prompt"])
+            let encoded = try LocalComputerUseRPCCodec.encode(response)
+            XCTAssertLessThanOrEqual(encoded.count, LocalComputerUseRPCLimits.maximumFrameBytes)
+            let replay = try await channel.pollForClient(authenticatedSenderID: peerID, sessionID: sessionID)
+            XCTAssertEqual(replay, pending, "Selecting a bounded reply cannot drop the unsent suffix or acknowledge the sent prefix")
+            for envelope in try LocalComputerUseRPCCodec.decodeResponse(encoded).envelopes {
+                let update = try ComputerUseTaskUpdate.decodeBody(envelope.body)
+                XCTAssertTrue(update.text.utf8.elementsEqual(text.utf8)); XCTAssertNotNil(update.clarification)
+            }
+            let ids = response.envelopes.map(\.id)
+            _ = try await channel.applyClientFrame(envelopes: [], acknowledgedEnvelopeIDs: ids,
+                authenticatedSenderID: peerID, sessionID: sessionID)
+            receivedIDs += ids; batches += 1
+        }
+        XCTAssertGreaterThan(batches, 1); XCTAssertEqual(receivedIDs, sent.map(\.id))
+        let remaining = try await channel.pollForClient(authenticatedSenderID: peerID, sessionID: sessionID)
+        XCTAssertTrue(remaining.isEmpty)
+    }
+
+    func testUnencodableSingleResponseIsRejectedBeforeItCanBlockTheLocalQueue() async throws {
+        let channel = LocalHostComputerUseChannel(hostID: hostID, pairingCode: pairingCode)
+        // JSON escapes each control byte to six bytes; the body alone fits its
+        // byte cap, but no legal local response frame can carry this message.
+        let body = String(repeating: "\u{1}", count: LocalHostComputerUseChannel.maximumResponseBodyBytes)
+        do {
+            _ = try await channel.send(kind: .assistant, body: body, to: peerID, sessionID: sessionID, messageID: "cannot-fit")
+            XCTFail("A permanently undeliverable message must not enter the queue")
+        } catch { XCTAssertEqual(error as? LocalComputerUseRPCValidationError, .frameTooLarge) }
+        let pending = try await channel.pollForClient(authenticatedSenderID: peerID, sessionID: sessionID)
+        XCTAssertTrue(pending.isEmpty)
+        let valid = try await channel.send(kind: .assistant, body: "Which location?", to: peerID, sessionID: sessionID, messageID: "fits")
+        let request = LocalComputerUseRPCRequest(requestID: "poll", senderID: peerID, targetID: hostID, sessionID: sessionID)
+        let response = try LocalComputerUseBrokerServer.boundedResponse(to: request, envelopes: [valid], acceptedEnvelopeIDs: [])
+        XCTAssertEqual(response.envelopes, [valid])
+    }
+
+    func testBrokerRoutesOnlyExplicitSessionBindWithoutChangingLegacyPolls() async throws {
+        let credential = try LocalComputerUseCredential(rawKey: Data(repeating: 0x5A, count: 32))
+        let channel = LocalHostComputerUseChannel(hostID: hostID, pairingCode: pairingCode)
+        let nextPeerID = "89CD465C-DEB5-4B48-B758-4C94206891D8"
+        var bindings: [(String, String)] = []
+        var revokedPeers: [String] = []
+        let server = LocalComputerUseBrokerServer(
+            credential: credential,
+            hostID: hostID,
+            channel: channel,
+            authorizePeer: { _ in true },
+            revokePeer: { revokedPeers.append($0) },
+            bindSession: { peer, session in
+                bindings.append((peer, session))
+                return session != "denied-session"
+            })
+        defer { server.stop() }
+
+        // A rejected first bind must release its provisional broker reservation.
+        let denied = try await server.handle(LocalComputerUseRPCRequest(
+            senderID: peerID, targetID: hostID,
+            sessionID: "denied-session", bindSession: true))
+        XCTAssertEqual(denied.sessionBindingAccepted, false)
+        XCTAssertEqual(revokedPeers, [peerID])
+
+        let bindRequest = LocalComputerUseRPCRequest(
+            senderID: nextPeerID, targetID: hostID,
+            sessionID: "replacement-session", bindSession: true)
+        XCTAssertEqual(try LocalComputerUseRPCCodec.decodeRequest(
+            LocalComputerUseRPCCodec.encode(bindRequest)), bindRequest)
+        let bindResponse = try await server.handle(bindRequest)
+        XCTAssertEqual(bindResponse.sessionBindingAccepted, true)
+        XCTAssertTrue(bindResponse.envelopes.isEmpty)
+        XCTAssertEqual(bindings.map { $0.0 }, [peerID, nextPeerID])
+        XCTAssertEqual(bindings.map { $0.1 }, ["denied-session", "replacement-session"])
+
+        let legacyPoll = try await server.handle(LocalComputerUseRPCRequest(
+            senderID: nextPeerID, targetID: hostID, sessionID: "replacement-session"))
+        XCTAssertNil(legacyPoll.sessionBindingAccepted)
+        XCTAssertEqual(bindings.count, 2)
+
+        XCTAssertThrowsError(try LocalComputerUseRPCRequest(
+            senderID: nextPeerID, targetID: hostID, sessionID: sessionID,
+            envelopes: [makeEnvelope(id: "mixed-bind-envelope")], bindSession: true).validate())
+        XCTAssertThrowsError(try LocalComputerUseRPCRequest(
+            senderID: nextPeerID, targetID: hostID, sessionID: sessionID,
+            acknowledgedEnvelopeIDs: ["old-ack"], bindSession: true).validate())
+        XCTAssertThrowsError(try LocalComputerUseRPCRequest(
+            senderID: nextPeerID, targetID: hostID, sessionID: sessionID,
+            memoryCommand: LocalMemoryRPCCommand(listMetadata: 1), bindSession: true).validate())
     }
 
     func testTLSPSKBrokerCarriesPromptResultAndAcknowledgementEndToEnd() async throws {

@@ -1,0 +1,9 @@
+id: "native-003"
+surface: app
+start: {"app":"TextEdit"}
+approval_policy: {"allow_start_interaction":true}
+setup: {"new_untitled":true}
+prompt: "Create a new TextEdit document. Its complete content must be exactly these three lines, without quotation marks: \"Owner: Ada\", then \"Status: Draft\", then \"Next: Review\". Put each quoted line on its own line with no blank lines and no newline after the last line. Save it to Documents in your home folder as Handoff."
+checker: {"type":"file_text","expect":{"path":"{home}/Documents/Handoff","stem":"Handoff","allow_rtf":true,"equals":"Owner: Ada\nStatus: Draft\nNext: Review"}}
+max_steps: 16
+tags: ["native","textedit","multiline","save"]

@@ -1,0 +1,8 @@
+id: "web-basic-025"
+surface: web
+start: {"url":"http://127.0.0.1:8765/controls.html"}
+prompt: "Choose Option B in the radio group without submitting."
+checker: {"type":"dom","expect":[{"selector":"#option-b","checked":true}],"url_prefix":"http://127.0.0.1:8765/"}
+max_steps: 10
+tags: ["radio","no-commit"]
+approval_policy: {"allow_fixture_interaction":true}

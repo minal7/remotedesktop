@@ -1,0 +1,9 @@
+id: "memory-recall-10-01"
+surface: web
+start: {url: "http://127.0.0.1:8765/memory-seat.html"}
+prompt: "Select my usual seat on this flight."
+checker: {type: "dom", expect: [{selector: "#selected-seat", text: "aisle"}], min_events: [{selector: "#seat-aisle", event: "click", count: 1}], url_prefix: "http://127.0.0.1:8765/"}
+max_steps: 8
+tags: ["memory-recall", "synthetic", "ordinary-memory"]
+approval_policy: {allow_fixture_interaction: true}
+memory_fixture: "memory-recall-10-01"

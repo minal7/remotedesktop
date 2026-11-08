@@ -1,10 +1,9 @@
 import SwiftUI
 import UIKit
 import LiveKitWebRTC
-import Metal
 
 /// The capture surface for the remote session: renders incoming video
-/// (placeholder for now) and routes every input channel back to the
+/// and routes every input channel back to the
 /// session's transport.
 ///
 /// Three input modes share this view:
@@ -23,12 +22,24 @@ struct RemoteScreenView: UIViewRepresentable {
     @EnvironmentObject private var session: SessionModel
     @ObservedObject var accessories: AccessoryMonitor
     @ObservedObject var zoom: RemoteScreenZoomController
+    #if DEBUG
+    var allowF4Renderer = false
+    var onLatencyGesture: (() -> Void)? = nil
+    #endif
+    var touchMode: TouchInputMode = .direct
 
     func makeUIView(context: Context) -> RemoteScreenUIView {
         let v = RemoteScreenUIView()
+        #if DEBUG
+        v.allowF4Renderer = allowF4Renderer
+        #endif
         v.bindSession(session)
         v.bindZoomController(zoom)
         v.accessories = accessories
+        #if DEBUG
+        v.onLatencyGesture = onLatencyGesture
+        #endif
+        v.setTouchMode(touchMode)
         return v
     }
 
@@ -36,7 +47,15 @@ struct RemoteScreenView: UIViewRepresentable {
         uiView.bindSession(session)
         uiView.bindZoomController(zoom)
         uiView.accessories = accessories
+        #if DEBUG
+        uiView.onLatencyGesture = onLatencyGesture
+        #endif
+        uiView.setTouchMode(touchMode)
         uiView.applyDisplay(session.display)
+    }
+
+    static func dismantleUIView(_ uiView: RemoteScreenUIView, coordinator: ()) {
+        uiView.stopCapture()
     }
 }
 
@@ -49,6 +68,7 @@ final class RemoteScreenZoomController: ObservableObject {
     }
 
     @Published private(set) var scale: CGFloat = 1
+    @Published private(set) var interactionRevision = 0
     @Published var moveScreenEnabled = false {
         didSet {
             guard oldValue != moveScreenEnabled else { return }
@@ -57,12 +77,15 @@ final class RemoteScreenZoomController: ObservableObject {
     }
     fileprivate var commandHandler: ((Command) -> Void)?
     fileprivate var interactionModeHandler: ((Bool) -> Void)?
+    fileprivate weak var captureView: RemoteScreenUIView?
 
     var isZoomed: Bool { scale > 1.01 }
 
     func zoomIn() { commandHandler?(.increase) }
     func zoomOut() { commandHandler?(.decrease) }
     func reset() { commandHandler?(.reset) }
+
+    fileprivate func notePinchInteraction() { interactionRevision &+= 1 }
 
     fileprivate func report(scale: CGFloat) {
         guard abs(self.scale - scale) > 0.005 else { return }
@@ -123,22 +146,37 @@ struct RemoteScreenZoomControls: View {
         .buttonStyle(.plain)
         .foregroundStyle(.primary)
         .padding(4)
-        .background(.regularMaterial, in: Capsule())
-        .overlay { Capsule().strokeBorder(Color.primary.opacity(0.1)) }
-        .shadow(color: .black.opacity(0.16), radius: 8, y: 3)
+        .sessionGlass(in: Capsule())
         .accessibilityIdentifier("remoteScreenZoomControls")
     }
 }
 
 final class RemoteScreenUIView: UIView, UIPointerInteractionDelegate, UIGestureRecognizerDelegate {
-    weak var session: SessionModel?
+    #if DEBUG
+    var allowF4Renderer: Bool {
+        get { videoView.allowF4Renderer }
+        set { videoView.allowF4Renderer = newValue }
+    }
+    var onLatencyGesture: (() -> Void)?
+    @objc private func latencyTapped(_ gesture: UITapGestureRecognizer) {
+        if gesture.state == .recognized { onLatencyGesture?() }
+    }
+    #endif
+    private(set) weak var session: SessionModel?
     weak var accessories: AccessoryMonitor?
 
     private let contentView = UIView(frame: .zero)
-    private let videoView = MetalSafeRTCVideoView(frame: .zero)
+    private let videoView = RemoteVideoSurfaceView(frame: .zero)
     private let cursorLayer = TouchCursorLayer()
+    private let clientCursor = CursorOverlayView()
     private var remoteDisplay: DisplayInfo?
-    private weak var boundSession: SessionModel?
+    private let rendererBinding = RemoteVideoRendererBinding()
+    private var visibilityObserver: UUID?
+    private var sessionBindingRequest = UUID()
+    private var visibilityOwner: UUID?
+    private weak var inputOwnershipSession: SessionModel?
+    private var isReconcilingVisibility = false
+    private var visibilityReconciliationPending = false
     private weak var zoomController: RemoteScreenZoomController?
     private let touchScroll = UIPanGestureRecognizer()
     private let indirectScroll = UIPanGestureRecognizer()
@@ -146,11 +184,21 @@ final class RemoteScreenUIView: UIView, UIPointerInteractionDelegate, UIGestureR
     private let zoomPan = UIPanGestureRecognizer()
     private let pinch = UIPinchGestureRecognizer()
     private let longPress = UILongPressGestureRecognizer()
+    private let twoFingerTap = UITapGestureRecognizer()
+    private var touchMode: TouchInputMode = .direct
+    private var trackpad = TrackpadGestureController()
     private var zoomScale: CGFloat = 1
     private var zoomOffset: CGPoint = .zero
     private var pinchStartScale: CGFloat = 1
     private var pinchAnchor: CGPoint = .zero
     private var panStartOffset: CGPoint = .zero
+    private var inputGeneration: UUID?
+    private var inputSource: RemoteInputSourceLease?
+    private var detached = false
+    private var stopped = false
+    private var inputAvailable = false
+    private var scrollGenerations: [ObjectIdentifier: UUID] = [:]
+    private var inputRouting = RemoteScreenInputRouting()
 
     var interactionState: RemoteScreenInteractionState {
         RemoteScreenInteractionState(
@@ -163,13 +211,23 @@ final class RemoteScreenUIView: UIView, UIPointerInteractionDelegate, UIGestureR
 
     override init(frame: CGRect) {
         super.init(frame: frame)
+        #if DEBUG
+        let latencyTap = UITapGestureRecognizer(target: self, action: #selector(latencyTapped(_:)))
+        latencyTap.numberOfTouchesRequired = 3
+        latencyTap.numberOfTapsRequired = 3
+        latencyTap.cancelsTouchesInView = false
+        latencyTap.delegate = self
+        addGestureRecognizer(latencyTap)
+        #endif
+        rendererBinding.attach(videoView)
+        videoView.isHidden = true
         backgroundColor = .black
         clipsToBounds = true
 
-        videoView.videoContentMode = .scaleAspectFit
         videoView.backgroundColor = UIColor(white: 0.05, alpha: 1)
         contentView.addSubview(videoView)
         contentView.layer.addSublayer(cursorLayer)
+        contentView.layer.addSublayer(clientCursor)
         addSubview(contentView)
 
         // Indirect pointer (trackpad / Magic Mouse / Pencil hover).
@@ -211,6 +269,12 @@ final class RemoteScreenUIView: UIView, UIPointerInteractionDelegate, UIGestureR
         longPress.delegate = self
         addGestureRecognizer(longPress)
 
+        twoFingerTap.numberOfTouchesRequired = 2
+        twoFingerTap.addTarget(self, action: #selector(onTwoFingerTap(_:)))
+        twoFingerTap.delegate = self
+        twoFingerTap.cancelsTouchesInView = false
+        addGestureRecognizer(twoFingerTap)
+
         isMultipleTouchEnabled = true
     }
     required init?(coder: NSCoder) { fatalError() }
@@ -218,53 +282,185 @@ final class RemoteScreenUIView: UIView, UIPointerInteractionDelegate, UIGestureR
     override func layoutSubviews() {
         super.layoutSubviews()
         contentView.bounds = CGRect(origin: .zero, size: bounds.size)
-        videoView.frame = contentView.bounds
+        applyVideoSurfaceLayout()
         cursorLayer.frame = contentView.bounds
+        clientCursor.frame = contentView.bounds
+        updateCursorScale()
         clampZoomOffset()
         applyZoomTransform()
-        cursorLayer.clamp(to: geometry.interactiveRect)
+        cursorLayer.clamp(to: visibleContentRect)
     }
 
     func applyDisplay(_ d: DisplayInfo?) {
+        let changed = remoteDisplay != d
+        if changed { retireInputSource() }
         remoteDisplay = d
-        cursorLayer.clamp(to: geometry.interactiveRect)
+        applyVideoSurfaceLayout()
+        updateCursorScale()
+        setNeedsLayout()
+        cursorLayer.clamp(to: visibleContentRect)
+        if changed {
+            session?.applyCursorState(to: self)
+            synchronizeInputAvailability(allowSourceBinding: true)
+        }
+    }
+
+    private func applyVideoSurfaceLayout() {
+        videoView.frame = contentView.bounds
+        videoView.setNeedsLayout()
+        videoView.layoutIfNeeded()
     }
 
     override func didMoveToWindow() {
         super.didMoveToWindow()
+        detached = window == nil
+        if detached { retireInputSource() }
+        synchronizeInputAvailability(allowSourceBinding: !detached)
         rebindRendererIfNeeded()
     }
 
     func bindSession(_ session: SessionModel?) {
-        self.session = session
+        guard !stopped else { return }
+        let request = UUID()
+        sessionBindingRequest = request
+        if self.session !== session {
+            if let visibilityObserver { self.session?.removeRemoteScreenVisibilityObserver(visibilityObserver) }
+            visibilityObserver = nil
+            visibilityOwner = nil
+            retireInputSource()
+            guard !stopped, sessionBindingRequest == request else { return }
+            setClientCursorEnabled(false)
+            self.session = session
+            inputOwnershipSession?.releaseRemoteScreenInput(owner: self)
+            inputOwnershipSession = session
+            session?.claimRemoteScreenInput(owner: self)
+            session?.applyCursorState(to: self)
+        }
+        if visibilityOwner == nil, let session = self.session {
+            let owner = UUID()
+            visibilityOwner = owner
+            let observer = session.observeRemoteScreenVisibility(owner: self) { [weak self, weak session] in
+                guard let self, let session, self.session === session,
+                      self.visibilityOwner == owner, !self.stopped else { return }
+                self.rebindRendererIfNeeded()
+            }
+            if self.session === session && visibilityOwner == owner && !stopped { visibilityObserver = observer }
+            else { session.removeRemoteScreenVisibilityObserver(observer) }
+        }
+        synchronizeInputAvailability(allowSourceBinding: true)
         rebindRendererIfNeeded()
     }
 
+    @discardableResult
+    private func synchronizeInputAvailability(allowSourceBinding: Bool = false) -> Bool {
+        let generation = session?.remoteInputGeneration
+        if generation != inputGeneration
+            || inputSource.map({ session?.isRemoteInputSourceCurrent($0) != true }) == true {
+            retireInputSource()
+        }
+        // Event callbacks may discard old state, but only an explicit UI
+        // binding/window attachment can acquire the next registration.
+        let ownsScreenInput = session?.ownsRemoteScreenInput(owner: self) == true
+        if allowSourceBinding, ownsScreenInput, !stopped, !detached, inputSource == nil,
+           let session, session.hasInteractiveRemoteScreen, let generation {
+            inputSource = session.beginRemoteInputSource(.pointer, expectedInputGeneration: generation)
+        }
+        let available = ownsScreenInput && !stopped && !detached && inputSource.map {
+            session?.isRemoteInputSourceCurrent($0) == true
+        } == true
+        if generation != inputGeneration || available != inputAvailable {
+            inputGeneration = generation
+            inputAvailable = available
+            activeTouch = nil; touchStart = nil; isDragging = false; rightClickFired = false
+            isTrackingIndirectClick = false; lastPointerButtons = 0; lastPointerLocation = nil
+            inputRouting = RemoteScreenInputRouting()
+            scrollGenerations.removeAll()
+            cursorLayer.hide()
+            // Reset recognizers even if a complete recovery occurred between
+            // SwiftUI updates. Cancel callbacks carry no current scroll lease.
+            for gesture: UIGestureRecognizer in [touchScroll, indirectScroll, hover, longPress] { gesture.isEnabled = false }
+            applyInteractionMode(moveScreenEnabled: zoomController?.moveScreenEnabled ?? false)
+        }
+        return available
+    }
+
+    private func retireInputSource() {
+        let source = inputSource
+        inputSource = nil
+        inputRouting = RemoteScreenInputRouting()
+        activeTouch = nil; touchStart = nil; isDragging = false; rightClickFired = false
+        isTrackingIndirectClick = false; lastPointerButtons = 0; lastPointerLocation = nil
+        scrollGenerations.removeAll()
+        if let source { session?.endRemoteInputSource(source) }
+    }
+
+    func stopCapture() {
+        stopped = true
+        sessionBindingRequest = UUID()
+        visibilityOwner = nil
+        if let visibilityObserver { session?.removeRemoteScreenVisibilityObserver(visibilityObserver) }
+        visibilityObserver = nil
+        retireInputSource()
+        inputOwnershipSession?.releaseRemoteScreenInput(owner: self)
+        inputOwnershipSession = nil
+        session = nil
+        setClientCursorEnabled(false)
+        synchronizeInputAvailability()
+        rebindRendererIfNeeded()
+        if zoomController?.captureView === self {
+            zoomController?.commandHandler = nil
+            zoomController?.interactionModeHandler = nil
+            zoomController?.captureView = nil
+        }
+        zoomController = nil
+        accessories = nil
+    }
+
     func bindZoomController(_ controller: RemoteScreenZoomController) {
-        guard zoomController !== controller else { return }
-        zoomController?.commandHandler = nil
-        zoomController?.interactionModeHandler = nil
+        guard !stopped, zoomController !== controller else { return }
+        if zoomController?.captureView === self {
+            zoomController?.commandHandler = nil
+            zoomController?.interactionModeHandler = nil
+            zoomController?.captureView = nil
+        }
         zoomController = controller
+        controller.captureView = self
         controller.commandHandler = { [weak self] command in
-            self?.handleZoomCommand(command)
+            guard let self, self.zoomController?.captureView === self, !self.stopped else { return }
+            self.handleZoomCommand(command)
         }
         controller.interactionModeHandler = { [weak self] enabled in
-            self?.applyInteractionMode(moveScreenEnabled: enabled)
+            guard let self, self.zoomController?.captureView === self, !self.stopped else { return }
+            self.applyInteractionMode(moveScreenEnabled: enabled)
         }
         controller.report(scale: zoomScale)
         applyInteractionMode(moveScreenEnabled: controller.moveScreenEnabled)
     }
 
     private func rebindRendererIfNeeded() {
-        if let previous = boundSession, previous !== session {
-            previous.detachVideoRenderer(videoView)
-            boundSession = nil
+        visibilityReconciliationPending = true
+        guard !isReconcilingVisibility else {
+            let visible = !stopped && window != nil && session?.mayRevealRemoteScreenPixels == true
+            videoView.isHidden = !visible
+            clientCursor.setSurfaceVisible(visible)
+            if !visible { cursorLayer.hide() }
+            // Publish the newest desired target to the binding while its old
+            // detach is still joined; don't briefly attach an obsolete owner.
+            rendererBinding.bind(visible ? session : nil)
+            return
         }
-
-        guard window != nil, let session else { return }
-        if boundSession !== session {
-            session.attachVideoRenderer(videoView)
-            boundSession = session
+        isReconcilingVisibility = true
+        defer { isReconcilingVisibility = false }
+        while visibilityReconciliationPending {
+            visibilityReconciliationPending = false
+            let visible = !stopped && window != nil && session?.mayRevealRemoteScreenPixels == true
+            videoView.isHidden = !visible
+            clientCursor.setSurfaceVisible(visible)
+            if !visible { cursorLayer.hide() }
+            // The binding joins the old exact detach before installing the
+            // latest target. Reveal receives a new native sink/subscription;
+            // a hidden RTC view's cached frame is never reused for readiness.
+            rendererBinding.bind(visible ? session : nil)
         }
     }
 
@@ -280,22 +476,26 @@ final class RemoteScreenUIView: UIView, UIPointerInteractionDelegate, UIGestureR
     // MARK: - Hover (indirect pointer position)
 
     private var lastPointerButtons: UInt8 = 0
-    private var lastPointerLocation: CGPoint = .zero
+    // Retain the observed view point; project it through the current zoom
+    // when scrolling instead of reusing an old content-space coordinate.
+    private var lastPointerLocation: CGPoint?
+    private var lastPointerContentPoint: CGPoint? { lastPointerLocation.map { contentPoint(from: $0) } }
     private var isTrackingIndirectClick = false
 
     @objc private func onHover(_ g: UIHoverGestureRecognizer) {
+        guard synchronizeInputAvailability() else { return }
         switch g.state {
         case .began, .changed:
-            accessories?.noteIndirectPointer(active: true)
-            cursorLayer.hide()
+            activateIndirectPointer()
             let p = g.location(in: self)
             let point = contentPoint(from: p)
-            lastPointerLocation = point
+            lastPointerLocation = p
             guard RemoteTouchRoutingPolicy.routesTouchesToComputer(
                 moveScreenEnabled: zoomController?.moveScreenEnabled ?? false) else {
                 return
             }
-            sendPointer(at: point, buttons: lastPointerButtons)
+            if RemoteScreenGeometry.contains(point, in: visibleContentRect) { moveCursor(toContentPoint: point) }
+            sendPointer(at: point, buttons: lastPointerButtons, allowsNewButtons: false)
         case .ended, .cancelled, .failed:
             accessories?.noteIndirectPointer(active: false)
         default: break
@@ -305,11 +505,13 @@ final class RemoteScreenUIView: UIView, UIPointerInteractionDelegate, UIGestureR
     // MARK: - Indirect scroll (trackpad / wheel)
 
     @objc private func onIndirectScroll(_ g: UIPanGestureRecognizer) {
+        guard acceptsScrollEvent(g) else { return }
         guard RemoteTouchRoutingPolicy.routesTouchesToComputer(
             moveScreenEnabled: zoomController?.moveScreenEnabled ?? false) else {
             g.setTranslation(.zero, in: self)
             return
         }
+        if g.state == .began { activateIndirectPointer() }
         let t = g.translation(in: self)
         if t == .zero && g.state == .changed { return }
         g.setTranslation(.zero, in: self)
@@ -318,11 +520,44 @@ final class RemoteScreenUIView: UIView, UIPointerInteractionDelegate, UIGestureR
             switch g.state {
             case .began: return .begin
             case .changed: return .changed
-            case .ended, .cancelled: return .end
+            case .ended, .cancelled, .failed: return .end
             default: return .changed
             }
         }()
-        sendScroll(at: lastPointerLocation, dx: t.x, dy: t.y, phase: phase)
+        sendScroll(at: lastPointerContentPoint, dx: t.x, dy: t.y, phase: phase, source: .indirect)
+    }
+
+    func setTouchMode(_ mode: TouchInputMode) {
+        guard mode != touchMode else { return }
+        cancelActiveTouch()
+        touchMode = mode
+        trackpad = TrackpadGestureController()
+        cursorLayer.hide()
+        applyInteractionMode(moveScreenEnabled: zoomController?.moveScreenEnabled ?? false)
+    }
+
+    private func trackpadInitialPoint() -> CGPoint {
+        let rect = geometry.interactiveRect
+        return RemoteScreenGeometry.contains(cursorContentPoint, in: rect) ? cursorContentPoint
+            : CGPoint(x: rect.midX, y: rect.midY)
+    }
+
+    private func panToTrackpadCursor(_ point: CGPoint) {
+        guard RemoteZoomPolicy.isZoomed(zoomScale) else { return }
+        let adjustment = TrackpadGestureController.edgePan(cursor: contentView.convert(point, to: self), viewport: bounds)
+        zoomOffset.x += adjustment.x; zoomOffset.y += adjustment.y
+        clampZoomOffset()
+        applyZoomTransform()
+    }
+
+    @objc private func onTwoFingerTap(_ gesture: UITapGestureRecognizer) {
+        guard gesture.state == .ended, touchMode == .trackpad, synchronizeInputAvailability(),
+              accessories?.hasIndirectPointer != true,
+              zoomController?.moveScreenEnabled != true else { return }
+        let point = trackpadInitialPoint()
+        trackpad.setCursor(point, bounds: geometry.interactiveRect)
+        panToTrackpadCursor(point)
+        for buttons in trackpad.endTwoFingerTap() { sendPointer(at: point, buttons: buttons) }
     }
 
     // MARK: - Touch cursor mode
@@ -334,10 +569,16 @@ final class RemoteScreenUIView: UIView, UIPointerInteractionDelegate, UIGestureR
     private var rightClickFired = false
 
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
+        guard synchronizeInputAvailability() else { return }
         if handleIndirectPointerTouches(touches, with: event, phase: .began) {
             return
         }
 
+        if touchMode == .trackpad, activeTouch != nil || touches.count > 1 {
+            for buttons in trackpad.secondFingerBegan() { sendPointer(at: trackpad.cursor, buttons: buttons) }
+            activeTouch = nil
+            return
+        }
         guard accessories?.hasIndirectPointer != true,
               RemoteTouchRoutingPolicy.routesTouchesToComputer(
                 moveScreenEnabled: zoomController?.moveScreenEnabled ?? false),
@@ -347,41 +588,68 @@ final class RemoteScreenUIView: UIView, UIPointerInteractionDelegate, UIGestureR
             return
         }
         activeTouch = t
+        if touchMode == .trackpad {
+            let point = trackpadInitialPoint()
+            trackpad.begin(at: t.timestamp, cursor: point, bounds: geometry.interactiveRect)
+            moveCursor(toContentPoint: point)
+            panToTrackpadCursor(point)
+            return
+        }
         touchStart = t.location(in: self)
         touchStartedAt = CACurrentMediaTime()
         isDragging = TouchCursorPolicy.beginsDrag(tapCount: t.tapCount)
         rightClickFired = false
-        let cursor = cursorLayer.cursorCenter == .zero
-            ? CGPoint(x: geometry.interactiveRect.midX, y: geometry.interactiveRect.midY)
-            : geometry.clampedLocalPoint(cursorLayer.cursorCenter)
-        cursorLayer.show(at: cursor, within: geometry.interactiveRect)
+        positionTouchCursor()
+        let cursor = cursorLayer.cursorCenter
         if isDragging {
             sendPointer(at: cursor, buttons: 0b001)
         }
     }
 
     override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
+        guard synchronizeInputAvailability() else { return }
         if handleIndirectPointerTouches(touches, with: event, phase: .moved) {
             return
         }
 
-        guard let t = activeTouch, touches.contains(t), touchStart != nil else { return }
+        guard let t = activeTouch, touches.contains(t) else { return }
+        if touchMode == .trackpad {
+            let prev = t.previousLocation(in: self), now = t.location(in: self)
+            let old = trackpad.cursor ?? trackpadInitialPoint()
+            let buttons = trackpad.move(delta: CGPoint(x: now.x - prev.x, y: now.y - prev.y),
+                                        timestamp: t.timestamp, scale: zoomScale, bounds: geometry.interactiveRect)
+            if buttons != 0 && inputRouting.pointerButtons == 0 { sendPointer(at: old, buttons: buttons) }
+            if let point = trackpad.cursor {
+                moveCursor(toContentPoint: point)
+                panToTrackpadCursor(point)
+                sendPointer(at: point, buttons: buttons, allowsNewButtons: false)
+            }
+            return
+        }
+        guard touchStart != nil else { return }
         let prev = t.previousLocation(in: self)
         let now = t.location(in: self)
         let delta = CGPoint(x: now.x - prev.x, y: now.y - prev.y)
         cursorLayer.move(
             by: CGPoint(x: delta.x / zoomScale, y: delta.y / zoomScale),
-            within: geometry.interactiveRect)
+            within: visibleContentRect)
         let cursor = cursorLayer.cursorCenter
-        sendPointer(at: cursor, buttons: isDragging ? 0b001 : 0)
+        sendPointer(at: cursor, buttons: isDragging ? 0b001 : 0, allowsNewButtons: false)
     }
 
     override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
+        guard synchronizeInputAvailability() else { return }
         if handleIndirectPointerTouches(touches, with: event, phase: .ended) {
             return
         }
 
         guard let t = activeTouch, touches.contains(t) else { return }
+        if touchMode == .trackpad {
+            let point = trackpad.cursor ?? trackpadInitialPoint()
+            for buttons in trackpad.end(at: t.timestamp) { sendPointer(at: point, buttons: buttons) }
+            activeTouch = nil
+            return
+        }
         let duration = CACurrentMediaTime() - touchStartedAt
         let cursor = cursorLayer.cursorCenter
         for buttons in TouchCursorPolicy.endButtonSequence(
@@ -398,11 +666,14 @@ final class RemoteScreenUIView: UIView, UIPointerInteractionDelegate, UIGestureR
     }
 
     override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
+        guard synchronizeInputAvailability() else { return }
         if handleIndirectPointerTouches(touches, with: event, phase: .cancelled) {
             return
         }
 
-        if isDragging {
+        if touchMode == .trackpad {
+            for buttons in trackpad.cancel() { sendPointer(at: trackpad.cursor, buttons: buttons) }
+        } else if isDragging {
             sendPointer(at: cursorLayer.cursorCenter, buttons: 0)
         }
         activeTouch = nil
@@ -422,11 +693,11 @@ final class RemoteScreenUIView: UIView, UIPointerInteractionDelegate, UIGestureR
             return false
         }
 
-        accessories?.noteIndirectPointer(active: true)
-        cursorLayer.hide()
+        activateIndirectPointer()
 
-        let location = contentPoint(from: touch.location(in: self))
-        lastPointerLocation = location
+        let viewLocation = touch.location(in: self)
+        let location = contentPoint(from: viewLocation)
+        lastPointerLocation = viewLocation
 
         guard RemoteTouchRoutingPolicy.routesTouchesToComputer(
             moveScreenEnabled: zoomController?.moveScreenEnabled ?? false) else {
@@ -434,6 +705,8 @@ final class RemoteScreenUIView: UIView, UIPointerInteractionDelegate, UIGestureR
             lastPointerButtons = 0
             return true
         }
+
+        if RemoteScreenGeometry.contains(location, in: visibleContentRect) { moveCursor(toContentPoint: location) }
 
         let buttons = IndirectPointerClickPolicy.buttons(
             for: event?.buttonMask ?? UIEvent.ButtonMask(),
@@ -443,12 +716,14 @@ final class RemoteScreenUIView: UIView, UIPointerInteractionDelegate, UIGestureR
 
         switch phase {
         case .began:
-            isTrackingIndirectClick = true
-            lastPointerButtons = buttons
             sendPointer(at: location, buttons: buttons)
+            lastPointerButtons = inputRouting.pointerButtons
+            isTrackingIndirectClick = lastPointerButtons != 0
         case .moved:
-            lastPointerButtons = buttons
-            sendPointer(at: location, buttons: buttons)
+            guard isTrackingIndirectClick else { return true }
+            sendPointer(at: location, buttons: buttons, allowsNewButtons: false)
+            lastPointerButtons = inputRouting.pointerButtons
+            isTrackingIndirectClick = lastPointerButtons != 0
         case .ended, .cancelled:
             if isTrackingIndirectClick || lastPointerButtons != 0 {
                 sendPointer(at: location, buttons: 0)
@@ -461,7 +736,8 @@ final class RemoteScreenUIView: UIView, UIPointerInteractionDelegate, UIGestureR
     }
 
     @objc private func onLongPress(_ g: UILongPressGestureRecognizer) {
-        guard accessories?.hasIndirectPointer != true,
+        guard synchronizeInputAvailability(), activeTouch != nil,
+              accessories?.hasIndirectPointer != true,
               RemoteTouchRoutingPolicy.routesTouchesToComputer(
                 moveScreenEnabled: zoomController?.moveScreenEnabled ?? false),
               g.state == .began,
@@ -473,7 +749,7 @@ final class RemoteScreenUIView: UIView, UIPointerInteractionDelegate, UIGestureR
     }
 
     @objc private func onTouchScroll(_ g: UIPanGestureRecognizer) {
-        guard accessories?.hasIndirectPointer != true,
+        guard acceptsScrollEvent(g), accessories?.hasIndirectPointer != true,
               RemoteTouchRoutingPolicy.routesTouchesToComputer(
                 moveScreenEnabled: zoomController?.moveScreenEnabled ?? false) else { return }
         let t = g.translation(in: self)
@@ -482,35 +758,56 @@ final class RemoteScreenUIView: UIView, UIPointerInteractionDelegate, UIGestureR
             switch g.state {
             case .began: return .begin
             case .changed: return .changed
-            case .ended, .cancelled: return .end
+            case .ended, .cancelled, .failed: return .end
             default: return .changed
             }
         }()
-        sendScroll(at: cursorLayer.cursorCenter, dx: t.x, dy: t.y, phase: phase)
+        if phase == .begin {
+            if touchMode == .direct { positionTouchCursor() }
+            else { trackpad.twoFingerScrollBegan() }
+        }
+        let point = touchMode == .trackpad ? (trackpad.cursor ?? trackpadInitialPoint()) : cursorLayer.cursorCenter
+        sendScroll(at: point, dx: t.x, dy: t.y, phase: phase, source: .touch)
     }
 
     // MARK: - UIGestureRecognizerDelegate
 
+    private func acceptsScrollEvent(_ gesture: UIPanGestureRecognizer) -> Bool {
+        guard synchronizeInputAvailability(), let inputGeneration else { return false }
+        let id = ObjectIdentifier(gesture)
+        switch gesture.state {
+        case .began:
+            scrollGenerations[id] = inputGeneration
+            return true
+        case .changed, .ended, .cancelled, .failed:
+            guard scrollGenerations[id] == inputGeneration else { return false }
+            if gesture.state != .changed { scrollGenerations[id] = nil }
+            return true
+        default: return false
+        }
+    }
+
     override func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
+        let available = synchronizeInputAvailability()
         if gestureRecognizer === zoomPan {
             return RemoteTouchRoutingPolicy.movesViewport(
                 moveScreenEnabled: zoomController?.moveScreenEnabled ?? false,
                 scale: zoomScale)
         }
         if gestureRecognizer === touchScroll {
-            return accessories?.hasIndirectPointer != true
+            return available && accessories?.hasIndirectPointer != true
                 && RemoteTouchRoutingPolicy.routesTouchesToComputer(
                     moveScreenEnabled: zoomController?.moveScreenEnabled ?? false)
         }
         if gestureRecognizer === indirectScroll || gestureRecognizer === hover {
-            return RemoteTouchRoutingPolicy.routesTouchesToComputer(
+            return available && RemoteTouchRoutingPolicy.routesTouchesToComputer(
                 moveScreenEnabled: zoomController?.moveScreenEnabled ?? false)
         }
         if gestureRecognizer === pinch {
             return RemoteTouchRoutingPolicy.allowsViewportZoom(
                 moveScreenEnabled: zoomController?.moveScreenEnabled ?? false)
         }
-        return true
+        return available
     }
 
     func gestureRecognizer(_ g: UIGestureRecognizer,
@@ -530,6 +827,7 @@ final class RemoteScreenUIView: UIView, UIPointerInteractionDelegate, UIGestureR
     @objc private func onPinch(_ gesture: UIPinchGestureRecognizer) {
         switch gesture.state {
         case .began:
+            if zoomController?.captureView === self { zoomController?.notePinchInteraction() }
             cancelActiveTouch()
             pinchStartScale = zoomScale
             pinchAnchor = contentPoint(from: gesture.location(in: self))
@@ -544,6 +842,7 @@ final class RemoteScreenUIView: UIView, UIPointerInteractionDelegate, UIGestureR
             clampZoomOffset()
             applyZoomTransform()
         case .ended, .cancelled, .failed:
+            if zoomController?.captureView === self { zoomController?.notePinchInteraction() }
             if zoomScale < 1.04 { resetZoom(animated: true) }
         default:
             break
@@ -582,22 +881,21 @@ final class RemoteScreenUIView: UIView, UIPointerInteractionDelegate, UIGestureR
         if moveScreenEnabled {
             cancelActiveTouch()
             if isTrackingIndirectClick || lastPointerButtons != 0 {
-                sendPointer(at: lastPointerLocation, buttons: 0)
+                sendPointer(at: lastPointerContentPoint, buttons: 0)
             }
             isTrackingIndirectClick = false
             lastPointerButtons = 0
-            if touchScroll.state == .began || touchScroll.state == .changed {
-                sendScroll(
-                    at: cursorLayer.cursorCenter,
-                    dx: 0,
-                    dy: 0,
-                    phase: .end)
+            if synchronizeInputAvailability(), let inputSource,
+               let end = inputRouting.endScroll() {
+                session?.send(end, from: inputSource)
             }
         }
-        touchScroll.isEnabled = !moveScreenEnabled
-        longPress.isEnabled = !moveScreenEnabled
-        hover.isEnabled = !moveScreenEnabled
-        indirectScroll.isEnabled = !moveScreenEnabled
+        if moveScreenEnabled { scrollGenerations.removeAll() }
+        touchScroll.isEnabled = !moveScreenEnabled && inputAvailable
+        longPress.isEnabled = !moveScreenEnabled && inputAvailable && touchMode == .direct
+        twoFingerTap.isEnabled = !moveScreenEnabled && inputAvailable && touchMode == .trackpad
+        hover.isEnabled = !moveScreenEnabled && inputAvailable
+        indirectScroll.isEnabled = !moveScreenEnabled && inputAvailable
         pinch.isEnabled = moveScreenEnabled
         zoomPan.isEnabled = moveScreenEnabled
     }
@@ -636,7 +934,9 @@ final class RemoteScreenUIView: UIView, UIPointerInteractionDelegate, UIGestureR
         contentView.center = CGPoint(
             x: bounds.midX + zoomOffset.x,
             y: bounds.midY + zoomOffset.y)
-        zoomController?.report(scale: zoomScale)
+        videoView.updateViewport(contentView.convert(bounds, from: self))
+        cursorLayer.clamp(to: visibleContentRect)
+        if zoomController?.captureView === self { zoomController?.report(scale: zoomScale) }
     }
 
     private func contentPoint(from viewPoint: CGPoint) -> CGPoint {
@@ -644,7 +944,9 @@ final class RemoteScreenUIView: UIView, UIPointerInteractionDelegate, UIGestureR
     }
 
     private func cancelActiveTouch() {
-        if isDragging {
+        if touchMode == .trackpad {
+            for buttons in trackpad.cancel() { sendPointer(at: trackpad.cursor, buttons: buttons) }
+        } else if isDragging {
             sendPointer(at: cursorLayer.cursorCenter, buttons: 0)
         }
         activeTouch = nil
@@ -653,111 +955,164 @@ final class RemoteScreenUIView: UIView, UIPointerInteractionDelegate, UIGestureR
         rightClickFired = false
     }
 
-    // MARK: - Coordinate mapping
+    // Cursor points use the same untransformed content coordinates as input.
+    var cursorContentPoint: CGPoint { clientCursor.cursorContentPoint }
 
-    private var lastSentPointer: (Int, Int, UInt8)?
-
-    private func sendPointer(at p: CGPoint, buttons: UInt8) {
-        let remote = geometry.localToRemote(p)
-        let key = (remote.x, remote.y, buttons)
-        if let last = lastSentPointer, last == key { return }   // dedup
-        lastSentPointer = key
-        session?.send(.pointer(x: remote.x, y: remote.y, buttons: buttons))
+    func moveCursor(toContentPoint point: CGPoint) {
+        #if DEBUG
+        if let remote = geometry.localToRemote(point) {
+            CursorAcceptanceTrace.record(event: "local_position", point: CGPoint(x: CGFloat(remote.x), y: CGFloat(remote.y)))
+        }
+        #endif
+        clientCursor.moveCursor(toContentPoint: point)
     }
 
-    private func sendScroll(at p: CGPoint, dx: CGFloat, dy: CGFloat, phase: InputScrollPhase) {
-        let ix = Int(dx.rounded()), iy = Int(dy.rounded())
-        if ix == 0 && iy == 0 && phase == .changed { return }   // skip sub-pixel noise
-        let remote = geometry.localToRemote(p)
-        session?.send(.scroll(x: remote.x, y: remote.y,
-                              dx: ix, dy: iy, phase: phase))
+    func setShape(id: String) { clientCursor.setShape(id: id) }
+
+    func setClientCursorEnabled(_ enabled: Bool) {
+        clientCursor.setEnabled(enabled)
+        cursorLayer.opacity = enabled ? 0 : 1
+    }
+
+    func installCursorShape(id: String, png: Data, hotspot: CGPoint, size: CGSize) {
+        clientCursor.installShape(id: id, png: png, hotspot: hotspot, size: size)
+    }
+
+    func moveHostCursor(toRemotePoint point: CGPoint) {
+        guard let display = remoteDisplay, display.w > 0, display.h > 0,
+              point.x.isFinite, point.y.isFinite,
+              point.x >= 0, point.y >= 0,
+              point.x < CGFloat(display.w), point.y < CGFloat(display.h) else { return }
+        let rect = geometry.interactiveRect
+        guard RemoteScreenGeometry.isFiniteRectangle(rect) else { return }
+        let contentPoint = CGPoint(
+            x: rect.minX + point.x * rect.width / CGFloat(display.w),
+            y: rect.minY + point.y * rect.height / CGFloat(display.h))
+        clientCursor.moveHostCursor(toContentPoint: contentPoint)
+        if touchMode == .trackpad && activeTouch == nil {
+            trackpad.setCursor(clientCursor.cursorContentPoint, bounds: rect)
+        }
+    }
+
+    private func updateCursorScale() {
+        guard let display = remoteDisplay, display.w > 0, display.h > 0 else { return }
+        let rect = geometry.interactiveRect
+        guard RemoteScreenGeometry.isFiniteRectangle(rect) else { return }
+        #if DEBUG
+        CursorAcceptanceTrace.recordGeometry(rect: rect, display: display)
+        #endif
+        clientCursor.setContentScale(CGSize(width: rect.width / CGFloat(display.w),
+                                            height: rect.height / CGFloat(display.h)))
+    }
+
+    // MARK: - Coordinate mapping
+
+    private func activateIndirectPointer() {
+        // Finish the previous finger gesture before this modality can own
+        // buttons or scrolling. Its later callbacks retain no gesture lease.
+        cancelActiveTouch()
+        sendScroll(at: nil, dx: 0, dy: 0, phase: .end, source: .touch)
+        scrollGenerations[ObjectIdentifier(touchScroll)] = nil
+        accessories?.noteIndirectPointer(active: true)
+        cursorLayer.hide()
+    }
+
+    private func sendPointer(at p: CGPoint?, buttons: UInt8, allowsNewButtons: Bool = true) {
+        guard synchronizeInputAvailability(), let inputSource else { return }
+        let previousButtons = inputRouting.pointerButtons
+        guard let message = inputRouting.pointer(at: p, buttons: buttons, allowsNewButtons: allowsNewButtons,
+                geometry: geometry, viewport: visibleContentRect) else { return }
+        if inputRouting.pointerButtons & ~previousButtons != 0, let session, let inputGeneration {
+            RemoteHardwareKeyboardCapture.requestFocus(in: session, expectedInputGeneration: inputGeneration)
+        }
+        if accessories?.hasIndirectPointer != true, let p,
+           RemoteScreenGeometry.contains(p, in: visibleContentRect) {
+            moveCursor(toContentPoint: p)
+        }
+        session?.send(message, from: inputSource)
+    }
+
+    private func sendScroll(at p: CGPoint?, dx: CGFloat, dy: CGFloat, phase: InputScrollPhase,
+                            source: RemoteScreenInputRouting.ScrollSource) {
+        guard synchronizeInputAvailability(), let inputSource,
+              let message = inputRouting.scroll(at: p, dx: dx, dy: dy, phase: phase, source: source,
+                geometry: geometry, viewport: visibleContentRect) else { return }
+        session?.send(message, from: inputSource)
+    }
+
+    private func positionTouchCursor() {
+        let rect = visibleContentRect
+        let position = cursorLayer.positionedCenter.flatMap {
+            RemoteScreenGeometry.contains($0, in: rect) ? $0 : nil
+        } ?? CGPoint(x: rect.midX, y: rect.midY)
+        cursorLayer.show(at: position, within: rect)
+    }
+
+    private var visibleContentRect: CGRect {
+        geometry.visibleRect(in: contentView.convert(bounds, from: self))
     }
 
     private var geometry: RemoteScreenGeometry {
-        RemoteScreenGeometry(bounds: bounds, display: remoteDisplay)
+        RemoteScreenGeometry(bounds: contentView.bounds, display: remoteDisplay)
     }
 }
 
-/// LiveKit's `RTCMTLVideoView` treats the pixel dimensions delivered to
-/// `RTCVideoRenderer.setSize(_:)` as points, then multiplies them by the iOS
-/// screen scale when sizing its `MTKView` drawable. A 3456-pixel Retina frame
-/// therefore requests a 10,368-pixel texture on an @3x iPhone, exceeding the
-/// 8192-pixel Metal limit exposed by Simulator.
-///
-/// Keep decoding the negotiated frame at full quality, but bound only the
-/// renderer's drawable request. The aspect ratio is retained, so LiveKit's
-/// aspect-fit layout and the separately signaled remote input geometry remain
-/// unchanged.
-private final class MetalSafeRTCVideoView: RTCMTLVideoView {
-    /// WebRTC invokes `setSize(_:)` on its renderer queue, so that callback
-    /// must not consult `UIView.window`, `UIWindow.screen`, or trait state.
-    /// Capture the immutable sizing inputs while UIKit constructs the view on
-    /// the main thread and use only those values from the renderer callback.
-    private let rendererDisplayScale: CGFloat
-    private let rendererMaximumTextureDimension: Int
+/// The container survives transport recovery; its driver and Metal layer are
+/// fresh for every attachment. Removed attachments cannot present into a successor.
+private final class RemoteVideoSurfaceView: UIView, RemoteVideoSurface {
+    #if DEBUG
+    var allowF4Renderer = false
+    #endif
+    private var viewport: CGRect?
+    private lazy var lifetime = RemoteVideoSurfaceLifetime<RemoteVideoPresentationSurface>(
+        make: { [weak self] in
+            #if DEBUG
+            return RemoteVideoPresentationSurface.make(allowF4: self?.allowF4Renderer == true)
+            #else
+            return RemoteVideoPresentationSurface.make()
+            #endif
+        },
+        install: { [weak self] renderer, display in
+            guard let self else { return }
+            renderer.view.backgroundColor = UIColor(white: 0.05, alpha: 1)
+            self.addSubview(renderer.view)
+            self.layout(renderer, display: display)
+        },
+        remove: { renderer in
+            renderer.retire()
+            renderer.view.removeFromSuperview()
+        },
+        presentation: { $0.presentation })
 
     override init(frame: CGRect) {
-        rendererDisplayScale = UIScreen.main.scale
-        rendererMaximumTextureDimension = MetalVideoRenderSizing
-            .maximumTextureDimension2D(for: MTLCreateSystemDefaultDevice())
         super.init(frame: frame)
+        clipsToBounds = true
     }
 
     @available(*, unavailable)
-    required init?(coder: NSCoder) {
-        fatalError("MetalSafeRTCVideoView is created programmatically")
+    required init?(coder: NSCoder) { fatalError("Created programmatically") }
+
+    func makeVideoAttachment(display: DisplayInfo) -> RemoteVideoSurfaceAttachment? {
+        lifetime.prepare(display: display)
     }
 
-    override func setSize(_ size: CGSize) {
-        super.setSize(MetalVideoRenderSizing.rendererFrameSize(
-            size,
-            displayScale: rendererDisplayScale,
-            maximumTextureDimension: rendererMaximumTextureDimension))
-    }
-}
-
-enum MetalVideoRenderSizing {
-    /// Metal does not expose a public `maxTextureDimension2D` property. The
-    /// limit is instead specified by GPU family. Apple3 and later permit a
-    /// 16K 2D texture; the portable fallback is 8K. Simulator needs the 8K
-    /// ceiling explicitly because its MTLSimDevice reports that validation
-    /// limit even when the host Mac belongs to a newer family.
-    static func maximumTextureDimension2D(for device: MTLDevice?) -> Int {
-#if targetEnvironment(simulator)
-        _ = device
-        return 8_192
-#else
-        guard let device else { return 8_192 }
-        return device.supportsFamily(.apple3) ? 16_384 : 8_192
-#endif
+    func updateViewport(_ viewport: CGRect) {
+        self.viewport = viewport
+        if let renderer = lifetime.renderer, let display = lifetime.display { layout(renderer, display: display) }
     }
 
-    static func rendererFrameSize(
-        _ frameSize: CGSize,
-        displayScale: CGFloat,
-        maximumTextureDimension: Int
-    ) -> CGSize {
-        guard frameSize.width.isFinite,
-              frameSize.height.isFinite,
-              frameSize.width > 0,
-              frameSize.height > 0 else {
-            return frameSize
-        }
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        if let renderer = lifetime.renderer, let display = lifetime.display { layout(renderer, display: display) }
+    }
 
-        let safeDisplayScale = displayScale.isFinite && displayScale > 0
-            ? displayScale
-            : 1
-        let maximumPointDimension = floor(
-            CGFloat(max(1, maximumTextureDimension)) / safeDisplayScale)
-        let downscale = min(
-            1,
-            maximumPointDimension / frameSize.width,
-            maximumPointDimension / frameSize.height)
-
-        guard downscale < 1 else { return frameSize }
-        return CGSize(
-            width: max(1, floor(frameSize.width * downscale)),
-            height: max(1, floor(frameSize.height * downscale)))
+    private func layout(_ renderer: RemoteVideoPresentationSurface, display: DisplayInfo) {
+        let layout = RemoteScreenRenderingLayout(bounds: bounds, display: display)
+        renderer.view.frame = layout.videoRect
+        let visible = renderer.view.convert(viewport ?? bounds, from: self).intersection(renderer.view.bounds)
+        renderer.configure(mode: layout.contentMode == .scaleAspectFit ? .aspectFit : .fill, viewport: visible)
+        renderer.view.setNeedsLayout()
+        renderer.view.layoutIfNeeded()
     }
 }
 
@@ -812,14 +1167,31 @@ struct RemoteScreenInteractionState: Equatable {
     let viewportPanEnabled: Bool
 }
 
+struct RemoteScreenRenderingLayout {
+    let videoRect: CGRect
+    let contentMode: UIView.ContentMode
+
+    init(bounds: CGRect, display: DisplayInfo?) {
+        if display?.fullDisplaySurface == true {
+            videoRect = RemoteScreenGeometry(bounds: bounds, display: display).interactiveRect
+            contentMode = .scaleToFill
+        } else {
+            videoRect = bounds
+            contentMode = .scaleAspectFit
+        }
+    }
+}
+
 struct RemoteScreenGeometry {
     let bounds: CGRect
     let display: DisplayInfo?
 
     var interactiveRect: CGRect {
-        guard let display, bounds.width > 0, bounds.height > 0,
-              display.w > 0, display.h > 0 else {
-            return bounds
+        guard let display, Self.isFiniteRectangle(bounds),
+              display.w > 0, display.h > 0,
+              display.w <= Int(Int32.max), display.h <= Int(Int32.max),
+              display.scale.isFinite, (1...4).contains(display.scale) else {
+            return .zero
         }
 
         let displayAspect = CGFloat(display.w) / CGFloat(display.h)
@@ -840,28 +1212,90 @@ struct RemoteScreenGeometry {
                       height: bounds.height)
     }
 
-    func clampedLocalPoint(_ point: CGPoint) -> CGPoint {
-        let rect = interactiveRect
-        return CGPoint(
-            x: max(rect.minX, min(rect.maxX, point.x)),
-            y: max(rect.minY, min(rect.maxY, point.y)))
+    static func isFiniteRectangle(_ rect: CGRect) -> Bool {
+        rect.origin.x.isFinite && rect.origin.y.isFinite && rect.size.width.isFinite && rect.size.height.isFinite
+            && rect.size.width > 0 && rect.size.height > 0 && rect.maxX.isFinite && rect.maxY.isFinite
     }
 
-    func localToRemote(_ point: CGPoint) -> (x: Int, y: Int) {
-        guard let display, display.w > 0, display.h > 0 else {
-            return (Int(point.x.rounded()), Int(point.y.rounded()))
-        }
+    static func contains(_ point: CGPoint, in rect: CGRect) -> Bool {
+        isFiniteRectangle(rect) && point.x.isFinite && point.y.isFinite
+            && point.x >= rect.minX && point.y >= rect.minY && point.x < rect.maxX && point.y < rect.maxY
+    }
 
+    func visibleRect(in viewport: CGRect) -> CGRect {
         let rect = interactiveRect
-        let clamped = clampedLocalPoint(point)
-        let nx = rect.width > 0 ? (clamped.x - rect.minX) / rect.width : 0
-        let ny = rect.height > 0 ? (clamped.y - rect.minY) / rect.height : 0
-        let maxX = max(display.w - 1, 0)
-        let maxY = max(display.h - 1, 0)
-        return (
-            x: Int((nx * CGFloat(maxX)).rounded()),
-            y: Int((ny * CGFloat(maxY)).rounded())
-        )
+        guard Self.isFiniteRectangle(rect), Self.isFiniteRectangle(viewport) else { return .zero }
+        let visible = rect.intersection(viewport)
+        return Self.isFiniteRectangle(visible) ? visible : .zero
+    }
+
+    func localToRemote(_ point: CGPoint, clamping: Bool = false) -> (x: Int, y: Int)? {
+        let rect = interactiveRect
+        guard let display, Self.isFiniteRectangle(rect), point.x.isFinite, point.y.isFinite,
+              clamping || Self.contains(point, in: rect) else { return nil }
+        let nx = max(0, min(1, (point.x - rect.minX) / rect.width))
+        let ny = max(0, min(1, (point.y - rect.minY) / rect.height))
+        // The full surface represents w by h logical cells. Multiplying by
+        // w-1/h-1 instead would shift the cells across the displayed surface.
+        return (min(display.w - 1, Int((nx * CGFloat(display.w)).rounded(.down))),
+                min(display.h - 1, Int((ny * CGFloat(display.h)).rounded(.down))))
+    }
+}
+
+/// Gesture intent is separate from coordinate clamping. This state belongs
+/// to one view's input-source lease and is discarded when that lease retires.
+struct RemoteScreenInputRouting {
+    enum ScrollSource: Equatable { case touch, indirect }
+    private struct Pointer: Equatable { let x: Int; let y: Int; let buttons: UInt8 }
+    private var lastPointer: Pointer?
+    private var activeScroll: (source: ScrollSource, x: Int, y: Int)?
+    var pointerButtons: UInt8 { lastPointer?.buttons ?? 0 }
+
+    mutating func pointer(at point: CGPoint?, buttons: UInt8, allowsNewButtons: Bool = true,
+                          geometry: RemoteScreenGeometry, viewport: CGRect) -> ControlMessage? {
+        guard buttons & ~UInt8(0b111) == 0 else { return nil }
+        let visible = geometry.visibleRect(in: viewport)
+        let inside = point.map { RemoteScreenGeometry.contains($0, in: visible) } ?? false
+        let previous = pointerButtons
+        guard inside || previous != 0 else { return nil }
+        let admitted = inside && allowsNewButtons ? buttons : buttons & previous
+        let remote: (x: Int, y: Int)
+        if !inside, admitted != previous, let lastPointer {
+            // Releases outside the surface (even with invalid coordinates)
+            // use the last admitted point; they cannot add a button or move.
+            remote = (lastPointer.x, lastPointer.y)
+        } else {
+            guard let point, RemoteScreenGeometry.isFiniteRectangle(visible), point.x.isFinite, point.y.isFinite else { return nil }
+            let clipped = CGPoint(x: max(visible.minX, min(visible.maxX.nextDown, point.x)),
+                                  y: max(visible.minY, min(visible.maxY.nextDown, point.y)))
+            guard let mapped = geometry.localToRemote(clipped, clamping: !inside) else { return nil }
+            remote = mapped
+        }
+        let next = Pointer(x: remote.x, y: remote.y, buttons: admitted)
+        guard next != lastPointer else { return nil }
+        lastPointer = next
+        return .pointer(x: next.x, y: next.y, buttons: next.buttons)
+    }
+
+    mutating func scroll(at point: CGPoint?, dx: CGFloat, dy: CGFloat, phase: InputScrollPhase,
+                         source: ScrollSource, geometry: RemoteScreenGeometry, viewport: CGRect) -> ControlMessage? {
+        if phase == .end { return activeScroll?.source == source ? endScroll() : nil }
+        if phase == .begin { guard activeScroll == nil else { return nil } }
+        else { guard activeScroll?.source == source else { return nil } }
+        guard let point, RemoteScreenGeometry.contains(point, in: geometry.visibleRect(in: viewport)),
+              let remote = geometry.localToRemote(point),
+              let ix = Int32(exactly: dx.rounded()), let iy = Int32(exactly: dy.rounded()) else {
+            return activeScroll?.source == source ? endScroll() : nil
+        }
+        if ix == 0 && iy == 0 && phase != .begin { return nil }
+        activeScroll = (source, remote.x, remote.y)
+        return .scroll(x: remote.x, y: remote.y, dx: Int(ix), dy: Int(iy), phase: phase)
+    }
+
+    mutating func endScroll() -> ControlMessage? {
+        guard let previous = activeScroll else { return nil }
+        activeScroll = nil
+        return .scroll(x: previous.x, y: previous.y, dx: 0, dy: 0, phase: .end)
     }
 }
 

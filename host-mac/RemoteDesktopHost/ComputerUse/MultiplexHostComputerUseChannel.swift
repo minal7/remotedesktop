@@ -164,6 +164,14 @@ actor MultiplexHostComputerUseChannel: HostComputerUseChannel {
         }
     }
 
+    func pollingInterval() async -> Duration {
+        var interval = Duration.seconds(2)
+        for channel in channels {
+            interval = min(interval, await channel.pollingInterval())
+        }
+        return interval
+    }
+
     /// Each backing transport owns an independent long-lived poll. A stalled
     /// CloudKit request can therefore never hold the LAN actor's already-ready
     /// batch behind structured-concurrency scope teardown.
@@ -194,7 +202,7 @@ actor MultiplexHostComputerUseChannel: HostComputerUseChannel {
                     // transports continue to feed the host immediately.
                 }
                 do {
-                    try await Task.sleep(for: .seconds(2))
+                    try await Task.sleep(for: await channel.pollingInterval())
                 } catch {
                     return
                 }

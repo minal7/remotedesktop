@@ -33,7 +33,10 @@ final class TouchCursorLayer: CALayer {
         return dot.position
     }
 
+    var positionedCenter: CGPoint? { hasPosition ? dot.position : nil }
+
     func show(at p: CGPoint, within rect: CGRect) {
+        guard RemoteScreenGeometry.isFiniteRectangle(rect), p.x.isFinite, p.y.isFinite else { hide(); return }
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         dot.position = clampedCenter(for: p, within: rect)
@@ -43,21 +46,19 @@ final class TouchCursorLayer: CALayer {
     }
 
     func move(by delta: CGPoint, within rect: CGRect) {
-        guard rect.width > 0, rect.height > 0 else { return }
+        guard RemoteScreenGeometry.isFiniteRectangle(rect), delta.x.isFinite, delta.y.isFinite else { return }
         if isHidden {
             show(at: CGPoint(x: rect.midX, y: rect.midY), within: rect)
         }
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        var center = dot.position
-        center.x = max(rect.minX, min(rect.maxX, center.x + delta.x * gain))
-        center.y = max(rect.minY, min(rect.maxY, center.y + delta.y * gain))
-        dot.position = center
+        let next = CGPoint(x: dot.position.x + delta.x * gain, y: dot.position.y + delta.y * gain)
+        if next.x.isFinite, next.y.isFinite { dot.position = clampedCenter(for: next, within: rect) }
         CATransaction.commit()
     }
 
     func clamp(to rect: CGRect) {
-        guard hasPosition, rect.width > 0, rect.height > 0 else { return }
+        guard hasPosition, RemoteScreenGeometry.isFiniteRectangle(rect) else { hide(); return }
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         dot.position = clampedCenter(for: cursorCenter, within: rect)
@@ -70,7 +71,7 @@ final class TouchCursorLayer: CALayer {
 
     private func clampedCenter(for center: CGPoint, within rect: CGRect) -> CGPoint {
         return CGPoint(
-            x: max(rect.minX, min(rect.maxX, center.x)),
-            y: max(rect.minY, min(rect.maxY, center.y)))
+            x: max(rect.minX, min(rect.maxX.nextDown, center.x)),
+            y: max(rect.minY, min(rect.maxY.nextDown, center.y)))
     }
 }

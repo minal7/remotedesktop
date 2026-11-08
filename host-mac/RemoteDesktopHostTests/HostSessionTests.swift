@@ -257,6 +257,7 @@ final class HostSessionTests: XCTestCase {
         let ledgerURL = ledgerDirectory.appendingPathComponent("ledger.json")
         defer { try? FileManager.default.removeItem(at: ledgerDirectory) }
         let manager = HostComputerUseManager(
+            experimentalEnabled: { true },
             injector: InputInjector(),
             executor: executor,
             taskLedger: ComputerUseTaskLedger(fileURL: ledgerURL),
@@ -435,6 +436,7 @@ final class HostSessionTests: XCTestCase {
         let ledgerURL = ledgerDirectory.appendingPathComponent("ledger.json")
         defer { try? FileManager.default.removeItem(at: ledgerDirectory) }
         let manager = HostComputerUseManager(
+            experimentalEnabled: { true },
             injector: InputInjector(),
             executor: executor,
             taskLedger: ComputerUseTaskLedger(fileURL: ledgerURL),
@@ -625,6 +627,17 @@ final class HostSessionTests: XCTestCase {
                 confirmedBinding: nil,
                 currentBinding: accountA),
             "a lost or malformed owner marker cannot revive an old credential")
+    }
+
+    func test_sidecarOfferKeepsDiscoveryWhilePrimaryPeerWithdrawsIt() {
+        XCTAssertFalse(
+            HostSession.shouldWithdrawAdvertisement(
+                afterAcceptedPeer: .localComputerUseSidecar),
+            "a visual sidecar must leave the independent LAN and CloudKit discovery paths active")
+        XCTAssertTrue(
+            HostSession.shouldWithdrawAdvertisement(
+                afterAcceptedPeer: .primaryRemoteControl),
+            "primary remote control retains its existing advertisement withdrawal")
     }
 
     func test_grantNextPermission_requestsScreenRecordingWithoutForcingSettings() {
@@ -1262,7 +1275,7 @@ final class HostSessionTests: XCTestCase {
             name: NSApplication.didFinishLaunchingNotification,
             object: NSApp))
 
-        XCTAssertEqual(NSApp.activationPolicy(), .prohibited)
+        XCTAssertEqual(NSApp.activationPolicy(), HostRuntimeContext.allowsNativeTestWindows ? .accessory : .prohibited)
         XCTAssertFalse(
             delegate.didEnterProductionLaunchPath,
             "XCTest must return before termination handlers or host services are configured")
@@ -1271,37 +1284,44 @@ final class HostSessionTests: XCTestCase {
             "XCTest must not allocate the Control Center-hosted status item")
     }
 
+    func test_hostRuntimeAllowsNativeWindowsOnlyForExplicitUITestProcess() {
+        for enabled in [false, true] {
+            for value in [nil, "", "0", "true", "1"] as [String?] {
+                let environment = value.map { ["RUN_COMPUTER_USE_UI_TESTS": $0] } ?? [:]
+                XCTAssertEqual(HostRuntimeContext.permitsNativeTestWindows(environment: environment,
+                    isRunningUnitTests: enabled), enabled && value == "1")
+            }
+        }
+    }
+
     func test_startAtLogin_defaultsToTrue() {
         withTemporaryDefaults { defaults in
             XCTAssertTrue(HeadlessHostSettings.startAtLogin(defaults: defaults))
         }
     }
 
-    func test_setupGuide_ordersRequiredPermissionsBeforeOptionalAudio() {
+    func test_setupGuide_ordersOnlyRequiredPermissions() {
         XCTAssertEqual(
             HostSetupStep.current(
                 permissions: .init(
                     screenRecording: false,
                     accessibility: false,
-                    microphone: false),
-                optionalAudioSkipped: false),
+                    microphone: false)),
             .screenRecording)
         XCTAssertEqual(
             HostSetupStep.current(
                 permissions: .init(
                     screenRecording: true,
                     accessibility: false,
-                    microphone: false),
-                optionalAudioSkipped: false),
+                    microphone: false)),
             .accessibility)
         XCTAssertEqual(
             HostSetupStep.current(
                 permissions: .init(
                     screenRecording: true,
                     accessibility: true,
-                    microphone: false),
-                optionalAudioSkipped: false),
-            .optionalAudio)
+                    microphone: false)),
+            .ready)
     }
 
     func test_setupGuide_canFinishWhileOptionalAudioIsOff() {
@@ -1312,8 +1332,7 @@ final class HostSessionTests: XCTestCase {
 
         XCTAssertEqual(
             HostSetupStep.current(
-                permissions: permissions,
-                optionalAudioSkipped: true),
+                permissions: permissions),
             .ready)
         XCTAssertTrue(permissions.coreReady)
         XCTAssertFalse(permissions.audioEnabled)

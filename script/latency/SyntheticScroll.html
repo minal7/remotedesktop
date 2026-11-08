@@ -1,0 +1,20 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Remote Desktop synthetic latency workload</title>
+<style>body{font:16px/1.5 -apple-system,sans-serif;max-width:76em;margin:auto;padding:2em} p{margin:.5em 0}</style>
+<h1>Synthetic text scrolling workload</h1>
+<main id="text"></main>
+<script>
+const text = document.getElementById('text');
+for (let i = 0; i < 500; i++) {
+  const p = document.createElement('p');
+  p.textContent = `${i + 1}: The quick brown fox jumps over the lazy dog. 0123456789 — A synthetic scrolling text workload.`;
+  text.appendChild(p);
+}
+let direction = 1;
+setInterval(() => {
+  if (window.scrollY + innerHeight >= document.documentElement.scrollHeight - 2) direction = -1;
+  if (window.scrollY <= 0) direction = 1;
+  window.scrollBy(0, direction * 4);
+}, 16);
+</script>

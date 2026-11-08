@@ -24,7 +24,7 @@
 </head>
 <body>
   <h1>Privacy Policy</h1>
-  <p class="muted">Remote Desktop · Last updated July 23, 2026</p>
+  <p class="muted">Remote Desktop · Last updated October 15, 2026</p>
 
   <p>Remote Desktop is designed so the developer does not receive your session content. We do
   not run a data-collection server, but the apps do store technical records in your private
@@ -37,17 +37,17 @@
     <li>The developer does <strong>not</strong> receive, sell, or share your session data.</li>
     <li>There is no separate Remote Desktop account and no advertising, analytics, or tracking
       SDK. Pairing uses the Apple Account already signed in to iCloud on your devices.</li>
-    <li>Your screen, audio, and input stream <strong>directly between your own devices</strong> — they never pass through a server we control.</li>
+    <li>Your screen, audio, and input use WebRTC between your devices. Depending on network conditions and the configured ICE servers, WebRTC can use a relay instead of a direct path.</li>
     <li>After enrollment, AI prompts, conversation, task results, controls, and approvals use
       only an authenticated local-network connection to your Mac; they do not fall back to
       CloudKit.</li>
   </ul>
 
   <h2>How the connection works</h2>
-  <p>Remote Desktop connects your iPhone or iPad to your own Mac or Windows computer using a
-  direct, peer-to-peer connection (WebRTC). The screen video, audio, and your taps and
-  keystrokes travel straight between your two devices. We never receive, record, or have
-  access to any of that content.</p>
+  <p>Remote Desktop connects your iPhone or iPad to your own Mac or Windows computer using
+  WebRTC. It uses a direct peer-to-peer path when available; depending on network conditions
+  and the ICE configuration, it may use a TURN relay. WebRTC encrypts media and input in transit
+  between the devices. A relay carries that encrypted traffic and may see connection metadata.</p>
 
   <h2>Pairing and signaling</h2>
   <p>To set up a connection, the two devices exchange a small amount of technical connection
@@ -87,6 +87,45 @@
   pixels, host audio, and direct input stay on the separate peer-to-peer WebRTC connection. AI
   planning, policy checks, and visual grounding run locally on the Mac host rather than through
   a developer-operated AI service.</p>
+
+  <h2>Computer use (Beta) on the Mac</h2>
+  <p>Computer use runs two models on the Mac: Fara 1.5 9B, which reads screenshots and chooses
+  each action, and LFM3 1.7B, which plans the task. To work in apps and web pages, the host also
+  reads the on-screen text and controls that macOS accessibility exposes. The task prompt
+  travels from your iPhone or iPad to your enrolled Mac over the authenticated local-network
+  connection. The Mac processes the task locally; prompts, screenshots, and task results are
+  not sent to a developer-operated AI service. Model files are downloaded during setup from
+  the configured model source and verified before use.</p>
+
+  <p>The Mac stores task episode records locally under its Remote Desktop Host application
+  support folder. These records can include screenshots, visible interface marks, task text,
+  model output, actions, and results. They are not uploaded by the app. The host removes
+  episode folders older than seven days when a new recording starts; you can also delete task
+  history from the host's Computer Use settings while no task is active. The app restricts the
+  history folder and files to the Mac user account.</p>
+
+  <h2>Saved Memory</h2>
+  <p>Computer Use (Beta) includes an optional Memory feature for ordinary owner facts and
+  preferences. Nothing is saved automatically from screenshots or task activity. To save an
+  item, you review it in the Memory form and choose Save. Do not save passwords or other
+  secrets. The encrypted Memory database is stored on the Mac; its encryption key is held in
+  the Mac user's Keychain. Saved items can be viewed, edited, or deleted in Memory from the
+  paired iPhone or iPad over the authenticated local connection, or in the host's Settings.</p>
+
+  <p>When you start a Computer Use task, saved items may be used as context by the
+  model running locally on the Mac. Incognito tasks skip saved Memory retrieval and saving.
+  Memory content is not synced through CloudKit or sent to the developer. Saved items remain
+  until you delete them or choose Forget in Memory. Forget erases this app's saved memories;
+  it does not erase task episode history, exported copies, or content stored in other apps.
+  Task history can be deleted separately in the host's Computer Use settings; otherwise,
+  episode folders older than seven days are removed when a new recording starts. To use Memory
+  again after Forget, choose Start Fresh and reconnect.</p>
+
+  <p><strong>Current candidate limitation:</strong> Memory has not passed release privacy
+  validation. In testing, instructions on a page caused an unrelated saved fact to appear
+  in a task answer. Saved facts can therefore also appear in local task history. Use only
+  synthetic test data in this candidate; local processing alone does not prevent this
+  kind of disclosure.</p>
 
   <p>A receiving device attempts to delete a CloudKit setup record only after it has applied the
   message. If deletion is interrupted, the app retains a bounded cleanup identity and retries

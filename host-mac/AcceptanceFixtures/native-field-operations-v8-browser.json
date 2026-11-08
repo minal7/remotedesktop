@@ -1,0 +1,236 @@
+{
+  "schemaVersion": 1,
+  "scope": "Six controlled visible owned-browser regressions for actual managed v8 proposals, host compilation, exact intermediate states, no-op repeated dispatch and replay; not general browser qualification",
+  "cases": [
+    {
+      "id": "B801",
+      "prompt": "Copy the \"Origin\" field into the \"Destination\" field.",
+      "fields": [
+        "Origin",
+        "Destination"
+      ],
+      "initial": [
+        "  東京 é 🧭\nline 2  ",
+        "old"
+      ],
+      "expectedDisposition": "supported",
+      "operations": [
+        {
+          "field": 1,
+          "mode": "replaceAll",
+          "sourceField": 0
+        }
+      ],
+      "states": [
+        {
+          "values": [
+            "  東京 é 🧭\nline 2  ",
+            "old"
+          ],
+          "target": null
+        },
+        {
+          "values": [
+            "  東京 é 🧭\nline 2  ",
+            "  東京 é 🧭\nline 2  "
+          ],
+          "target": 1
+        }
+      ]
+    },
+    {
+      "id": "B802",
+      "prompt": "Put \"blue\" in Title, then copy Title into Tag.",
+      "fields": [
+        "Title",
+        "Tag"
+      ],
+      "initial": [
+        "old title",
+        "old tag"
+      ],
+      "expectedDisposition": "supported",
+      "operations": [
+        {
+          "field": 0,
+          "mode": "replaceAll",
+          "value": "blue"
+        },
+        {
+          "field": 1,
+          "mode": "replaceAll",
+          "sourceField": 0
+        }
+      ],
+      "states": [
+        {
+          "values": [
+            "old title",
+            "old tag"
+          ],
+          "target": null
+        },
+        {
+          "values": [
+            "blue",
+            "old tag"
+          ],
+          "target": 0
+        },
+        {
+          "values": [
+            "blue",
+            "blue"
+          ],
+          "target": 1
+        }
+      ]
+    },
+    {
+      "id": "B803",
+      "prompt": "Append what is in Notes to Notes itself.",
+      "fields": [
+        "Notes",
+        "Tag"
+      ],
+      "initial": [
+        "  café é 😀\n",
+        "stay"
+      ],
+      "expectedDisposition": "supported",
+      "operations": [
+        {
+          "field": 0,
+          "mode": "append",
+          "sourceField": 0
+        }
+      ],
+      "states": [
+        {
+          "values": [
+            "  café é 😀\n",
+            "stay"
+          ],
+          "target": null
+        },
+        {
+          "values": [
+            "  café é 😀\n  café é 😀\n",
+            "stay"
+          ],
+          "target": 0
+        }
+      ]
+    },
+    {
+      "id": "B804",
+      "prompt": "Copy Notes into Tag twice.",
+      "fields": [
+        "Notes",
+        "Tag"
+      ],
+      "initial": [
+        "same",
+        "same"
+      ],
+      "expectedDisposition": "supported",
+      "operations": [
+        {
+          "field": 1,
+          "mode": "replaceAll",
+          "sourceField": 0
+        },
+        {
+          "field": 1,
+          "mode": "replaceAll",
+          "sourceField": 0
+        }
+      ],
+      "states": [
+        {
+          "values": [
+            "same",
+            "same"
+          ],
+          "target": null
+        },
+        {
+          "values": [
+            "same",
+            "same"
+          ],
+          "target": 1
+        },
+        {
+          "values": [
+            "same",
+            "same"
+          ],
+          "target": 1
+        }
+      ]
+    },
+    {
+      "id": "B805",
+      "prompt": "Copy Title into Tag and write a short poem in Notes.",
+      "fields": [
+        "Title",
+        "Tag",
+        "Notes"
+      ],
+      "initial": [
+        "private title",
+        "unchanged",
+        "plain"
+      ],
+      "expectedDisposition": "unsupported",
+      "operations": [],
+      "states": [
+        {
+          "values": [
+            "private title",
+            "unchanged",
+            "plain"
+          ],
+          "target": null
+        }
+      ]
+    },
+    {
+      "id": "B806",
+      "prompt": "Type the literal word \"Origin\" in Destination.",
+      "fields": [
+        "Origin",
+        "Destination"
+      ],
+      "initial": [
+        "hidden contents",
+        "old"
+      ],
+      "expectedDisposition": "supported",
+      "operations": [
+        {
+          "field": 1,
+          "mode": "replaceAll",
+          "value": "Origin"
+        }
+      ],
+      "states": [
+        {
+          "values": [
+            "hidden contents",
+            "old"
+          ],
+          "target": null
+        },
+        {
+          "values": [
+            "hidden contents",
+            "Origin"
+          ],
+          "target": 1
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,14 @@
+id: "demo-001"
+surface: web
+start: {url: "https://en.wikipedia.org/wiki/Lisbon"}
+prompt: "Look up the population of Lisbon on Wikipedia and tell me."
+checker:
+  type: manual_review
+  expect:
+    criteria:
+      - "Use the final observed Wikipedia page text to identify its Lisbon population figure and the figure's reference date or definition."
+      - "Compare the answer's numeric population to that observed figure; accept only within ±5%."
+      - "Review the recorded final screenshot/page evidence and this task's episode."
+max_steps: 12
+tags: ["demo", "web", "read", "public-web", "read-only"]
+approval_policy: {allow_start_interaction: true}

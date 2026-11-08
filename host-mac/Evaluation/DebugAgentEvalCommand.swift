@@ -1,0 +1,752 @@
+#if DEBUG
+import AppKit
+import ApplicationServices
+import CoreGraphics
+import CryptoKit
+import Darwin
+import Foundation
+import ImageIO
+import ScreenCaptureKit
+import UniformTypeIdentifiers
+
+@MainActor
+enum DebugAgentEvalCommand {
+    static let argument = "--debug-agent-eval"
+
+    static func shouldRun(arguments: [String] = CommandLine.arguments) -> Bool {
+        arguments.dropFirst().first == argument
+    }
+
+    static func runIfRequested(
+        arguments: [String] = CommandLine.arguments,
+        input: FileHandle = .standardInput,
+        output: FileHandle = .standardOutput,
+        errorOutput: FileHandle = .standardError
+    ) async -> Int32? {
+        guard shouldRun(arguments: arguments) else { return nil }
+        guard Array(arguments.dropFirst()).count == 1 else {
+            write("invalid evaluation command arguments\n", to: errorOutput)
+            return 2
+        }
+        do {
+            let data = input.readDataToEndOfFile()
+            let root = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+            let encoded: Data
+            if root?["operation"] as? String == "capture_configuration_probe" {
+                let request = try CoordinateCalibrationRequest.decodeStrict(data, operation: "capture_configuration_probe")
+                let report = await CoordinateCalibration.captureConfigurationProbe(seed: request.selectionSeed)
+                encoded = try JSONSerialization.data(withJSONObject: report, options: [.sortedKeys])
+            } else if root?["operation"] as? String == "coordinate_calibration" {
+                let request = try CoordinateCalibrationRequest.decodeStrict(data)
+                let report = await CoordinateCalibration.run(seed: request.selectionSeed)
+                encoded = try JSONSerialization.data(withJSONObject: report, options: [.sortedKeys])
+            } else if root?["operation"] as? String == "policy_replay" {
+                let request = try AgentEvalPolicyReplayRequest.decodeStrict(data)
+                encoded = try JSONEncoder().encode(await AgentEvalPolicyReplay.run(request))
+            } else if root?["operation"] as? String == "suite_clean_start" {
+                let request = try SuiteCleanStartRequest.decodeStrict(data)
+                encoded = try JSONSerialization.data(withJSONObject: await SuiteCleanStart.run(request), options: [.sortedKeys])
+            } else if root?["operation"] as? String == "preflight" {
+                let response: AgentEvalPreflightResponse
+                if let request = try? AgentEvalPreflightRequest.decodeStrict(data) {
+                    response = await AgentEvalPreflight.run(request)
+                } else {
+                    response = .invalidRequest()
+                }
+                encoded = try JSONEncoder().encode(response)
+            } else if root?["operation"] as? String == "focus_probe" {
+                let request = try AgentEvalFocusProbeRequest.decodeStrict(data)
+                encoded = try JSONEncoder().encode(AgentEvalFocusProbe.run(request))
+            } else {
+                let request = try AgentEvalRequest.decodeStrict(data)
+                let response = try await DebugAgentEvalSession(request: request).run()
+                encoded = try JSONEncoder().encode(response)
+            }
+            output.write(encoded)
+            output.write(Data([0x0A]))
+            return 0
+        } catch {
+            write("evaluation driver failed: \(error.localizedDescription)\n", to: errorOutput)
+            return 1
+        }
+    }
+
+    private static func write(_ value: String, to handle: FileHandle) {
+        handle.write(Data(value.utf8))
+    }
+}
+
+private struct CoordinateCalibrationRequest {
+    let selectionSeed: UInt64
+
+    static func decodeStrict(_ data: Data, operation: String = "coordinate_calibration") throws -> Self {
+        guard data.count <= 4_096,
+              let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              Set(object.keys) == ["operation", "selection_seed"],
+              object["operation"] as? String == operation,
+              let number = object["selection_seed"] as? NSNumber,
+              CFGetTypeID(number) != CFBooleanGetTypeID(),
+              number.doubleValue.isFinite, number.doubleValue >= 0,
+              number.doubleValue.rounded(.towardZero) == number.doubleValue,
+              number.doubleValue < 18_446_744_073_709_551_616.0 else {
+            throw AgentEvalWireError.invalidRequest
+        }
+        return Self(selectionSeed: number.uint64Value)
+    }
+}
+
+/// Read-only, DEBUG-only coordinate calibration. It opens only the three declared apps,
+/// captures their selected windows, and never posts input events.
+enum CoordinateCalibrationIdentityResult: Equatable {
+    case exact, descendant(depth: Int), rejected
+}
+
+enum CoordinateCalibrationIdentityMatcher {
+    static func classify(geometryValid: Bool, selectedWindowHit: Bool, exact: Bool,
+                         hitIsActionable: Bool, ancestors: [(Bool, Bool)]) -> CoordinateCalibrationIdentityResult {
+        guard geometryValid, selectedWindowHit else { return .rejected }
+        if exact { return .exact }
+        guard !hitIsActionable else { return .rejected }
+        for (i, a) in ancestors.prefix(5).enumerated() {
+            if a.0 { return a.1 ? .descendant(depth: i + 1) : .rejected }
+            if a.1 { return .rejected }
+        }
+        return .rejected
+    }
+}
+
+struct CoordinateCalibrationTracePhase {
+    let phase: String
+    let uptime: TimeInterval
+    let frontmostPID: Int32?
+    let focusedAXIdentity: Int?
+    let focusedAXTitle: String?
+    let focusedAXBounds: CGRect?
+    let samePIDWindows: [[String: Double]]
+}
+
+@MainActor
+private enum CoordinateCalibration {
+    private struct AppSpec {
+        let name: String
+        let bundleID: String
+    }
+
+    private struct WindowSample {
+        let spec: AppSpec
+        let app: NSRunningApplication
+        let target: SCWindow
+        let bounds: CGRect
+        let image: CGImage
+        let expectedNativeSize: CGSize
+        let nativeSize: CGSize
+        let pointPixelScale: CGFloat
+        let filterContentRect: CGRect
+        let marks: [PixelElementMark]
+        let focusedAXTitle: String?
+        let frameCandidateCount: Int
+        let maskedSecureRegions: Int
+        let visibleWindowCount: Int
+        let pngPath: String
+        let pngSHA256: String
+        var trace: [CoordinateCalibrationTracePhase]
+    }
+
+    private static let apps = [
+        AppSpec(name: "Safari", bundleID: "com.apple.Safari"),
+        AppSpec(name: "TextEdit", bundleID: "com.apple.TextEdit"),
+        AppSpec(name: "Finder", bundleID: "com.apple.finder"),
+    ]
+
+    static func run(seed: UInt64) async -> [String: Any] {
+        let started = ProcessInfo.processInfo.systemUptime
+        var appFailures: [[String: Any]] = []
+        do {
+            let rootPath = try evaluationRoot()
+            let runDirectory = try makePrivateRunDirectory(rootPath: rootPath)
+            var rng = SplitMix64(seed: seed)
+            var samples: [WindowSample] = []
+            var checks: [[String: Any]] = []
+            var eligibleCounts: [String: Int] = [:]
+            var selectedCounts: [String: Int] = [:]
+            var windows: [[String: Any]] = []
+            for spec in apps {
+                do {
+                    let sample = try await capture(spec: spec, seed: seed, directory: runDirectory)
+                    samples.append(sample)
+                } catch {
+                    appFailures.append(["app": spec.name, "bundleID": spec.bundleID,
+                        "error": String(describing: error)])
+                }
+            }
+            let candidates = samples.map { sample -> [PixelElementMark] in
+                var marks = eligibleMarks(in: sample)
+                rng.shuffle(&marks)
+                eligibleCounts[sample.spec.bundleID] = marks.count
+                return marks
+            }
+            let quotas = allocate(count: 20, capacities: candidates.map(\.count), rng: &rng)
+            for index in candidates.indices {
+                let sample = samples[index]
+                let selected = Array(candidates[index].prefix(quotas[index]))
+                selectedCounts[sample.spec.bundleID] = selected.count
+                guard await reactivateAndVerify(sample) else {
+                    appFailures.append(["app": sample.spec.name, "bundleID": sample.spec.bundleID,
+                        "error": "The sampled window was no longer frontmost and focused before its AX checks."])
+                    continue
+                }
+                let afterReactivation = phaseSnapshot("after_reactivation", app: sample.app,
+                    target: sample.target)
+                samples[index].trace.append(afterReactivation)
+                let tracedSample = samples[index]
+                for mark in selected { checks.append(check(mark, sample: tracedSample)) }
+            }
+            let exactCount = checks.filter { $0["identityMatch"] as? String == "exact" }.count
+            let descendantCount = checks.filter { $0["identityMatch"] as? String == "descendant" }.count
+            let passCount = checks.filter { $0["calibrationPass"] as? Bool == true }.count
+            let expectedCount = 20
+            let appsCovered = apps.allSatisfy { (selectedCounts[$0.bundleID] ?? 0) > 0 }
+            windows = samples.map(windowJSON)
+            return [
+                "operation": "coordinate_calibration",
+                "selectionSeed": seed,
+                "readOnly": true,
+                "inputEventsPosted": 0,
+                "expectedChecks": expectedCount,
+                "checks": checks,
+                "windows": windows,
+                "eligibleMarksByBundleID": eligibleCounts,
+                "selectedMarksByBundleID": selectedCounts,
+                "allThreeAppsRepresented": appsCovered,
+                "appFailures": appFailures,
+                "passedChecks": passCount,
+                "exactChecks": exactCount,
+                "descendantChecks": descendantCount,
+                "passed": checks.count == expectedCount && passCount == expectedCount && appsCovered && appFailures.isEmpty,
+                "wallSeconds": ProcessInfo.processInfo.systemUptime - started,
+            ]
+        } catch {
+            return ["operation": "coordinate_calibration", "selectionSeed": seed,
+                "readOnly": true, "inputEventsPosted": 0, "passed": false,
+                "checks": [], "appFailures": appFailures,
+                "error": String(describing: error),
+                "wallSeconds": ProcessInfo.processInfo.systemUptime - started]
+        }
+    }
+
+    static func captureConfigurationProbe(seed: UInt64) async -> [String: Any] {
+        let started = ProcessInfo.processInfo.systemUptime
+        var comparisons: [[String: Any]] = []
+        var failures: [[String: Any]] = []
+        do {
+            let directory = try makePrivateRunDirectory(rootPath: evaluationRoot())
+            for spec in apps {
+                do {
+                    let sample = try await capture(spec: spec, seed: seed, directory: directory)
+                    comparisons.append(try await displayBoundComparison(sample))
+                } catch {
+                    failures.append(["app": spec.name, "bundleID": spec.bundleID,
+                        "error": String(describing: error)])
+                }
+            }
+        } catch {
+            failures.append(["error": String(describing: error)])
+        }
+        return ["operation": "capture_configuration_probe", "selectionSeed": seed,
+            "diagnosticOnly": true, "noCalibrationGrade": true, "inputEventsPosted": 0,
+            "comparisons": comparisons, "appFailures": failures,
+            "wallSeconds": ProcessInfo.processInfo.systemUptime - started]
+    }
+
+    private static func displayBoundComparison(_ sample: WindowSample) async throws -> [String: Any] {
+        guard #available(macOS 14.2, *) else { throw AgentEnvironmentError.unsupportedAction }
+        guard sample.maskedSecureRegions == 0 else {
+            throw AgentEnvironmentError.unavailable("Display-bound comparison skipped because secure regions were masked.")
+        }
+        guard NSWorkspace.shared.frontmostApplication?.processIdentifier == sample.app.processIdentifier else {
+            throw AgentEnvironmentError.scopeChanged
+        }
+        let content = try await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: true)
+        let targets = content.windows.filter {
+            $0.windowID == sample.target.windowID &&
+            $0.owningApplication?.processID == sample.app.processIdentifier &&
+            $0.frame == sample.bounds && $0.isOnScreen
+        }
+        guard targets.count == 1, let target = targets.first else { throw AgentEnvironmentError.scopeChanged }
+        let center = CGPoint(x: target.frame.midX, y: target.frame.midY)
+        let displays = content.displays.filter { $0.frame.contains(center) }
+        guard displays.count == 1, let display = displays.first else { throw AgentEnvironmentError.unavailable("The selected window does not map to exactly one display.") }
+        let sourceRect = target.frame.offsetBy(dx: -display.frame.minX, dy: -display.frame.minY)
+        let filter = SCContentFilter(display: display, including: [target])
+        let filterInfo = SCShareableContent.info(for: filter)
+        guard let size = PixelGeometry.nativeWindowPixelSize(windowBounds: target.frame,
+                pointPixelScale: CGFloat(filterInfo.pointPixelScale)) else { throw AgentEnvironmentError.unavailable("The selected window has invalid native pixel dimensions.") }
+        let configuration = SCStreamConfiguration()
+        configuration.width = size.width; configuration.height = size.height
+        configuration.sourceRect = sourceRect
+        configuration.showsCursor = false; configuration.scalesToFit = true
+        configuration.preservesAspectRatio = true; configuration.ignoreShadowsDisplay = true
+        configuration.includeChildWindows = true
+        let beforeCapture = phaseSnapshot("before_display_bound_capture", app: sample.app, target: target)
+        let image = try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: configuration)
+        let afterCapture = phaseSnapshot("after_display_bound_capture", app: sample.app, target: target)
+        let appRoot = AXUIElementCreateApplication(sample.app.processIdentifier)
+        AXUIElementSetMessagingTimeout(appRoot, 0.1)
+        guard NSWorkspace.shared.frontmostApplication?.processIdentifier == sample.app.processIdentifier,
+              let focused = ElementMarks.focusedWindow(appRoot),
+              ElementMarks.bounds(focused) == sample.bounds else { throw AgentEnvironmentError.scopeChanged }
+        let directory = URL(fileURLWithPath: sample.pngPath).deletingLastPathComponent()
+        let url = directory.appendingPathComponent(URL(fileURLWithPath: sample.pngPath).deletingPathExtension().lastPathComponent + "-display-bound.png")
+        let png = try pngData(image)
+        try png.write(to: url, options: .atomic)
+        guard chmod(url.path, 0o600) == 0 else { throw AgentEvalWireError.bootstrapFailure }
+        let hash = SHA256.hash(data: png).map { String(format: "%02x", $0) }.joined()
+        return ["app": sample.spec.name, "bundleID": sample.spec.bundleID,
+            "windowID": target.windowID, "windowFrame": rectJSON(target.frame),
+            "displayID": display.displayID, "displayFrame": rectJSON(display.frame),
+            "filterContentRect": rectJSON(filterInfo.contentRect),
+            "independentPointPixelScale": sample.pointPixelScale,
+            "displayFilterPointPixelScale": filterInfo.pointPixelScale,
+            "sourceRectDisplayLocal": rectJSON(sourceRect),
+            "includeChildWindows": true, "ignoreShadowsDisplay": true,
+            "independent": ["pngPath": sample.pngPath, "pngSHA256": sample.pngSHA256,
+                "savedPixels": ["width": sample.image.width, "height": sample.image.height],
+                "nativePixels": ["width": sample.nativeSize.width, "height": sample.nativeSize.height],
+                "filterContentRect": rectJSON(sample.filterContentRect),
+                "tracePhases": sample.trace.map { phase in
+                    ["phase": phase.phase, "uptime": phase.uptime,
+                     "frontmostPID": phase.frontmostPID ?? 0,
+                     "focusedAXIdentity": phase.focusedAXIdentity ?? 0,
+                     "focusedAXTitle": phase.focusedAXTitle ?? "",
+                     "focusedAXBounds": phase.focusedAXBounds.map { rectJSON($0) as Any } ?? NSNull(),
+                     "samePIDWindows": phase.samePIDWindows] as [String: Any]
+                }],
+            "displayBound": ["pngPath": url.path, "pngSHA256": hash,
+                "configuredPixels": ["width": size.width, "height": size.height],
+                "actualPixels": ["width": image.width, "height": image.height],
+                "samePIDWindowsBeforeCapture": beforeCapture.samePIDWindows,
+                "samePIDWindowsAfterCapture": afterCapture.samePIDWindows]]
+    }
+
+    private static func eligibleMarks(in sample: WindowSample) -> [PixelElementMark] {
+        sample.marks.filter { mark in
+            PixelTargetSnapping.interactiveRoles.contains(mark.role) && mark.inView &&
+                !mark.state.contains("disabled") &&
+                sample.bounds.contains(CGPoint(x: mark.screenRect.midX, y: mark.screenRect.midY))
+        }
+    }
+
+    private static func isActionable(_ element: AXUIElement) -> Bool {
+        guard let role = ElementMarks.string(element, kAXRoleAttribute),
+              PixelTargetSnapping.interactiveRoles.contains(role) else { return false }
+        var enabledValue: CFTypeRef?
+        if AXUIElementCopyAttributeValue(element, kAXEnabledAttribute as CFString, &enabledValue) == .success,
+           let enabled = enabledValue as? Bool { return enabled }
+        return true
+    }
+
+    private static func allocate(count: Int, capacities: [Int], rng: inout SplitMix64) -> [Int] {
+        var quotas = capacities.map { $0 > 0 ? 1 : 0 }
+        var remaining = max(0, count - quotas.reduce(0, +))
+        while remaining > 0 {
+            var available = capacities.indices.filter { quotas[$0] < capacities[$0] }
+            guard !available.isEmpty else { break }
+            rng.shuffle(&available)
+            for index in available where remaining > 0 {
+                quotas[index] += 1
+                remaining -= 1
+            }
+        }
+        return quotas
+    }
+
+    private static func reactivateAndVerify(_ sample: WindowSample) async -> Bool {
+        _ = sample.app.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
+        let deadline = ProcessInfo.processInfo.systemUptime + 4
+        var previousWindowID: UInt32?
+        var previousFrame: CGRect?
+        var stablePolls = 0
+        while ProcessInfo.processInfo.systemUptime < deadline {
+            if NSWorkspace.shared.frontmostApplication?.processIdentifier == sample.app.processIdentifier {
+                do {
+                    let content = try await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: true)
+                    let candidates = content.windows.filter {
+                        $0.owningApplication?.processID == sample.app.processIdentifier &&
+                        $0.frame.width > 50 && $0.frame.height > 50 && $0.isOnScreen
+                    }
+                    let root = AXUIElementCreateApplication(sample.app.processIdentifier)
+                    if let focused = ElementMarks.focusedWindow(root), let bounds = ElementMarks.bounds(focused),
+                       let windowID = AgentMacAccessibility.matchingWindowID(ownerPID: sample.app.processIdentifier,
+                           bounds: bounds, focusedTitle: ElementMarks.string(focused, kAXTitleAttribute)),
+                       let target = candidates.first(where: { $0.windowID == windowID }),
+                       windowID == sample.target.windowID,
+                       ElementMarks.focusedWindowMatches(bounds, selectedBounds: target.frame),
+                       ElementMarks.focusedWindowMatches(sample.bounds, selectedBounds: target.frame) {
+                        stablePolls = previousWindowID == windowID && previousFrame == target.frame
+                            ? stablePolls + 1 : 1
+                        if stablePolls >= 2 { return true }
+                        previousWindowID = windowID; previousFrame = target.frame
+                    } else { stablePolls = 0; previousWindowID = nil; previousFrame = nil }
+                } catch { return false }
+            } else {
+                stablePolls = 0; previousWindowID = nil; previousFrame = nil
+            }
+            try? await Task.sleep(for: .milliseconds(150))
+        }
+        return false
+    }
+
+    private static func evaluationRoot() throws -> URL {
+        guard let path = ProcessInfo.processInfo.environment["REMOTE_DESKTOP_EVAL_ROOT"],
+              path.hasPrefix("/"), !path.contains("\0") else { throw AgentEvalWireError.bootstrapFailure }
+        let root = URL(fileURLWithPath: path, isDirectory: true).standardizedFileURL
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true,
+                                                attributes: [.posixPermissions: 0o700])
+        var info = stat()
+        guard lstat(root.path, &info) == 0, info.st_mode & S_IFMT == S_IFDIR,
+              info.st_uid == getuid(), info.st_mode & 0o777 == 0o700 else {
+            throw AgentEvalWireError.bootstrapFailure
+        }
+        let parent = root.appendingPathComponent("coordinate-calibration", isDirectory: true)
+        if mkdir(parent.path, 0o700) != 0 && errno != EEXIST { throw AgentEvalWireError.bootstrapFailure }
+        guard lstat(parent.path, &info) == 0, info.st_mode & S_IFMT == S_IFDIR,
+              info.st_uid == getuid(), info.st_mode & 0o777 == 0o700 else {
+            throw AgentEvalWireError.bootstrapFailure
+        }
+        return parent
+    }
+
+    private static func makePrivateRunDirectory(rootPath: URL) throws -> URL {
+        let directory = rootPath.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        guard mkdir(directory.path, 0o700) == 0 else { throw AgentEvalWireError.bootstrapFailure }
+        return directory
+    }
+
+    private static func capture(spec: AppSpec, seed: UInt64, directory: URL) async throws -> WindowSample {
+        guard AXIsProcessTrusted(), let appURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: spec.bundleID) else {
+            throw AgentEnvironmentError.unavailable("Accessibility or the expected app is unavailable.")
+        }
+        let app: NSRunningApplication
+        if let running = NSWorkspace.shared.runningApplications.first(where: { $0.bundleIdentifier == spec.bundleID }) {
+            app = running
+        } else {
+            app = try await withCheckedThrowingContinuation { continuation in
+                NSWorkspace.shared.openApplication(at: appURL, configuration: .init()) { running, error in
+                    if let error { continuation.resume(throwing: error) }
+                    else if let running { continuation.resume(returning: running) }
+                    else { continuation.resume(throwing: AgentEvalWireError.bootstrapFailure) }
+                }
+            }
+        }
+        _ = app.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
+        let deadline = ProcessInfo.processInfo.systemUptime + 8
+        var selected: (SCWindow, AXUIElement, CGRect, SCShareableContent)?
+        var previousWindowID: UInt32?
+        var previousFrame: CGRect?
+        var stablePolls = 0
+        var selectionDiagnostic = "No focused AX window was observed."
+        while ProcessInfo.processInfo.systemUptime < deadline {
+            guard NSWorkspace.shared.frontmostApplication?.processIdentifier == app.processIdentifier else {
+                previousWindowID = nil; previousFrame = nil; stablePolls = 0
+                try? await Task.sleep(for: .milliseconds(150)); continue
+            }
+            let content = try await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: true)
+            let root = AXUIElementCreateApplication(app.processIdentifier)
+            if let focused = ElementMarks.focusedWindow(root), let bounds = ElementMarks.bounds(focused) {
+                let candidates = content.windows.filter {
+                    $0.owningApplication?.processID == app.processIdentifier && $0.frame.width > 50 && $0.frame.height > 50 && $0.isOnScreen
+                }
+                let title = ElementMarks.string(focused, kAXTitleAttribute)
+                let frameCandidates = candidates.filter { ElementMarks.focusedWindowMatches(bounds, selectedBounds: $0.frame) }
+                let summary = frameCandidates.prefix(12).map { window in
+                    "\(window.windowID):\(String((window.title ?? "").prefix(80))):\(rectJSON(window.frame))"
+                }.joined(separator: "; ")
+                selectionDiagnostic = "focusedAXTitle=\(String((title ?? "").prefix(120))), focusedBounds=\(rectJSON(bounds)), frameCandidates=[\(summary)]"
+                let windowID = AgentMacAccessibility.matchingWindowID(ownerPID: app.processIdentifier,
+                    bounds: bounds, focusedTitle: title)
+                if let windowID, let target = candidates.first(where: { $0.windowID == windowID }),
+                   ElementMarks.focusedWindowMatches(bounds, selectedBounds: target.frame) {
+                    stablePolls = previousWindowID == target.windowID && previousFrame == target.frame
+                        ? stablePolls + 1 : 1
+                    if stablePolls >= 2 { selected = (target, focused, bounds, content); break }
+                    previousWindowID = target.windowID; previousFrame = target.frame
+                } else {
+                    previousWindowID = nil; previousFrame = nil; stablePolls = 0
+                }
+            } else {
+                previousWindowID = nil; previousFrame = nil; stablePolls = 0
+            }
+            try? await Task.sleep(for: .milliseconds(150))
+        }
+        guard let (target, focused, bounds, content) = selected else {
+            throw AgentEnvironmentError.unavailable("No AX/ScreenCaptureKit window match for \(spec.name); \(selectionDiagnostic)")
+        }
+        let root = AXUIElementCreateApplication(app.processIdentifier)
+        let axWindow = AgentMacAccessibility.Window(application: app, element: focused,
+            bounds: target.frame, number: target.windowID, title: target.title ?? "")
+        let marks = ElementMarks.readCapture(window: axWindow, focusedWindowElement: focused,
+            focusedBounds: bounds, appRoot: root, application: app, selectedBounds: target.frame,
+            budget: .seconds(2), limit: 256)
+        let beforeScreenshot = phaseSnapshot("before_screenshot", app: app, target: target)
+        let native = try await PixelEnvironment.captureNativeWindow(target)
+        let afterScreenshot = phaseSnapshot("after_screenshot", app: app, target: target)
+        guard NSWorkspace.shared.frontmostApplication?.processIdentifier == app.processIdentifier else {
+            throw AgentEnvironmentError.scopeChanged
+        }
+        guard let resized = PixelGeometry.resize(native.image, width: 1280) else {
+            throw AgentEnvironmentError.unavailable("Captured pixels did not match the requested native window geometry.")
+        }
+        let (image, maskedCount) = try maskSecureRegions(resized, screenBounds: target.frame,
+            secureRects: marks.secureScreenRects)
+        let png = try pngData(image)
+        let pngName = "\(spec.bundleID.replacingOccurrences(of: ".", with: "_"))-\(seed).png"
+        let pngURL = directory.appendingPathComponent(pngName)
+        try png.write(to: pngURL, options: .atomic)
+        guard chmod(pngURL.path, 0o600) == 0 else { throw AgentEvalWireError.bootstrapFailure }
+        let hash = SHA256.hash(data: png).map { String(format: "%02x", $0) }.joined()
+        return WindowSample(spec: spec, app: app, target: target, bounds: target.frame,
+            image: image, expectedNativeSize: native.expectedPixelSize,
+            nativeSize: CGSize(width: native.image.width, height: native.image.height),
+            pointPixelScale: native.pointPixelScale, filterContentRect: native.contentRect,
+            marks: marks.marks, focusedAXTitle: ElementMarks.string(focused, kAXTitleAttribute),
+            frameCandidateCount: content.windows.filter {
+                $0.owningApplication?.processID == app.processIdentifier &&
+                ElementMarks.focusedWindowMatches(bounds, selectedBounds: $0.frame)
+            }.count, maskedSecureRegions: maskedCount,
+            visibleWindowCount: content.windows.filter { $0.owningApplication?.processID == app.processIdentifier && $0.isOnScreen }.count,
+            pngPath: pngURL.path, pngSHA256: hash, trace: [beforeScreenshot, afterScreenshot])
+    }
+
+    private static func phaseSnapshot(_ phase: String, app: NSRunningApplication,
+                                      target: SCWindow) -> CoordinateCalibrationTracePhase {
+        let capturedAt = ProcessInfo.processInfo.systemUptime
+        let root = AXUIElementCreateApplication(app.processIdentifier)
+        AXUIElementSetMessagingTimeout(root, 0.1)
+        let focused = ElementMarks.focusedWindow(root)
+        if let focused { AXUIElementSetMessagingTimeout(focused, 0.1) }
+        let windows = (CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements],
+            kCGNullWindowID) as? [[String: Any]] ?? []).compactMap { info -> [String: Double]? in
+                guard info[kCGWindowOwnerPID as String] as? Int32 == app.processIdentifier,
+                      let id = info[kCGWindowNumber as String] as? Int,
+                      let layer = info[kCGWindowLayer as String] as? Int,
+                      let raw = info[kCGWindowBounds as String] as? [String: Any],
+                      let bounds = CGRect(dictionaryRepresentation: raw as CFDictionary),
+                      bounds.intersects(target.frame) else { return nil }
+                return ["windowID": Double(id), "layer": Double(layer),
+                    "x": bounds.origin.x, "y": bounds.origin.y,
+                    "width": bounds.width, "height": bounds.height]
+            }.prefix(32).map { $0 }
+        return CoordinateCalibrationTracePhase(phase: phase, uptime: capturedAt,
+            frontmostPID: NSWorkspace.shared.frontmostApplication?.processIdentifier,
+            focusedAXIdentity: focused.map { Int(truncatingIfNeeded: CFHash($0)) },
+            focusedAXTitle: focused.flatMap { ElementMarks.string($0, kAXTitleAttribute) },
+            focusedAXBounds: focused.flatMap(ElementMarks.bounds),
+            samePIDWindows: windows)
+    }
+
+    private static func check(_ mark: PixelElementMark, sample: WindowSample) -> [String: Any] {
+        let center = CGPoint(x: mark.screenRect.midX, y: mark.screenRect.midY)
+        let imageSize = CGSize(width: sample.image.width, height: sample.image.height)
+        let pixel = PixelGeometry.imagePoint(center, imageSize: imageSize, screenBounds: sample.bounds)
+        let roundTrip = pixel.flatMap { PixelGeometry.point($0, imageSize: imageSize, screenBounds: sample.bounds) }
+        let appRoot = AXUIElementCreateApplication(sample.app.processIdentifier)
+        var actual: AXUIElement?
+        let status: AXError
+        if let point = roundTrip {
+            status = AXUIElementCopyElementAtPosition(appRoot, Float(point.x), Float(point.y), &actual)
+        } else { status = .failure }
+        let expected = mark.identity?.base as? PixelAXIdentity
+        let equal: Bool
+        if status == .success, let expected, let actual { equal = CFEqual(expected.element, actual) }
+        else { equal = false }
+        let hitIsActionable = actual.map(Self.isActionable) ?? false
+        var ancestors: [(Bool, Bool)] = []
+        if let actual, let expected, !CFEqual(expected.element, actual) {
+            if !hitIsActionable {
+                var current = actual
+                for _ in 0..<5 {
+                    AXUIElementSetMessagingTimeout(current, 0.1)
+                    var parentValue: CFTypeRef?
+                    guard AXUIElementCopyAttributeValue(
+                        current, kAXParentAttribute as CFString, &parentValue) == .success,
+                        let parentValue,
+                        CFGetTypeID(parentValue) == AXUIElementGetTypeID() else { break }
+                    let parent = unsafeBitCast(parentValue, to: AXUIElement.self)
+                    let isExpected = CFEqual(expected.element, parent)
+                    let actionable = Self.isActionable(parent)
+                    ancestors.append((isExpected, actionable))
+                    if isExpected || actionable { break }
+                    current = parent
+                }
+            }
+        }
+        var actualPID: pid_t = 0
+        let actualPIDStatus = actual.map { AXUIElementGetPid($0, &actualPID) } ?? .failure
+        let actualBounds = actual.flatMap(ElementMarks.bounds)
+        let actualRole = actual.flatMap { ElementMarks.string($0, kAXRoleAttribute) }
+        let actualTitle = actual.flatMap { ElementMarks.string($0, kAXTitleAttribute) }
+        let actualDescription = actual.flatMap { ElementMarks.string($0, kAXDescriptionAttribute) }
+        let actualName = actual.map(ElementMarks.label)
+        let hitWindows = actual.map { _ in
+            onScreenWindowCandidates(ownerPID: actualPID, point: roundTrip,
+                                     elementBounds: actualBounds)
+        } ?? []
+        let windowAtPoint = hitWindows.first { $0["containsPoint"] as? Bool == true }
+        let geometryValid = pixel != nil && roundTrip.map { point in
+            sample.bounds.contains(center) && sample.bounds.contains(point) &&
+                abs(point.x - center.x) <= 0.01 && abs(point.y - center.y) <= 0.01
+        } == true
+        let selectedWindowHit = actualPIDStatus == .success && actualPID == sample.app.processIdentifier &&
+            (windowAtPoint?["windowID"] as? UInt32) == sample.target.windowID
+        let identityResult = CoordinateCalibrationIdentityMatcher.classify(geometryValid: geometryValid,
+            selectedWindowHit: selectedWindowHit, exact: equal, hitIsActionable: hitIsActionable,
+            ancestors: ancestors)
+        let identityMatch: String
+        let calibrationPass: Bool
+        switch identityResult {
+        case .exact: identityMatch = "exact"; calibrationPass = true
+        case .descendant: identityMatch = "descendant"; calibrationPass = true
+        case .rejected: identityMatch = "rejected"; calibrationPass = false
+        }
+        if let expected { AXUIElementSetMessagingTimeout(expected.element, 0.1) }
+        let expectedRole = expected.flatMap { ElementMarks.string($0.element, kAXRoleAttribute) }
+        let expectedBounds = expected.flatMap { ElementMarks.bounds($0.element) }
+        var expectedPID: pid_t = 0
+        let expectedPIDStatus = expected.map { AXUIElementGetPid($0.element, &expectedPID) } ?? .failure
+        let originalIdentityValid = expectedRole != nil && expectedBounds != nil &&
+            expectedPIDStatus == .success && expectedPID == sample.app.processIdentifier
+        return [
+            "app": sample.spec.name, "bundleID": sample.spec.bundleID,
+            "windowID": sample.target.windowID, "windowTitle": sample.target.title ?? "",
+            "role": mark.role, "name": mark.name, "markID": mark.id,
+            "originalIdentityValidAfterReactivation": originalIdentityValid,
+            "originalIdentityCurrentRole": expectedRole ?? "",
+            "originalIdentityCurrentBounds": expectedBounds.map { rectJSON($0) as Any } ?? NSNull(),
+            "sourceCenter": pointJSON(center), "screenshotPixel": pixel.map { pointJSON($0) as Any } ?? NSNull(),
+            "roundTripPoint": roundTrip.map { pointJSON($0) as Any } ?? NSNull(),
+            "expectedMarkBounds": rectJSON(mark.screenRect),
+            "axEqual": equal, "identityMatch": identityMatch,
+            "geometryValid": geometryValid, "selectedWindowHit": selectedWindowHit,
+            "calibrationPass": calibrationPass, "axError": status.rawValue,
+            "actualAXRole": actualRole ?? "", "actualAXTitle": actualTitle ?? "",
+            "actualAXDescription": actualDescription ?? "", "actualAXName": actualName ?? "",
+            "actualAXBounds": actualBounds.map { rectJSON($0) as Any } ?? NSNull(),
+            "actualAXPID": actualPIDStatus == .success ? actualPID : 0,
+            "hitPointWindowCandidates": hitWindows,
+            "actualWindowIDAtPoint": windowAtPoint?["windowID"] ?? NSNull(),
+            "selectedWindowAmongHitCandidates": hitWindows.contains {
+                ($0["windowID"] as? UInt32) == sample.target.windowID
+            },
+            "windowFrame": rectJSON(sample.bounds),
+            "expectedNativePixels": ["width": sample.expectedNativeSize.width, "height": sample.expectedNativeSize.height],
+            "nativeCapturedPixels": ["width": sample.nativeSize.width, "height": sample.nativeSize.height],
+            "pointPixelScale": sample.pointPixelScale,
+            "filterContentRect": rectJSON(sample.filterContentRect),
+            "resizedPixels": ["width": sample.image.width, "height": sample.image.height],
+            "maskedSecureRegions": sample.maskedSecureRegions,
+            "pngPath": sample.pngPath, "pngSHA256": sample.pngSHA256,
+        ]
+    }
+
+    private static func onScreenWindowCandidates(ownerPID: pid_t, point: CGPoint?,
+                                                  elementBounds: CGRect?) -> [[String: Any]] {
+        guard ownerPID > 0,
+              let entries = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements],
+                                                        kCGNullWindowID) as? [[String: Any]] else { return [] }
+        return entries.enumerated().compactMap { order, info in
+            guard info[kCGWindowOwnerPID as String] as? pid_t == ownerPID,
+                  let number = info[kCGWindowNumber as String] as? UInt32,
+                  let rawBounds = info[kCGWindowBounds as String] as? [String: Any],
+                  let bounds = CGRect(dictionaryRepresentation: rawBounds as CFDictionary) else { return nil }
+            let containsPoint = point.map { bounds.contains($0) } ?? false
+            let intersectsElement = elementBounds.map { bounds.intersects($0) } ?? false
+            guard containsPoint || intersectsElement else { return nil }
+            return ["zOrder": order, "windowID": number,
+                    "title": String((info[kCGWindowName as String] as? String ?? "").prefix(120)),
+                    "bounds": rectJSON(bounds), "containsPoint": containsPoint,
+                    "intersectsAXBounds": intersectsElement]
+        }.prefix(12).map { $0 }
+    }
+
+    private static func windowJSON(_ sample: WindowSample) -> [String: Any] {
+        ["app": sample.spec.name, "bundleID": sample.spec.bundleID,
+         "windowID": sample.target.windowID, "windowTitle": sample.target.title ?? "",
+         "visibleWindowCount": sample.visibleWindowCount,
+         "focusedAXTitle": sample.focusedAXTitle ?? "",
+         "sameFrameCandidateCount": sample.frameCandidateCount,
+         "windowFrame": rectJSON(sample.bounds),
+         "expectedNativePixels": ["width": sample.expectedNativeSize.width, "height": sample.expectedNativeSize.height],
+         "nativeCapturedPixels": ["width": sample.nativeSize.width, "height": sample.nativeSize.height],
+         "pointPixelScale": sample.pointPixelScale, "filterContentRect": rectJSON(sample.filterContentRect),
+         "resizedPixels": ["width": sample.image.width, "height": sample.image.height],
+         "maskedSecureRegions": sample.maskedSecureRegions,
+         "eligibleInteractiveMarks": eligibleMarks(in: sample).count,
+         "tracePhases": sample.trace.map { phase in
+            ["phase": phase.phase, "uptime": phase.uptime,
+             "frontmostPID": phase.frontmostPID ?? 0,
+             "focusedAXIdentity": phase.focusedAXIdentity ?? 0,
+             "focusedAXTitle": phase.focusedAXTitle ?? "",
+             "focusedAXBounds": phase.focusedAXBounds.map { rectJSON($0) as Any } ?? NSNull(),
+             "samePIDWindows": phase.samePIDWindows] as [String: Any]
+         },
+         "pngPath": sample.pngPath, "pngSHA256": sample.pngSHA256]
+    }
+
+    private static func maskSecureRegions(_ image: CGImage, screenBounds: CGRect,
+                                          secureRects: [CGRect]) throws -> (CGImage, Int) {
+        guard !secureRects.isEmpty else { return (image, 0) }
+        guard let context = CGContext(data: nil, width: image.width, height: image.height,
+            bitsPerComponent: 8, bytesPerRow: 0, space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else {
+            throw AgentEvalWireError.bootstrapFailure
+        }
+        context.draw(image, in: CGRect(x: 0, y: 0, width: image.width, height: image.height))
+        context.setFillColor(CGColor(gray: 0, alpha: 1))
+        var count = 0
+        for rect in secureRects {
+            guard let pixelRect = PixelGeometry.imageRect(rect, captureBounds: screenBounds,
+                imageSize: CGSize(width: image.width, height: image.height)) else { continue }
+            let integral = pixelRect.integral
+            let bottomLeftRect = CGRect(x: integral.minX, y: CGFloat(image.height) - integral.maxY,
+                                        width: integral.width, height: integral.height)
+            context.fill(bottomLeftRect)
+            count += 1
+        }
+        guard let masked = context.makeImage() else { throw AgentEvalWireError.bootstrapFailure }
+        return (masked, count)
+    }
+
+    private static func pngData(_ image: CGImage) throws -> Data {
+        let output = NSMutableData()
+        guard let destination = CGImageDestinationCreateWithData(output, UTType.png.identifier as CFString, 1, nil) else {
+            throw AgentEvalWireError.bootstrapFailure
+        }
+        CGImageDestinationAddImage(destination, image, nil)
+        guard CGImageDestinationFinalize(destination) else { throw AgentEvalWireError.bootstrapFailure }
+        return output as Data
+    }
+
+    private static func pointJSON(_ point: CGPoint) -> [String: CGFloat] { ["x": point.x, "y": point.y] }
+    private static func rectJSON(_ rect: CGRect) -> [String: CGFloat] {
+        ["x": rect.origin.x, "y": rect.origin.y, "width": rect.width, "height": rect.height]
+    }
+
+    private struct SplitMix64 {
+        var state: UInt64
+        init(seed: UInt64) { state = seed }
+        mutating func next() -> UInt64 {
+            state &+= 0x9E3779B97F4A7C15
+            var value = state
+            value = (value ^ (value >> 30)) &* 0xBF58476D1CE4E5B9
+            value = (value ^ (value >> 27)) &* 0x94D049BB133111EB
+            return value ^ (value >> 31)
+        }
+        mutating func shuffle<T>(_ values: inout [T]) {
+            guard values.count > 1 else { return }
+            for index in stride(from: values.count - 1, through: 1, by: -1) {
+                values.swapAt(index, Int(next() % UInt64(index + 1)))
+            }
+        }
+    }
+}
+#endif

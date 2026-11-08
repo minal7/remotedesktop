@@ -7,6 +7,12 @@ import Dispatch
 import Foundation
 import OSLog
 import Security
+import MemoryStoreKit
+
+struct OwnerMemoryScopeLease: Equatable, Sendable {
+    let scopeID: UUID
+    let generation: UInt64
+}
 
 /// Flattens host context that is interpolated into a model prompt. Application
 /// labels and action history are context, never prompt structure: line/control
@@ -87,6 +93,10 @@ struct ComputerUseApplicationIdentity: Equatable, Hashable, Sendable {
     /// executor will actually launch and attest.
     static let reviewedApplications: [ReviewedApplication] = [
         .init(
+            canonicalName: "Calculator",
+            aliases: ["Calculator"],
+            bundleIdentifiers: ["com.apple.calculator"]),
+        .init(
             canonicalName: "Notes",
             aliases: ["Notes", "Apple Notes"],
             bundleIdentifiers: ["com.apple.Notes"]),
@@ -114,10 +124,6 @@ struct ComputerUseApplicationIdentity: Equatable, Hashable, Sendable {
             canonicalName: "Reminders",
             aliases: ["Reminders", "Apple Reminders"],
             bundleIdentifiers: ["com.apple.reminders"]),
-        .init(
-            canonicalName: "Calculator",
-            aliases: ["Calculator"],
-            bundleIdentifiers: ["com.apple.calculator"]),
         .init(
             canonicalName: "Books",
             aliases: ["Books", "Apple Books"],
@@ -721,11 +727,21 @@ struct ComputerUseFrontmostApplicationSnapshot: Equatable, Sendable {
     }
 }
 
-fileprivate struct ComputerUseApprovalFingerprint: Equatable {
+struct ComputerUseApprovalFingerprint: Equatable {
     let action: ComputerUsePredictedAction
     let applicationID: String
     let accessibilityIdentity: String
     let visualDigest: String?
+
+    init(action: ComputerUsePredictedAction, applicationID: String, accessibilityIdentity: String,
+         visualDigest: String?) {
+        self.action = action
+        self.applicationID = applicationID
+        self.accessibilityIdentity = accessibilityIdentity
+        self.visualDigest = visualDigest
+    }
+
+    func matchesForFinalDispatch(_ other: Self) -> Bool { self == other }
 }
 
 fileprivate struct ComputerUsePreparedApproval {
@@ -740,11 +756,7 @@ struct ComputerUseApprovalTargetSnapshot: Equatable {
     let context: String
     let applicationID: String
     let accessibilityIdentity: String
-}
-
-struct ComputerUseCalculatorSnapshot: Equatable {
-    let inputValue: String?
-    let expressionValue: String?
+    var frame: CGRect? = nil
 }
 
 /// Privacy-bounded Accessibility evidence used only to decide whether the
@@ -762,6 +774,133 @@ struct ComputerUseFrontmostWindowCaptureIdentity: Equatable {
     let applicationProcessIdentifier: pid_t
     let accessibilityWindowHash: CFHashCode
     let bounds: CGRect
+}
+
+struct ComputerUseActiveDisplay: Equatable {
+    let identifier: CGDirectDisplayID
+    let bounds: CGRect
+}
+
+/// Selects the one active display that contains the complete focused AX
+/// window. Nil is fail-closed for spanning, mirrored, or malformed geometry.
+enum ComputerUseFocusedDisplaySelector {
+    static func select(windowBounds: CGRect, activeDisplays: [ComputerUseActiveDisplay]) -> ComputerUseActiveDisplay? {
+        func valid(_ rect: CGRect) -> Bool {
+            !rect.isNull && !rect.isInfinite && !rect.isEmpty
+                && [rect.minX, rect.minY, rect.width, rect.height].allSatisfy { $0.isFinite && abs($0) <= 1_000_000 }
+        }
+        guard valid(windowBounds), !activeDisplays.isEmpty, activeDisplays.count <= 32,
+              activeDisplays.allSatisfy({ $0.identifier != 0 && valid($0.bounds) }),
+              Set(activeDisplays.map(\.identifier)).count == activeDisplays.count else { return nil }
+        let candidates = activeDisplays.filter { $0.bounds.contains(windowBounds) }
+        guard candidates.count == 1, let selected = candidates.first else { return nil }
+        // Mirrored or otherwise overlapping display geometry cannot identify
+        // a unique coordinate-to-panel mapping for this focused window.
+        guard !activeDisplays.contains(where: { display in
+            guard display.identifier != selected.identifier else { return false }
+            let overlap = display.bounds.intersection(windowBounds)
+            return !overlap.isNull && overlap.width > 0 && overlap.height > 0
+        }) else { return nil }
+        return selected
+    }
+
+    static func isStable(before: ComputerUseActiveDisplay?, after: ComputerUseActiveDisplay?) -> Bool {
+        guard let before, let after else { return false }
+        return before == after
+    }
+}
+
+/// One public Window Server entry in top-to-bottom list order. This describes
+/// visible composition; it does not replace the app receiving keyboard events.
+struct ComputerUseVisibleWindowEntry: Equatable {
+    let ownerProcessIdentifier: pid_t
+    let layer: Int
+    let bounds: CGRect
+    let alpha: CGFloat
+
+    init?(windowInfo: [String: Any]) {
+        guard let owner = windowInfo[kCGWindowOwnerPID as String] as? Int,
+              let ownerPID = pid_t(exactly: owner), ownerPID > 0,
+              let layer = windowInfo[kCGWindowLayer as String] as? Int,
+              let rawBounds = windowInfo[kCGWindowBounds as String] as? [String: Any],
+              let alphaNumber = windowInfo[kCGWindowAlpha as String] as? NSNumber else { return nil }
+        var bounds = CGRect.zero
+        guard CGRectMakeWithDictionaryRepresentation(rawBounds as CFDictionary, &bounds),
+              !bounds.isNull, !bounds.isInfinite,
+              [bounds.minX, bounds.minY, bounds.width, bounds.height].allSatisfy(\.isFinite) else { return nil }
+        ownerProcessIdentifier = ownerPID; self.layer = layer
+        self.bounds = bounds; alpha = CGFloat(alphaNumber.doubleValue)
+    }
+
+    init(ownerProcessIdentifier: pid_t, layer: Int, bounds: CGRect, alpha: CGFloat = 1) {
+        self.ownerProcessIdentifier = ownerProcessIdentifier; self.layer = layer
+        self.bounds = bounds; self.alpha = alpha
+    }
+
+    var hasValidGeometryAndAlpha: Bool {
+        ownerProcessIdentifier > 0 && alpha.isFinite && (0...1).contains(alpha)
+            && !bounds.isNull && !bounds.isInfinite && !bounds.isEmpty
+            && [bounds.minX, bounds.minY, bounds.width, bounds.height].allSatisfy(\.isFinite)
+    }
+}
+
+/// Pure occlusion assessment for a retained focused window. Unknown means the
+/// stack cannot prove that the visible pixels match the keyboard recipient.
+struct ComputerUseVisibleWindowStack {
+    enum Assessment: Equatable { case clear, occluded, unknown }
+    let entries: [ComputerUseVisibleWindowEntry]
+    private let hasInvalidRelevantEntry: Bool
+
+    private static let relevantLayers: Set<Int> = [
+        Int(CGWindowLevelForKey(.normalWindow)),
+        Int(CGWindowLevelForKey(.floatingWindow)),
+        Int(CGWindowLevelForKey(.modalPanelWindow)),
+    ]
+
+    init(windowInfo: [[String: Any]]) {
+        var parsed: [ComputerUseVisibleWindowEntry] = []
+        var invalid = false
+        for info in windowInfo {
+            guard let layer = info[kCGWindowLayer as String] as? Int else {
+                invalid = true; continue
+            }
+            guard Self.relevantLayers.contains(layer) else { continue }
+            guard let entry = ComputerUseVisibleWindowEntry(windowInfo: info),
+                  entry.hasValidGeometryAndAlpha else {
+                invalid = true; continue
+            }
+            parsed.append(entry)
+        }
+        entries = parsed; hasInvalidRelevantEntry = invalid
+    }
+
+    init(entries: [ComputerUseVisibleWindowEntry]) {
+        self.entries = entries; hasInvalidRelevantEntry = false
+    }
+
+    func assessFocusedWindow(ownerProcessIdentifier: pid_t, bounds: CGRect) -> Assessment {
+        guard !hasInvalidRelevantEntry, !bounds.isNull, !bounds.isInfinite,
+              !bounds.isEmpty,
+              [bounds.minX, bounds.minY, bounds.width, bounds.height].allSatisfy(\.isFinite) else {
+            return .unknown
+        }
+        let relevant = entries.filter { Self.relevantLayers.contains($0.layer) }
+        guard relevant.allSatisfy(\.hasValidGeometryAndAlpha) else { return .unknown }
+        guard let candidateIndex = relevant.firstIndex(where: {
+            $0.ownerProcessIdentifier == ownerProcessIdentifier && $0.bounds == bounds
+                && $0.hasValidGeometryAndAlpha && $0.alpha > 0
+        }) else { return .unknown }
+        for entry in relevant[..<candidateIndex] {
+            guard entry.hasValidGeometryAndAlpha else { return .unknown }
+            guard entry.alpha > 0, entry.ownerProcessIdentifier != ownerProcessIdentifier else { continue }
+            let intersection = entry.bounds.intersection(bounds)
+            if !intersection.isNull && !intersection.isEmpty
+                && intersection.width > 0 && intersection.height > 0 {
+                return .occluded
+            }
+        }
+        return .clear
+    }
 }
 
 /// Value-free identity of the UI state a semantic route was selected from.
@@ -839,7 +978,7 @@ struct ComputerUsePlanningStateFingerprint: Equatable {
             && expectedApplicationIdentity == candidateApplicationIdentity
     }
 
-    private func matchesStableSignedFocusedAuthority(
+    func matchesStableSignedFocusedAuthority(
         _ candidate: ComputerUsePlanningStateFingerprint
     ) -> Bool {
         guard let expectedApplicationIdentity = frontmostApplicationIdentity,
@@ -862,6 +1001,128 @@ struct ComputerUsePlanningStateFingerprint: Equatable {
     }
 }
 
+/// Bridges the native opener's callback without making Stop wait for Launch
+/// Services. Cancellation/deadline only ends this wait; the OS operation may
+/// still finish. The executor must retain that attempted effect as uncertain.
+enum ComputerUseApplicationOpenOperation {
+    enum Failure: Error, Equatable, LocalizedError {
+        case timedOut, busy
+        var errorDescription: String? {
+            switch self {
+            case .timedOut:
+                return "Opening the app took too long. It may still open; check its state before continuing."
+            case .busy:
+                return "An earlier app-open request is still finishing. Wait for it to settle before continuing."
+            }
+        }
+    }
+
+    private static let nativeFlight = NativeFlight()
+    static var hasPendingNativeOpen: Bool { nativeFlight.isOccupied }
+    static func beginNativeOpen() throws -> UUID { try nativeFlight.begin() }
+    static func finishNativeOpen(_ id: UUID) { nativeFlight.finish(id) }
+
+    /// Cancellation of the waiter must not release this lease. An outstanding
+    /// OS activation could steal focus from new automation; only its native
+    /// callback (or a failure before dispatch) can release the exact lease.
+    private final class NativeFlight: @unchecked Sendable {
+        private let lock = NSLock()
+        private var owner: UUID?
+        var isOccupied: Bool { lock.withLock { owner != nil } }
+        func begin() throws -> UUID {
+            try lock.withLock {
+                guard owner == nil else { throw Failure.busy }
+                let id = UUID()
+                owner = id
+                return id
+            }
+        }
+        func finish(_ id: UUID) {
+            lock.withLock { if owner == id { owner = nil } }
+        }
+    }
+
+    @MainActor
+    static func run<Value: Sendable>(
+        timeout: TimeInterval = 30,
+        start: (@escaping @Sendable (Result<Value, Error>) -> Void) throws -> Void
+    ) async throws -> Value {
+        try Task.checkCancellation()
+        guard timeout.isFinite, timeout > 0, timeout <= 30 else { throw Failure.timedOut }
+        let delivery = Delivery<Value>()
+        let deadline = DispatchWorkItem { delivery.finish(.failure(Failure.timedOut)) }
+        defer { deadline.cancel() }
+        // Return the winning completion without a later cancellation check.
+        // The caller must record verified success before honoring Stop.
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                delivery.install(continuation)
+                guard !delivery.isFinished else { return }
+                DispatchQueue.global(qos: .userInitiated).asyncAfter(
+                    deadline: .now() + timeout, execute: deadline)
+                do {
+                    try Task.checkCancellation()
+                    guard !delivery.isFinished else { return }
+                    try start { delivery.finish($0) }
+                } catch {
+                    delivery.finish(.failure(error))
+                }
+            }
+        } onCancel: {
+            delivery.finish(.failure(CancellationError()))
+        }
+    }
+
+    private final class Delivery<Value: Sendable>: @unchecked Sendable {
+        private let lock = NSLock()
+        private var result: Result<Value, Error>?
+        private var continuation: CheckedContinuation<Value, Error>?
+        var isFinished: Bool { lock.withLock { result != nil } }
+
+        func install(_ continuation: CheckedContinuation<Value, Error>) {
+            let finished = lock.withLock { () -> Result<Value, Error>? in
+                if let result { return result }
+                self.continuation = continuation
+                return nil
+            }
+            if let finished { continuation.resume(with: finished) }
+        }
+
+        func finish(_ result: Result<Value, Error>) {
+            let waiter = lock.withLock { () -> CheckedContinuation<Value, Error>? in
+                guard self.result == nil else { return nil }
+                self.result = result
+                defer { continuation = nil }
+                return continuation
+            }
+            waiter?.resume(with: result)
+        }
+    }
+}
+
+enum ComputerUseNativeBrowserHostCommand {
+    case newWindow
+    case focusAddress
+    case commitAddress
+
+    var usage: Int {
+        switch self {
+        case .newWindow: return 0x11 // N
+        case .focusAddress: return 0x0F // L
+        case .commitAddress: return 0x28 // Return
+        }
+    }
+
+    var modifiers: UInt16 {
+        switch self {
+        case .newWindow, .focusAddress: return 1 << 3 // Command
+        case .commitAddress: return 0
+        }
+    }
+
+    var action: ComputerUsePredictedAction { .key(usage: usage, modifiers: modifiers) }
+}
+
 @MainActor
 final class ComputerUseHostTools {
     private static let semanticGroundingLog = Logger(
@@ -871,6 +1132,8 @@ final class ComputerUseHostTools {
     enum ToolError: Error, LocalizedError {
         case paused
         case screenshotUnavailable
+        case visualSurfaceObscured
+        case focusedDisplayUnavailable
         case applicationUnavailable
         case approvalTargetUnavailable
         case approvalTargetChanged
@@ -878,8 +1141,12 @@ final class ComputerUseHostTools {
 
         var errorDescription: String? {
             switch self {
-            case .paused: return "AI Computer Use is paused by the user."
+            case .paused: return "AI Computer Use is paused."
             case .screenshotUnavailable: return "The Mac screen could not be captured."
+            case .visualSurfaceObscured:
+                return "Close the covering window or handle the system dialog, then bring the intended window to the front and choose Resume."
+            case .focusedDisplayUnavailable:
+                return "Move the intended window fully onto one active display, then choose Resume."
             case .applicationUnavailable:
                 return "The requested Mac app could not be found or opened."
             case .approvalTargetUnavailable:
@@ -900,6 +1167,7 @@ final class ComputerUseHostTools {
     private let approvalTargetProvider:
         ((ComputerUsePredictedAction) throws -> ComputerUseApprovalTargetSnapshot)?
     private let actionPerformer: ((ComputerUsePredictedAction) throws -> Void)?
+    private(set) var lastScreenCaptureFailureForDiagnostics: String?
     /// Deterministic seam used to exercise a gate close after one low-level
     /// event has posted but before the rest of an approved action is emitted.
     /// Production leaves this nil.
@@ -914,7 +1182,6 @@ final class ComputerUseHostTools {
         ((ComputerUsePredictedAction) -> Bool)?
     private let accessibilityContextProvider:
         ((ComputerUsePredictedAction) -> String)?
-    private let calculatorSnapshotProvider: (() -> ComputerUseCalculatorSnapshot?)?
     private let authenticationContextProvider:
         (() -> ComputerUseAuthenticationContextSnapshot?)?
     private let screenCaptureConsentContextProvider:
@@ -945,7 +1212,6 @@ final class ComputerUseHostTools {
             ((ComputerUsePredictedAction) -> Bool)? = nil,
         accessibilityContextProvider:
             ((ComputerUsePredictedAction) -> String)? = nil,
-        calculatorSnapshotProvider: (() -> ComputerUseCalculatorSnapshot?)? = nil,
         authenticationContextProvider:
             (() -> ComputerUseAuthenticationContextSnapshot?)? = nil,
         screenCaptureConsentContextProvider:
@@ -956,7 +1222,9 @@ final class ComputerUseHostTools {
         frontmostApplicationProvider: (() -> String?)? = nil
     ) {
         self.injector = injector
-        self.mayAct = mayAct
+        self.mayAct = {
+            mayAct() && !ComputerUseApplicationOpenOperation.hasPendingNativeOpen
+        }
         if let applicationIdentityOpener {
             self.applicationOpener = applicationIdentityOpener
             self.applicationOpenerProvidesCanonicalIdentity = true
@@ -968,7 +1236,8 @@ final class ComputerUseHostTools {
             self.applicationOpenerProvidesCanonicalIdentity = false
         } else {
             self.applicationOpener = {
-                try await ComputerUseHostTools.openInstalledApplication(named: $0)
+                try await ComputerUseHostTools.openInstalledApplication(
+                    named: $0, mayAct: mayAct)
             }
             self.applicationOpenerProvidesCanonicalIdentity = true
         }
@@ -1000,7 +1269,6 @@ final class ComputerUseHostTools {
             self.transientSystemOverlayProvider = nil
         }
         self.accessibilityContextProvider = accessibilityContextProvider
-        self.calculatorSnapshotProvider = calculatorSnapshotProvider
         if let authenticationContextProvider {
             self.authenticationContextProvider = authenticationContextProvider
         } else if screenProvider != nil {
@@ -1031,6 +1299,68 @@ final class ComputerUseHostTools {
             frontmostApplicationIdentityProvider == nil
                 && frontmostApplicationProvider == nil
                 && screenProvider == nil
+    }
+
+    /// Session adapters must not carry permission across asynchronous work.
+    func requireActive() throws {
+        try Task.checkCancellation()
+        guard mayAct() else { throw ToolError.paused }
+    }
+
+    /// Closed host-owned browser commands. These cannot be created by a model
+    /// proposal and intentionally carry no user-selected key payload.
+    func performNativeBrowserHostCommand(
+        _ command: ComputerUseNativeBrowserHostCommand,
+        expectedApplication: ComputerUseApplicationIdentity,
+        willBeginEffect: @escaping () throws -> Void
+    ) throws {
+        func validateFrontmostSafari() throws {
+            guard expectedApplication.bundleIdentifier == "com.apple.Safari",
+                  let expectedCode = expectedApplication.codeIdentity,
+                  expectedCode.bundleIdentifier == "com.apple.Safari" else {
+                throw ToolError.approvalTargetChanged
+            }
+            let frontmost = frontmostApplicationSnapshot()
+            guard frontmost.identityIsAuthoritative,
+                  let current = frontmost.identity,
+                  current == expectedApplication,
+                  current.codeIdentity == expectedCode else {
+                throw ToolError.approvalTargetChanged
+            }
+        }
+
+        try Task.checkCancellation()
+        try requireActive()
+        try validateFrontmostSafari()
+
+        let beforePosting = {
+            try Task.checkCancellation()
+            try self.requireActive()
+            try validateFrontmostSafari()
+            try willBeginEffect()
+            // Session checks may perform bounded Accessibility reads. Recheck
+            // the signed frontmost app and task gate immediately before input.
+            try Task.checkCancellation()
+            try self.requireActive()
+            try validateFrontmostSafari()
+        }
+        do {
+            if actionPerformer != nil {
+                // Deterministic virtual fixtures keep the same checks and latch;
+                // production has no actionPerformer and always posts via injector.
+                try injector.performHostEffectIfAllowed(
+                    ifAllowed: { !Task.isCancelled && self.mayAct() }) {
+                    try beforePosting()
+                    try self.perform(command.action, reportsPartialApprovedEffect: false)
+                }
+            } else {
+                try injector.applyHostKeyStroke(usage: command.usage, modifiers: command.modifiers,
+                    ifAllowed: { !Task.isCancelled && self.mayAct() }, beforePosting: beforePosting)
+            }
+        } catch InputInjector.AutomationGateError.interrupted {
+            try Task.checkCancellation()
+            throw ToolError.paused
+        }
     }
 
     func frontmostApplicationName() -> String? {
@@ -1165,6 +1495,7 @@ final class ComputerUseHostTools {
     func openApplication(
         named rawName: String
     ) async throws -> ComputerUseApplicationIdentity? {
+        try Task.checkCancellation()
         guard mayAct() else { throw ToolError.paused }
         let name = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !name.isEmpty,
@@ -1177,6 +1508,8 @@ final class ComputerUseHostTools {
               name.rangeOfCharacter(from: .controlCharacters) == nil else {
             throw ToolError.applicationUnavailable
         }
+        try Task.checkCancellation()
+        guard mayAct() else { throw ToolError.paused }
         let identity = try await applicationOpener(name)
         if applicationOpenerProvidesCanonicalIdentity {
             guard let identity, identity.codeIdentity != nil else {
@@ -1191,9 +1524,9 @@ final class ComputerUseHostTools {
         return identity
     }
 
-    private static func openInstalledApplication(
+    static func resolveReviewedApplication(
         named name: String
-    ) async throws -> ComputerUseApplicationIdentity {
+    ) throws -> (url: URL, bundleIdentifier: String, code: ComputerUseReviewedApplicationCodeVerifier.StaticIdentity) {
         // Resolve only through the host-owned alias -> bundle-ID registry.
         // A localized application name is attacker-controlled, and the modern
         // Launch Services API intentionally has no trustworthy name resolver.
@@ -1232,16 +1565,44 @@ final class ComputerUseHostTools {
             throw ToolError.applicationUnavailable
         }
 
+        return (applicationURL, resolvedBundleIdentifier, reviewedStaticIdentity)
+    }
+
+    static func openInstalledApplication(
+        named name: String,
+        mayAct: () -> Bool,
+        expectedURL: URL? = nil
+    ) async throws -> ComputerUseApplicationIdentity {
+        let resolved = try resolveReviewedApplication(named: name)
+        if let expectedURL,
+           resolved.url != expectedURL.resolvingSymlinksInPath().standardizedFileURL {
+            throw ToolError.applicationUnavailable
+        }
+        let applicationURL = resolved.url
+        let resolvedBundleIdentifier = resolved.bundleIdentifier
+        let reviewedStaticIdentity = resolved.code
         let configuration = NSWorkspace.OpenConfiguration()
         configuration.activates = true
-        return try await withCheckedThrowingContinuation {
-            (continuation: CheckedContinuation<ComputerUseApplicationIdentity, Error>) in
+        return try await ComputerUseApplicationOpenOperation.run { complete in
+            // Static bundle/code validation does not carry permission through
+            // to dispatch. Recheck immediately before Launch Services.
+            try Task.checkCancellation()
+            guard mayAct() else { throw ToolError.paused }
+            let flight = try ComputerUseApplicationOpenOperation.beginNativeOpen()
+            do {
+                try Task.checkCancellation()
+                guard mayAct() else { throw ToolError.paused }
+            } catch {
+                ComputerUseApplicationOpenOperation.finishNativeOpen(flight)
+                throw error
+            }
             NSWorkspace.shared.openApplication(
                 at: applicationURL,
                 configuration: configuration
             ) { application, error in
+                let result: Result<ComputerUseApplicationIdentity, Error>
                 if let error {
-                    continuation.resume(throwing: error)
+                    result = .failure(error)
                 } else if let application {
                     do {
                         let proof = try
@@ -1258,19 +1619,21 @@ final class ComputerUseHostTools {
                                 named: name) else {
                             throw ToolError.applicationUnavailable
                         }
-                        continuation.resume(returning: identity)
+                        result = .success(identity)
                     } catch {
-                        continuation.resume(
-                            throwing: ToolError.applicationUnavailable)
+                        result = .failure(ToolError.applicationUnavailable)
                     }
                 } else {
-                    continuation.resume(throwing: ToolError.applicationUnavailable)
+                    result = .failure(ToolError.applicationUnavailable)
                 }
+                ComputerUseApplicationOpenOperation.finishNativeOpen(flight)
+                complete(result)
             }
         }
     }
 
     func currentScreen() throws -> ComputerUseScreenObservation {
+        lastScreenCaptureFailureForDiagnostics = nil
         guard mayAct() else { throw ToolError.paused }
         if let screenProvider {
             return try screenProvider()
@@ -1279,27 +1642,78 @@ final class ComputerUseHostTools {
         // screenshot remains a full-display input for visual control, while
         // fact extractors can fail closed to this one active window instead
         // of accepting a coherent stale result from another visible app.
-        let windowBeforeCapture = liveFrontmostWindowSnapshot()
-        let displayID = CGMainDisplayID()
+        guard let windowBeforeCapture = liveFrontmostWindowSnapshot() else {
+            lastScreenCaptureFailureForDiagnostics = "window_before_unavailable"
+            throw ToolError.focusedDisplayUnavailable
+        }
+        guard let activeDisplaysBefore = liveActiveDisplayInventory(),
+              let selectedDisplayBefore = ComputerUseFocusedDisplaySelector.select(
+                windowBounds: windowBeforeCapture.bounds, activeDisplays: activeDisplaysBefore) else {
+            lastScreenCaptureFailureForDiagnostics = "display_before_unavailable"
+            throw ToolError.focusedDisplayUnavailable
+        }
+        guard let stackBeforeCapture = liveVisibleWindowStack(),
+              stackBeforeCapture.assessFocusedWindow(
+                ownerProcessIdentifier: windowBeforeCapture.applicationProcessIdentifier,
+                bounds: windowBeforeCapture.bounds) == .clear else {
+            lastScreenCaptureFailureForDiagnostics = "stack_before_obscured"
+            throw ToolError.visualSurfaceObscured
+        }
+        let displayID = selectedDisplayBefore.identifier
         guard let image = CGDisplayCreateImage(displayID) else {
+            lastScreenCaptureFailureForDiagnostics = "image_unavailable"
             throw ToolError.screenshotUnavailable
         }
         let windowAfterCapture = liveFrontmostWindowSnapshot()
+        guard let windowAfterCapture else {
+            lastScreenCaptureFailureForDiagnostics = "window_after_unavailable"
+            throw ToolError.visualSurfaceObscured
+        }
+        guard windowAfterCapture == windowBeforeCapture else {
+            lastScreenCaptureFailureForDiagnostics = "window_after_changed"
+            throw ToolError.visualSurfaceObscured
+        }
+        guard let activeDisplaysAfter = liveActiveDisplayInventory(),
+              let selectedDisplayAfter = ComputerUseFocusedDisplaySelector.select(
+                windowBounds: windowAfterCapture.bounds, activeDisplays: activeDisplaysAfter),
+              ComputerUseFocusedDisplaySelector.isStable(before: selectedDisplayBefore, after: selectedDisplayAfter) else {
+            lastScreenCaptureFailureForDiagnostics = "display_after_unavailable"
+            throw ToolError.focusedDisplayUnavailable
+        }
+        guard let stackAfterCapture = liveVisibleWindowStack(),
+              stackAfterCapture.assessFocusedWindow(
+                ownerProcessIdentifier: windowAfterCapture.applicationProcessIdentifier,
+                bounds: windowAfterCapture.bounds) == .clear else {
+            lastScreenCaptureFailureForDiagnostics = "stack_after_obscured"
+            throw ToolError.visualSurfaceObscured
+        }
         let frontmostWindowBounds = Self.stableFrontmostWindowBounds(
             before: windowBeforeCapture,
             after: windowAfterCapture)
-        let displayBounds = CGDisplayBounds(displayID)
-        let bounds = displayBounds.width > 0 && displayBounds.height > 0
-            ? displayBounds
-            : CGRect(
-                x: 0,
-                y: 0,
-                width: CGDisplayPixelsWide(displayID),
-                height: CGDisplayPixelsHigh(displayID))
+        let displayBounds = selectedDisplayBefore.bounds
         return ComputerUseScreenObservation(
             image: CIImage(cgImage: image),
-            displayBounds: bounds,
+            displayBounds: displayBounds,
             frontmostWindowBounds: frontmostWindowBounds)
+    }
+
+    private func liveActiveDisplayInventory() -> [ComputerUseActiveDisplay]? {
+        var count: UInt32 = 0
+        guard CGGetActiveDisplayList(0, nil, &count) == .success,
+              count > 0, count <= 32 else { return nil }
+        var identifiers = Array(repeating: CGDirectDisplayID(0), count: Int(count))
+        var actualCount = count
+        let status = identifiers.withUnsafeMutableBufferPointer { buffer in
+            CGGetActiveDisplayList(count, buffer.baseAddress, &actualCount)
+        }
+        guard status == .success, actualCount == count else { return nil }
+        return identifiers.map { ComputerUseActiveDisplay(identifier: $0, bounds: CGDisplayBounds($0)) }
+    }
+
+    private func liveVisibleWindowStack() -> ComputerUseVisibleWindowStack? {
+        guard let windowInfo = CGWindowListCopyWindowInfo(
+            .optionOnScreenOnly, kCGNullWindowID) as? [[String: Any]] else { return nil }
+        return ComputerUseVisibleWindowStack(windowInfo: windowInfo)
     }
 
     func planningStateFingerprint(
@@ -1424,6 +1838,7 @@ final class ComputerUseHostTools {
             return nil
         }
         let root = AXUIElementCreateApplication(application.processIdentifier)
+        AXUIElementSetMessagingTimeout(root, 1.5)
         var focusedWindowValue: CFTypeRef?
         guard AXUIElementCopyAttributeValue(
             root,
@@ -1436,6 +1851,7 @@ final class ComputerUseHostTools {
         let focusedWindow = unsafeBitCast(
             focusedWindowValue,
             to: AXUIElement.self)
+        AXUIElementSetMessagingTimeout(focusedWindow, 0.5)
         guard let origin = pointAttribute(
                 kAXPositionAttribute as CFString,
                 from: focusedWindow),
@@ -1469,148 +1885,6 @@ final class ComputerUseHostTools {
         return data
     }
 
-    /// Reads only Calculator's visible input/result field from its bounded
-    /// Accessibility subtree. The deterministic arithmetic route uses this
-    /// as execution evidence and never reports completion from the injected
-    /// keystrokes alone.
-    func calculatorSnapshot() throws -> ComputerUseCalculatorSnapshot? {
-        guard mayAct() else { throw ToolError.paused }
-        if let calculatorSnapshotProvider {
-            return calculatorSnapshotProvider()
-        }
-        return Self.liveCalculatorSnapshot()
-    }
-
-    private static func liveCalculatorSnapshot() -> ComputerUseCalculatorSnapshot? {
-        guard let application = NSWorkspace.shared.frontmostApplication,
-              application.bundleIdentifier == "com.apple.calculator",
-              !application.isTerminated else {
-            return nil
-        }
-        let root = AXUIElementCreateApplication(application.processIdentifier)
-        var focusedWindowValue: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(
-            root,
-            kAXFocusedWindowAttribute as CFString,
-            &focusedWindowValue) == .success,
-              let focusedWindowValue,
-              CFGetTypeID(focusedWindowValue) == AXUIElementGetTypeID() else {
-            return nil
-        }
-        let focusedWindow = unsafeBitCast(
-            focusedWindowValue,
-            to: AXUIElement.self)
-        guard let inputContainers = calculatorContainers(
-            in: focusedWindow,
-            identifier: "StandardInputView"),
-              inputContainers.count == 1,
-              let expressionContainers = calculatorContainers(
-                in: focusedWindow,
-                identifier: "StandardResultView"),
-              expressionContainers.count <= 1 else {
-            return nil
-        }
-        var inputVisited = 0
-        let inputValue = firstStaticTextValue(
-            in: inputContainers[0],
-            depth: 0,
-            visited: &inputVisited)
-        let expressionValue: String?
-        if let expressionContainer = expressionContainers.first {
-            var expressionVisited = 0
-            expressionValue = firstStaticTextValue(
-                in: expressionContainer,
-                depth: 0,
-                visited: &expressionVisited)
-        } else {
-            expressionValue = nil
-        }
-        guard inputValue != nil else { return nil }
-        return ComputerUseCalculatorSnapshot(
-            inputValue: inputValue,
-            expressionValue: expressionValue)
-    }
-
-    private static func calculatorContainers(
-        in element: AXUIElement,
-        identifier targetIdentifier: String
-    ) -> [AXUIElement]? {
-        var queue: [(AXUIElement, Int)] = [(element, 0)]
-        var index = 0
-        var matches: [AXUIElement] = []
-        while index < queue.count, index < 500 {
-            let (current, depth) = queue[index]
-            index += 1
-            guard depth <= 12 else { continue }
-            if stringAttribute(
-                kAXIdentifierAttribute as CFString,
-                from: current) == targetIdentifier {
-                matches.append(current)
-                guard matches.count <= 1 else { return nil }
-            }
-            var childValue: CFTypeRef?
-            if AXUIElementCopyAttributeValue(
-                current,
-                kAXChildrenAttribute as CFString,
-                &childValue) == .success,
-               let children = childValue as? [AXUIElement] {
-                queue.append(contentsOf: children.prefix(80).map {
-                    ($0, depth + 1)
-                })
-            }
-        }
-        guard index < 500 || index == queue.count else { return nil }
-        return matches
-    }
-
-    private static func firstStaticTextValue(
-        in element: AXUIElement,
-        depth: Int,
-        visited: inout Int
-    ) -> String? {
-        guard depth <= 6, visited < 80 else { return nil }
-        visited += 1
-        let role = stringAttribute(
-            kAXRoleAttribute as CFString,
-            from: element) ?? ""
-        let identifier = stringAttribute(
-            kAXIdentifierAttribute as CFString,
-            from: element) ?? ""
-
-        if role == kAXStaticTextRole as String,
-           let value = stringAttribute(
-               kAXValueAttribute as CFString,
-               from: element),
-           !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            return value
-        }
-        if identifier == "StandardInputView" || identifier == "StandardResultView",
-           let value = stringAttribute(
-               kAXValueAttribute as CFString,
-               from: element),
-           !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            return value
-        }
-
-        var childValue: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(
-            element,
-            kAXChildrenAttribute as CFString,
-            &childValue) == .success,
-              let children = childValue as? [AXUIElement] else {
-            return nil
-        }
-        for child in children.prefix(80) {
-            if let value = firstStaticTextValue(
-                in: child,
-                depth: depth + 1,
-                visited: &visited) {
-                return value
-            }
-        }
-        return nil
-    }
-
     private static func stringAttribute(
         _ attribute: CFString,
         from element: AXUIElement
@@ -1623,328 +1897,6 @@ final class ComputerUseHostTools {
             return nil
         }
         return value as? String
-    }
-
-    func approvalReason(for action: ComputerUsePredictedAction) -> String? {
-        ComputerUseActionSafetyPolicy.approvalReason(
-            for: action,
-            accessibilityContext: accessibilityContext(for: action))
-    }
-
-    /// Returns a human-facing label only when the point resolves to an
-    /// actionable Accessibility control. Missing labels deliberately remain
-    /// inconclusive for canvas and icon-only interfaces.
-    func actionablePointerTargetLabel(
-        at point: CGPoint,
-        providerAction: ComputerUsePredictedAction
-    ) -> String? {
-        if let accessibilityContextProvider {
-            return Self.actionableLabel(
-                fromProvidedContext: accessibilityContextProvider(
-                    providerAction))
-        }
-
-        let systemWide = AXUIElementCreateSystemWide()
-        var element: AXUIElement?
-        guard AXUIElementCopyElementAtPosition(
-            systemWide,
-            Float(point.x),
-            Float(point.y),
-            &element) == .success,
-              var current = element else { return nil }
-
-        for _ in 0 ..< 8 {
-            let snapshot = accessibilitySnapshot(for: current)
-            if snapshot.isActionable,
-               let label = snapshot.attestationLabel {
-                return label
-            }
-            guard let parent = parentElement(of: current) else { break }
-            current = parent
-        }
-        return nil
-    }
-
-    /// Returns true only when the system focus is a writable, non-secure text
-    /// control. A semantic TYPE route carries exact host-owned text, but the
-    /// language router cannot prove where keyboard input will land. Keep that
-    /// final destination decision in the host and fail closed when
-    /// Accessibility cannot identify an editable target.
-    func focusedTypingTargetIsEditable(
-        providerAction: ComputerUsePredictedAction
-    ) throws -> Bool {
-        guard mayAct() else { throw ToolError.paused }
-        if let accessibilityContextProvider {
-            return Self.providedContextDescribesEditableTypingTarget(
-                accessibilityContextProvider(providerAction))
-        }
-        guard let focused = focusedElement() else { return false }
-        let role = Self.stringAttribute(
-            kAXRoleAttribute as CFString,
-            from: focused) ?? ""
-        let subrole = Self.stringAttribute(
-            kAXSubroleAttribute as CFString,
-            from: focused) ?? ""
-        let editableRoles: Set<String> = [
-            kAXTextFieldRole as String,
-            kAXTextAreaRole as String,
-            kAXComboBoxRole as String,
-        ]
-        guard editableRoles.contains(role),
-              !subrole.localizedCaseInsensitiveContains("secure"),
-              boolAttribute(
-                  kAXEnabledAttribute as CFString,
-                  from: focused) == true else { return false }
-
-        var valueIsSettable = DarwinBoolean(false)
-        guard AXUIElementIsAttributeSettable(
-            focused,
-            kAXValueAttribute as CFString,
-            &valueIsSettable) == .success else { return false }
-        return valueIsSettable.boolValue
-    }
-
-    private static func providedContextDescribesEditableTypingTarget(
-        _ context: String
-    ) -> Bool {
-        let normalized = " " + context.folding(
-            options: [.caseInsensitive, .diacriticInsensitive],
-            locale: Locale(identifier: "en_US_POSIX"))
-            .unicodeScalars
-            .map {
-                CharacterSet.alphanumerics.contains($0)
-                    ? String($0)
-                    : " "
-            }
-            .joined()
-            .split(whereSeparator: { $0.isWhitespace })
-            .joined(separator: " ") + " "
-        guard !normalized.contains(" axsecuretextfield "),
-              !normalized.contains(" secure text field "),
-              !normalized.contains(" disabled "),
-              !normalized.contains(" enabled false "),
-              !normalized.contains(" editable false ") else { return false }
-        return [
-            " axtextfield ",
-            " axtextarea ",
-            " axcombobox ",
-            " axsearchfield ",
-        ].contains(where: normalized.contains)
-    }
-
-    private static func actionableLabel(
-        fromProvidedContext context: String
-    ) -> String? {
-        let tokens = context.folding(
-            options: [.caseInsensitive, .diacriticInsensitive],
-            locale: Locale(identifier: "en_US_POSIX"))
-            .unicodeScalars
-            .split(whereSeparator: {
-                !CharacterSet.alphanumerics.contains($0)
-            })
-            .map(String.init)
-        let actionableRoles: Set<String> = [
-            "axbutton", "axcheckbox", "axradiobutton", "axpopupbutton",
-            "axcombobox", "axtextfield", "axtextarea", "axmenuitem",
-            "axslider", "axincrementor", "axlink", "axswitch", "axcell",
-        ]
-        guard !actionableRoles.isDisjoint(with: tokens) else { return nil }
-
-        let structuralValues = actionableRoles.union([
-            "role", "subrole", "title", "description", "placeholder",
-            "identifier", "enabled", "selected",
-        ])
-        let labelTokens = tokens.filter { !structuralValues.contains($0) }
-        guard !labelTokens.isEmpty else { return nil }
-        return labelTokens.joined(separator: " ")
-    }
-
-    /// Correct only a primary single-click, and only when the model point lands
-    /// on a non-actionable Accessibility container while one unique enabled
-    /// control is visible within a tightly bounded neighborhood. This never
-    /// chooses between candidates and never changes drags or secondary clicks.
-    func conservativelyAdjustedAction(
-        _ action: ComputerUsePredictedAction
-    ) -> ComputerUsePredictedAction {
-        if let conservativeActionAdjustmentProvider {
-            return conservativeActionAdjustmentProvider(action)
-        }
-        guard case .click(let x, let y, let button, let count) = action,
-              button == 1,
-              count == 1 else { return action }
-        let predicted = CGPoint(x: x, y: y)
-        let directHit = accessibilityClickCandidate(at: predicted)
-        guard let directHit, !directHit.isActionable else { return action }
-        let radius = OSAtlasAccessibilityClickCorrection.maximumRadius
-        let step: CGFloat = 16
-        var nearby: [OSAtlasAccessibilityClickCandidate] = []
-        for offsetY in stride(from: -radius, through: radius, by: step) {
-            for offsetX in stride(from: -radius, through: radius, by: step) {
-                guard offsetX != 0 || offsetY != 0,
-                      hypot(offsetX, offsetY) <= radius else { continue }
-                let point = CGPoint(
-                    x: predicted.x + offsetX,
-                    y: predicted.y + offsetY)
-                if let candidate = accessibilityClickCandidate(at: point) {
-                    nearby.append(candidate)
-                }
-            }
-        }
-        let corrected = OSAtlasAccessibilityClickCorrection.correctedPoint(
-            predicted: predicted,
-            directHit: directHit,
-            nearbyCandidates: nearby)
-        guard corrected != predicted else { return action }
-        return .click(
-            x: Int(corrected.x.rounded()),
-            y: Int(corrected.y.rounded()),
-            button: button,
-            count: count)
-    }
-
-    /// A typed pointer route may use its task-purpose hint to correct a poor
-    /// visual carrier across the focused window. The candidate source is the
-    /// focused frontmost window (preferring its first web area) or an explicit
-    /// synthetic test seam; it never combines a virtual screenshot with live
-    /// Accessibility state. Ambiguous/no semantic matches retain the existing
-    /// geometry-only conservative behavior.
-    func conservativelyAdjustedAction(
-        _ action: ComputerUsePredictedAction,
-        semanticTargetHint: String,
-        trustedTaskFallbackHint: String?,
-        rawVisualPoint: CGPoint
-    ) -> ComputerUsePredictedAction {
-        guard case .click(_, _, let button, let count) = action,
-              button == 1,
-              count == 1 else {
-            return conservativelyAdjustedAction(action)
-        }
-
-        let scope: OSAtlasSemanticAccessibilityClickScope?
-        if let semanticAccessibilityClickScopeProvider {
-            scope = semanticAccessibilityClickScopeProvider(
-                action,
-                semanticTargetHint)
-        } else if screenProvider != nil {
-            // Synthetic pixels and the person's live AX tree have no shared
-            // authority. Tests that exercise semantic correction inject the
-            // exact candidate scope explicitly.
-            scope = nil
-        } else {
-            scope = focusedSemanticAccessibilityClickScope()
-        }
-
-        guard let scope else {
-            return conservativelyAdjustedAction(action)
-        }
-        let primary = OSAtlasSemanticAccessibilityClickCorrection
-            .correctedPoint(
-                predicted: rawVisualPoint,
-                targetHint: semanticTargetHint,
-                scope: scope)
-        let fallback = trustedTaskFallbackHint.flatMap { hint in
-            OSAtlasSemanticAccessibilityClickCorrection.correctedPoint(
-                predicted: rawVisualPoint,
-                targetHint: hint,
-                scope: scope)
-        }
-        let corrected = primary ?? fallback
-        let fallbackMatchCount = trustedTaskFallbackHint.map { hint in
-            scope.candidates.filter {
-                OSAtlasSemanticAccessibilityClickCorrection.stronglyMatches(
-                    targetHint: hint,
-                    candidateLabel: $0.label)
-            }.count
-        } ?? -1
-        Self.semanticGroundingLog.info(
-            "semantic AX correction rawInside=\(scope.frame.contains(rawVisualPoint), privacy: .public) candidates=\(scope.candidates.count, privacy: .public) primary=\(primary != nil, privacy: .public) fallbackAvailable=\(trustedTaskFallbackHint != nil, privacy: .public) fallbackMatches=\(fallbackMatchCount, privacy: .public) fallbackCorrected=\(fallback != nil, privacy: .public) corrected=\(corrected != nil, privacy: .public)")
-        guard let corrected else {
-            return conservativelyAdjustedAction(action)
-        }
-        return .click(
-            x: Int(corrected.x.rounded()),
-            y: Int(corrected.y.rounded()),
-            button: button,
-            count: count)
-    }
-
-    /// Reports the number of distinct enabled/actionable AX controls that
-    /// strongly match one host-bound target. `nil` means no trustworthy AX
-    /// scope is available, while `0` deliberately leaves visual grounding as a
-    /// fallback. More than one match is an ambiguity and must fail closed.
-    func semanticAccessibilityActionableMatchCount(
-        for action: ComputerUsePredictedAction,
-        targetHint: String
-    ) -> Int? {
-        guard case .click(_, _, let button, let count) = action,
-              button == 1,
-              count == 1 else { return nil }
-
-        let scope: OSAtlasSemanticAccessibilityClickScope?
-        if let semanticAccessibilityClickScopeProvider {
-            scope = semanticAccessibilityClickScopeProvider(action, targetHint)
-        } else if screenProvider != nil {
-            scope = nil
-        } else {
-            scope = focusedSemanticAccessibilityClickScope()
-        }
-        guard let scope,
-              scope.frame.origin.x.isFinite,
-              scope.frame.origin.y.isFinite,
-              scope.frame.width.isFinite,
-              scope.frame.height.isFinite,
-              scope.frame.width > 0,
-              scope.frame.height > 0 else {
-            return nil
-        }
-
-        var identities: Set<String> = []
-        for candidate in scope.candidates where
-            candidate.isEnabled && candidate.isActionable
-            && candidate.frame.origin.x.isFinite
-            && candidate.frame.origin.y.isFinite
-            && candidate.frame.width.isFinite
-            && candidate.frame.height.isFinite
-            && candidate.frame.width > 0 && candidate.frame.height > 0
-            && scope.frame.contains(CGPoint(
-                x: candidate.frame.midX,
-                y: candidate.frame.midY))
-            && OSAtlasSemanticAccessibilityClickCorrection.stronglyMatches(
-                targetHint: targetHint,
-                candidateLabel: candidate.label) {
-            identities.insert(candidate.identity)
-        }
-        return identities.count
-    }
-
-    fileprivate func prepareApproval(
-        for action: ComputerUsePredictedAction
-    ) throws -> ComputerUsePreparedApproval {
-        let target = try approvalTarget(for: action)
-        let message = ComputerUseActionSafetyPolicy.approvalReason(
-            for: action,
-            accessibilityContext: target.context,
-            forceConfirmation: true)
-            ?? "Perform this exact action on the current screen"
-        let fingerprint = ComputerUseApprovalFingerprint(
-            action: action,
-            applicationID: target.applicationID,
-            accessibilityIdentity: target.accessibilityIdentity,
-            visualDigest: try visualDigest(around: target.visualCheckpoints))
-        return ComputerUsePreparedApproval(
-            message: message,
-            fingerprint: fingerprint)
-    }
-
-    fileprivate func performApproved(
-        _ action: ComputerUsePredictedAction,
-        fingerprint: ComputerUseApprovalFingerprint
-    ) throws {
-        let current = try prepareApproval(for: action).fingerprint
-        guard current == fingerprint else {
-            throw ToolError.approvalTargetChanged
-        }
-        try perform(action, reportsPartialApprovedEffect: true)
     }
 
     private struct ApprovalTarget {
@@ -1983,7 +1935,7 @@ final class ComputerUseHostTools {
         switch action {
         case .click(let x, let y, _, _):
             let point = CGPoint(x: x, y: y)
-            snapshots = elementSnapshot(at: point).map { [$0] } ?? []
+            snapshots = actionableElementSnapshot(at: point).map { [$0] } ?? []
             checkpoints = [point]
 
         case .drag(let fromX, let fromY, let toX, let toY):
@@ -1996,9 +1948,15 @@ final class ComputerUseHostTools {
         case .key:
             let focused = focusedElementSnapshot()
             snapshots = focused.map { [$0] } ?? []
-            checkpoints = focused?.center.map { [$0] }
-                ?? [CGPoint(x: CGDisplayBounds(CGMainDisplayID()).midX,
-                            y: CGDisplayBounds(CGMainDisplayID()).midY)]
+            guard screenProvider == nil,
+                  let focusedWindow = liveFrontmostWindowSnapshot(),
+                  let activeDisplays = liveActiveDisplayInventory(),
+                  let selectedDisplay = ComputerUseFocusedDisplaySelector.select(
+                    windowBounds: focusedWindow.bounds, activeDisplays: activeDisplays) else {
+                throw ToolError.approvalTargetUnavailable
+            }
+            checkpoints = [Self.nativeKeyboardCheckpoint(focusedFrame: focused?.frame,
+                windowBounds: focusedWindow.bounds, displayBounds: selectedDisplay.bounds)]
 
         case .typeText:
             guard let focused = focusedElementSnapshot() else {
@@ -2031,13 +1989,34 @@ final class ComputerUseHostTools {
             visualCheckpoints: checkpoints)
     }
 
+    static func nativeKeyboardCheckpoint(focusedFrame: CGRect?, windowBounds: CGRect?, displayBounds: CGRect) -> CGPoint {
+        func visible(_ frame: CGRect?, in bounds: CGRect) -> CGRect? {
+            guard let frame, !frame.isEmpty,
+                  [frame.minX, frame.minY, frame.width, frame.height].allSatisfy(\.isFinite) else { return nil }
+            let intersection = frame.intersection(bounds)
+            return intersection.isEmpty || intersection.isNull ? nil : intersection
+        }
+        let window = visible(windowBounds, in: displayBounds) ?? displayBounds
+        // AX outlines can describe all scrollable rows, with their center far
+        // offscreen. Bind keyboard pixels to the visible part of that control.
+        // This point is only observed; keyboard input still targets AX focus.
+        let target = visible(focusedFrame, in: window) ?? window
+        return CGPoint(x: target.midX, y: target.midY)
+    }
+
     private func accessibilityContext(for action: ComputerUsePredictedAction) -> String {
         if let accessibilityContextProvider {
-            return accessibilityContextProvider(action)
+            let context = accessibilityContextProvider(action)
+            if case .click = action,
+               Self.actionableLabel(fromProvidedContext: context) == nil { return "" }
+            return context
         }
         switch action {
         case .click(let x, let y, _, _):
-            return elementSnapshot(at: CGPoint(x: x, y: y))?.summary ?? ""
+            // A containing application/window/web area does not identify the
+            // clicked control. Resolve an actionable ancestor (for nested
+            // text/images), or require approval for the unidentified point.
+            return actionableElementSnapshot(at: CGPoint(x: x, y: y))?.summary ?? ""
         case .drag(let fromX, let fromY, let toX, let toY):
             return [
                 elementSnapshot(at: CGPoint(x: fromX, y: fromY))?.summary,
@@ -2210,6 +2189,9 @@ final class ComputerUseHostTools {
         return unsafeBitCast(value, to: AXUIElement.self)
     }
 
+    /// Text snapshots may resolve an active suggestion row to its owning
+    /// expanded combo box. Generic button/menu focus continues to use the raw
+    /// system-wide focused element above.
     private func focusedElementSnapshot() -> AccessibilitySnapshot? {
         guard let focused = focusedElement() else { return nil }
         return accessibilitySnapshot(for: focused)
@@ -2564,34 +2546,91 @@ final class ComputerUseHostTools {
     }
 
     private func visualDigest(around points: [CGPoint]) throws -> String? {
+        lastScreenCaptureFailureForDiagnostics = nil
         guard !points.isEmpty else { return nil }
-        let displayID = CGMainDisplayID()
-        let bounds = CGDisplayBounds(displayID)
+        // A synthetic observation must never be mixed with the live display.
+        guard screenProvider == nil else { return nil }
+        let windowBefore = liveFrontmostWindowSnapshot()
+        guard let windowBefore else {
+            lastScreenCaptureFailureForDiagnostics = "digest_window_before_unavailable"
+            throw ToolError.focusedDisplayUnavailable
+        }
+        guard let activeDisplaysBefore = liveActiveDisplayInventory(),
+              let selectedDisplayBefore = ComputerUseFocusedDisplaySelector.select(
+                windowBounds: windowBefore.bounds, activeDisplays: activeDisplaysBefore) else {
+            lastScreenCaptureFailureForDiagnostics = "digest_display_before_unavailable"
+            throw ToolError.focusedDisplayUnavailable
+        }
+        let displayID = selectedDisplayBefore.identifier
+        let bounds = selectedDisplayBefore.bounds
         guard bounds.width > 0, bounds.height > 0,
               let image = CGDisplayCreateImage(displayID) else {
             throw ToolError.screenshotUnavailable
         }
+        let windowAfter = liveFrontmostWindowSnapshot()
+        guard let windowAfter else {
+            lastScreenCaptureFailureForDiagnostics = "digest_window_after_unavailable"
+            throw ToolError.approvalTargetChanged
+        }
+        guard windowBefore == windowAfter else {
+            lastScreenCaptureFailureForDiagnostics = "digest_window_after_changed"
+            throw ToolError.approvalTargetChanged
+        }
+        guard let activeDisplaysAfter = liveActiveDisplayInventory(),
+              let selectedDisplayAfter = ComputerUseFocusedDisplaySelector.select(
+                windowBounds: windowAfter.bounds, activeDisplays: activeDisplaysAfter) else {
+            lastScreenCaptureFailureForDiagnostics = "digest_display_after_unavailable"
+            throw ToolError.approvalTargetChanged
+        }
+        guard ComputerUseFocusedDisplaySelector.isStable(before: selectedDisplayBefore, after: selectedDisplayAfter) else {
+            lastScreenCaptureFailureForDiagnostics = "digest_display_after_changed"
+            throw ToolError.approvalTargetChanged
+        }
+        return try Self.approvalVisualDigest(around: points, image: image, displayBounds: bounds, window: windowAfter)
+    }
 
+    static func approvalVisualDigest(around points: [CGPoint], image: CGImage, displayBounds bounds: CGRect,
+                                     window: ComputerUseFrontmostWindowCaptureIdentity?) throws -> String? {
+        guard !points.isEmpty else { return nil }
+        func valid(_ rect: CGRect) -> Bool {
+            !rect.isEmpty && [rect.minX, rect.minY, rect.maxX, rect.maxY, rect.width, rect.height].allSatisfy(\.isFinite)
+        }
+        guard valid(bounds), points.allSatisfy({ $0.x.isFinite && $0.y.isFinite && bounds.contains($0) }),
+              window.map({ valid($0.bounds) }) ?? true else { throw ToolError.approvalTargetUnavailable }
         let scaleX = CGFloat(image.width) / bounds.width
         let scaleY = CGFloat(image.height) / bounds.height
-        var digestInput = Data()
+        let imageBounds = CGRect(x: 0, y: 0, width: image.width, height: image.height)
+        var scope = imageBounds
+        func geometry(_ rect: CGRect) -> [String] {
+            [rect.minX, rect.minY, rect.width, rect.height].map { String(Double($0)) }
+        }
+        var identity = ["approval-pixels-v2", String(image.width), String(image.height)] + geometry(bounds)
+        if let window {
+            identity += ["window", String(window.applicationProcessIdentifier), String(window.accessibilityWindowHash)] + geometry(window.bounds)
+            // A cross-window drag or a target outside the focused window
+            // still needs display pixels at every checkpoint.
+            if points.allSatisfy({ window.bounds.contains($0) }) {
+                scope = CGRect(x: (window.bounds.minX - bounds.minX) * scaleX,
+                    y: (window.bounds.minY - bounds.minY) * scaleY,
+                    width: window.bounds.width * scaleX, height: window.bounds.height * scaleY).intersection(imageBounds)
+            }
+        } else { identity.append("unknown-window") }
+        var digestInput = Data(ComputerUseTaskContract.digest(identity).utf8)
         for point in points {
             let pixelPoint = CGPoint(
                 x: (point.x - bounds.minX) * scaleX,
                 y: (point.y - bounds.minY) * scaleY)
             let radius: CGFloat = 48
-            let imageBounds = CGRect(
-                x: 0,
-                y: 0,
-                width: image.width,
-                height: image.height)
-            let cropRect = CGRect(
+            let requested = CGRect(
                 x: pixelPoint.x - radius,
                 y: pixelPoint.y - radius,
                 width: radius * 2,
                 height: radius * 2)
-                .intersection(imageBounds)
-                .integral
+                .intersection(scope)
+            // Whole image pixels only: outward rounding at a fractional
+            // window edge can import pixels from the adjacent application.
+            let cropRect = CGRect(x: ceil(requested.minX), y: ceil(requested.minY),
+                width: floor(requested.maxX) - ceil(requested.minX), height: floor(requested.maxY) - ceil(requested.minY))
             guard cropRect.width > 0, cropRect.height > 0,
                   let crop = image.cropping(to: cropRect) else {
                 throw ToolError.approvalTargetUnavailable
@@ -2614,6 +2653,7 @@ final class ComputerUseHostTools {
                 return true
             }
             guard rendered else { throw ToolError.screenshotUnavailable }
+            digestInput.append(contentsOf: ComputerUseTaskContract.digest(geometry(cropRect)).utf8)
             digestInput.append(contentsOf: pixels)
         }
         return SHA256.hash(data: digestInput)
@@ -2623,6 +2663,419 @@ final class ComputerUseHostTools {
 
     func perform(_ action: ComputerUsePredictedAction) throws {
         try perform(action, reportsPartialApprovedEffect: false)
+    }
+
+
+    func approvalReason(for action: ComputerUsePredictedAction) -> String? {
+        if case .key(let usage, let modifiers) = action, usage == 0x28, modifiers == 0,
+           usesLiveFrontmostApplicationIdentity, screenProvider == nil, accessibilityContextProvider == nil,
+           mayAct(), let app = frontmostApplicationSnapshot().identity, app.codeIdentity != nil,
+           let snapshot = try? ComputerUseDefaultBrowserSession.captureWindowsForApplication(app),
+           !snapshot.hasUnrecognizedSheets, let panel = snapshot.fileOpenPanel,
+           panel.isNavigatingPath, panel.pathFieldIsFocused {
+            // Return in the native Go To field navigates the local picker.
+            // It neither activates the outer Open/Upload button nor submits a
+            // website form; the retained-window scope is checked separately.
+            return nil
+        }
+        return ComputerUseActionSafetyPolicy.approvalReason(
+            for: action,
+            accessibilityContext: accessibilityContext(for: action))
+    }
+
+    /// Returns a human-facing label only when the point resolves to an
+    /// actionable Accessibility control. Missing labels deliberately remain
+    /// inconclusive for canvas and icon-only interfaces.
+    func actionablePointerTargetLabel(
+        at point: CGPoint,
+        providerAction: ComputerUsePredictedAction
+    ) -> String? {
+        if let accessibilityContextProvider {
+            return Self.actionableLabel(
+                fromProvidedContext: accessibilityContextProvider(
+                    providerAction))
+        }
+
+        return actionableElementSnapshot(at: point)?.attestationLabel
+    }
+
+    private func actionableElementSnapshot(
+        at point: CGPoint,
+        requiringLabel: Bool = true,
+        excludingStructuralGeometry: Bool = false
+    ) -> AccessibilitySnapshot? {
+        let systemWide = AXUIElementCreateSystemWide()
+        var element: AXUIElement?
+        guard AXUIElementCopyElementAtPosition(
+            systemWide,
+            Float(point.x),
+            Float(point.y),
+            &element) == .success,
+              var current = element else { return nil }
+
+        var hitPathLabel: String?
+        for _ in 0 ..< 8 {
+            let snapshot = accessibilitySnapshot(for: current)
+            let currentLabel = snapshot.attestationLabel.flatMap { value -> String? in
+                guard !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                    return nil
+                }
+                return String(value.prefix(256))
+            }
+            if hitPathLabel == nil {
+                hitPathLabel = currentLabel
+            }
+            let role = Self.stringAttribute(kAXRoleAttribute as CFString, from: current) ?? ""
+            var selectedValue: CFTypeRef?
+            var selectableCell = false
+            if role == "AXCell" {
+                selectedValue = Self.attributeValue(kAXSelectedAttribute as CFString, from: current)
+                let selectedCapability = Self.selectedAttributeSettableResult(for: current)
+                selectableCell = Self.isSelectableAXCell(
+                    role: role,
+                    selectedValue: selectedValue,
+                    selectedSettableResult: selectedCapability.result,
+                    selectedIsSettable: selectedCapability.isSettable,
+                    enabled: boolAttribute(kAXEnabledAttribute as CFString, from: current))
+            }
+            if selectableCell {
+                let label = currentLabel ?? hitPathLabel
+                if !requiringLabel || label != nil {
+                    let boundLabel = label
+                    let summary = [snapshot.summary, boundLabel]
+                        .compactMap { $0 }
+                        .filter { !$0.isEmpty }
+                        .joined(separator: " • ")
+                    return AccessibilitySnapshot(
+                        summary: summary,
+                        attestationLabel: boundLabel,
+                        identity: snapshot.identity
+                            + "|AXSelected=\(Self.booleanDescription(selectedValue))"
+                            + "|hitPathLabel=\(boundLabel ?? "")",
+                        center: snapshot.center,
+                        frame: snapshot.frame,
+                        isEnabled: true,
+                        isActionable: true)
+                }
+            }
+            // AX hit testing identifies the element at the physical point.
+            // Browser AX frames can be offset from that point; use the hit
+            // for its label, and validate usable geometry separately.
+            // Structural containers do not identify a specific clicked control;
+            // pointer callers can instead use their scoped point context.
+            let structuralGeometryRoles: Set<String> = [
+                "AXGroup", "AXWebArea", "AXScrollArea", "AXWindow", "AXApplication"
+            ]
+            if snapshot.isActionable,
+               (!excludingStructuralGeometry || !structuralGeometryRoles.contains(role)),
+               (!requiringLabel || snapshot.attestationLabel != nil) {
+                return snapshot
+            }
+            guard let parent = parentElement(of: current) else { break }
+            current = parent
+        }
+        return nil
+    }
+
+    static func isSelectableAXCell(
+        role: String,
+        selectedValue: CFTypeRef?,
+        selectedSettableResult: AXError,
+        selectedIsSettable: Bool,
+        enabled: Bool?
+    ) -> Bool {
+        guard role == "AXCell",
+              let selectedValue,
+              CFGetTypeID(selectedValue) == CFBooleanGetTypeID(),
+              selectedSettableResult == .success,
+              selectedIsSettable,
+              enabled != false else { return false }
+        return true
+    }
+
+    private static func attributeValue(
+        _ attribute: CFString,
+        from element: AXUIElement
+    ) -> CFTypeRef? {
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, attribute, &value) == .success else {
+            return nil
+        }
+        return value
+    }
+
+    private static func selectedAttributeSettableResult(
+        for element: AXUIElement
+    ) -> (result: AXError, isSettable: Bool) {
+        var isSettable = DarwinBoolean(false)
+        let result = AXUIElementIsAttributeSettable(
+            element, kAXSelectedAttribute as CFString, &isSettable)
+        return (result, isSettable.boolValue)
+    }
+
+    private static func booleanDescription(_ value: CFTypeRef?) -> String {
+        guard let value, CFGetTypeID(value) == CFBooleanGetTypeID() else {
+            return "unavailable"
+        }
+        return CFBooleanGetValue(unsafeBitCast(value, to: CFBoolean.self)) ? "true" : "false"
+    }
+
+    private static func actionableLabel(
+        fromProvidedContext context: String
+    ) -> String? {
+        let tokens = context.folding(
+            options: [.caseInsensitive, .diacriticInsensitive],
+            locale: Locale(identifier: "en_US_POSIX"))
+            .unicodeScalars
+            .split(whereSeparator: {
+                !CharacterSet.alphanumerics.contains($0)
+            })
+            .map(String.init)
+        let actionableRoles: Set<String> = [
+            "axbutton", "axcheckbox", "axradiobutton", "axpopupbutton",
+            "axcombobox", "axtextfield", "axtextarea", "axmenuitem",
+            "axslider", "axincrementor", "axlink", "axswitch", "axcell",
+        ]
+        guard !actionableRoles.isDisjoint(with: tokens) else { return nil }
+
+        let structuralValues = actionableRoles.union([
+            "role", "subrole", "title", "description", "placeholder",
+            "identifier", "enabled", "selected",
+        ])
+        let labelTokens = tokens.filter { !structuralValues.contains($0) }
+        guard !labelTokens.isEmpty else { return nil }
+        return labelTokens.joined(separator: " ")
+    }
+
+    /// Correct only a primary single-click, and only when the model point lands
+    /// on a non-actionable Accessibility container while one unique enabled
+    /// control is visible within a tightly bounded neighborhood. This never
+    /// chooses between candidates and never changes drags or secondary clicks.
+    func conservativelyAdjustedAction(
+        _ action: ComputerUsePredictedAction
+    ) -> ComputerUsePredictedAction {
+        if let conservativeActionAdjustmentProvider {
+            return conservativeActionAdjustmentProvider(action)
+        }
+        guard case .click(let x, let y, let button, let count) = action,
+              button == 1,
+              count == 1 else { return action }
+        let predicted = CGPoint(x: x, y: y)
+        let directHit = accessibilityClickCandidate(at: predicted)
+        guard let directHit, !directHit.isActionable else { return action }
+        let radius = OSAtlasAccessibilityClickCorrection.maximumRadius
+        let step: CGFloat = 16
+        var nearby: [OSAtlasAccessibilityClickCandidate] = []
+        for offsetY in stride(from: -radius, through: radius, by: step) {
+            for offsetX in stride(from: -radius, through: radius, by: step) {
+                guard offsetX != 0 || offsetY != 0,
+                      hypot(offsetX, offsetY) <= radius else { continue }
+                let point = CGPoint(
+                    x: predicted.x + offsetX,
+                    y: predicted.y + offsetY)
+                if let candidate = accessibilityClickCandidate(at: point) {
+                    nearby.append(candidate)
+                }
+            }
+        }
+        let corrected = OSAtlasAccessibilityClickCorrection.correctedPoint(
+            predicted: predicted,
+            directHit: directHit,
+            nearbyCandidates: nearby)
+        guard corrected != predicted else { return action }
+        return .click(
+            x: Int(corrected.x.rounded()),
+            y: Int(corrected.y.rounded()),
+            button: button,
+            count: count)
+    }
+
+    /// A typed pointer route may use its task-purpose hint to correct a poor
+    /// visual carrier across the focused window. The candidate source is the
+    /// focused frontmost window (preferring its first web area) or an explicit
+    /// synthetic test seam; it never combines a virtual screenshot with live
+    /// Accessibility state. Ambiguous/no semantic matches retain the existing
+    /// geometry-only conservative behavior.
+    func conservativelyAdjustedAction(
+        _ action: ComputerUsePredictedAction,
+        semanticTargetHint: String,
+        trustedTaskFallbackHint: String?,
+        rawVisualPoint: CGPoint
+    ) -> ComputerUsePredictedAction {
+        guard case .click(_, _, let button, let count) = action,
+              button == 1,
+              count == 1 else {
+            return conservativelyAdjustedAction(action)
+        }
+
+        let scope: OSAtlasSemanticAccessibilityClickScope?
+        if let semanticAccessibilityClickScopeProvider {
+            scope = semanticAccessibilityClickScopeProvider(
+                action,
+                semanticTargetHint)
+        } else if screenProvider != nil {
+            // Synthetic pixels and the person's live AX tree have no shared
+            // authority. Tests that exercise semantic correction inject the
+            // exact candidate scope explicitly.
+            scope = nil
+        } else {
+            scope = focusedSemanticAccessibilityClickScope()
+        }
+
+        guard let scope else {
+            return conservativelyAdjustedAction(action)
+        }
+        let primary = OSAtlasSemanticAccessibilityClickCorrection
+            .correctedPoint(
+                predicted: rawVisualPoint,
+                targetHint: semanticTargetHint,
+                scope: scope)
+        let fallback = trustedTaskFallbackHint.flatMap { hint in
+            OSAtlasSemanticAccessibilityClickCorrection.correctedPoint(
+                predicted: rawVisualPoint,
+                targetHint: hint,
+                scope: scope)
+        }
+        let corrected = primary ?? fallback
+        let fallbackMatchCount = trustedTaskFallbackHint.map { hint in
+            scope.candidates.filter {
+                OSAtlasSemanticAccessibilityClickCorrection.stronglyMatches(
+                    targetHint: hint,
+                    candidateLabel: $0.label)
+            }.count
+        } ?? -1
+        Self.semanticGroundingLog.info(
+            "semantic AX correction rawInside=\(scope.frame.contains(rawVisualPoint), privacy: .public) candidates=\(scope.candidates.count, privacy: .public) primary=\(primary != nil, privacy: .public) fallbackAvailable=\(trustedTaskFallbackHint != nil, privacy: .public) fallbackMatches=\(fallbackMatchCount, privacy: .public) fallbackCorrected=\(fallback != nil, privacy: .public) corrected=\(corrected != nil, privacy: .public)")
+        guard let corrected else {
+            return conservativelyAdjustedAction(action)
+        }
+        return .click(
+            x: Int(corrected.x.rounded()),
+            y: Int(corrected.y.rounded()),
+            button: button,
+            count: count)
+    }
+
+    /// Reports the number of distinct enabled/actionable AX controls that
+    /// strongly match one host-bound target. `nil` means no trustworthy AX
+    /// scope is available, while `0` deliberately leaves visual grounding as a
+    /// fallback. More than one match is an ambiguity and must fail closed.
+    func semanticAccessibilityActionableMatchCount(
+        for action: ComputerUsePredictedAction,
+        targetHint: String
+    ) -> Int? {
+        guard case .click(_, _, let button, let count) = action,
+              button == 1,
+              count == 1 else { return nil }
+
+        let scope: OSAtlasSemanticAccessibilityClickScope?
+        if let semanticAccessibilityClickScopeProvider {
+            scope = semanticAccessibilityClickScopeProvider(action, targetHint)
+        } else if screenProvider != nil {
+            scope = nil
+        } else {
+            scope = focusedSemanticAccessibilityClickScope()
+        }
+        guard let scope,
+              scope.frame.origin.x.isFinite,
+              scope.frame.origin.y.isFinite,
+              scope.frame.width.isFinite,
+              scope.frame.height.isFinite,
+              scope.frame.width > 0,
+              scope.frame.height > 0 else {
+            return nil
+        }
+
+        var identities: Set<String> = []
+        for candidate in scope.candidates where
+            candidate.isEnabled && candidate.isActionable
+            && candidate.frame.origin.x.isFinite
+            && candidate.frame.origin.y.isFinite
+            && candidate.frame.width.isFinite
+            && candidate.frame.height.isFinite
+            && candidate.frame.width > 0 && candidate.frame.height > 0
+            && scope.frame.contains(CGPoint(
+                x: candidate.frame.midX,
+                y: candidate.frame.midY))
+            && OSAtlasSemanticAccessibilityClickCorrection.stronglyMatches(
+                targetHint: targetHint,
+                candidateLabel: candidate.label) {
+            identities.insert(candidate.identity)
+        }
+        return identities.count
+    }
+
+    fileprivate func prepareApproval(
+        for action: ComputerUsePredictedAction
+    ) throws -> ComputerUsePreparedApproval {
+        let target = try approvalTarget(for: action)
+        var accessibilityIdentity = target.accessibilityIdentity
+        let message = ComputerUseActionSafetyPolicy.approvalReason(
+            for: action,
+            accessibilityContext: target.context,
+            forceConfirmation: true)
+            ?? "Perform this exact action on the current screen"
+        let fingerprint = ComputerUseApprovalFingerprint(
+            action: action,
+            applicationID: target.applicationID,
+            accessibilityIdentity: accessibilityIdentity,
+            visualDigest: try visualDigest(around: target.visualCheckpoints))
+        return ComputerUsePreparedApproval(
+            message: message,
+            fingerprint: fingerprint)
+    }
+
+    fileprivate func performApproved(
+        _ action: ComputerUsePredictedAction,
+        fingerprint: ComputerUseApprovalFingerprint,
+        willBeginEffect: () throws -> Void
+    ) async throws {
+        try Task.checkCancellation()
+        guard mayAct() else { throw ToolError.paused }
+        let current = try prepareApproval(for: action).fingerprint
+        guard current.matchesForFinalDispatch(fingerprint) else {
+            throw ToolError.approvalTargetChanged
+        }
+        try willBeginEffect()
+        try perform(action, reportsPartialApprovedEffect: true)
+    }
+
+    /// Native model adapters retain the same approval fingerprint boundary as
+    /// approved host input. Text dispatch uses its scoped visual-keyboard path;
+    /// the adapter still owns policy and journals in willBeginEffect.
+    func prepareNativeActionFingerprint(for action: ComputerUsePredictedAction) throws -> ComputerUseApprovalFingerprint {
+        try prepareApproval(for: action).fingerprint
+    }
+
+    func nativePointerTargetFrame(for action: ComputerUsePredictedAction) throws -> CGRect? {
+        guard mayAct() else { throw ToolError.paused }
+        guard case .click(let x, let y, _, _) = action else { return nil }
+        if let approvalTargetProvider { return try approvalTargetProvider(action).frame }
+        guard screenProvider == nil else { return nil }
+        // Geometry is useful even when an editor or icon has no semantic
+        // label. Label attestation keeps its stricter, separate requirement;
+        // the executor still validates target authority and current pixels.
+        let point = CGPoint(x: x, y: y)
+        guard let frame = actionableElementSnapshot(
+            at: point,
+            requiringLabel: false,
+            excludingStructuralGeometry: true)?.frame,
+              !frame.isEmpty, [frame.minX, frame.minY, frame.width, frame.height].allSatisfy(\.isFinite),
+              frame.contains(point) else { return nil }
+        return frame
+    }
+
+    func nativeControlObservation(displayBounds: CGRect, windowBounds: CGRect) throws -> ComputerUseNativeControls? {
+        guard mayAct() else { throw ToolError.paused }
+        // Synthetic screenshots/context have no relationship to live AX.
+        guard screenProvider == nil, accessibilityContextProvider == nil else { return nil }
+        return try ComputerUseNativeControlReader.observe(displayBounds: displayBounds, windowBounds: windowBounds,
+            access: .live, mayAct: mayAct)
+    }
+
+    func performNativeAction(_ action: ComputerUsePredictedAction, fingerprint: ComputerUseApprovalFingerprint,
+                            willBeginEffect: () throws -> Void) async throws {
+        try await performApproved(action, fingerprint: fingerprint, willBeginEffect: willBeginEffect)
     }
 
     private func perform(
@@ -2679,23 +3132,71 @@ final class ComputerUseHostTools {
         case .key(let usage, let modifiers):
             try inject(.key(usage: usage, down: true, modifiers: modifiers))
             try inject(.key(usage: usage, down: false, modifiers: modifiers))
-        case .typeText(let text):
-            try inject(.text(text))
+        case .typeText:
+            throw ToolError.approvalTargetUnavailable
         case .requestApproval, .wait, .done:
             break
         }
     }
 }
 
-private final class ComputerUseActionGate: @unchecked Sendable {
+final class ComputerUseActionGate: @unchecked Sendable {
     private let lock = NSLock()
     private var value = true
-    private var automationPending = false
+    private var pendingAutomationID: UUID?
+    private var pendingAutomationAdopted = false
     private var automationActive = false
     private var approvalPending = false
+    struct InputIntervention: Equatable, Sendable {
+        fileprivate let id: UUID
+    }
+    private var pendingInputIntervention: InputIntervention?
+    struct PausedInputSnapshot: Equatable, Sendable {
+        let scopeID: UUID
+        let generation: UInt64
+    }
+    private var pausedInputScopeID: UUID?
+    private var pausedInputGeneration: UInt64 = 0
+    private var pausedInputUnacknowledged = false
+
+    func trackPausedInput(scopeID: UUID?) {
+        lock.withLock {
+            guard pausedInputScopeID != scopeID else { return }
+            pausedInputScopeID = scopeID
+            pausedInputGeneration = 0
+            pausedInputUnacknowledged = false
+        }
+    }
+    func pausedInputSnapshot(scopeID: UUID) -> PausedInputSnapshot? {
+        lock.withLock {
+            guard pausedInputScopeID == scopeID else { return nil }
+            return .init(scopeID: scopeID, generation: pausedInputGeneration)
+        }
+    }
+    func hasUnacknowledgedInput(_ snapshot: PausedInputSnapshot) -> Bool {
+        lock.withLock {
+            pausedInputScopeID == snapshot.scopeID && pausedInputUnacknowledged
+        }
+    }
+    func acknowledgePausedInput(_ snapshot: PausedInputSnapshot) {
+        lock.withLock {
+            guard pausedInputScopeID == snapshot.scopeID, pausedInputGeneration == snapshot.generation,
+                  pausedInputGeneration < UInt64.max else { return }
+            pausedInputUnacknowledged = false
+        }
+    }
 
     var allowsActions: Bool {
         lock.withLock { value }
+    }
+
+    /// Intervention clears held approval ownership under this same lock.
+    func requiresInterventionOnPeerAuthorization(preservingHeldApproval: Bool) -> Bool {
+        lock.withLock { !value && !(preservingHeldApproval && approvalPending) }
+    }
+
+    var hasPendingInputIntervention: Bool {
+        lock.withLock { pendingInputIntervention != nil }
     }
 
     func setAllowsActions(_ allowed: Bool) {
@@ -2705,22 +3206,53 @@ private final class ComputerUseActionGate: @unchecked Sendable {
     /// Claims one automation while it waits for a cancelled predecessor to
     /// join. Actions stay closed, but direct input still owns an intervention
     /// race and can invalidate this pending claim synchronously off-main.
-    func beginAutomationPending() {
+    func reservePendingAutomation() -> UUID {
+        lock.withLock { reservePendingAutomationLocked() }
+    }
+    func reservePendingAutomation(after snapshot: PausedInputSnapshot) -> UUID? {
         lock.withLock {
+            guard pausedInputScopeID == snapshot.scopeID, pausedInputGeneration == snapshot.generation,
+                  !pausedInputUnacknowledged else { return nil }
+            return reservePendingAutomationLocked()
+        }
+    }
+    private func reservePendingAutomationLocked() -> UUID {
+        let id = UUID()
+        pendingInputIntervention = nil
+        value = false
+        pendingAutomationID = id
+        pendingAutomationAdopted = false
+        automationActive = false
+        approvalPending = false
+        return id
+    }
+
+    /// Resume reserves before readiness/claim work. Adoption cannot recreate
+    /// a reservation invalidated by direct input during that synchronous work.
+    func adoptPendingAutomation(_ id: UUID) -> Bool {
+        lock.withLock {
+            guard pendingAutomationID == id, !pendingAutomationAdopted else { return false }
+            pendingAutomationAdopted = true
+            return true
+        }
+    }
+
+    func abandonReservedAutomation(_ id: UUID) {
+        lock.withLock {
+            guard pendingAutomationID == id, !pendingAutomationAdopted else { return }
             value = false
-            automationPending = true
-            automationActive = false
-            approvalPending = false
+            pendingAutomationID = nil
         }
     }
 
     /// Opens the pending claim only if no intervention, stop, or newer state
     /// transition took ownership while the predecessor was unwinding.
-    func activatePendingAutomation() -> Bool {
+    func activatePendingAutomation(_ id: UUID) -> Bool {
         lock.withLock {
-            guard automationPending else { return false }
+            guard pendingAutomationID == id, pendingAutomationAdopted else { return false }
             value = true
-            automationPending = false
+            pendingAutomationID = nil
+            pendingAutomationAdopted = false
             automationActive = true
             approvalPending = false
             return true
@@ -2735,7 +3267,8 @@ private final class ComputerUseActionGate: @unchecked Sendable {
         lock.withLock {
             guard approvalPending else { return false }
             value = true
-            automationPending = false
+            pendingAutomationID = nil
+            pendingAutomationAdopted = false
             automationActive = true
             approvalPending = false
             return true
@@ -2749,7 +3282,7 @@ private final class ComputerUseActionGate: @unchecked Sendable {
     @discardableResult
     func endAutomation(allowsActions: Bool) -> Bool {
         lock.withLock {
-            let ownsTransition = automationPending
+            let ownsTransition = pendingAutomationID != nil
                 || automationActive
                 || approvalPending
             if !allowsActions {
@@ -2757,33 +3290,64 @@ private final class ComputerUseActionGate: @unchecked Sendable {
             } else if ownsTransition {
                 value = true
             }
-            automationPending = false
+            pendingAutomationID = nil
+            pendingAutomationAdopted = false
             automationActive = false
             approvalPending = false
+            pendingInputIntervention = nil
             return value
         }
     }
 
-    func beginApprovalWait() {
+    func beginApprovalWait() -> Bool {
         lock.withLock {
+            // A result arriving after synchronous input cannot recreate held
+            // approval authority while the input's actor callback is queued.
+            guard automationActive, value else { return false }
             value = false
-            automationPending = false
+            pendingAutomationID = nil
+            pendingAutomationAdopted = false
             automationActive = false
             approvalPending = true
+            return true
         }
     }
 
-    func blockForIntervention() -> Bool {
+    /// Record occurrence only. A paused burst schedules no actor callback or
+    /// disk write; an arriving control reconciles its newest generation.
+    func recordUserInput() -> InputIntervention? {
         lock.withLock {
-            guard automationPending
-                    || automationActive
-                    || approvalPending else { return false }
-            value = false
-            automationPending = false
-            automationActive = false
-            approvalPending = false
+            if pausedInputScopeID != nil {
+                if pausedInputGeneration < UInt64.max { pausedInputGeneration += 1 }
+                pausedInputUnacknowledged = true
+            }
+            guard blockForInterventionLocked() else { return nil }
+            let intervention = InputIntervention(id: UUID())
+            pendingInputIntervention = intervention
+            return intervention
+        }
+    }
+
+    /// The actor may apply this interruption once, only while the gate still
+    /// retains it. Pause, completion, Stop and a new admission retire it.
+    func consumeInputIntervention(_ intervention: InputIntervention) -> Bool {
+        lock.withLock {
+            guard pendingInputIntervention == intervention else { return false }
+            pendingInputIntervention = nil
             return true
         }
+    }
+    func blockForIntervention() -> Bool {
+        lock.withLock { blockForInterventionLocked() }
+    }
+    private func blockForInterventionLocked() -> Bool {
+        guard pendingAutomationID != nil || automationActive || approvalPending else { return false }
+        value = false
+        pendingAutomationID = nil
+        pendingAutomationAdopted = false
+        automationActive = false
+        approvalPending = false
+        return true
     }
 }
 
@@ -2802,7 +3366,7 @@ private final class ComputerUsePeerAuthorizationEpoch: @unchecked Sendable {
 /// Lock-protected ownership consulted by the WebRTC disconnect callback before
 /// it crosses to MainActor. A rejected second peer must never close the active
 /// LAN owner's native-action gate.
-private final class ComputerUseWebRTCAuthorizationFence: @unchecked Sendable {
+final class ComputerUseWebRTCAuthorizationFence: @unchecked Sendable {
     private struct Owner: Equatable {
         let senderID: String
         let generation: UInt64
@@ -2825,9 +3389,12 @@ private final class ComputerUseWebRTCAuthorizationFence: @unchecked Sendable {
         }
     }
 
-    func owns(senderID: String, generation: UInt64) -> Bool {
+    /// Keeps the owner check and its synchronous effect in one transition.
+    /// The effect must not re-enter this fence or wait on MainActor.
+    func performIfOwned(senderID: String, generation: UInt64, _ effect: () -> Bool) -> Bool {
         lock.withLock {
-            owner == Owner(senderID: senderID, generation: generation)
+            guard owner == Owner(senderID: senderID, generation: generation) else { return false }
+            return effect()
         }
     }
 }
@@ -2876,7 +3443,8 @@ enum ComputerUseExecutionResult: Equatable {
     case unableToComplete(String)
     /// The task cannot proceed until the user supplies missing information.
     /// Unlike live-screen intervention, this terminalizes the stable task ID;
-    /// the answer arrives as a new prompt with recent conversation context.
+    /// A retained native form issues a scoped reference for the answer task;
+    /// other capabilities may use recent conversation as planning context.
     case clarificationRequired(String)
     /// The requested task is still active, but the next step must be performed
     /// by the person (for example, entering account credentials). The manager
@@ -2886,7 +3454,7 @@ enum ComputerUseExecutionResult: Equatable {
         message: String,
         action: ComputerUsePredictedAction,
         continuation: ComputerUseVisualApprovalContinuation)
-    case mcpApprovalRequired(MCPPreparedApproval)
+    case agentApprovalRequired(AgentApprovalRequest)
 }
 
 protocol HostComputerUseChannel: Sendable {
@@ -2900,11 +3468,14 @@ protocol HostComputerUseChannel: Sendable {
     ) async throws -> ComputerUseEnvelope
 
     func poll() async throws -> [ComputerUseEnvelope]
+    func pollingInterval() async -> Duration
     func acknowledge(_ envelopes: [ComputerUseEnvelope]) async throws
     func stopPolling() async
 }
 
 extension HostComputerUseChannel {
+    func pollingInterval() async -> Duration { .seconds(2) }
+
     @discardableResult
     func send(
         kind: ComputerUseEnvelope.Kind,
@@ -2969,6 +3540,10 @@ actor SetupOnlyHostComputerUseChannel: HostComputerUseChannel {
         return envelopes.filter { $0.kind == .setupRequest }
     }
 
+    func pollingInterval() async -> Duration {
+        await wrapped.pollingInterval()
+    }
+
     func acknowledge(_ envelopes: [ComputerUseEnvelope]) async throws {
         let setupRequests = envelopes.filter { $0.kind == .setupRequest }
         guard !setupRequests.isEmpty else { return }
@@ -2986,15 +3561,6 @@ extension CloudKitComputerUseChannel: HostComputerUseChannel {}
 /// constructing the manager or opening the Mac UI can never start a download.
 /// The production actor performs signature and receipt validation for status;
 /// tests inject an in-memory implementation and never touch the network.
-protocol MacControlMCPProvisioning: Sendable {
-    func durableStatus() async -> MacControlMCPInstaller.DurableStatus
-    func install(
-        progress: @MainActor @Sendable @escaping (MacControlMCPInstaller.Update) -> Void
-    ) async throws -> MacControlMCPInstallationReceipt
-}
-
-extension MacControlMCPInstaller: MacControlMCPProvisioning {}
-
 protocol ComputerUseModelProvisioning: Sendable {
     func currentInstallation() async -> ComputerUseInstallationReceipt?
     func interruptedInstallationExists() async -> Bool
@@ -3016,6 +3582,8 @@ extension ComputerUseInstaller: ComputerUseModelProvisioning {}
 protocol ComputerUseExecuting: AnyObject {
     var isReady: Bool { get }
     var runtimeName: String { get }
+    var hasAdditionalSetup: Bool { get }
+    var readyDetail: String { get }
     func execute(
         prompt: String,
         tools: ComputerUseHostTools,
@@ -3054,6 +3622,14 @@ protocol ComputerUseExecuting: AnyObject {
 /// from host-authored prose.
 @MainActor
 protocol ComputerUseVisualApprovalContinuing: AnyObject {
+    func performApprovedVisualAction(
+        _ continuation: ComputerUseVisualApprovalContinuation,
+        action: ComputerUsePredictedAction,
+        fingerprint: ComputerUseApprovalFingerprint,
+        tools: ComputerUseHostTools,
+        willBeginEffect: () -> Void
+    ) async throws
+
     func continueAfterApprovedVisualAction(
         _ continuation: ComputerUseVisualApprovalContinuation,
         action: ComputerUsePredictedAction,
@@ -3065,7 +3641,19 @@ protocol ComputerUseVisualApprovalContinuing: AnyObject {
         _ continuation: ComputerUseVisualApprovalContinuation)
 }
 
+extension ComputerUseVisualApprovalContinuing {
+    func performApprovedVisualAction(_ continuation: ComputerUseVisualApprovalContinuation,
+        action: ComputerUsePredictedAction, fingerprint: ComputerUseApprovalFingerprint,
+        tools: ComputerUseHostTools, willBeginEffect: () -> Void) async throws {
+        try await tools.performApproved(action, fingerprint: fingerprint,
+            willBeginEffect: willBeginEffect)
+    }
+}
+
 extension ComputerUseExecuting {
+    var hasAdditionalSetup: Bool { false }
+    var readyDetail: String { "AI Computer Use is ready" }
+
     func execute(
         taskID: String,
         modelPrompt: String,
@@ -3099,11 +3687,6 @@ extension ComputerUseExecuting {
             progress: progress)
     }
 }
-
-typealias ComputerUseExecutorComposer = @MainActor @Sendable (
-    MacControlMCPInstallationReceipt,
-    any ComputerUseExecuting
-) async throws -> any ComputerUseExecuting
 
 /// Bounded monitor set for one setup generation. iOS refreshes its idempotent
 /// setup request while monitoring, so an active recipient renews its lease.
@@ -3217,6 +3800,7 @@ struct ComputerUseSetupRecipientRegistry {
 
 @MainActor
 final class HostComputerUseManager: ObservableObject {
+    private static let interventionLog = Logger(subsystem: "com.threadmark.remotedesktop.host", category: "agent-intervention")
     static let orderedControlsRequiredResponse =
         "AI Computer Use requires an updated iPhone app with ordered task controls. Update Remote Desktop before trying again. No action was taken."
     static let userInterventionGuidance =
@@ -3254,13 +3838,154 @@ final class HostComputerUseManager: ObservableObject {
     }
 
     @Published private(set) var modelState: ModelState = .downloadRequired
-    @Published private(set) var activity: Activity = .idle
+    @Published private(set) var activity: Activity = .idle {
+        willSet {
+            if case .working = newValue {
+                revokeOwnerMemoryScopeForAutomation()
+                willBeginAutomation?()
+            }
+        }
+        didSet { refreshLocalTaskControls() }
+    }
+    // The lifecycle owner wires this before it creates a local owner-memory
+    // scope, so every transition into automation revokes that scope first.
+    var willBeginAutomation: (@MainActor () -> Void)?
+    var didRevokeOwnerMemoryScope: (@MainActor (OwnerMemoryScopeLease) -> Void)?
+    var permitsOwnerMemorySession: Bool {
+        guard !isShuttingDown,
+              memoryErasureFence == nil,
+              activity == .idle,
+              currentExecution == nil,
+              pausedExecution == nil,
+              pendingApproval == nil,
+              activeVisualApprovalContinuation == nil,
+              postedApprovedVisualTaskID == nil,
+              currentExecutionToken == nil,
+              executionTask == nil else {
+            return false
+        }
+        return true
+    }
+
+    func mintOwnerMemoryScope(scopeID: UUID) -> OwnerMemoryScopeLease? {
+        guard permitsOwnerMemorySession, ownerMemoryScope == nil else { return nil }
+        ownerMemoryScopeGeneration &+= 1
+        let lease = OwnerMemoryScopeLease(scopeID: scopeID, generation: ownerMemoryScopeGeneration)
+        ownerMemoryScope = lease
+        ownerMemoryScopeConsumed = false
+        return lease
+    }
+
+    func isOwnerMemoryScopeCurrent(_ lease: OwnerMemoryScopeLease) -> Bool {
+        guard ownerMemoryScope == lease else { return false }
+        guard let fence = memoryErasureFence else { return true }
+        return !fence.revoked
+            && fence.authority == .owner(scopeID: lease.scopeID, generation: lease.generation)
+    }
+
+    func beginOwnerMemoryErasure(_ lease: OwnerMemoryScopeLease) -> UUID? {
+        guard !isShuttingDown else { return nil }
+        if let fence = memoryErasureFence {
+            guard !fence.revoked,
+                  fence.authority == .owner(scopeID: lease.scopeID, generation: lease.generation),
+                  ownerMemoryScope == lease else { return nil }
+            return fence.token
+        }
+        guard permitsOwnerMemorySession, ownerMemoryScope == lease,
+              !ownerMemoryScopeConsumed else { return nil }
+
+        ownerMemoryScopeConsumed = true
+        let fence = MemoryErasureFence(
+            token: UUID(),
+            authority: .owner(scopeID: lease.scopeID, generation: lease.generation),
+            peerID: "", sessionID: "", authorizationGeneration: 0,
+            executionTasks: [], lifecycleTasks: [], drainTask: nil, drained: false, revoked: false)
+        memoryErasureFence = fence
+        // The lifecycle hook can now distinguish this confirmed owner erase
+        // from phone erasure and ordinary automation before it closes the read scope.
+        willBeginAutomation?()
+        beginMemoryErasureWork(for: fence.token)
+        return memoryErasureFence?.token == fence.token
+            && memoryErasureFence?.revoked == false ? fence.token : nil
+    }
+
+    func isOwnerMemoryErasure(_ lease: OwnerMemoryScopeLease) -> Bool {
+        guard ownerMemoryScope == lease, let fence = memoryErasureFence else { return false }
+        return !fence.revoked
+            && fence.authority == .owner(scopeID: lease.scopeID, generation: lease.generation)
+    }
+
+    func revokeOwnerMemoryScope(_ lease: OwnerMemoryScopeLease) {
+        guard ownerMemoryScope == lease else { return }
+        retireOwnerMemoryScope(lease)
+        if let fence = memoryErasureFence,
+           fence.authority == .owner(scopeID: lease.scopeID, generation: lease.generation) {
+            revokeMemoryErasureFence(fence)
+        }
+    }
+
+    private func revokeOwnerMemoryScopeForAutomation() {
+        retireCurrentOwnerMemoryScope()
+    }
+
+    private func retireCurrentOwnerMemoryScope() {
+        guard let ownerMemoryScope else { return }
+        retireOwnerMemoryScope(ownerMemoryScope)
+    }
+
+    private func retireOwnerMemoryScope(_ lease: OwnerMemoryScopeLease) {
+        guard ownerMemoryScope == lease else { return }
+        ownerMemoryScope = nil
+        ownerMemoryScopeConsumed = false
+        didRevokeOwnerMemoryScope?(lease)
+    }
+    private struct TaskControlIdentity: Equatable {
+        let taskID: String
+        let senderID: String
+        let sessionID: String
+        var executionToken: UUID?
+        let authorizationGeneration: UInt64
+        let transportGeneration: UInt64
+        let remoteRevision: UInt64?
+        let hostControlEpoch: UInt64
+        let phase: ComputerUseTaskControls.Phase
+        let canResume: Bool
+
+        func sameOwner(as other: Self) -> Bool {
+            taskID == other.taskID && senderID == other.senderID && sessionID == other.sessionID
+                && authorizationGeneration == other.authorizationGeneration
+                && transportGeneration == other.transportGeneration
+        }
+    }
+    private var taskControlIdentity: TaskControlIdentity?
+    @Published private(set) var localTaskControls: ComputerUseTaskControls?
+    private struct PausedInputOwner: Equatable {
+        let taskID: String
+        let senderID: String
+        let sessionID: String
+        init(_ context: ExecutionContext) {
+            taskID = context.envelope.id; senderID = context.envelope.senderID; sessionID = context.envelope.sessionID
+        }
+    }
+    private var pausedInputOwner: PausedInputOwner?
+    private var pausedInputScopeID: UUID?
+
+    private var executorIsReady: Bool {
+        executor?.isReady == true
+    }
+
+    var needsAdditionalSetup: Bool { executor?.hasAdditionalSetup == true }
 
     var capability: ComputerUseCapability {
-        if macControlReceipt != nil, executor?.isReady == true {
+        if setupTask != nil, case .installing(let detail, _) = modelState {
+            // Setup owns the executor/model transition. New tasks are held
+            // at admission even if a previously loaded capability still exists.
+            return ComputerUseCapability(state: .installing, detail: detail)
+        }
+        if executorIsReady {
             switch activity {
             case .idle:
-                return .ready
+                return ComputerUseCapability(state: .ready, detail: executor?.readyDetail ?? "AI Computer Use is ready")
             case .working:
                 return ComputerUseCapability(
                     state: .busy,
@@ -3284,12 +4009,12 @@ final class HostComputerUseManager: ObservableObject {
                 state: .setupRequired,
                 detail: modelStateDetail)
         case .ready:
-            guard macControlReceipt != nil else {
+            guard executorIsReady else {
                 return ComputerUseCapability(
                     state: .setupRequired,
-                    detail: "Set up Mac control")
+                    detail: "Set up AI Computer Use")
             }
-            return .ready
+            return ComputerUseCapability(state: .ready, detail: executor?.readyDetail ?? "AI Computer Use is ready")
         }
     }
 
@@ -3310,6 +4035,12 @@ final class HostComputerUseManager: ObservableObject {
         let sessionID: String
     }
 
+    private struct TextClarificationContinuation {
+        let originatingTaskID: String
+        let goal: ComputerUseUnresolvedTextGoal
+        let selectedChoice: ComputerUseClarificationChoice?
+    }
+
     private struct ExecutionContext {
         let envelope: ComputerUseEnvelope
         let channel: any HostComputerUseChannel
@@ -3319,6 +4050,10 @@ final class HostComputerUseManager: ObservableObject {
         /// Typed prior chat supplied by the signed prompt payload. Host-authored
         /// resume/replan prose is deliberately not inserted into these turns.
         let conversation: [ComputerUseConversationTurn]
+        let textClarification: TextClarificationContinuation?
+        /// Captured from the admitted task payload. `nil` is reserved for a
+        /// malformed pre-delivered Pause and never grants memory access.
+        let memoryPolicy: ComputerUseTaskMemoryPolicy?
         /// False only when a versioned Pause reached the durable ledger before
         /// its Prompt. Resume can then claim and start that Prompt exactly once
         /// instead of treating it as work that needs a continuation replan.
@@ -3329,6 +4064,8 @@ final class HostComputerUseManager: ObservableObject {
             channel: any HostComputerUseChannel,
             trustedUserPrompt: String? = nil,
             conversation: [ComputerUseConversationTurn]? = nil,
+            textClarification: TextClarificationContinuation? = nil,
+            memoryPolicy: ComputerUseTaskMemoryPolicy? = nil,
             hasStarted: Bool = true
         ) {
             self.envelope = envelope
@@ -3340,6 +4077,9 @@ final class HostComputerUseManager: ObservableObject {
                 ?? ComputerUsePromptRequest.decodeCompatibleBody(
                     envelope.body).conversation
             self.hasStarted = hasStarted
+            self.textClarification = textClarification
+            self.memoryPolicy = memoryPolicy
+                ?? (try? ComputerUseExecutionPromptDecoder.decode(envelope.body).memoryPolicy)
         }
 
         func belongs(to control: ComputerUseEnvelope) -> Bool {
@@ -3353,7 +4093,7 @@ final class HostComputerUseManager: ObservableObject {
             continuation: ComputerUseVisualApprovalContinuation,
             action: ComputerUsePredictedAction,
             fingerprint: ComputerUseApprovalFingerprint)
-        case mcp(MCPPreparedApproval)
+        case agent(AgentApprovalRequest)
     }
 
     private enum VisualApprovalContinuationError: Error, LocalizedError {
@@ -3376,20 +4116,69 @@ final class HostComputerUseManager: ObservableObject {
         let operation: PendingOperation
     }
 
+    /// Created only after the retained clarification store matches the exact
+    /// reference, task, sender, and session for an answer. Cleanup may use its
+    /// task ID; untrusted answer fields alone cannot construct this value.
+    private struct ValidatedTextClarificationOwner {
+        let reference: ComputerUseClarificationReference
+        let questionEnvelope: ComputerUseEnvelope
+    }
+
+    private struct MemoryErasureFence {
+        enum Authority: Equatable {
+            case phone(peerID: String, sessionID: String, generation: UInt64)
+            case owner(scopeID: UUID, generation: UInt64)
+        }
+
+        let token: UUID
+        let authority: Authority
+        let peerID: String
+        let sessionID: String
+        let authorizationGeneration: UInt64
+        var executionTasks: [Task<Void, Never>]
+        var lifecycleTasks: [Task<Void, Never>]
+        var drainTask: Task<Void, Never>?
+        var drained: Bool
+        var revoked: Bool
+    }
+
     private var executor: (any ComputerUseExecuting)?
+    private let generalAgentFactory: ((ComputerUseInstallationReceipt) throws -> ComputerUseCapabilityExecutor)?
+    private var agentLifecycleTask: Task<Void, Never>?
+    var hasRetainedAgentTask: Bool { generalAgent?.hasRetainedTask == true }
+    private var generalAgent: (any AgentTaskAdapting)? {
+        (executor as? ComputerUseCapabilityExecutor)?.agentAdapter ?? executor as? any AgentTaskAdapting
+    }
+#if DEBUG
+    var hasGeneralAgentFactory: Bool { generalAgentFactory != nil }
+
+    func debugPendingAgentApproval(taskID: String, requestID: String) -> AgentLoop.PendingStep? {
+        guard case .awaitingApproval = activity,
+              let pendingApproval,
+              pendingApproval.context.envelope.id == taskID,
+              pendingApproval.request.taskID == taskID,
+              pendingApproval.request.requestID == requestID,
+              case .agent(let request) = pendingApproval.operation,
+              let id = UUID(uuidString: requestID), request.id == id else { return nil }
+        return generalAgent?.debugPendingApproval(taskID: taskID, requestID: id)
+    }
+#endif
     private let injector: InputInjector
     private let tools: ComputerUseHostTools
     private let actionGate: ComputerUseActionGate
     private let installer: any ComputerUseModelProvisioning
-    private let macControlInstaller: any MacControlMCPProvisioning
     private let visualExecutorLoader: any ComputerUseVisualExecutorLoading
-    private let executorComposer: ComputerUseExecutorComposer
     private let taskLedger: ComputerUseTaskLedger
+    private let textClarifications: ComputerUseClarificationStore
     private let transportTeardownTimeout: Duration
     /// False only for app-hosted test sessions. Direct manager constructions
     /// keep the production default so their installer lifecycle tests retain
     /// the behavior they are explicitly exercising.
     let allowsExternalServices: Bool
+    private let allowsAutomaticSetup: Bool
+    private let taskMemoryContextProvider: (any PersonalMemoryTaskContextProviding)?
+    private let taskMemoryContextSlot: TaskMemoryContextSlot?
+    private let experimentalEnabled: @MainActor () -> Bool
     private let peerAuthorizationEpoch = ComputerUsePeerAuthorizationEpoch()
     private let webRTCAuthorizationFence =
         ComputerUseWebRTCAuthorizationFence()
@@ -3408,14 +4197,18 @@ final class HostComputerUseManager: ObservableObject {
     /// Some channel implementations cannot promptly cancel an in-flight
     /// network request, so Task cancellation alone is not a sufficient fence.
     private var transportGeneration: UInt64 = 0
-    private var executionTask: Task<Void, Never>?
+    private var peerAuthorizationGeneration: UInt64 = 0
+    private var executionTaskSlotID = UUID()
+    private var executionTask: Task<Void, Never>? {
+        didSet { executionTaskSlotID = UUID() }
+    }
     private var currentExecution: ExecutionContext?
     private var pausedExecution: ExecutionContext?
     /// One host task can be resumably paused at a time. Retaining its exact
     /// bounded instruction lets a duplicate accepted Prompt replay the same
     /// typed handoff instead of replacing useful sign-in guidance with a
     /// generic pause explanation.
-    private var lastUserIntervention: (taskID: String, guidance: String)?
+    private var lastUserIntervention: (taskID: String, guidance: String, report: ComputerUseResearchProgress?)?
     private var currentExecutionToken: UUID?
     private var pendingApproval: PendingApproval?
     private var activeVisualApprovalContinuation:
@@ -3431,13 +4224,26 @@ final class HostComputerUseManager: ObservableObject {
     private var modelCheckTask: Task<Void, Never>?
     private var setupRecipients = ComputerUseSetupRecipientRegistry()
     private var currentSetupProgress: ComputerUseSetupProgress?
-    private var macControlReceipt: MacControlMCPInstallationReceipt?
-    private var authorizedPeerID: String?
-    private var authorizedPeerSupportsOrderedComputerUseControls = false
+    private var authorizedPeerID: String? {
+        didSet { refreshLocalTaskControls() }
+    }
+    private var authorizedPeerSupportsOrderedComputerUseControls = false {
+        didSet { refreshLocalTaskControls() }
+    }
     /// Authorization sources are tracked independently so expiry of the LAN
     /// lease cannot revoke an authenticated WebRTC connection (or vice versa).
     /// Both sources may coexist only for the same stable device identity.
     private var localAuthorizedPeerID: String?
+    private var localMemorySessionID: String?
+    private var ownerMemoryScope: OwnerMemoryScopeLease?
+    private var ownerMemoryScopeGeneration: UInt64 = 0
+    private var ownerMemoryScopeConsumed = false
+    private var completedMemoryConfirmationLease:
+        (peerID: String, sessionID: String, taskID: String,
+         authorizationGeneration: UInt64, memoryPolicy: ComputerUseTaskMemoryPolicy,
+         expiresAt: Date)?
+    private var pendingTextClarificationMemoryPolicy:
+        (reference: ComputerUseClarificationReference, policy: ComputerUseTaskMemoryPolicy)?
     private var webRTCAuthorizedPeerID: String?
     private var webRTCAuthorizedPeerGeneration: UInt64?
     private var webRTCSupportsOrderedComputerUseControls = false
@@ -3451,17 +4257,24 @@ final class HostComputerUseManager: ObservableObject {
     private var lastInstallerProgressFraction: Double?
     private var lastInstallerProgressDate = Date.distantPast
     private var isShuttingDown = false
+    private var memoryErasureFence: MemoryErasureFence?
 
     init(
+        experimentalEnabled: @escaping @MainActor () -> Bool = { ComputerUseFeatureFlags.experimental },
         injector: InputInjector,
         executor: (any ComputerUseExecuting)? = nil,
         installer: (any ComputerUseModelProvisioning)? = nil,
-        macControlInstaller: (any MacControlMCPProvisioning)? = nil,
         visualExecutorLoader: (any ComputerUseVisualExecutorLoading)? = nil,
-        executorComposer: ComputerUseExecutorComposer? = nil,
         taskLedger: ComputerUseTaskLedger = ComputerUseTaskLedger(),
+        textClarifications: ComputerUseClarificationStore? = nil,
         transportTeardownTimeout: Duration = .seconds(5),
         allowsExternalServices: Bool = true,
+        allowsAutomaticSetup: Bool = true,
+        agentConfiguration: AgentHostFactory.Configuration = .init(),
+        agentRuntimeOverride: OSAtlasLlamaRuntime? = nil,
+        taskMemoryContextProvider: (any PersonalMemoryTaskContextProviding)? = nil,
+        taskMemoryContextSlot: TaskMemoryContextSlot? = nil,
+        taskMemoryFaraRuntimeInputs: PersonalMemoryFaraRuntimeInputsCache? = nil,
         approvalTargetProvider:
             ((ComputerUsePredictedAction) throws -> ComputerUseApprovalTargetSnapshot)? = nil,
         actionPerformer: ((ComputerUsePredictedAction) throws -> Void)? = nil,
@@ -3478,40 +4291,54 @@ final class HostComputerUseManager: ObservableObject {
         }
     ) {
         let gate = ComputerUseActionGate()
+        self.experimentalEnabled = experimentalEnabled
+        let mayAct = { [weak gate] in gate?.allowsActions == true }
         self.executor = executor
         self.injector = injector
         self.actionGate = gate
         self.tools = ComputerUseHostTools(
             injector: injector,
-            mayAct: { [weak gate] in gate?.allowsActions == true },
+            mayAct: mayAct,
             approvalTargetProvider: approvalTargetProvider,
             actionPerformer: actionPerformer,
             approvedActionStepDidPost: approvedActionStepDidPost,
             screenProvider: screenProvider,
             accessibilityContextProvider: accessibilityContextProvider)
-        self.installer = installer ?? ComputerUseInstaller()
-        self.macControlInstaller = macControlInstaller ?? MacControlMCPInstaller()
-        self.visualExecutorLoader = visualExecutorLoader
-            ?? OSAtlasVisualExecutorLoader()
-        self.executorComposer = executorComposer ?? { helperReceipt, visualFallback in
-            try await MCPFirstComputerUseExecutor.load(
-                binaryURL: URL(fileURLWithPath: helperReceipt.binaryPath),
-                visualFallback: visualFallback,
-                clientPool: MCPClientPool())
-        }
+        let modelInstaller = installer ?? ComputerUseInstaller()
+        self.installer = modelInstaller
+        let agentRuntime = agentRuntimeOverride
+            ?? .shared
+        if executor == nil, visualExecutorLoader == nil {
+            generalAgentFactory = { receipt in
+                if agentConfiguration.engine == .localAgent {
+                    return try LocalAgentHostFactory.make(receipt: receipt, injector: injector, mayAct: mayAct)
+                }
+                return try AgentHostFactory.make(receipt: receipt, injector: injector, mayAct: mayAct,
+                    configuration: agentConfiguration, taskMemoryContextSlot: taskMemoryContextSlot,
+                    taskMemoryFaraRuntimeInputs: taskMemoryFaraRuntimeInputs,
+                    runtime: agentRuntime)
+            }
+        } else { generalAgentFactory = nil }
+        let modelLoader = visualExecutorLoader ?? OSAtlasVisualExecutorLoader()
+        self.visualExecutorLoader = modelLoader
         self.taskLedger = taskLedger
+        self.textClarifications = textClarifications ?? ComputerUseClarificationStore()
         self.transportTeardownTimeout = transportTeardownTimeout
         self.allowsExternalServices = allowsExternalServices
+        self.allowsAutomaticSetup = allowsAutomaticSetup
+        self.taskMemoryContextProvider = taskMemoryContextProvider
+        self.taskMemoryContextSlot = taskMemoryContextSlot
         self.channelFactory = channelFactory
         if allowsExternalServices {
             refreshModelState()
             installLocalInterventionMonitors()
         }
+        refreshLocalTaskControls()
     }
 
     func refreshModelState() {
         guard allowsExternalServices, !isShuttingDown else { return }
-        if macControlReceipt != nil, let executor, executor.isReady {
+        if executorIsReady, let executor {
             modelState = .ready(runtimeName: executor.runtimeName)
             return
         }
@@ -3519,40 +4346,28 @@ final class HostComputerUseManager: ObservableObject {
         let task = Task { [weak self] in
             guard let self else { return }
             defer { modelCheckTask = nil }
-            let helperStatus = await macControlInstaller.durableStatus()
-            guard !Task.isCancelled, !isShuttingDown else { return }
-            switch helperStatus {
-            case .ready(let receipt):
-                macControlReceipt = receipt
-                if let executor, executor.isReady {
-                    modelState = .ready(runtimeName: executor.runtimeName)
-                } else if let modelReceipt = await installer.currentInstallation() {
-                    modelState = .packageFound(fileName: "Verified model installation")
-                    beginActivation(of: modelReceipt)
-                } else if await installer.interruptedInstallationExists() {
-                    // The helper receipt plus the model marker prove that this
-                    // setup was explicitly initiated before the host exited.
-                    modelState = .installing(
-                        detail: "Resuming AI setup…",
-                        fraction: nil)
+            if let generalAgentFactory {
+                if let receipt = await installer.currentInstallation() {
+                    guard !Task.isCancelled, !isShuttingDown else { return }
+                    do {
+                        executor = try generalAgentFactory(receipt)
+                        modelState = .ready(runtimeName: executor!.runtimeName)
+                    } catch { modelState = .error(error.localizedDescription) }
+                } else if allowsAutomaticSetup, await installer.interruptedInstallationExists() {
+                    guard !Task.isCancelled, !isShuttingDown else { return }
                     startSetupPipeline()
-                } else {
-                    modelState = .downloadRequired
-                }
-
-            case .downloadPresent(let downloadedByteCount, _)
-                where downloadedByteCount > 0:
-                // Only real bytes in the installer's managed download area
-                // authorize an automatic helper resume. A fresh status check,
-                // repair state, or zero-byte marker never starts networking.
-                macControlReceipt = nil
-                modelState = .installing(
-                    detail: "Resuming Mac control setup…",
-                    fraction: nil)
+                } else { modelState = .downloadRequired }
+                return
+            }
+            if let modelReceipt = await installer.currentInstallation() {
+                guard !Task.isCancelled, !isShuttingDown else { return }
+                modelState = .packageFound(fileName: "Verified model installation")
+                beginActivation(of: modelReceipt)
+            } else if allowsAutomaticSetup, await installer.interruptedInstallationExists() {
+                guard !Task.isCancelled, !isShuttingDown else { return }
+                modelState = .installing(detail: "Resuming AI setup…", fraction: nil)
                 startSetupPipeline()
-
-            case .notInstalled, .repairRequired, .downloadPresent:
-                macControlReceipt = nil
+            } else {
                 modelState = .downloadRequired
             }
         }
@@ -3688,6 +4503,11 @@ final class HostComputerUseManager: ObservableObject {
         }
         injector.releaseHeldInput()
         guard localAuthorizedPeerID == senderID else {
+            switch activity {
+            case .working, .awaitingApproval:
+                Self.interventionLog.notice("cause=sidecar_ended")
+            case .idle, .paused: break
+            }
             revokePeerAuthorization()
             return true
         }
@@ -3696,6 +4516,7 @@ final class HostComputerUseManager: ObservableObject {
         _ = blockActionsForUserIntervention()
         switch activity {
         case .working, .awaitingApproval:
+            Self.interventionLog.notice("cause=sidecar_ended")
             userIntervened()
         case .idle, .paused:
             actionGate.setAllowsActions(false)
@@ -3708,6 +4529,13 @@ final class HostComputerUseManager: ObservableObject {
         supportsOrderedComputerUseControls: Bool = true
     ) {
         guard !senderID.isEmpty else { return }
+        if authorizedPeerID != senderID {
+            invalidateMemoryErasureFence()
+            invalidateTextClarification()
+            localMemorySessionID = nil
+            invalidateCompletedMemoryConfirmationLease()
+            peerAuthorizationGeneration &+= 1
+        }
         authorizedPeerID = senderID
         authorizedPeerSupportsOrderedComputerUseControls =
             supportsOrderedComputerUseControls
@@ -3731,6 +4559,11 @@ final class HostComputerUseManager: ObservableObject {
               authorizedPeerID == nil || authorizedPeerID == senderID else {
             return false
         }
+        if localAuthorizedPeerID != senderID {
+            invalidateMemoryErasureFence()
+            localMemorySessionID = nil
+            completedMemoryConfirmationLease = nil
+        }
         localAuthorizedPeerID = senderID
         authorizePeer(senderID: senderID)
         return true
@@ -3738,7 +4571,15 @@ final class HostComputerUseManager: ObservableObject {
 
     func revokeLocalPeerAuthorization(senderID: String) {
         guard localAuthorizedPeerID == senderID else { return }
+        let boundMemoryTask = [currentExecution, pausedExecution, pendingApproval?.context]
+            .compactMap { $0 }
+            .first { $0.envelope.senderID == senderID
+                && taskMemoryContextSlot?.hasLease(taskID: $0.envelope.id) == true }
+        taskMemoryContextSlot?.revokeAuthorization()
+        invalidateMemoryErasureFence()
         localAuthorizedPeerID = nil
+        localMemorySessionID = nil
+        completedMemoryConfirmationLease = nil
         if webRTCAuthorizedPeerID == senderID {
             authorizedPeerID = senderID
             authorizedPeerSupportsOrderedComputerUseControls =
@@ -3746,9 +4587,358 @@ final class HostComputerUseManager: ObservableObject {
         } else {
             revokePeerAuthorization()
         }
+        if let boundMemoryTask {
+            terminateMemoryTaskAfterAuthorizationRevocation(boundMemoryTask)
+        }
+    }
+
+    private func terminateMemoryTaskAfterAuthorizationRevocation(_ context: ExecutionContext) {
+        let response: String
+        do {
+            let resolution = try taskLedger.cancelLocally(taskID: context.envelope.id,
+                senderID: context.envelope.senderID, sessionID: context.envelope.sessionID)
+            guard resolution.disposition != .identityMismatch,
+                  resolution.state == .cancelled,
+                  let terminalResponse = resolution.terminalResponse else {
+                throw ComputerUseTaskLedger.LedgerError.invalidIdentity
+            }
+            response = terminalResponse
+        } catch {
+            stopExecution(context)
+            send(kind: .assistant, body: Self.terminalPersistenceFailureResponse,
+                replyingTo: context.envelope, channel: context.channel,
+                outcome: .unableToComplete)
+            sendStatus("ready", replyingTo: context.envelope, channel: context.channel)
+            return
+        }
+        stopExecution(context)
+        sendDurableTerminal(response, outcome: .unableToComplete,
+            replyingTo: context.envelope, channel: context.channel)
+        sendStatus("ready", replyingTo: context.envelope, channel: context.channel)
+    }
+
+    /// Binds the authenticated local peer to the phone's explicit connection
+    /// session. A same-session reconnect is idempotent so task recovery keeps
+    /// its existing authority. Changing sessions is allowed only while the
+    /// host is quiescent and invalidates every old memory/context lease.
+    @discardableResult
+    func bindLocalMemorySession(peerID: String, sessionID: String) -> Bool {
+        guard localAuthorizedPeerID == peerID,
+              authorizedPeerID == peerID,
+              UUID(uuidString: peerID) != nil,
+              !sessionID.isEmpty,
+              sessionID.utf8.count <= LocalHostComputerUseChannel.maximumSessionIDBytes,
+              sessionID.unicodeScalars.allSatisfy({
+                  !CharacterSet.controlCharacters.contains($0)
+              }) else {
+            return false
+        }
+        if localMemorySessionID == sessionID { return true }
+        guard !isShuttingDown,
+              memoryErasureFence == nil,
+              !actionGate.hasPendingInputIntervention else {
+            return false
+        }
+        let retainedContext = currentExecution ?? pausedExecution ?? pendingApproval?.context
+        let isSameTaskRecovery = retainedContext?.envelope.senderID == peerID
+            && retainedContext?.envelope.sessionID == sessionID
+        guard isSameTaskRecovery || permitsOwnerMemorySession else {
+            return false
+        }
+        taskMemoryContextSlot?.clear()
+        invalidateTextClarification()
+        invalidateCompletedMemoryConfirmationLease()
+        peerAuthorizationGeneration &+= 1
+        localMemorySessionID = sessionID
+        return true
+    }
+
+    /// Binds owner-memory RPC work to the broker-reserved local peer and the
+    /// exact task context already accepted by the host. Manual memory commands
+    /// may have no task. Confirmation may use a completed task for ten minutes,
+    /// matching the writer's proposal expiry; the lease is cleared on any
+    /// cancellation, takeover, new task, or authorization change.
+    func localMemoryLease(
+        peerID: String,
+        sessionID: String,
+        requiresTask: Bool
+    ) -> LocalMemoryHostLease? {
+        guard localAuthorizedPeerID == peerID,
+              authorizedPeerID == peerID,
+              UUID(uuidString: peerID) != nil,
+              !sessionID.isEmpty,
+              sessionID.utf8.count <= LocalHostComputerUseChannel.maximumSessionIDBytes,
+              localMemorySessionID == sessionID else {
+            return nil
+        }
+
+        let activeContext = currentExecution ?? pausedExecution ?? pendingApproval?.context
+        if let activeContext,
+           activeContext.envelope.senderID == peerID {
+            guard activeContext.envelope.sessionID == sessionID,
+                  let memoryPolicy = activeContext.memoryPolicy else { return nil }
+            // Confirmation is an owner action after the proposing task ends.
+            // A still-running or takeover-paused task cannot confirm a proposal.
+            guard !requiresTask else { return nil }
+            localMemorySessionID = sessionID
+            return LocalMemoryHostLease(
+                peerID: peerID,
+                sessionID: sessionID,
+                taskID: activeContext.envelope.id,
+                authorizationGeneration: peerAuthorizationGeneration,
+                taskAuthority: .active,
+                memoryPolicy: memoryPolicy)
+        }
+        if requiresTask {
+            guard let lease = completedMemoryConfirmationLease,
+                  lease.peerID == peerID,
+                  lease.sessionID == sessionID,
+                  lease.authorizationGeneration == peerAuthorizationGeneration,
+                  lease.expiresAt > Date() else {
+                completedMemoryConfirmationLease = nil
+                return nil
+            }
+            localMemorySessionID = sessionID
+            return LocalMemoryHostLease(
+                peerID: peerID,
+                sessionID: sessionID,
+                taskID: lease.taskID,
+                authorizationGeneration: lease.authorizationGeneration,
+                taskAuthority: .completed,
+                memoryPolicy: lease.memoryPolicy)
+        }
+        localMemorySessionID = sessionID
+        return LocalMemoryHostLease(
+            peerID: peerID,
+            sessionID: sessionID,
+            taskID: nil,
+            authorizationGeneration: peerAuthorizationGeneration,
+            taskAuthority: .none,
+            memoryPolicy: .init())
+    }
+
+    func beginMemoryErasure(_ lease: LocalMemoryHostLease) -> UUID? {
+        guard !isShuttingDown,
+              !lease.peerID.isEmpty,
+              localAuthorizedPeerID == lease.peerID,
+              authorizedPeerID == lease.peerID,
+              localMemorySessionID == lease.sessionID,
+              peerAuthorizationGeneration == lease.authorizationGeneration else {
+            return nil
+        }
+
+        if let fence = memoryErasureFence {
+            guard !fence.revoked,
+                  fence.authority == .phone(peerID: lease.peerID, sessionID: lease.sessionID,
+                      generation: lease.authorizationGeneration),
+                  fence.peerID == lease.peerID,
+                  fence.sessionID == lease.sessionID,
+                  fence.authorizationGeneration == lease.authorizationGeneration else {
+                return nil
+            }
+            return fence.token
+        }
+
+        switch lease.taskAuthority {
+        case .none:
+            guard lease.taskID == nil else { return nil }
+        case .active:
+            guard let taskID = lease.taskID,
+                  let context = currentExecution ?? pausedExecution ?? pendingApproval?.context,
+                  context.envelope.id == taskID,
+                  context.envelope.senderID == lease.peerID,
+                  context.envelope.sessionID == lease.sessionID else { return nil }
+        case .completed:
+            guard let taskID = lease.taskID,
+                  let completed = completedMemoryConfirmationLease,
+                  completed.peerID == lease.peerID,
+                  completed.sessionID == lease.sessionID,
+                  completed.taskID == taskID,
+                  completed.authorizationGeneration == lease.authorizationGeneration,
+                  completed.expiresAt > Date() else { return nil }
+        }
+
+        let fence = MemoryErasureFence(
+            token: UUID(),
+            authority: .phone(peerID: lease.peerID, sessionID: lease.sessionID,
+                generation: lease.authorizationGeneration),
+            peerID: lease.peerID, sessionID: lease.sessionID,
+            authorizationGeneration: lease.authorizationGeneration,
+            executionTasks: [], lifecycleTasks: [], drainTask: nil, drained: false, revoked: false)
+        memoryErasureFence = fence
+        // A phone-authorized Forget retires any ordinary Mac owner read scope.
+        retireCurrentOwnerMemoryScope()
+        // Revoke an already-open Mac owner-memory scope before touching the
+        // accepted task or its executor.
+        willBeginAutomation?()
+
+        beginMemoryErasureWork(for: fence.token)
+        return memoryErasureFence?.token == fence.token
+            && memoryErasureFence?.revoked == false ? fence.token : nil
+    }
+
+    private func beginMemoryErasureWork(for token: UUID) {
+        taskMemoryContextSlot?.clear()
+        let context = currentExecution ?? pausedExecution ?? pendingApproval?.context
+        let capturedExecution = executionTask
+        if let context {
+            terminalizeForMemoryErasure(context)
+            stopExecution(context)
+        } else {
+            actionGate.endAutomation(allowsActions: false)
+            let invalidatedApproval = pendingApproval
+            cancelApprovalIfNeeded(invalidatedApproval)
+            cancelActiveVisualApprovalContinuation()
+            cancelActiveTaskWork()
+            executionTask?.cancel()
+            currentExecution = nil
+            pausedExecution = nil
+            pendingApproval = nil
+            approvalDeliveryTask?.cancel()
+            approvalDeliveryTask = nil
+            currentExecutionToken = nil
+            activity = .idle
+        }
+
+        guard memoryErasureFence?.token == token else { return }
+        memoryErasureFence?.executionTasks = capturedExecution.map { [$0] } ?? []
+        memoryErasureFence?.lifecycleTasks = agentLifecycleTask.map { [$0] } ?? []
+        scheduleMemoryErasureDrain(for: token)
+    }
+
+    func memoryErasureIsQuiescent(_ token: UUID) -> Bool {
+        guard let fence = memoryErasureFence, fence.token == token,
+              !fence.revoked, isMemoryErasureAuthorityCurrent(fence) else { return false }
+        return fence.drained
+    }
+
+    func endMemoryErasure(_ token: UUID) {
+        guard let fence = memoryErasureFence,
+              fence.token == token,
+              fence.drained,
+              !fence.revoked,
+              isMemoryErasureAuthorityCurrent(fence) else { return }
+        memoryErasureFence = nil
+        refreshLocalTaskControls()
+    }
+
+    private func isMemoryErasureAuthorityCurrent(_ fence: MemoryErasureFence) -> Bool {
+        guard !fence.revoked else { return false }
+        switch fence.authority {
+        case .phone(let peerID, let sessionID, let generation):
+            return localAuthorizedPeerID == peerID
+                && authorizedPeerID == peerID
+                && localMemorySessionID == sessionID
+                && peerAuthorizationGeneration == generation
+        case .owner(let scopeID, let generation):
+            return ownerMemoryScope == OwnerMemoryScopeLease(scopeID: scopeID, generation: generation)
+        }
+    }
+
+    private func scheduleMemoryErasureDrain(for token: UUID) {
+        guard var fence = memoryErasureFence, fence.token == token else { return }
+        guard !fence.executionTasks.isEmpty || !fence.lifecycleTasks.isEmpty else {
+            if fence.revoked || !isMemoryErasureAuthorityCurrent(fence) {
+                memoryErasureFence = nil
+            } else {
+                fence.drained = true
+                memoryErasureFence = fence
+            }
+            return
+        }
+        let executionTasks = fence.executionTasks
+        let lifecycleTasks = fence.lifecycleTasks
+        let authority = fence.authority
+        fence.drainTask = Task { @MainActor [weak self] in
+            for task in executionTasks { await task.value }
+            for task in lifecycleTasks { await task.value }
+            guard let self,
+                  var current = self.memoryErasureFence,
+                  current.token == token,
+                  current.authority == authority else { return }
+            // Retained handles are released only after both cancellation paths
+            // have unwound and only while this exact authorization still owns
+            // the erasure fence.
+            if !current.executionTasks.isEmpty {
+                // The fence prevents a replacement task from being admitted
+                // before this join, so the manager slot can only still refer
+                // to the captured, now-completed execution.
+                self.executionTask = nil
+            }
+            current.executionTasks.removeAll()
+            current.lifecycleTasks.removeAll()
+            current.drainTask = nil
+            if current.revoked || !self.isMemoryErasureAuthorityCurrent(current) {
+                self.memoryErasureFence = nil
+            } else {
+                current.drained = true
+                self.memoryErasureFence = current
+            }
+            self.refreshLocalTaskControls()
+        }
+        memoryErasureFence = fence
+    }
+
+    private func terminalizeForMemoryErasure(_ context: ExecutionContext) {
+        do {
+            let resolution = try taskLedger.cancelLocally(taskID: context.envelope.id,
+                senderID: context.envelope.senderID, sessionID: context.envelope.sessionID)
+            guard resolution.disposition != .identityMismatch,
+                  resolution.state == .cancelled else {
+                throw ComputerUseTaskLedger.LedgerError.invalidIdentity
+            }
+            sendDurableTerminal(ComputerUseTaskLedger.stoppedResponse, outcome: .unableToComplete,
+                replyingTo: context.envelope, channel: context.channel)
+        } catch {
+            send(kind: .assistant, body: Self.terminalPersistenceFailureResponse,
+                replyingTo: context.envelope, channel: context.channel, outcome: .unableToComplete)
+        }
+        sendStatus("ready", replyingTo: context.envelope, channel: context.channel)
+    }
+
+    private func invalidateMemoryErasureFence() {
+        retireCurrentOwnerMemoryScope()
+        guard let fence = memoryErasureFence else { return }
+        revokeMemoryErasureFence(fence)
+    }
+
+    private func revokeMemoryErasureFence(_ fence: MemoryErasureFence) {
+        guard memoryErasureFence?.token == fence.token else { return }
+        if fence.drained {
+            memoryErasureFence = nil
+        } else {
+            var updatedFence = fence
+            updatedFence.revoked = true
+            memoryErasureFence = updatedFence
+        }
+    }
+
+    private func retainCompletedMemoryConfirmationLease(for context: ExecutionContext) {
+        guard let memoryPolicy = context.memoryPolicy,
+              localAuthorizedPeerID == context.envelope.senderID,
+              authorizedPeerID == context.envelope.senderID else {
+            invalidateCompletedMemoryConfirmationLease()
+            return
+        }
+        completedMemoryConfirmationLease = (
+            peerID: context.envelope.senderID,
+            sessionID: context.envelope.sessionID,
+            taskID: context.envelope.id,
+            authorizationGeneration: peerAuthorizationGeneration,
+            memoryPolicy: memoryPolicy,
+            expiresAt: Date().addingTimeInterval(10 * 60))
+    }
+
+    private func invalidateCompletedMemoryConfirmationLease() {
+        completedMemoryConfirmationLease = nil
     }
 
     func revokePeerAuthorization() {
+        taskMemoryContextSlot?.clear()
+        invalidateMemoryErasureFence()
+        invalidateTextClarification()
+        invalidateCompletedMemoryConfirmationLease()
+        peerAuthorizationGeneration &+= 1
         authorizedPeerID = nil
         authorizedPeerSupportsOrderedComputerUseControls = false
         _ = blockActionsForUserIntervention()
@@ -3787,9 +4977,15 @@ final class HostComputerUseManager: ObservableObject {
             // A disconnect closes the gate synchronously off-main. Even if a
             // newer reconnect callback reaches MainActor first, preserve that
             // intervention as a paused task requiring an explicit Resume.
-            if !actionGate.allowsActions {
+            let initialSameOwnerSidecarApproval = activeWebRTCPeer.classification == .localComputerUseSidecar
+                && localAuthorizedPeerID == senderID
+                && webRTCAuthorizedPeerID == nil
+                && supportsOrderedComputerUseControls
+                && pendingApproval?.context.envelope.senderID == senderID
+            if actionGate.requiresInterventionOnPeerAuthorization(preservingHeldApproval: initialSameOwnerSidecarApproval) {
                 switch activity {
                 case .working, .awaitingApproval:
+                    Self.interventionLog.notice("cause=peer_authorized_gate_closed")
                     userIntervened()
                 case .idle, .paused:
                     break
@@ -3823,6 +5019,7 @@ final class HostComputerUseManager: ObservableObject {
                 _ = blockActionsForUserIntervention()
                 switch activity {
                 case .working, .awaitingApproval:
+                    Self.interventionLog.notice("cause=peer_authorization_lost")
                     userIntervened()
                 case .idle, .paused:
                     break
@@ -3830,6 +5027,11 @@ final class HostComputerUseManager: ObservableObject {
                 authorizedPeerID = senderID
                 authorizedPeerSupportsOrderedComputerUseControls = true
             } else {
+                switch activity {
+                case .working, .awaitingApproval:
+                    Self.interventionLog.notice("cause=peer_authorization_lost")
+                case .idle, .paused: break
+                }
                 revokePeerAuthorization()
             }
         }
@@ -3869,11 +5071,13 @@ final class HostComputerUseManager: ObservableObject {
         let pendingTransportTeardown = stopTransport()
         actionGate.setAllowsActions(false)
         activity = .idle
+        removeLocalInterventionMonitors()
 
         pendingExecution?.cancel()
         setupTask?.cancel()
         modelCheckTask?.cancel()
         await pendingExecution?.value
+        await agentLifecycleTask?.value
         await pendingSetup?.value
         await pendingModelCheck?.value
 
@@ -3895,56 +5099,63 @@ final class HostComputerUseManager: ObservableObject {
         executor = nil
     }
 
-    /// Called before direct user input so automation and a person never race.
+    /// Immediate MainActor lifecycle interruption. Off-main physical/direct
+    /// input must use its captured receipt through applyUserInputIntervention.
     func userIntervened() {
+        taskMemoryContextSlot?.clear()
+        invalidateCompletedMemoryConfirmationLease()
+        revokeCurrentOwnerMemoryScope()
         switch activity {
-        case .working:
+        case .working, .awaitingApproval:
             blockActionsForUserIntervention()
-            let interrupted = currentExecution
-            if let interrupted,
-               postedApprovedVisualTaskID == interrupted.envelope.id {
-                terminalizePostedVisualActionForIntervention(
-                    context: interrupted)
-                return
+            if let context = currentExecution ?? pendingApproval?.context {
+                pauseForLocalIntervention(context)
             }
-            pausedExecution = interrupted
-            currentExecution = nil
-            currentExecutionToken = nil
-            cancelActiveVisualApprovalContinuation()
-            cancelActiveMCPWork()
-            executionTask?.cancel()
-            activity = .paused
-            if let interrupted {
-                sendUserInterventionStatus(
-                    Self.userInterventionGuidance,
-                    replyingTo: interrupted.envelope,
-                    channel: interrupted.channel)
-            }
-
-        case .awaitingApproval:
-            let invalidated = pendingApproval
-            pendingApproval = nil
-            cancelApprovalIfNeeded(invalidated)
-            pausedExecution = invalidated?.context
-            approvalDeliveryTask?.cancel()
-            approvalDeliveryTask = nil
-            activity = .paused
-            if let invalidated {
-                sendUserInterventionStatus(
-                    Self.userInterventionGuidance,
-                    replyingTo: invalidated.context.envelope,
-                    channel: invalidated.context.channel)
-            }
-
         case .idle, .paused:
             return
         }
     }
 
-    /// The WebRTC callback invokes this synchronously before injecting the
-    /// person's event. Cancellation and UI state then follow on MainActor.
-    /// This closes the small race where the model could otherwise inject one
-    /// more action after the user had already touched the screen.
+    private func revokeCurrentOwnerMemoryScope() {
+        guard let ownerMemoryScope else { return }
+        revokeOwnerMemoryScope(ownerMemoryScope)
+    }
+
+    func applyUserInputIntervention(_ intervention: ComputerUseActionGate.InputIntervention) {
+        guard actionGate.consumeInputIntervention(intervention) else { return }
+        switch activity {
+        case .working, .awaitingApproval:
+            Self.interventionLog.notice("cause=physical_or_direct_input")
+        case .idle, .paused: break
+        }
+        userIntervened()
+    }
+
+    nonisolated func recordPhysicalInputForIntervention(_ event: NSEvent) -> ComputerUseActionGate.InputIntervention? {
+        guard InputInjector.isPhysicalIntervention(event) else { return nil }
+        return recordUserInputForIntervention()
+    }
+
+    /// Physical input closes the gate under the injection lock before its
+    /// lifecycle update follows on MainActor. Direct phone input instead uses
+    /// recordUserInputInInjectionTransaction under its packet transaction. The
+    /// callback carries no key, text, pointer coordinate or authentication data.
+    @discardableResult
+    nonisolated func recordUserInputForIntervention() -> ComputerUseActionGate.InputIntervention? {
+        var intervention: ComputerUseActionGate.InputIntervention?
+        injector.interruptAutomation { [actionGate] in
+            intervention = actionGate.recordUserInput()
+            return intervention != nil
+        }
+        return intervention
+    }
+
+    /// Direct phone input uses InputInjector.applyDirectInput, which already
+    /// holds the injection lock and owns release/dispatch. Do not reacquire it.
+    nonisolated func recordUserInputInInjectionTransaction() -> ComputerUseActionGate.InputIntervention? {
+        actionGate.recordUserInput()
+    }
+
     @discardableResult
     nonisolated func blockActionsForUserIntervention() -> Bool {
         injector.interruptAutomation { [actionGate] in
@@ -3956,24 +5167,28 @@ final class HostComputerUseManager: ObservableObject {
     /// current-peer loss releases direct-input state even when automation was
     /// already paused: a person can press a button (which pauses AI) and lose
     /// the data channel before sending the matching release. The generation
-    /// check runs first so a late callback from an old peer cannot release input
-    /// owned by its replacement or interrupt the replacement's LAN task.
+    /// check and cleanup share one ownership transition so replacement cannot
+    /// slip between the check and release or action-gate interruption.
     @discardableResult
     nonisolated func blockActionsForWebRTCDeauthorization(
         senderID: String,
         generation: UInt64
     ) -> Bool {
-        guard webRTCAuthorizationFence.owns(
+        webRTCAuthorizationFence.performIfOwned(
             senderID: senderID,
-            generation: generation) else {
-            return false
+            generation: generation) {
+            injector.releaseHeldInput()
+            return blockActionsForUserIntervention()
         }
-        injector.releaseHeldInput()
-        return blockActionsForUserIntervention()
     }
 
     @discardableResult
     private func stopTransport() -> Task<Void, Never> {
+        taskMemoryContextSlot?.clear()
+        invalidateMemoryErasureFence()
+        invalidateTextClarification()
+        localMemorySessionID = nil
+        invalidateCompletedMemoryConfirmationLease()
         // Fence an in-flight poll before doing anything that can yield. A
         // cancellation-ignoring channel may still return, but its generation
         // can no longer enter `handle` or acknowledge stale envelopes.
@@ -4004,11 +5219,12 @@ final class HostComputerUseManager: ObservableObject {
         cancelActiveVisualApprovalContinuation()
         postedApprovedVisualTaskID = nil
         if invalidatedApproval == nil {
-            cancelActiveMCPWork()
+            cancelActiveTaskWork()
         }
         pollingTask?.cancel()
         pollingTask = nil
         executionTask?.cancel()
+        releaseExecutionTaskHandleAfterCancellation()
         currentExecution = nil
         pausedExecution = nil
         pendingApproval = nil
@@ -4126,7 +5342,7 @@ final class HostComputerUseManager: ObservableObject {
             }
 
             do {
-                try await Task.sleep(for: .seconds(2))
+                try await Task.sleep(for: await channel.pollingInterval())
             } catch {
                 return
             }
@@ -4152,11 +5368,13 @@ final class HostComputerUseManager: ObservableObject {
             guard authorizedPeerSupportsOrderedComputerUseControls else {
                 return true
             }
+            guard memoryErasureFence == nil else { return true }
             handleApprovalResponse(envelope)
             return true
         case .prompt:
             guard let authorizedPeerID else { return false }
             guard authorizedPeerID == envelope.senderID else { return true }
+            guard memoryErasureFence == nil else { return true }
             guard authorizedPeerSupportsOrderedComputerUseControls else {
                 send(
                     kind: .assistant,
@@ -4172,12 +5390,110 @@ final class HostComputerUseManager: ObservableObject {
         case .pause, .resume, .cancel:
             guard let authorizedPeerID else { return false }
             guard authorizedPeerID == envelope.senderID else { return true }
+            guard memoryErasureFence == nil else { return true }
             guard authorizedPeerSupportsOrderedComputerUseControls else {
                 return true
             }
             return handleControl(envelope, channel: channel)
-        case .assistant, .status:
+        case .status:
+            guard let probe = try? ComputerUseClarificationProbe.decodeBody(envelope.body) else { return true }
+            guard let authorizedPeerID else { return false }
+            guard authorizedPeerID == envelope.senderID, authorizedPeerSupportsOrderedComputerUseControls else { return true }
+            sendClarificationProbeResult(probe, replyingTo: envelope, channel: channel)
             return true
+        case .assistant:
+            return true
+        }
+    }
+
+    private func refreshLocalTaskControls() {
+        // A reconnect of this same retained task keeps unacknowledged input.
+        // Leaving paused ownership or replacing the task retires that scope.
+        let inputOwner: PausedInputOwner?
+        if !isShuttingDown, case .paused = activity, let pausedExecution { inputOwner = .init(pausedExecution) }
+        else { inputOwner = nil }
+        if inputOwner != pausedInputOwner {
+            pausedInputOwner = inputOwner
+            pausedInputScopeID = inputOwner == nil ? nil : UUID()
+            actionGate.trackPausedInput(scopeID: pausedInputScopeID)
+        }
+        let context: ExecutionContext?
+        let phase: ComputerUseTaskControls.Phase
+        switch activity {
+        case .working: context = currentExecution; phase = .working
+        case .paused: context = pausedExecution; phase = .paused
+        case .awaitingApproval: context = pendingApproval?.context; phase = .awaitingApproval
+        case .idle: context = nil; phase = .paused
+        }
+        guard !isShuttingDown, let context else {
+            taskControlIdentity = nil
+            localTaskControls = nil
+            return
+        }
+        var identity = TaskControlIdentity(taskID: context.envelope.id,
+            senderID: context.envelope.senderID, sessionID: context.envelope.sessionID,
+            executionToken: currentExecutionToken,
+            authorizationGeneration: peerAuthorizationGeneration,
+            transportGeneration: transportGeneration,
+            remoteRevision: taskLedger.appliedControlRevision(taskID: context.envelope.id),
+            hostControlEpoch: taskLedger.hostControlEpoch(taskID: context.envelope.id),
+            phase: phase, canResume: phase == .paused
+                && isPeerAuthorizedForComputerUse(senderID: context.envelope.senderID)
+                && taskLedger.canResumeLocally(taskID: context.envelope.id,
+                    senderID: context.envelope.senderID, sessionID: context.envelope.sessionID))
+        if identity.executionToken == nil, let previous = taskControlIdentity,
+           identity.sameOwner(as: previous) {
+            identity.executionToken = previous.executionToken
+        }
+        guard identity != taskControlIdentity else { return }
+        let sameRun = taskControlIdentity.map {
+            identity.sameOwner(as: $0) && identity.executionToken == $0.executionToken
+        } ?? false
+        let snapshot = ComputerUseTaskControls(taskID: identity.taskID,
+            scopeID: sameRun ? (localTaskControls?.scopeID ?? UUID()) : UUID(),
+            presentationID: UUID(), phase: phase, canResume: identity.canResume,
+            ownerID: taskControlIdentity.map { identity.sameOwner(as: $0) } == true
+                ? (localTaskControls?.ownerID ?? UUID()) : UUID())
+        taskControlIdentity = identity
+        localTaskControls = snapshot
+    }
+
+    func requestLocalTaskControl(_ action: ComputerUseTaskControls.Action,
+                                 displayed: ComputerUseTaskControls) {
+        refreshLocalTaskControls()
+        guard let current = localTaskControls,
+              current.taskID == displayed.taskID, current.scopeID == displayed.scopeID,
+              let context = currentExecution ?? pausedExecution ?? pendingApproval?.context,
+              context.envelope.id == current.taskID else { return }
+        switch action {
+        case .takeControl:
+            guard current.phase != .paused else { return }
+            pauseForLocalIntervention(context)
+        case .resume:
+            guard displayed == current, current.phase == .paused, current.canResume,
+                  isPeerAuthorizedForComputerUse(senderID: context.envelope.senderID) else { return }
+            let input = pausedInputSnapshot(for: context)
+            guard persistLocalControl(.resume, context: context, acknowledgingInput: input) else {
+                pauseExecution(context, guidance: Self.localControlPersistenceFailureGuidance)
+                return
+            }
+            resumeExecution(context, afterInput: input)
+        case .stop:
+            actionGate.endAutomation(allowsActions: false)
+            do {
+                let resolution = try taskLedger.cancelLocally(taskID: context.envelope.id,
+                    senderID: context.envelope.senderID, sessionID: context.envelope.sessionID)
+                guard resolution.disposition != .identityMismatch, resolution.state == .cancelled else {
+                    throw ComputerUseTaskLedger.LedgerError.invalidIdentity
+                }
+                sendDurableTerminal(ComputerUseTaskLedger.stoppedResponse, outcome: .unableToComplete,
+                                    replyingTo: context.envelope, channel: context.channel)
+            } catch {
+                send(kind: .assistant, body: Self.terminalPersistenceFailureResponse,
+                     replyingTo: context.envelope, channel: context.channel, outcome: .unableToComplete)
+            }
+            stopExecution(context)
+            sendStatus("ready", replyingTo: context.envelope, channel: context.channel)
         }
     }
 
@@ -4185,14 +5501,15 @@ final class HostComputerUseManager: ObservableObject {
         _ envelope: ComputerUseEnvelope,
         channel: any HostComputerUseChannel
     ) -> Bool {
+        refreshLocalTaskControls()
+        defer { refreshLocalTaskControls() }
         guard let control = ledgerControl(for: envelope.kind) else { return true }
 
         if envelope.body.isEmpty {
-            handleLegacyControl(
+            return handleLegacyControl(
                 control,
                 envelope: envelope,
                 channel: channel)
-            return true
         }
 
         guard let request = try? ComputerUseControlRequest.decodeBody(
@@ -4208,14 +5525,22 @@ final class HostComputerUseManager: ObservableObject {
             taskID: request.taskID,
             matching: envelope)
 
+        var inputChanged = false
+        var resumeInput: ComputerUseActionGate.PausedInputSnapshot?
+        if control != .cancel, let context {
+            guard let reconciled = reconcilePausedInputBeforeRemoteControl(context) else { return false }
+            inputChanged = reconciled.changed; resumeInput = reconciled.snapshot
+        }
         let resolution: ComputerUseTaskLedger.ControlResolution
+        let rejectedQuestion = taskLedger.rejectedAnswerReference(taskID: request.taskID)
         do {
             resolution = try taskLedger.applyControl(
                 control,
                 taskID: request.taskID,
                 revision: request.revision,
                 senderID: envelope.senderID,
-                sessionID: envelope.sessionID)
+                sessionID: envelope.sessionID,
+                observedHostControlEpoch: request.observedHostControlEpoch)
         } catch {
             // Control is fail-closed unless its causal state was durably
             // recorded. Pause and Cancel also stop the live executor before
@@ -4234,6 +5559,18 @@ final class HostComputerUseManager: ObservableObject {
                 taskID: request.taskID,
                 basedOn: envelope)
         let replyChannel = context?.channel ?? channel
+
+        if resolution.state == .cancelled {
+            if let rejectedQuestion {
+                if taskLedger.terminalClarification(taskID: rejectedQuestion.taskID) == rejectedQuestion {
+                    do { _ = try taskLedger.cancelLocally(taskID: rejectedQuestion.taskID,
+                        senderID: envelope.senderID, sessionID: envelope.sessionID) }
+                    catch { return false }
+                }
+            }
+            textClarifications.invalidate(for: replyEnvelope)
+            (executor as? any ComputerUseClarificationContinuing)?.invalidateClarification(taskID: request.taskID)
+        }
 
         if let terminalResponse = resolution.terminalResponse {
             if resolution.state == .cancelled, let context {
@@ -4262,7 +5599,7 @@ final class HostComputerUseManager: ObservableObject {
         switch resolution.state {
         case .paused:
             if let context {
-                pauseExecution(context)
+                pauseExecution(context, guidance: inputChanged ? Self.pausedInputChangedGuidance : nil)
             } else {
                 // The Prompt may still be in flight. Its stable ID is used for
                 // correlation even though no execution context exists yet.
@@ -4279,14 +5616,14 @@ final class HostComputerUseManager: ObservableObject {
                     == context.envelope.id {
                     // A newer Resume revision supersedes the causal state
                     // stamped onto the outstanding approval. Tear down its
-                    // delivery loop and held MCP generation, then replan from
+                    // delivery loop and held Agent lifecycle work, then replan from
                     // the current screen so only a revision-current approval
                     // can be presented or accepted.
                     pauseExecution(context)
-                    resumeExecution(context, controlEnvelope: envelope)
+                    resumeExecution(context, controlEnvelope: envelope, afterInput: resumeInput)
                 } else if pausedExecution?.envelope.id
                     == context.envelope.id {
-                    resumeExecution(context, controlEnvelope: envelope)
+                    resumeExecution(context, controlEnvelope: envelope, afterInput: resumeInput)
                 } else {
                     sendCurrentStatus(
                         for: context,
@@ -4315,13 +5652,24 @@ final class HostComputerUseManager: ObservableObject {
         _ control: ComputerUseTaskLedger.Control,
         envelope: ComputerUseEnvelope,
         channel: any HostComputerUseChannel
-    ) {
+    ) -> Bool {
         // Empty bodies are the compatibility path for shipped clients. With no
         // task ID or revision, they may only touch the one live context owned
         // by the same sender and session. In particular, nil-context Pause is
         // a no-op instead of placing the whole host in a phantom paused state.
         guard let context = legacyExecutionContext(matching: envelope) else {
-            return
+            return true
+        }
+        var resumeInput: ComputerUseActionGate.PausedInputSnapshot?
+        if control != .cancel {
+            guard let reconciled = reconcilePausedInputBeforeRemoteControl(context) else { return false }
+            resumeInput = reconciled.snapshot
+        }
+        // An empty legacy control cannot have observed a local handoff. Stop
+        // remains available; Pause/Resume need a versioned, current command.
+        if control != .cancel, taskLedger.hostControlEpoch(taskID: context.envelope.id) > 0 {
+            sendCurrentStatus(for: context, fallback: "paused", replyingTo: context.envelope, channel: context.channel)
+            return true
         }
 
         switch control {
@@ -4329,9 +5677,9 @@ final class HostComputerUseManager: ObservableObject {
             pauseExecution(context)
         case .resume:
             guard pausedExecution?.envelope.id == context.envelope.id else {
-                return
+                return true
             }
-            resumeExecution(context, controlEnvelope: envelope)
+            resumeExecution(context, controlEnvelope: envelope, afterInput: resumeInput)
         case .cancel:
             sendDurableTerminal(
                 ComputerUseTaskLedger.stoppedResponse,
@@ -4344,6 +5692,7 @@ final class HostComputerUseManager: ObservableObject {
                 replyingTo: context.envelope,
                 channel: context.channel)
         }
+        return true
     }
 
     private func ledgerControl(
@@ -4381,16 +5730,83 @@ final class HostComputerUseManager: ObservableObject {
         }
     }
 
-    private func pauseExecution(_ context: ExecutionContext) {
+    private static let localControlPersistenceFailureGuidance =
+        "AI is paused, but the Mac couldn't safely save this handoff. Keep control of the Mac until its task storage is available."
+
+    private static let pausedInputChangedGuidance =
+        "You used the Mac while AI was paused. Choose Resume again when you are ready."
+
+    private static let heldInputGuidance =
+        "Finish the current input and release any held keys or mouse buttons, then choose Resume."
+
+    private static func admissionGuidance(_ admission: InputInjector.AutomationAdmission) -> String? {
+        switch admission {
+        case .inputHeld: return heldInputGuidance
+        case .inputStateUnavailable:
+            return "I couldn't check keyboard and mouse input. Check Accessibility access for RemoteDesktopHost, then choose Resume."
+        case .admitted, .interrupted: return nil
+        }
+    }
+
+    private func admitAutomation(_ admission: () -> Bool) -> InputInjector.AutomationAdmission {
+        if allowsExternalServices, !HostRuntimeContext.isRunningUnitTests {
+            if localInputMonitors.count != 2 { installLocalInterventionMonitors() }
+            guard localInputMonitors.count == 2 else { return .inputStateUnavailable }
+        }
+        return injector.admitAutomation(admission)
+    }
+
+    private func pausedInputSnapshot(for context: ExecutionContext) -> ComputerUseActionGate.PausedInputSnapshot? {
+        guard case .paused = activity, pausedInputOwner == PausedInputOwner(context), let scope = pausedInputScopeID else { return nil }
+        return actionGate.pausedInputSnapshot(scopeID: scope)
+    }
+    private func reconcilePausedInputBeforeRemoteControl(_ context: ExecutionContext)
+        -> (snapshot: ComputerUseActionGate.PausedInputSnapshot?, changed: Bool)? {
+        guard let input = pausedInputSnapshot(for: context) else { return (nil, false) }
+        guard actionGate.hasUnacknowledgedInput(input) else { return (input, false) }
+        guard persistLocalControl(.pause, context: context, acknowledgingInput: input) else {
+            pauseExecution(context, guidance: Self.localControlPersistenceFailureGuidance)
+            return nil
+        }
+        return (pausedInputSnapshot(for: context), true)
+    }
+
+    private func persistLocalControl(_ control: ComputerUseTaskLedger.Control, context: ExecutionContext,
+        acknowledgingInput: ComputerUseActionGate.PausedInputSnapshot? = nil) -> Bool {
+        let input = acknowledgingInput ?? pausedInputSnapshot(for: context)
+        defer { refreshLocalTaskControls() }
+        do {
+            try taskLedger.applyLocalControl(control, taskID: context.envelope.id,
+                senderID: context.envelope.senderID, sessionID: context.envelope.sessionID)
+            if let input { actionGate.acknowledgePausedInput(input) }
+            return true
+        } catch {
+            actionGate.endAutomation(allowsActions: false)
+            return false
+        }
+    }
+
+    private func pauseForLocalIntervention(_ context: ExecutionContext, guidance: String? = nil,
+                                            report: ComputerUseResearchProgress? = nil) {
+        actionGate.endAutomation(allowsActions: false)
+        let persisted = persistLocalControl(.pause, context: context)
+        pauseExecution(context, guidance: persisted ? guidance : Self.localControlPersistenceFailureGuidance,
+            report: persisted ? report : nil)
+    }
+
+    private func pauseExecution(_ context: ExecutionContext, guidance: String? = nil,
+                                report: ComputerUseResearchProgress? = nil) {
+        let guidance = guidance ?? Self.userInterventionGuidance
         if postedApprovedVisualTaskID == context.envelope.id {
             terminalizePostedVisualActionForIntervention(context: context)
             return
         }
         if pausedExecution?.envelope.id == context.envelope.id {
-            sendStatus(
-                "paused",
-                replyingTo: context.envelope,
-                channel: context.channel)
+            if guidance == Self.userInterventionGuidance {
+                sendStatus("paused", replyingTo: context.envelope, channel: context.channel)
+            } else {
+                sendUserInterventionStatus(guidance, replyingTo: context.envelope, channel: context.channel, report: report)
+            }
             return
         }
 
@@ -4402,28 +5818,35 @@ final class HostComputerUseManager: ObservableObject {
         pausedExecution = context
         currentExecution = nil
         pendingApproval = nil
-        cancelApprovalIfNeeded(invalidatedApproval)
+        cancelApprovalIfNeeded(invalidatedApproval, preservingTaskProgress: true)
         approvalDeliveryTask?.cancel()
         approvalDeliveryTask = nil
         currentExecutionToken = nil
         cancelActiveVisualApprovalContinuation()
-        cancelActiveMCPWork()
-        executionTask?.cancel()
+        cancelActiveTaskWork(preservingTaskProgress: true)
+        if generalAgent == nil { executionTask?.cancel() }
         activity = .paused
         sendUserInterventionStatus(
-            Self.userInterventionGuidance,
+            guidance,
             replyingTo: context.envelope,
-            channel: context.channel)
+            channel: context.channel,
+            report: report)
     }
 
     private func resumeExecution(
         _ context: ExecutionContext,
-        controlEnvelope: ComputerUseEnvelope
+        controlEnvelope: ComputerUseEnvelope,
+        afterInput: ComputerUseActionGate.PausedInputSnapshot? = nil
     ) {
+        guard context.belongs(to: controlEnvelope) else { return }
+        resumeExecution(context, afterInput: afterInput)
+    }
+
+    private func resumeExecution(_ context: ExecutionContext, afterInput: ComputerUseActionGate.PausedInputSnapshot? = nil) {
         guard case .paused = activity,
               let pausedExecution,
               pausedExecution.envelope.id == context.envelope.id,
-              pausedExecution.belongs(to: controlEnvelope) else {
+              pausedExecution.belongs(to: context.envelope) else {
             sendCurrentStatus(
                 for: context,
                 fallback: "ready",
@@ -4432,30 +5855,38 @@ final class HostComputerUseManager: ObservableObject {
             return
         }
 
-        self.pausedExecution = nil
-        actionGate.setAllowsActions(true)
-        actionGate.endAutomation(allowsActions: true)
-        activity = .idle
-
+        // Own a closed admission before readiness checks or durable prompt
+        // claiming. Direct input can revoke it even while activity is idle.
+        let pendingAutomationID: UUID
+        if let input = afterInput ?? pausedInputSnapshot(for: context) {
+            guard let reservation = actionGate.reservePendingAutomation(after: input) else {
+                pauseForLocalIntervention(context, guidance: Self.pausedInputChangedGuidance)
+                return
+            }
+            pendingAutomationID = reservation
+        } else { pendingAutomationID = actionGate.reservePendingAutomation() }
+        defer { actionGate.abandonReservedAutomation(pendingAutomationID) }
         if !pausedExecution.hasStarted {
+            // An unstarted prompt owns no live browser handoff. The ordinary
+            // claim path may terminalize without adopting this reservation.
+            self.pausedExecution = nil
+            lastUserIntervention = nil
+            activity = .idle
             // This Prompt was durably claimed while a pre-delivered Pause was
             // in force. Re-enter the normal claim path: the ledger atomically
             // marks executionStarted and returns `.new` exactly once.
             startExecution(
                 for: pausedExecution.envelope,
-                channel: pausedExecution.channel)
+                channel: pausedExecution.channel, pendingAutomationID: pendingAutomationID)
             return
         }
 
+        // Preserve the paused owner and its provider window through readiness.
+        // Publishing idle here would clear browser controls and close sign-in.
         guard let executor, executor.isReady else {
             self.pausedExecution = pausedExecution
-            actionGate.setAllowsActions(false)
-            actionGate.endAutomation(allowsActions: false)
             activity = .paused
-            sendUserInterventionStatus(
-                Self.userInterventionGuidance,
-                replyingTo: pausedExecution.envelope,
-                channel: pausedExecution.channel)
+            pauseForLocalIntervention(pausedExecution)
             return
         }
 
@@ -4475,8 +5906,11 @@ final class HostComputerUseManager: ObservableObject {
             for: resumed,
             trustedUserPrompt: pausedExecution.trustedUserPrompt,
             conversation: pausedExecution.conversation,
+            textClarification: pausedExecution.textClarification,
+            memoryPolicy: pausedExecution.memoryPolicy,
             channel: pausedExecution.channel,
-            isResuming: true)
+            isResuming: true, pendingAutomationID: pendingAutomationID,
+            preservingPausedExecution: true)
     }
 
     private func stopExecution(_ context: ExecutionContext) {
@@ -4484,15 +5918,22 @@ final class HostComputerUseManager: ObservableObject {
             ?? pausedExecution?.envelope.id
             ?? pendingApproval?.context.envelope.id
         guard activeTaskID == context.envelope.id else { return }
+        taskMemoryContextSlot?.clear()
+        invalidateCompletedMemoryConfirmationLease()
+        textClarifications.invalidate(for: context.envelope)
+        (executor as? any ComputerUseClarificationContinuing)?.invalidateClarification(taskID: context.envelope.id)
         // Cancel is terminal for this execution. Keep the automation gate
         // closed until a later, separately claimed Prompt explicitly begins;
         // never let cancellation-ignoring work inject during unwind.
-        actionGate.endAutomation(allowsActions: false)
+        injector.stopAutomation { [actionGate] in
+            actionGate.endAutomation(allowsActions: false)
+        }
         let invalidatedApproval = pendingApproval
         postedApprovedVisualTaskID = nil
         cancelActiveVisualApprovalContinuation()
-        cancelActiveMCPWork()
+        cancelActiveTaskWork()
         executionTask?.cancel()
+        releaseExecutionTaskHandleAfterCancellation()
         currentExecution = nil
         pausedExecution = nil
         pendingApproval = nil
@@ -4551,6 +5992,19 @@ final class HostComputerUseManager: ObservableObject {
         approvalDeliveryTask?.cancel()
         approvalDeliveryTask = nil
 
+        if case let .agent(request) = pendingApproval.operation {
+            guard let agent = generalAgent,
+                  agent.ownsApproval(request, hostTaskID: pendingApproval.context.envelope.id) else { return }
+            let admission = admitAutomation { actionGate.beginApprovedAutomation() }
+            guard admission == .admitted else {
+                cancelApprovalIfNeeded(pendingApproval, preservingTaskProgress: true)
+                pauseForLocalIntervention(pendingApproval.context, guidance: Self.admissionGuidance(admission))
+                return
+            }
+            continueApprovedAgent(request, approved: response.approved, agent: agent, context: pendingApproval.context)
+            return
+        }
+
         guard response.approved,
               let executor,
               executor.isReady else {
@@ -4569,23 +6023,19 @@ final class HostComputerUseManager: ObservableObject {
             return
         }
 
-        guard actionGate.beginApprovedAutomation() else {
+        let admission = admitAutomation { actionGate.beginApprovedAutomation() }
+        guard admission == .admitted else {
             // Direct input can close the gate synchronously before its
             // MainActor lifecycle callback arrives. That close owns the race:
             // keep the held task resumable and never execute the approval.
-            cancelApprovalIfNeeded(pendingApproval)
-            pauseAfterApprovedOperationWasBlocked(
-                context: pendingApproval.context)
+            cancelApprovalIfNeeded(pendingApproval, preservingTaskProgress: true)
+            pauseForLocalIntervention(pendingApproval.context,
+                guidance: Self.admissionGuidance(admission))
             return
         }
 
         switch pendingApproval.operation {
-        case .mcp(let prepared):
-            continueApprovedMCP(
-                prepared,
-                executor: executor,
-                context: pendingApproval.context)
-
+        case .agent: return
         case .visual(let continuation, let action, let fingerprint):
             continueApprovedVisualAction(
                 continuation,
@@ -4599,16 +6049,33 @@ final class HostComputerUseManager: ObservableObject {
     private func pauseAfterApprovedOperationWasBlocked(
         context: ExecutionContext
     ) {
-        actionGate.endAutomation(allowsActions: false)
-        currentExecution = nil
-        currentExecutionToken = nil
-        executionTask = nil
-        pausedExecution = context
-        activity = .paused
-        sendUserInterventionStatus(
-            Self.userInterventionGuidance,
-            replyingTo: context.envelope,
-            channel: context.channel)
+        pauseForLocalIntervention(context)
+    }
+
+    private func continueApprovedAgent(_ request: AgentApprovalRequest, approved: Bool,
+                                       agent: any AgentTaskAdapting, context: ExecutionContext) {
+        let token = UUID()
+        currentExecution = context; currentExecutionToken = token
+        activity = .working("Continuing the approved agent task…")
+        let lifecycle = agentLifecycleTask
+        executionTask = Task { [weak self] in
+            guard let self else { return }
+            await lifecycle?.value
+            guard !Task.isCancelled, currentExecutionToken == token else { return }
+            let progress: (String) -> Void = { [weak self] value in
+                guard self?.currentExecutionToken == token else { return }
+                self?.activity = .working(value)
+                self?.sendStatus(value, replyingTo: context.envelope, channel: context.channel)
+            }
+            let result = await agent.resumeApproval(request: request, approved: approved, progress: progress)
+            guard !Task.isCancelled, currentExecutionToken == token, let executor else { return }
+            do { try await acceptExecutionResult(result, executor: executor, context: context, token: token) }
+            catch {
+                guard currentExecutionToken == token else { return }
+                currentExecution = nil; currentExecutionToken = nil; executionTask = nil
+                finishApprovedActionFailure(error, context: context)
+            }
+        }
     }
 
     private func approvalResponse(
@@ -4618,6 +6085,8 @@ final class HostComputerUseManager: ObservableObject {
         let taskID = approval.context.envelope.id
         let expectedRevision = approval.request.appliedControlRevision
         guard approval.request.taskID == taskID,
+              (response.hostControlEpoch ?? 0) == (approval.request.hostControlEpoch ?? 0),
+              (approval.request.hostControlEpoch ?? 0) == taskLedger.hostControlEpoch(taskID: taskID),
               taskLedger.appliedControlRevision(taskID: taskID)
                 == expectedRevision else {
             // A lifecycle control advanced after the card was created. The
@@ -4631,22 +6100,20 @@ final class HostComputerUseManager: ObservableObject {
             // Pre-revision clients did not echo task metadata. They remain
             // compatible only while the task itself has never received a
             // versioned lifecycle control.
-            return expectedRevision == nil
+            return expectedRevision == nil && (approval.request.hostControlEpoch ?? 0) == 0
         }
 
         return response.taskID == taskID
             && response.appliedControlRevision == expectedRevision
     }
 
-    private func cancelApprovalIfNeeded(_ approval: PendingApproval?) {
+    private func cancelApprovalIfNeeded(_ approval: PendingApproval?, preservingTaskProgress: Bool = false) {
         guard let approval else { return }
         switch approval.operation {
+        case .agent:
+            cancelActiveTaskWork(preservingTaskProgress: preservingTaskProgress)
         case .visual(let token, _, _):
             cancelVisualApprovalContinuation(token)
-        case .mcp:
-            guard let continuation =
-                    executor as? any MCPApprovalContinuing else { return }
-            continuation.cancelMCPWork()
         }
     }
 
@@ -4671,7 +6138,7 @@ final class HostComputerUseManager: ObservableObject {
     ) {
         actionGate.endAutomation(allowsActions: false)
         cancelActiveVisualApprovalContinuation()
-        cancelActiveMCPWork()
+        cancelActiveTaskWork()
         executionTask?.cancel()
         postedApprovedVisualTaskID = nil
         currentExecution = nil
@@ -4687,13 +6154,35 @@ final class HostComputerUseManager: ObservableObject {
             allowsActions: false)
     }
 
-    /// Captures and invalidates the currently owned helper generation before
-    /// task cancellation can race an immediate Resume. MCPFirst binds the
-    /// asynchronous stop to that captured generation, so stale cleanup cannot
-    /// terminate the generation started by the resumed task.
-    private func cancelActiveMCPWork() {
-        guard let continuation = executor as? any MCPApprovalContinuing else { return }
-        continuation.cancelMCPWork()
+    /// Serialize AgentLoop pause/cancel requests behind prior lifecycle work so
+    /// an immediate Resume cannot be overtaken by stale cleanup.
+    private func cancelActiveTaskWork(preservingTaskProgress: Bool = false) {
+        if let agent = generalAgent {
+            if preservingTaskProgress { agent.requestPause() }
+            else { agent.requestCancellation() }
+            let previous = agentLifecycleTask
+            agentLifecycleTask = Task {
+                await previous?.value
+                if preservingTaskProgress { await agent.pauseAgent() }
+                else { await agent.cancelAgent() }
+            }
+            return
+        }
+    }
+
+    /// Keep the execution handle as a join barrier until both the task and
+    /// serialized agent cancellation have unwound. A later task assignment
+    /// changes the slot identity, so stale cleanup cannot clear its handle.
+    private func releaseExecutionTaskHandleAfterCancellation() {
+        guard let retiringExecution = executionTask else { return }
+        let retiringSlotID = executionTaskSlotID
+        let lifecycle = agentLifecycleTask
+        Task { @MainActor [weak self] in
+            await retiringExecution.value
+            await lifecycle?.value
+            guard let self, self.executionTaskSlotID == retiringSlotID else { return }
+            self.executionTask = nil
+        }
     }
 
     private func finishApprovedActionFailure(
@@ -4702,7 +6191,7 @@ final class HostComputerUseManager: ObservableObject {
     ) {
         actionGate.endAutomation(allowsActions: true)
         activity = .idle
-        let response = "The approved action was not performed: \(error.localizedDescription)"
+        let response = "I couldn't confirm the approved action's result. It will not be retried automatically: \(error.localizedDescription)"
         sendDurableTerminal(
             response,
             outcome: .unableToComplete,
@@ -4789,6 +6278,17 @@ final class HostComputerUseManager: ObservableObject {
             return
         }
 
+        // Setup may replace the coordinator and switch the shared model owner.
+        // It cannot discard a running/paused task or an approval continuation.
+        guard activity == .idle else {
+            sendSetupProgress(ComputerUseSetupProgress(requestID: request.requestID,
+                idempotencyKey: request.idempotencyKey, phase: .failed,
+                detail: "Finish or stop the current AI task before changing setup.",
+                errorMessage: "Finish or stop the current AI task, then retry setup."),
+                replyingTo: envelope, channel: channel)
+            return
+        }
+
         let replacesFailedGeneration =
             currentSetupProgress?.phase == .failed && setupTask == nil
         let admission = setupRecipients.admit(
@@ -4810,14 +6310,14 @@ final class HostComputerUseManager: ObservableObject {
             return
         }
 
-        if macControlReceipt != nil, executor?.isReady == true {
+        if executorIsReady, !needsAdditionalSetup {
             publishSetupProgress(
                 phase: .ready,
                 fraction: 1,
-                detail: "AI Computer Use is ready")
+                detail: executor?.readyDetail ?? "AI Computer Use is ready")
             return
         }
-        if let currentSetupProgress {
+        if let currentSetupProgress, currentSetupProgress.phase != .ready {
             sendSetupProgress(currentSetupProgress, replyingTo: envelope, channel: channel)
         }
         if setupTask == nil { startSetupPipeline() }
@@ -4827,156 +6327,158 @@ final class HostComputerUseManager: ObservableObject {
         guard allowsExternalServices,
               !isShuttingDown,
               setupTask == nil else { return }
+        if let generalAgentFactory {
+            startGeneralAgentSetup(factory: generalAgentFactory)
+            return
+        }
         modelCheckTask?.cancel()
         modelCheckTask = nil
         lastInstallerProgressPhase = nil
         lastInstallerProgressFraction = nil
         lastInstallerProgressDate = .distantPast
-        publishSetupProgress(
-            phase: .queued,
-            fraction: 0,
-            detail: "Checking this Mac…")
+        publishSetupProgress(phase: .queued, fraction: 0, detail: "Checking this Mac…")
         modelState = .installing(detail: "Checking this Mac…", fraction: 0)
         setupTask = Task { [weak self] in
             guard let self else { return }
             defer { setupTask = nil }
+            let previouslyAvailableExecutor = executor
             var activationReceipt: ComputerUseInstallationReceipt?
             do {
-                let helperReceipt = try await macControlInstaller.install { [weak self] update in
-                    self?.consumeMacControlInstallerUpdate(update)
-                }
-                macControlReceipt = helperReceipt
-                try Task.checkCancellation()
                 let receipt = try await installer.install { [weak self] update in
                     self?.consumeInstallerUpdate(update)
                 }
                 activationReceipt = receipt
                 try Task.checkCancellation()
-                modelState = .installing(
-                    detail: "Loading the on-device AI…",
-                    fraction: 0.98)
-                publishSetupProgress(
-                    phase: .installingPackages,
-                    fraction: 0.98,
+                modelState = .installing(detail: "Loading the on-device AI…", fraction: 0.98)
+                publishSetupProgress(phase: .installingPackages, fraction: 0.98,
                     detail: "Loading the on-device AI…")
                 executor = nil
-                let loaded = try await visualExecutorLoader.load(
-                    receipt: receipt,
-                    progress: { [weak self] detail in
-                        self?.consumeRuntimeActivationUpdate(detail)
-                    })
+                let loaded = try await visualExecutorLoader.load(receipt: receipt) { [weak self] detail in
+                    self?.consumeRuntimeActivationUpdate(detail)
+                }
                 try Task.checkCancellation()
-                modelState = .installing(
-                    detail: "Starting verified local Mac tools…",
-                    fraction: 0.99)
-                publishSetupProgress(
-                    phase: .installingPackages,
-                    fraction: 0.99,
-                    detail: "Starting verified local Mac tools…")
-                let hybrid = try await executorComposer(helperReceipt, loaded)
-                try Task.checkCancellation()
+                publishSetupProgress(phase: .installingPackages, fraction: 0.99,
+                    detail: "Starting the on-device AI…")
                 try await installer.recordRuntimeActivationSuccess(for: receipt)
-                executor = hybrid
-                modelState = .ready(runtimeName: hybrid.runtimeName)
-                publishSetupProgress(
-                    phase: .ready,
-                    fraction: 1,
-                    detail: "AI Computer Use is ready")
+                try Task.checkCancellation()
+                executor = loaded
+                modelState = .ready(runtimeName: executor?.runtimeName ?? loaded.runtimeName)
+                publishSetupProgress(phase: .ready, fraction: 1,
+                    detail: executor?.readyDetail ?? "AI Computer Use is ready")
             } catch is CancellationError {
                 await visualExecutorLoader.deactivate()
-                executor = nil
+                executor = previouslyAvailableExecutor
                 if let activationReceipt {
-                    try? await installer.restorePreviousInstallation(
-                        afterFailedActivationOf: activationReceipt)
+                    try? await installer.restorePreviousInstallation(afterFailedActivationOf: activationReceipt)
                 }
-                modelState = .downloadRequired
-                publishSetupProgress(
-                    phase: .failed,
-                    fraction: nil,
-                    detail: "Setup stopped",
-                    errorMessage: "Setup stopped before AI Computer Use was activated. Tap Retry to continue.")
-                return
+                modelState = executor.map { .ready(runtimeName: $0.runtimeName) } ?? .downloadRequired
+                publishSetupProgress(phase: .failed, fraction: nil, detail: "Setup stopped",
+                    errorMessage: executor == nil
+                        ? "Setup stopped before AI Computer Use was activated. Tap Retry to continue."
+                        : "Available AI tools are ready. Additional setup stopped; tap Retry to finish it.")
             } catch {
                 await visualExecutorLoader.deactivate()
-                executor = nil
+                executor = previouslyAvailableExecutor
                 if let activationReceipt {
-                    try? await installer.restorePreviousInstallation(
-                        afterFailedActivationOf: activationReceipt)
+                    try? await installer.restorePreviousInstallation(afterFailedActivationOf: activationReceipt)
                 }
                 await installer.clearInterruptedInstallationMarker()
-                let message = (error as? LocalizedError)?.errorDescription
-                    ?? error.localizedDescription
-                modelState = .error(message)
-                publishSetupProgress(
-                    phase: .failed,
-                    fraction: nil,
-                    detail: "Setup needs attention",
+                let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+                modelState = executor.map { .ready(runtimeName: $0.runtimeName) } ?? .error(message)
+                publishSetupProgress(phase: .failed, fraction: nil, detail: "Setup needs attention",
                     errorMessage: message)
             }
         }
     }
 
+    private func startGeneralAgentSetup(factory: @escaping (ComputerUseInstallationReceipt) throws -> ComputerUseCapabilityExecutor) {
+        modelCheckTask?.cancel(); modelCheckTask = nil
+        publishSetupProgress(phase: .queued, fraction: 0, detail: "Checking the local model package…")
+        modelState = .installing(detail: "Checking the local model package…", fraction: 0)
+        setupTask = Task { [weak self] in
+            guard let self else { return }
+            defer { setupTask = nil }
+            do {
+                try Task.checkCancellation()
+                let receipt = try await installer.install { [weak self] update in self?.consumeInstallerUpdate(update) }
+                try Task.checkCancellation()
+                executor = try factory(receipt)
+                modelState = .ready(runtimeName: executor!.runtimeName)
+                publishSetupProgress(phase: .ready, fraction: 1, detail: executor!.readyDetail)
+            } catch is CancellationError {
+                modelState = executor.map { .ready(runtimeName: $0.runtimeName) } ?? .downloadRequired
+                publishSetupProgress(phase: .failed, fraction: nil, detail: "Setup stopped", errorMessage: "Setup stopped before the local agent was ready.")
+            } catch {
+                await installer.clearInterruptedInstallationMarker()
+                modelState = .error(error.localizedDescription)
+                publishSetupProgress(phase: .failed, fraction: nil, detail: "Setup needs attention", errorMessage: error.localizedDescription)
+            }
+        }
+    }
+
+    private func configureVisualFactory(_ native: ComputerUseCapabilityExecutor,
+        receipt: ComputerUseInstallationReceipt?) {
+        native.setDesktopFactory(includesVisualControl: receipt != nil) { [weak self] _ in
+            guard let self else { throw CancellationError() }
+            return deferredVisualExecutor(receipt: receipt)
+        }
+    }
+
+    private func deferredVisualExecutor(receipt: ComputerUseInstallationReceipt?) -> ComputerUseDeferredVisualExecutor {
+        guard let receipt else { return ComputerUseDeferredVisualExecutor() }
+        return ComputerUseDeferredVisualExecutor(loader: { [visualExecutorLoader, installer] progress in
+            do {
+                let prepared = try await visualExecutorLoader.prepare(receipt: receipt, progress: progress)
+                try Task.checkCancellation()
+                if prepared.runtimeWasActivated {
+                    try await installer.recordRuntimeActivationSuccess(for: receipt)
+                }
+                try Task.checkCancellation()
+                return prepared.executor
+            } catch {
+                await visualExecutorLoader.deactivate()
+                throw error
+            }
+        }, abandon: { [visualExecutorLoader] _ in await visualExecutorLoader.deactivate() })
+    }
+
+    private func publishRequestedActivationFailure(_ error: Error) {
+        guard !setupRecipients.activeRecipients().isEmpty else { return }
+        publishSetupProgress(phase: .failed, fraction: nil, detail: "Setup needs attention",
+            errorMessage: (error as? LocalizedError)?.errorDescription ?? error.localizedDescription)
+    }
+
     private func beginActivation(of receipt: ComputerUseInstallationReceipt) {
-        guard allowsExternalServices,
-              !isShuttingDown,
-              setupTask == nil,
-              let helperReceipt = macControlReceipt,
+        guard allowsExternalServices, !isShuttingDown, setupTask == nil,
               executor?.isReady != true else { return }
-        modelState = .installing(
-            detail: "Loading the on-device AI…",
-            fraction: 0.98)
+        modelState = .installing(detail: "Loading the on-device AI…", fraction: 0.98)
         setupTask = Task { [weak self] in
             guard let self else { return }
             do {
                 executor = nil
-                let loaded = try await visualExecutorLoader.load(
-                    receipt: receipt,
-                    progress: { [weak self] detail in
-                        self?.consumeRuntimeActivationUpdate(detail)
-                    })
-                try Task.checkCancellation()
-                modelState = .installing(
-                    detail: "Starting verified local Mac tools…",
-                    fraction: 0.99)
-                let hybrid = try await executorComposer(helperReceipt, loaded)
+                let loaded = try await visualExecutorLoader.load(receipt: receipt) { [weak self] detail in
+                    self?.consumeRuntimeActivationUpdate(detail)
+                }
                 try Task.checkCancellation()
                 try await installer.recordRuntimeActivationSuccess(for: receipt)
-                executor = hybrid
-                modelState = .ready(runtimeName: hybrid.runtimeName)
-                publishSetupProgress(
-                    phase: .ready,
-                    fraction: 1,
-                    detail: "AI Computer Use is ready")
+                try Task.checkCancellation()
+                executor = loaded
+                modelState = .ready(runtimeName: loaded.runtimeName)
+                publishSetupProgress(phase: .ready, fraction: 1, detail: "AI Computer Use is ready")
             } catch is CancellationError {
                 await visualExecutorLoader.deactivate()
                 executor = nil
-                try? await installer.restorePreviousInstallation(
-                    afterFailedActivationOf: receipt)
+                try? await installer.restorePreviousInstallation(afterFailedActivationOf: receipt)
                 modelState = .downloadRequired
             } catch {
                 await visualExecutorLoader.deactivate()
                 executor = nil
-                try? await installer.restorePreviousInstallation(
-                    afterFailedActivationOf: receipt)
-                let message = (error as? LocalizedError)?.errorDescription
-                    ?? error.localizedDescription
+                try? await installer.restorePreviousInstallation(afterFailedActivationOf: receipt)
+                let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
                 modelState = .error(message)
             }
             setupTask = nil
         }
-    }
-
-    /// The small signed helper receives a visible 8% phase allocation. Its
-    /// byte-count detail remains authoritative while the allocation prevents a
-    /// 2.6 MB prerequisite from looking frozen beside the multi-GB model.
-    private func consumeMacControlInstallerUpdate(_ update: MacControlMCPInstaller.Update) {
-        let candidate = Self.visibleMacControlInstallerFraction(update)
-        consumeProvisioningProgress(
-            phase: .installingPackages,
-            candidateFraction: candidate,
-            detail: update.detail,
-            minimumPublishDelta: 0.005,
-            forcePublish: update.phase == .ready)
     }
 
     private func consumeInstallerUpdate(_ update: ComputerUseInstaller.Update) {
@@ -4997,7 +6499,7 @@ final class HostComputerUseManager: ObservableObject {
             candidateFraction: visibleFraction,
             detail: update.detail,
             minimumPublishDelta: 0.02,
-            forcePublish: visibleFraction == 0.97)
+            forcePublish: update.phase == .ready)
     }
 
     /// Runtime activation is part of setup too. Forward its changing detail to
@@ -5043,22 +6545,10 @@ final class HostComputerUseManager: ObservableObject {
             detail: detail)
     }
 
-    nonisolated static let macControlSetupFraction = 0.08
-
-    nonisolated static func visibleMacControlInstallerFraction(
-        _ update: MacControlMCPInstaller.Update
-    ) -> Double {
-        guard update.fraction.isFinite else { return 0 }
-        return min(1, max(0, update.fraction)) * macControlSetupFraction
-    }
-
     nonisolated static func visibleModelInstallerFraction(
         _ update: ComputerUseInstaller.Update
     ) -> Double? {
-        guard let internalFraction = visibleInstallerFraction(update) else { return nil }
-        let normalized = internalFraction / 0.97
-        return macControlSetupFraction
-            + normalized * (0.97 - macControlSetupFraction)
+        visibleInstallerFraction(update)
     }
 
     /// The installer owns the first 97% of user-visible setup. Native model
@@ -5147,7 +6637,8 @@ final class HostComputerUseManager: ObservableObject {
 
     private func startExecution(
         for envelope: ComputerUseEnvelope,
-        channel: any HostComputerUseChannel
+        channel: any HostComputerUseChannel,
+        pendingAutomationID: UUID? = nil
     ) {
         let activeTaskID = currentExecution?.envelope.id
             ?? pausedExecution?.envelope.id
@@ -5166,7 +6657,8 @@ final class HostComputerUseManager: ObservableObject {
             switch try taskLedger.claim(
                 taskID: envelope.id,
                 senderID: envelope.senderID,
-                sessionID: envelope.sessionID) {
+                sessionID: envelope.sessionID,
+                promptBody: envelope.body) {
             case .new:
                 if hasDifferentActiveTask {
                     sendDurableTerminal(
@@ -5176,6 +6668,12 @@ final class HostComputerUseManager: ObservableObject {
                         channel: channel)
                     return
                 }
+                invalidateCompletedMemoryConfirmationLease()
+                // A newly claimed, non-conflicting task is host-accepted
+                // authority to move this peer's memory RPC session binding.
+                // Do not rebind from a memory RPC alone: a stale session could
+                // otherwise take ownership after the task's session changed.
+                localMemorySessionID = envelope.sessionID
                 break
             case .paused:
                 if hasDifferentActiveTask {
@@ -5203,12 +6701,20 @@ final class HostComputerUseManager: ObservableObject {
                     channel: channel)
                 return
             case .completed(let response):
+                if taskLedger.isCancelled(taskID: envelope.id),
+                   let reference = (try? ComputerUseExecutionPromptDecoder.decode(envelope.body))?.clarification {
+                    if taskLedger.terminalClarification(taskID: reference.taskID) == reference {
+                        _ = try taskLedger.cancelLocally(taskID: reference.taskID,
+                            senderID: envelope.senderID, sessionID: envelope.sessionID)
+                    }
+                }
                 send(
                     kind: .assistant,
                     body: response,
                     replyingTo: envelope,
                     channel: channel,
-                    outcome: taskLedger.terminalOutcome(taskID: envelope.id))
+                    outcome: taskLedger.terminalOutcome(taskID: envelope.id),
+                    clarification: taskLedger.terminalClarification(taskID: envelope.id))
                 sendStatus("ready", replyingTo: envelope, channel: channel)
                 return
             case .accepted:
@@ -5233,7 +6739,8 @@ final class HostComputerUseManager: ObservableObject {
                         sendUserInterventionStatus(
                             guidance,
                             replyingTo: envelope,
-                            channel: channel)
+                            channel: channel,
+                            report: lastUserIntervention?.taskID == envelope.id ? lastUserIntervention?.report : nil)
                     case .awaitingApproval:
                         sendStatus(
                             "Waiting for your approval before continuing…",
@@ -5247,24 +6754,45 @@ final class HostComputerUseManager: ObservableObject {
                     }
                 } else {
                     let response = "That request was received before the host restarted, so it was not run again. Send it as a new request if it is still needed."
-                    sendDurableTerminal(
-                        response,
-                        outcome: .unableToComplete,
-                        replyingTo: envelope,
-                        channel: channel)
+                    sendDurableTerminal(response, outcome: .unableToComplete,
+                        replyingTo: envelope, channel: channel)
                     sendStatus("ready", replyingTo: envelope, channel: channel)
                 }
                 return
             case .identityMismatch:
+                // A conflicting delivery cannot replace the live request or
+                // terminalize its phone state while the original may act.
+                return
+            case .promptIdentityUnavailable:
+                send(kind: .assistant, body: Self.promptIdentityRecoveryResponse,
+                    replyingTo: envelope, channel: channel, outcome: .unableToComplete)
+                sendStatus("ready", replyingTo: envelope, channel: channel)
                 return
             }
         } catch {
             send(
                 kind: .assistant,
-                body: "The host could not safely record this request, so no action was taken.",
+                body: "The host could not safely record or verify this request. It will not start another attempt. Check the Mac before sending a new request.",
                 replyingTo: envelope,
                 channel: channel,
                 outcome: .unableToComplete)
+            return
+        }
+        let request: ComputerUsePromptRequest
+        do {
+            request = try ComputerUseExecutionPromptDecoder.decode(envelope.body)
+        } catch {
+            sendDurableTerminal("I couldn't validate this request or its clarification. Start a new request with the complete instruction.",
+                outcome: .unableToComplete, replyingTo: envelope, channel: channel)
+            sendStatus("ready", replyingTo: envelope, channel: channel)
+            return
+        }
+        // A newly claimed ordinary request retires the old question even if
+        // setup/readiness prevents the new request from executing.
+        if request.clarification == nil { invalidateTextClarification() }
+        guard setupTask == nil else {
+            sendDurableTerminal("AI setup is still running. Wait for setup to finish, then send this as a new request.",
+                outcome: .userInterventionRequired, replyingTo: envelope, channel: channel)
             return
         }
         guard let executor, executor.isReady else {
@@ -5277,12 +6805,66 @@ final class HostComputerUseManager: ObservableObject {
             return
         }
 
-        let request = ComputerUsePromptRequest.decodeCompatibleBody(envelope.body)
+        let continuation: TextClarificationContinuation?
+        let acceptedMemoryPolicy: ComputerUseTaskMemoryPolicy
+        var validatedClarificationOwner: ValidatedTextClarificationOwner?
+        do {
+            if let reference = request.clarification {
+                guard let retained = pendingTextClarificationMemoryPolicy,
+                      retained.reference == reference else {
+                    throw ComputerUseClarificationStore.Failure.invalidReference
+                }
+                acceptedMemoryPolicy = retained.policy
+                let originalQuestion = controlReplyEnvelope(taskID: reference.taskID, basedOn: envelope)
+                guard textClarifications.owns(reference, for: originalQuestion) else {
+                    throw ComputerUseClarificationStore.Failure.invalidReference
+                }
+                let owner = ValidatedTextClarificationOwner(
+                    reference: reference, questionEnvelope: originalQuestion)
+                validatedClarificationOwner = owner
+                guard let continuing = executor as? any ComputerUseClarificationContinuing,
+                      let pending = try continuing.clarification(taskID: reference.taskID) else {
+                    retireTextClarification(owner)
+                    throw ComputerUseClarificationStore.Failure.invalidReference
+                }
+                guard textClarifications.retains(reference, native: pending, for: originalQuestion) else {
+                    // The reference and route are host-verified above. A stale
+                    // native scope or expired owner question can now be retired
+                    // without letting a forged reference erase another task.
+                    retireTextClarification(owner)
+                    throw ComputerUseClarificationStore.Failure.invalidReference
+                }
+                let resolution = try textClarifications.consumeSelection(reference, answer: request.prompt,
+                    choiceID: request.clarificationChoiceID, scope: pending.scope, for: envelope)
+                continuation = TextClarificationContinuation(originatingTaskID: reference.taskID,
+                    goal: resolution.goal, selectedChoice: resolution.selectedChoice)
+                pendingTextClarificationMemoryPolicy = nil
+            } else {
+                acceptedMemoryPolicy = request.memoryPolicy
+                continuation = nil
+            }
+        } catch {
+            if let owner = validatedClarificationOwner,
+               let failure = error as? ComputerUseClarificationStore.Failure,
+               failure == .expired || failure == .scopeChanged {
+                // consumeSelection reaches these failures only after matching
+                // the stored reference and request owner. Invalid choices,
+                // forged references, and wrong-session answers retain the
+                // valid question for a later legitimate answer.
+                retireTextClarification(owner)
+            }
+            sendDurableTerminal("I couldn't validate this request or its clarification. Start a new request with the complete instruction.",
+                outcome: .unableToComplete, replyingTo: envelope, channel: channel)
+            sendStatus("ready", replyingTo: envelope, channel: channel)
+            return
+        }
         let clarification: String?
-        if request.prompt.isEmpty {
+        if continuation != nil {
+            clarification = nil
+        } else if request.prompt.isEmpty {
             clarification = "What would you like me to do on your Mac?"
         } else {
-            clarification = ComputerUseClarificationPolicy.question(for: request)
+            clarification = nil
         }
         if let clarification {
             // This is a terminal response for this stable task ID. The user's
@@ -5315,7 +6897,9 @@ final class HostComputerUseManager: ObservableObject {
             for: executionEnvelope,
             trustedUserPrompt: request.prompt,
             conversation: request.conversation,
-            channel: channel)
+            textClarification: continuation,
+            memoryPolicy: acceptedMemoryPolicy,
+            channel: channel, pendingAutomationID: pendingAutomationID)
     }
 
     private func beginExecution(
@@ -5323,37 +6907,52 @@ final class HostComputerUseManager: ObservableObject {
         for envelope: ComputerUseEnvelope,
         trustedUserPrompt: String,
         conversation: [ComputerUseConversationTurn],
+        textClarification: TextClarificationContinuation? = nil,
+        memoryPolicy: ComputerUseTaskMemoryPolicy? = nil,
         channel: any HostComputerUseChannel,
-        isResuming: Bool = false
+        isResuming: Bool = false,
+        pendingAutomationID: UUID? = nil,
+        preservingPausedExecution: Bool = false
     ) {
-        let precedingExecution = executionTask
-        precedingExecution?.cancel()
-        // Keep native injection closed while retaining intervention ownership.
-        // A person's input during this join must invalidate the successor even
-        // though its executor has not started yet.
-        actionGate.beginAutomationPending()
         let context = ExecutionContext(
             envelope: envelope,
             channel: channel,
             trustedUserPrompt: trustedUserPrompt,
-            conversation: conversation)
+            conversation: conversation,
+            textClarification: textClarification,
+            memoryPolicy: memoryPolicy)
+        let admissionID = pendingAutomationID ?? actionGate.reservePendingAutomation()
+        guard actionGate.adoptPendingAutomation(admissionID) else {
+            pauseForLocalIntervention(context)
+            return
+        }
+        let precedingExecution = executionTask
+        if !preservingPausedExecution { precedingExecution?.cancel() }
+        if textClarification == nil { taskMemoryContextSlot?.clear() }
+        // Keep this exact reservation through predecessor joining. An input
+        // event may revoke it before or after adoption, and a later run cannot
+        // substitute a new reservation for this continuation.
         let token = UUID()
         currentExecution = context
         currentExecutionToken = token
+        pausedExecution = nil
+        lastUserIntervention = nil
         activity = .working(isResuming ? "Continuing…" : "Starting…")
         sendStatus("working", replyingTo: envelope, channel: channel)
+        let capturedContext = context
         executionTask = Task { [weak self] in
             guard let self else { return }
+            var context = capturedContext
             // Cancellation is a lifecycle barrier, not merely a signal. The
             // previous executor joins its runtime-cancel child before this
             // separately claimed prompt is allowed to activate/reuse a model.
             await precedingExecution?.value
             guard !Task.isCancelled,
                   currentExecutionToken == token else { return }
-            guard actionGate.activatePendingAutomation() else {
-                pauseAfterPendingAutomationWasBlocked(
-                    context: context,
-                    token: token)
+            let admission = admitAutomation { self.actionGate.activatePendingAutomation(admissionID) }
+            guard admission == .admitted else {
+                pauseAfterPendingAutomationWasBlocked(context: context, token: token,
+                    guidance: Self.admissionGuidance(admission))
                 return
             }
             do {
@@ -5362,16 +6961,34 @@ final class HostComputerUseManager: ObservableObject {
                     self?.activity = .working(value)
                     self?.sendStatus(value, replyingTo: envelope, channel: channel)
                 }
-                let result = try await executor.execute(
-                    taskID: envelope.id,
-                    modelPrompt: envelope.body,
-                    currentUserPrompt: trustedUserPrompt,
-                    conversation: conversation,
-                    tools: tools,
-                    progress: progress)
+                try Task.checkCancellation()
+                guard currentExecutionToken == token else { throw CancellationError() }
+                let result: ComputerUseExecutionResult
+                if let textClarification {
+                    guard let continuing = executor as? any ComputerUseClarificationContinuing else {
+                        throw ComputerUseClarificationStore.Failure.invalidReference
+                    }
+                    result = try await continuing.continueClarification(taskID: envelope.id,
+                        originatingTaskID: textClarification.originatingTaskID, goal: textClarification.goal,
+                        selectedChoice: textClarification.selectedChoice, progress: progress)
+                } else {
+                    await agentLifecycleTask?.value
+                    try Task.checkCancellation()
+                    guard currentExecutionToken == token else { throw CancellationError() }
+                    try await prepareTaskMemoryContext(context, token: token)
+                    try Task.checkCancellation()
+                    guard currentExecutionToken == token else { throw CancellationError() }
+                    result = try await executor.execute(
+                        taskID: envelope.id,
+                        modelPrompt: envelope.body,
+                        currentUserPrompt: trustedUserPrompt,
+                        conversation: conversation,
+                        tools: tools,
+                        progress: progress)
+                }
                 guard !Task.isCancelled,
                       currentExecutionToken == token else { return }
-                try acceptExecutionResult(
+                try await acceptExecutionResult(
                     result,
                     executor: executor,
                     context: context,
@@ -5391,17 +7008,10 @@ final class HostComputerUseManager: ObservableObject {
                 // Preserve the task for explicit Resume instead of recording
                 // a pause as a terminal failure.
                 guard currentExecutionToken == token else { return }
-                currentExecution = nil
-                currentExecutionToken = nil
-                pausedExecution = context
-                actionGate.endAutomation(allowsActions: false)
-                activity = .paused
-                sendUserInterventionStatus(
-                    Self.userInterventionGuidance,
-                    replyingTo: envelope,
-                    channel: channel)
+                pauseForLocalIntervention(context)
             } catch {
                 guard currentExecutionToken == token else { return }
+                taskMemoryContextSlot?.clear()
                 if currentExecution?.envelope.id == envelope.id {
                     currentExecution = nil
                 }
@@ -5421,21 +7031,99 @@ final class HostComputerUseManager: ObservableObject {
         }
     }
 
+    private func prepareTaskMemoryContext(_ context: ExecutionContext, token: UUID) async throws {
+        guard let provider = taskMemoryContextProvider else { return }
+        guard
+              let policy = context.memoryPolicy, !policy.incognito, !policy.noMemory,
+              context.textClarification == nil else { return }
+        guard let slot = taskMemoryContextSlot else { throw TaskMemoryContextFailure.unavailable }
+        guard let lease = localMemoryLease(peerID: context.envelope.senderID,
+            sessionID: context.envelope.sessionID, requiresTask: false),
+              lease.taskID == context.envelope.id, lease.taskAuthority == .active,
+              lease.authorizationGeneration == peerAuthorizationGeneration else {
+            throw TaskMemoryContextFailure.invalidLease
+        }
+        slot.bindLease(lease)
+        let binding: MemoryStoreBinding?
+        do { binding = try await provider.captureBinding(for: lease) }
+        catch is CancellationError { throw CancellationError() }
+        catch { throw TaskMemoryContextFailure.unavailable }
+        guard let binding else {
+            try Task.checkCancellation()
+            guard currentExecutionToken == token,
+                  localMemoryLease(peerID: lease.peerID, sessionID: lease.sessionID,
+                    requiresTask: false) == lease,
+                  slot.clearForMemorylessTask(taskID: context.envelope.id) else {
+                throw CancellationError()
+            }
+            return
+        }
+        try Task.checkCancellation()
+        guard currentExecutionToken == token,
+              localMemoryLease(peerID: lease.peerID, sessionID: lease.sessionID,
+                requiresTask: false) == lease else { throw CancellationError() }
+        let text: String?
+        do { text = try await provider.prepare(lease: lease, binding: binding,
+            prompt: context.trustedUserPrompt) }
+        catch is CancellationError { throw CancellationError() }
+        catch { throw TaskMemoryContextFailure.unavailable }
+        guard let text else { throw TaskMemoryContextFailure.unavailable }
+        try Task.checkCancellation()
+        let finalBinding: MemoryStoreBinding?
+        do { finalBinding = try await provider.captureBinding(for: lease) }
+        catch is CancellationError { throw CancellationError() }
+        catch { throw TaskMemoryContextFailure.unavailable }
+        try Task.checkCancellation()
+        guard currentExecutionToken == token,
+              localMemoryLease(peerID: lease.peerID, sessionID: lease.sessionID,
+                requiresTask: false) == lease,
+              finalBinding == binding else {
+            throw TaskMemoryContextFailure.staleBinding
+        }
+        slot.stage(text, taskID: context.envelope.id, lease: lease, binding: binding) { [weak self] in
+            self?.isTaskMemoryContextCurrent(lease, taskID: context.envelope.id, initialToken: token) == true
+        }
+    }
+
+    func isTaskMemoryLeaseCurrent(_ lease: LocalMemoryHostLease) -> Bool {
+        guard lease.taskAuthority == .active, lease.taskID != nil else { return false }
+        return localMemoryLease(peerID: lease.peerID, sessionID: lease.sessionID,
+            requiresTask: false) == lease
+    }
+
+    private func isTaskMemoryContextCurrent(_ lease: LocalMemoryHostLease, taskID: String,
+                                            initialToken: UUID) -> Bool {
+        guard localAuthorizedPeerID == lease.peerID, authorizedPeerID == lease.peerID,
+              peerAuthorizationGeneration == lease.authorizationGeneration else { return false }
+        if currentExecutionToken == initialToken,
+           currentExecution?.envelope.id == taskID,
+           localMemoryLease(peerID: lease.peerID, sessionID: lease.sessionID,
+                requiresTask: false) == lease { return true }
+        guard let activeContext = currentExecution,
+              activeContext.envelope.senderID == lease.peerID,
+              activeContext.envelope.sessionID == lease.sessionID,
+              activeContext.memoryPolicy == lease.memoryPolicy,
+              (activeContext.envelope.id == taskID || activeContext.textClarification != nil),
+              let activeLease = localMemoryLease(peerID: lease.peerID,
+                sessionID: lease.sessionID, requiresTask: false) else { return false }
+        guard activeLease.taskAuthority == .active else { return false }
+        if activeContext.envelope.id == taskID { return activeLease == lease }
+        guard let clarification = activeContext.textClarification else { return false }
+        return generalAgent?.ownsTaskMemoryContinuation(rootTaskID: taskID,
+            originatingHostTaskID: clarification.originatingTaskID,
+            currentHostTaskID: activeContext.envelope.id) == true
+            && activeLease.authorizationGeneration == lease.authorizationGeneration
+            && activeLease.memoryPolicy == lease.memoryPolicy
+            && (activeContext.textClarification != nil || activeLease.taskID == taskID)
+    }
+
     private func pauseAfterPendingAutomationWasBlocked(
         context: ExecutionContext,
-        token: UUID
+        token: UUID,
+        guidance: String? = nil
     ) {
         guard currentExecutionToken == token else { return }
-        actionGate.endAutomation(allowsActions: false)
-        currentExecution = nil
-        currentExecutionToken = nil
-        executionTask = nil
-        pausedExecution = context
-        activity = .paused
-        sendUserInterventionStatus(
-            Self.userInterventionGuidance,
-            replyingTo: context.envelope,
-            channel: context.channel)
+        pauseForLocalIntervention(context, guidance: guidance)
     }
 
     private func continueApprovedVisualAction(
@@ -5477,14 +7165,15 @@ final class HostComputerUseManager: ObservableObject {
                 return
             }
 
-            // Mark the task before entering the synchronous posting boundary.
-            // MainActor cannot service Pause or direct-intervention callbacks
-            // until the continuation reaches its first suspension. If a test
-            // seam re-enters synchronously from the poster itself, the marker
-            // still forces the honest post-effect terminal path.
-            postedApprovedVisualTaskID = context.envelope.id
             do {
-                try tools.performApproved(action, fingerprint: fingerprint)
+                try await continuationExecutor.performApprovedVisualAction(continuationToken,
+                    action: action, fingerprint: fingerprint, tools: tools,
+                    willBeginEffect: { [weak self] in
+                        // Browser validation can suspend without posting any
+                        // input. Only cross into may-have-occurred tracking
+                        // after those checks and immediately before dispatch.
+                        self?.postedApprovedVisualTaskID = context.envelope.id
+                    })
             } catch ComputerUseHostTools.ToolError.approvalTargetChanged {
                 postedApprovedVisualTaskID = nil
                 guard currentExecutionToken == executionToken else { return }
@@ -5520,11 +7209,9 @@ final class HostComputerUseManager: ObservableObject {
                 return
             }
 
-            // `performApproved` and this call are consecutive MainActor work:
-            // there is no `await`, yield, status delivery, or task hop between
-            // the successful host post and the executor consuming its exact
-            // token/history. The callee runs on this actor through its first
-            // suspension point.
+            // Consume the exact continuation only after the host action has
+            // completed its required verification. Cancellation while checking
+            // text is handled as a possibly performed effect above.
             guard currentExecutionToken == executionToken,
                   !Task.isCancelled else { return }
             do {
@@ -5548,7 +7235,7 @@ final class HostComputerUseManager: ObservableObject {
                 if activeVisualApprovalContinuation == continuationToken {
                     activeVisualApprovalContinuation = nil
                 }
-                try acceptExecutionResult(
+                try await acceptExecutionResult(
                     result,
                     executor: executor,
                     context: context,
@@ -5639,74 +7326,10 @@ final class HostComputerUseManager: ObservableObject {
             for: replanned,
             trustedUserPrompt: context.trustedUserPrompt,
             conversation: context.conversation,
+            textClarification: context.textClarification,
+            memoryPolicy: context.memoryPolicy,
             channel: context.channel,
             isResuming: true)
-    }
-
-    private func continueApprovedMCP(
-        _ prepared: MCPPreparedApproval,
-        executor: any ComputerUseExecuting,
-        context: ExecutionContext
-    ) {
-        guard let continuation = executor as? any MCPApprovalContinuing else {
-            finishApprovedActionFailure(
-                MCPClientError.approvalMismatch,
-                context: context)
-            return
-        }
-
-        let precedingExecution = executionTask
-        precedingExecution?.cancel()
-        let token = UUID()
-        currentExecution = context
-        currentExecutionToken = token
-        activity = .working("Performing the one approved Mac action…")
-        sendStatus(
-            "Performing the one approved Mac action…",
-            replyingTo: context.envelope,
-            channel: context.channel)
-
-        executionTask = Task { [weak self] in
-            guard let self else { return }
-            await precedingExecution?.value
-            guard !Task.isCancelled,
-                  currentExecutionToken == token else { return }
-            guard actionGate.allowsActions else {
-                pauseAfterApprovedOperationWasBlocked(context: context)
-                return
-            }
-            do {
-                let result = try await continuation.continueAfterApproval(
-                    prepared,
-                    tools: tools,
-                    progress: { [weak self] value in
-                        guard self?.currentExecutionToken == token else { return }
-                        self?.activity = .working(value)
-                        self?.sendStatus(
-                            value,
-                            replyingTo: context.envelope,
-                            channel: context.channel)
-                    })
-                guard !Task.isCancelled,
-                      currentExecutionToken == token else { return }
-                try acceptExecutionResult(
-                    result,
-                    executor: executor,
-                    context: context,
-                    token: token)
-            } catch is CancellationError {
-                finishUnexpectedCancellationIfCurrent(
-                    context: context,
-                    token: token)
-                return
-            } catch {
-                guard currentExecutionToken == token else { return }
-                currentExecution = nil
-                currentExecutionToken = nil
-                executionTask = nil
-                finishApprovedActionFailure(error, context: context)
-            }
-        }
     }
 
     private func acceptExecutionResult(
@@ -5714,12 +7337,26 @@ final class HostComputerUseManager: ObservableObject {
         executor: any ComputerUseExecuting,
         context: ExecutionContext,
         token: UUID
-    ) throws {
+    ) async throws {
         guard currentExecutionToken == token else { throw CancellationError() }
         let envelope = context.envelope
 
         switch result {
+        case .agentApprovalRequired(let request):
+            guard let agent = generalAgent, agent.ownsApproval(request, hostTaskID: envelope.id) else {
+                throw AgentLoopError.noMatchingApproval
+            }
+            let action = String(decoding: try JSONEncoder().encode(request.action), as: UTF8.self)
+            let reviewDetails = request.reviewFields.map { ComputerUseApprovalRequest.Detail(label: $0.label, value: $0.value) }
+            // The local agent explains itself in plain language; there's no raw action to show.
+            let details = request.fingerprint.hasPrefix(LocalAgentCapabilityAdapter.approvalMarker) ? reviewDetails
+                : [.init(label: "Action", value: action), .init(label: "Fingerprint", value: request.fingerprint)] + reviewDetails
+            let presentation = ComputerUseApprovalRequest(requestID: request.id.uuidString, taskID: envelope.id,
+                message: request.reason, details: details)
+            enterApproval(.init(request: presentation, context: context, operation: .agent(request)))
         case .completed(let response):
+            retainCompletedMemoryConfirmationLease(for: context)
+            taskMemoryContextSlot?.clear()
             sendDurableTerminal(
                 response,
                 outcome: .taskCompleted,
@@ -5733,6 +7370,7 @@ final class HostComputerUseManager: ObservableObject {
             sendStatus("ready", replyingTo: envelope, channel: context.channel)
 
         case .unableToComplete(let response):
+            taskMemoryContextSlot?.clear()
             sendDurableTerminal(
                 response,
                 outcome: .unableToComplete,
@@ -5746,11 +7384,31 @@ final class HostComputerUseManager: ObservableObject {
             sendStatus("ready", replyingTo: envelope, channel: context.channel)
 
         case .clarificationRequired(let response):
+            let reference: ComputerUseClarificationReference?
+            let choices: [ComputerUseClarificationChoice]?
+            if let pending = try (executor as? any ComputerUseClarificationContinuing)?.clarification(taskID: envelope.id) {
+                let goal = try context.textClarification?.goal
+                    ?? ComputerUseUnresolvedTextGoal(userRequest: context.trustedUserPrompt)
+                guard pending.taskID == envelope.id, pending.goal == goal,
+                      pending.question.utf8.elementsEqual(response.utf8) else {
+                    throw ComputerUseClarificationStore.Failure.invalidReference
+                }
+                reference = try textClarifications.issue(goal: goal, question: response, scope: pending.scope,
+                    choices: pending.choices, expiresAt: pending.expiresAt, for: envelope)
+                choices = pending.choices
+            } else {
+                guard context.textClarification == nil else { throw ComputerUseClarificationStore.Failure.invalidReference }
+                reference = nil
+                choices = nil
+            }
             sendDurableTerminal(
                 response,
                 outcome: .userInterventionRequired,
                 replyingTo: envelope,
-                channel: context.channel)
+                channel: context.channel,
+                clarification: reference,
+                clarificationChoices: choices,
+                memoryPolicy: context.memoryPolicy)
             currentExecution = nil
             currentExecutionToken = nil
             executionTask = nil
@@ -5763,17 +7421,7 @@ final class HostComputerUseManager: ObservableObject {
             // the idempotency ledger. Preserve the exact prompt so the user
             // can sign in through the live screen and resume from the changed
             // UI without starting a second task.
-            pausedExecution = context
-            currentExecution = nil
-            currentExecutionToken = nil
-            executionTask = nil
-            actionGate.setAllowsActions(false)
-            actionGate.endAutomation(allowsActions: false)
-            activity = .paused
-            sendUserInterventionStatus(
-                message,
-                replyingTo: envelope,
-                channel: context.channel)
+            pauseForLocalIntervention(context, guidance: message)
 
         case .approvalRequired(
             _,
@@ -5788,11 +7436,12 @@ final class HostComputerUseManager: ObservableObject {
                     continuationToken)
                 throw VisualApprovalContinuationError.invalidContinuation
             }
-            // The visual model's confirmation copy is untrusted. Build the
-            // user-facing description and TOCTOU fingerprint from the exact
-            // action and current Accessibility target.
+            // Build the user-facing description and TOCTOU fingerprint from the
+            // exact action and host-observed Accessibility target.
             let prepared: ComputerUsePreparedApproval
             do {
+                try Task.checkCancellation()
+                guard currentExecutionToken == token else { throw CancellationError() }
                 prepared = try tools.prepareApproval(for: proposedAction)
             } catch {
                 continuationExecutor.cancelVisualApprovalContinuation(
@@ -5801,7 +7450,9 @@ final class HostComputerUseManager: ObservableObject {
             }
             let request = ComputerUseApprovalRequest(
                 taskID: envelope.id,
-                message: prepared.message)
+                message: prepared.message,
+                details: nil,
+                confirmLabel: nil)
             enterApproval(
                 PendingApproval(
                     request: request,
@@ -5811,20 +7462,7 @@ final class HostComputerUseManager: ObservableObject {
                         action: proposedAction,
                         fingerprint: prepared.fingerprint)))
 
-        case .mcpApprovalRequired(let prepared):
-            guard prepared.call.taskID == envelope.id else {
-                throw MCPClientError.approvalMismatch
-            }
-            let presentation = prepared.computerUsePresentation
-            let request = ComputerUseApprovalRequest(
-                taskID: envelope.id,
-                message: presentation.message,
-                details: presentation.details,
-                confirmLabel: presentation.confirmLabel)
-            enterApproval(PendingApproval(
-                request: request,
-                context: context,
-                operation: .mcp(prepared)))
+
         }
     }
 
@@ -5833,6 +7471,7 @@ final class HostComputerUseManager: ObservableObject {
         token: UUID
     ) {
         guard currentExecutionToken == token else { return }
+        taskMemoryContextSlot?.clear()
         currentExecution = nil
         currentExecutionToken = nil
         executionTask = nil
@@ -5855,16 +7494,21 @@ final class HostComputerUseManager: ObservableObject {
             details: approval.request.details,
             confirmLabel: approval.request.confirmLabel,
             appliedControlRevision: taskLedger.appliedControlRevision(
-                taskID: approval.context.envelope.id))
+                taskID: approval.context.envelope.id),
+            hostControlEpoch: taskLedger.hostControlEpoch(taskID: approval.context.envelope.id))
         let stampedApproval = PendingApproval(
             request: request,
             context: approval.context,
             operation: approval.operation)
+        guard actionGate.beginApprovalWait() else {
+            cancelApprovalIfNeeded(approval, preservingTaskProgress: true)
+            pauseForLocalIntervention(approval.context)
+            return
+        }
         pendingApproval = stampedApproval
         currentExecution = nil
         currentExecutionToken = nil
         executionTask = nil
-        actionGate.beginApprovalWait()
         activity = .awaitingApproval(request.message)
         startApprovalDelivery(stampedApproval)
         sendStatus(
@@ -5894,20 +7538,26 @@ final class HostComputerUseManager: ObservableObject {
     private func sendUserInterventionStatus(
         _ guidance: String,
         replyingTo envelope: ComputerUseEnvelope,
-        channel: any HostComputerUseChannel
+        channel: any HostComputerUseChannel,
+        report: ComputerUseResearchProgress? = nil
     ) {
         let signal = ComputerUseStatusSignal.userIntervention(guidance)
         if let boundedGuidance = ComputerUseStatusSignal
             .userInterventionMessage(from: signal) {
             lastUserIntervention = (
                 taskID: envelope.id,
-                guidance: boundedGuidance)
+                guidance: boundedGuidance,
+                report: report)
         }
-        sendStatus(
-            signal,
+        send(
+            kind: .status,
+            body: signal,
             replyingTo: envelope,
             channel: channel,
-            outcome: .userInterventionRequired)
+            outcome: .userInterventionRequired,
+            researchProgress: report,
+            authorizationDeliveryGeneration: report == nil ? nil :
+                (transport: transportGeneration, authorization: peerAuthorizationGeneration))
     }
 
     /// A terminal reply is authoritative only after its first-result-wins
@@ -5918,20 +7568,47 @@ final class HostComputerUseManager: ObservableObject {
         _ response: String,
         outcome: ComputerUseTerminalOutcome,
         replyingTo envelope: ComputerUseEnvelope,
-        channel: any HostComputerUseChannel
+        channel: any HostComputerUseChannel,
+        clarification: ComputerUseClarificationReference? = nil,
+        clarificationChoices: [ComputerUseClarificationChoice]? = nil,
+        memoryPolicy: ComputerUseTaskMemoryPolicy? = nil
     ) {
+        let identifiesTextQuestion = clarification.map { textClarifications.matches($0) } ?? false
         do {
             let terminal = try taskLedger.complete(
                 taskID: envelope.id,
                 response: response,
-                outcome: outcome)
+                outcome: outcome,
+                clarification: clarification,
+                clarificationOwner: identifiesTextQuestion ? .text : nil)
+            if let reference = terminal.clarification,
+               reference == clarification,
+               let memoryPolicy {
+                pendingTextClarificationMemoryPolicy = (reference, memoryPolicy)
+            } else if pendingTextClarificationMemoryPolicy?.reference.taskID == envelope.id
+                        || pendingTextClarificationMemoryPolicy?.reference == clarification {
+                pendingTextClarificationMemoryPolicy = nil
+            }
+            if terminal.clarification == nil || (clarification != nil && terminal.clarification != clarification) {
+                textClarifications.invalidate(for: envelope)
+                (executor as? any ComputerUseClarificationContinuing)?.invalidateClarification(taskID: envelope.id)
+            }
             send(
                 kind: .assistant,
                 body: terminal.response,
                 replyingTo: envelope,
                 channel: channel,
-                outcome: terminal.outcome)
+                outcome: terminal.outcome,
+                clarification: terminal.clarification,
+                clarificationChoices: terminal.clarification == clarification
+                    && terminal.outcome == .userInterventionRequired ? clarificationChoices : nil)
         } catch {
+            if pendingTextClarificationMemoryPolicy?.reference.taskID == envelope.id
+                || pendingTextClarificationMemoryPolicy?.reference == clarification {
+                pendingTextClarificationMemoryPolicy = nil
+            }
+            textClarifications.invalidate(for: envelope)
+            (executor as? any ComputerUseClarificationContinuing)?.invalidateClarification(taskID: envelope.id)
             send(
                 kind: .assistant,
                 body: Self.terminalPersistenceFailureResponse,
@@ -5939,6 +7616,21 @@ final class HostComputerUseManager: ObservableObject {
                 channel: channel,
                 outcome: .unableToComplete)
         }
+    }
+
+    private func invalidateTextClarification() {
+        pendingTextClarificationMemoryPolicy = nil
+        textClarifications.invalidate()
+        (executor as? any ComputerUseClarificationContinuing)?.invalidateClarification(taskID: nil)
+    }
+
+    private func retireTextClarification(_ owner: ValidatedTextClarificationOwner) {
+        if pendingTextClarificationMemoryPolicy?.reference == owner.reference {
+            pendingTextClarificationMemoryPolicy = nil
+        }
+        textClarifications.invalidate(for: owner.questionEnvelope)
+        (executor as? any ComputerUseClarificationContinuing)?.invalidateClarification(
+            taskID: owner.reference.taskID)
     }
 
     private func startApprovalDelivery(_ approval: PendingApproval) {
@@ -5963,34 +7655,140 @@ final class HostComputerUseManager: ObservableObject {
         }
     }
 
+    static let promptIdentityRecoveryResponse = "The Mac has an older record for this request but cannot verify its original instruction. It will not run it again or use the old result as confirmation. Check the Mac before starting a new request."
+
     private func send(
         kind: ComputerUseEnvelope.Kind,
         body: String,
         replyingTo envelope: ComputerUseEnvelope,
         channel: any HostComputerUseChannel,
-        outcome: ComputerUseTerminalOutcome? = nil
+        outcome: ComputerUseTerminalOutcome? = nil,
+        clarification: ComputerUseClarificationReference? = nil,
+        clarificationChoices requestedClarificationChoices: [ComputerUseClarificationChoice]? = nil,
+        researchProgress: ComputerUseResearchProgress? = nil,
+        authorizationDeliveryGeneration: (transport: UInt64, authorization: UInt64)? = nil
     ) {
+        // Gate every projection of an older unbound result, including Cancel
+        // replies with no prompt body. Preserve the durable result for future
+        // reconciliation; do not attach its clarification.
+        let needsIdentityRecovery = taskLedger.requiresPromptIdentityRecovery(taskID: envelope.id)
+        let liveQuestion = clarification.map { reference in
+            !needsIdentityRecovery
+                && taskLedger.terminalClarification(taskID: envelope.id) == reference
+                && retainsNativeQuestion(reference, for: envelope)
+        } ?? false
+        let liveTextQuestion = clarification.map { reference in
+            liveQuestion && taskLedger.clarificationOwner(taskID: envelope.id) != .browser
+        } ?? false
+        let availableClarificationChoices: [ComputerUseClarificationChoice]? = clarification.flatMap { reference in
+            guard liveTextQuestion else { return nil }
+            let originalQuestion = controlReplyEnvelope(taskID: reference.taskID, basedOn: envelope)
+            return textClarifications.retainedChoices(for: reference, request: originalQuestion)
+        }
+        let canPublishClarificationChoices = requestedClarificationChoices == nil
+            || requestedClarificationChoices == availableClarificationChoices
+        let clarificationChoices = canPublishClarificationChoices ? availableClarificationChoices : nil
+        let unavailableQuestion = clarification != nil && (!liveQuestion || !canPublishClarificationChoices)
+        let responseBody = needsIdentityRecovery && kind == .assistant ? Self.promptIdentityRecoveryResponse
+            : unavailableQuestion ? "The original question is no longer active. Start a new request with the complete instruction." : body
         let wireBody: String
         switch kind {
         case .assistant, .status:
             wireBody = (try? ComputerUseTaskUpdate(
                 taskID: envelope.id,
-                text: body,
-                appliedControlRevision: taskLedger.appliedControlRevision(
-                    taskID: envelope.id),
-                outcome: outcome).encodedBody()) ?? body
+                text: responseBody,
+                appliedControlRevision: taskLedger.appliedControlRevision(taskID: envelope.id),
+                hostControlEpoch: taskLedger.hostControlEpoch(taskID: envelope.id),
+                outcome: (needsIdentityRecovery && kind == .assistant) || unavailableQuestion ? .unableToComplete : outcome,
+                clarification: needsIdentityRecovery || unavailableQuestion ? nil : clarification,
+                clarificationAnswerPolicy: nil,
+                clarificationRetry: nil,
+                clarificationChoices: needsIdentityRecovery || unavailableQuestion ? nil : clarificationChoices,
+                supportsClarificationRecovery: !needsIdentityRecovery && !unavailableQuestion && clarification != nil,
+                researchProgress: needsIdentityRecovery ? nil : researchProgress).encodedBody()) ?? responseBody
         default:
             wireBody = body
         }
         let previousDelivery = outboundDeliveryTask
-        let delivery = Task {
+        let guardedGeneration = clarification != nil
+            ? (transport: transportGeneration, authorization: peerAuthorizationGeneration) : authorizationDeliveryGeneration
+        let delivery = Task { [weak self] in
             if let previousDelivery { await previousDelivery.value }
+            if let guardedGeneration {
+                guard let self, self.transportGeneration == guardedGeneration.transport,
+                      self.peerAuthorizationGeneration == guardedGeneration.authorization,
+                      self.authorizedPeerID == envelope.senderID else { return }
+            }
+            var deliveredBody = wireBody
+            if clarification != nil && !unavailableQuestion {
+                guard let self, let freshBody = self.revalidateClarificationDelivery(wireBody, replyingTo: envelope,
+                    question: clarification) else { return }
+                deliveredBody = freshBody
+            }
             _ = try? await channel.send(
                 kind: kind,
-                body: wireBody,
+                body: deliveredBody,
                 to: envelope.senderID,
                 sessionID: envelope.sessionID,
                 messageID: nil)
+        }
+        outboundDeliveryTask = delivery
+    }
+
+    /// Recheck after preceding deliveries finish, immediately before handing
+    /// this reply to the channel. A historical question is not a live owner.
+    private func revalidateClarificationDelivery(_ body: String, replyingTo envelope: ComputerUseEnvelope,
+                                                question: ComputerUseClarificationReference?) -> String? {
+        guard let original = try? ComputerUseTaskUpdate.decodeBody(body), original.taskID == envelope.id,
+              original.clarification == question else { return nil }
+        let liveQuestion = question.map {
+            taskLedger.terminalClarification(taskID: envelope.id) == $0
+                && retainsNativeQuestion($0, for: envelope)
+        } ?? true
+        let liveChoices: [ComputerUseClarificationChoice]? = question.flatMap { reference in
+            guard liveQuestion else { return nil }
+            let originalRequest = controlReplyEnvelope(taskID: reference.taskID, basedOn: envelope)
+            return textClarifications.retainedChoices(for: reference, request: originalRequest)
+        }
+        guard !liveQuestion else {
+            guard original.clarificationChoices == liveChoices else { return nil }
+            return body
+        }
+        return try? ComputerUseTaskUpdate(taskID: original.taskID,
+            text: "The original question is no longer active. Start a new request with the complete instruction.",
+            appliedControlRevision: original.appliedControlRevision, hostControlEpoch: original.hostControlEpoch,
+            outcome: .unableToComplete).encodedBody()
+    }
+
+    private func retainsNativeQuestion(_ reference: ComputerUseClarificationReference, for envelope: ComputerUseEnvelope) -> Bool {
+        guard taskLedger.clarificationOwner(taskID: envelope.id) != .browser,
+              textClarifications.matches(reference),
+              let native = try? (executor as? any ComputerUseClarificationContinuing)?.clarification(taskID: envelope.id) else { return false }
+        return textClarifications.retains(reference, native: native, for: envelope)
+    }
+
+    private func sendClarificationProbeResult(_ probe: ComputerUseClarificationProbe, replyingTo envelope: ComputerUseEnvelope,
+                                              channel: any HostComputerUseChannel) {
+        let previousDelivery = outboundDeliveryTask
+        let generation = (transport: transportGeneration, authorization: peerAuthorizationGeneration)
+        let delivery = Task { [weak self] in
+            if let previousDelivery { await previousDelivery.value }
+            guard let self, self.transportGeneration == generation.transport,
+                  self.peerAuthorizationGeneration == generation.authorization,
+                  self.authorizedPeerID == envelope.senderID else { return }
+            // This is a read-only lookup. Never claim a new prompt, change
+            // controls, interpret a goal or reconstruct a missing owner.
+            let original = self.controlReplyEnvelope(taskID: probe.reference.taskID, basedOn: envelope)
+            let available = !self.taskLedger.requiresPromptIdentityRecovery(taskID: probe.reference.taskID)
+                && self.taskLedger.terminalClarification(taskID: probe.reference.taskID) == probe.reference
+                && self.retainsNativeQuestion(probe.reference, for: original)
+            let choices = available ? self.textClarifications.retainedChoices(for: probe.reference, request: original) : nil
+            guard let result = try? ComputerUseClarificationProbeResult(probeID: probe.probeID, reference: probe.reference,
+                question: available ? self.taskLedger.terminalClarificationText(taskID: probe.reference.taskID) : nil,
+                answerPolicy: nil,
+                clarificationChoices: choices),
+                let body = try? result.encodedBody() else { return }
+            _ = try? await channel.send(kind: .status, body: body, to: envelope.senderID, sessionID: envelope.sessionID, messageID: nil)
         }
         outboundDeliveryTask = delivery
     }
@@ -6010,19 +7808,21 @@ final class HostComputerUseManager: ObservableObject {
         }
     }
 
+    private func removeLocalInterventionMonitors() {
+        for monitor in localInputMonitors { NSEvent.removeMonitor(monitor) }
+        localInputMonitors.removeAll()
+    }
+
     private func installLocalInterventionMonitors() {
         guard !HostRuntimeContext.isRunningUnitTests else {
             return
         }
-        let mask: NSEvent.EventTypeMask = [
-            .leftMouseDown, .rightMouseDown, .otherMouseDown,
-            .mouseMoved, .leftMouseDragged, .rightMouseDragged, .otherMouseDragged,
-            .scrollWheel, .keyDown, .flagsChanged,
-        ]
+        guard !isShuttingDown, localInputMonitors.count != 2 else { return }
+        removeLocalInterventionMonitors()
+        let mask = InputInjector.physicalInterventionEventMask
         let interrupt: @Sendable (NSEvent) -> Void = { [weak self] event in
-            guard !InputInjector.isSynthetic(event),
-                  self?.blockActionsForUserIntervention() == true else { return }
-            Task { @MainActor [weak self] in self?.userIntervened() }
+            guard let intervention = self?.recordPhysicalInputForIntervention(event) else { return }
+            Task { @MainActor [weak self] in self?.applyUserInputIntervention(intervention) }
         }
         if let global = NSEvent.addGlobalMonitorForEvents(
             matching: mask,

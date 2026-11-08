@@ -733,6 +733,13 @@ public actor CloudKitSignalingClient: SignalingChannel {
         return true
     }
 
+    /// The bound client lost its connection. Another device on this iCloud
+    /// account may claim the host, as it could after a fresh advertisement.
+    public func releaseOfferSender() {
+        guard role == .host else { return }
+        targetID = nil
+    }
+
     /// The host uses this identity to bind privileged Computer Use messages
     /// to the iOS peer that completed the active WebRTC pairing.
     public func resolvedPeerSenderID() -> String? {

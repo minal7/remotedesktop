@@ -3,11 +3,21 @@ import LiveKitWebRTC
 
 /// Shared desktop-video policy for the Apple host and viewer.
 ///
-/// WebRTC still owns congestion control. These values raise the quality ceiling
-/// and tell its quality scaler to shed frame rate before desktop resolution, so
-/// a constrained link stays responsive instead of building a stale-frame queue.
+/// WebRTC owns congestion control. Legacy sessions retain the 30 fps
+/// sharpness policy; negotiated adaptive sessions prefer frame rate at 60 fps
+/// and allow WebRTC to reduce image quality or resolution when constrained.
 enum DesktopVideoQuality {
+    /// The screen-share default paces at 1.0x the bandwidth estimate, so a large frame
+    /// leaves only as fast as the estimate. 4x was the highest factor without a blackout
+    /// on a 10 Mbps path. WebRTC's frame dropper fights a constant-bitrate encoder.
+    static let streamFieldTrials = "WebRTC-FrameDropper/Disabled/WebRTC-ProbingScreenshareBwe/4.0,2875,80,40,-60,3/"
+    /// Keeps a false estimate collapse from blurring the stream. See StreamFloorGuard.
+    static let streamMinimumBitrateBps = 2_000_000
     static let targetFramesPerSecond = 30
+    static let adaptiveFramesPerSecond = 60
+    static let adaptiveMaximumMacroblocksPerFrame = 16_384
+    static let f2FramesPerSecond = 60
+    static let f2MaximumMacroblocksPerFrame = 16_384
     static let maximumBitrateBps = 30_000_000
     static let maximumBitrateKbps = maximumBitrateBps / 1_000
     static let captureQueueDepth = 3
@@ -24,6 +34,50 @@ enum DesktopVideoQuality {
     static let softwareCodecMaximumMacroblocksPerFrame = 8_704
     static let maximumEncodedDimension = 3_840
 
+    struct CapturePolicy: Equatable {
+        let framesPerSecond: Int32
+        let maximumMacroblocksPerFrame: Int
+        let lowLatencyEncoder: Bool
+    }
+
+    static func supportsExperimentalEncoder(name: String, profileLevelID: String?, packetizationMode: String?) -> Bool {
+        name.caseInsensitiveCompare("H264") == .orderedSame &&
+            profileLevelID?.lowercased() == "640c33" && packetizationMode == "1"
+    }
+
+    /// F2 uses a level-5.1-safe size at 60 fps; legacy and software peers stay unchanged.
+    static func capturePolicy(negotiatedCodecs: [LKRTCRtpCodecParameters], f2Requested: Bool) -> CapturePolicy {
+        let current = maximumMacroblocksPerFrame(negotiatedCodecs: negotiatedCodecs)
+        let codec = negotiatedCodecs.first(where: {
+            ["H264", "VP8", "VP9", "AV1"].contains($0.name.uppercased())
+        })
+        let mode = codec?.parameters["packetization-mode"]
+        return capturePolicy(name: codec?.name, profileLevelID: codec?.parameters["profile-level-id"] as? String,
+                             packetizationMode: (mode as? String) ?? (mode as? NSNumber)?.stringValue,
+                             currentLimit: current, f2Requested: f2Requested)
+    }
+
+    static func capturePolicy(name: String?, profileLevelID: String?, packetizationMode: String?,
+                              currentLimit: Int, f2Requested: Bool) -> CapturePolicy {
+        #if DEBUG && os(macOS)
+        guard f2Requested, let name, supportsExperimentalEncoder(name: name,
+              profileLevelID: profileLevelID, packetizationMode: packetizationMode) else {
+            return CapturePolicy(framesPerSecond: Int32(targetFramesPerSecond),
+                                 maximumMacroblocksPerFrame: currentLimit, lowLatencyEncoder: false)
+        }
+        return CapturePolicy(framesPerSecond: Int32(f2FramesPerSecond),
+                             maximumMacroblocksPerFrame: min(currentLimit, f2MaximumMacroblocksPerFrame),
+                             lowLatencyEncoder: true)
+        #else
+        return CapturePolicy(framesPerSecond: Int32(targetFramesPerSecond),
+                             maximumMacroblocksPerFrame: currentLimit, lowLatencyEncoder: false)
+        #endif
+    }
+
+    static func senderFrameRate(policyRate: Int, captureRate: Int32, isDefault: Bool) -> Int {
+        isDefault && captureRate == Int32(f2FramesPerSecond) ? f2FramesPerSecond : policyRate
+    }
+
     struct SenderPolicy: Equatable {
         let maximumFramesPerSecond: Int
         let maximumBitrateBps: Int
@@ -35,14 +89,132 @@ enum DesktopVideoQuality {
         maximumBitrateBps: maximumBitrateBps,
         degradationPreference: .maintainResolution)
 
+    /// The first primary codec must be the validated H.264 profile. Unknown,
+    /// older and software codecs retain their existing capture policy.
+    static func supportsAdaptive60(name: String?, profileLevelID: String?, packetizationMode: String?) -> Bool {
+        name?.uppercased() == "H264" && profileLevelID?.lowercased() == "640c33" && packetizationMode == "1"
+    }
+
+    /// The answer's video m-line carries codec preference order. WebRTC's
+    /// receiver codec parameter array does not necessarily preserve that order.
+    static func supportsAdaptive60(answerSDP: String) -> Bool {
+        guard answerSDP.utf8.count <= 1_000_000 else { return false }
+        let lines = answerSDP.components(separatedBy: .newlines).map {
+            $0.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        let videoSections = lines.indices.filter { lines[$0].hasPrefix("m=video ") }
+        guard videoSections.count == 1, let videoStart = videoSections.first else { return false }
+        let media = lines[videoStart].split(separator: " ")
+        guard media.count > 3, let port = Int(media[1]), port > 0, port <= 65_535,
+              Set(media.dropFirst(3)).count == media.count - 3 else { return false }
+        let end = lines[(videoStart + 1)...].firstIndex(where: { $0.hasPrefix("m=") }) ?? lines.endIndex
+        let section = lines[(videoStart + 1)..<end]
+        guard !section.contains("a=inactive"), !section.contains("a=recvonly") else { return false }
+        for payload in media.dropFirst(3) {
+            let prefix = "a=rtpmap:\(payload) "
+            let mappings = section.filter { $0.hasPrefix(prefix) }
+            guard mappings.count == 1, let mapping = mappings.first else { return false }
+            let name = mapping.dropFirst(prefix.count).split(separator: "/").first.map(String.init) ?? ""
+            if ["RTX", "RED", "ULPFEC", "FLEXFEC-03"].contains(name.uppercased()) { continue }
+            let fmtpPrefix = "a=fmtp:\(payload) "
+            let formatParameters = section.filter { $0.hasPrefix(fmtpPrefix) }
+            guard formatParameters.count == 1, let fmtp = formatParameters.first else { return false }
+            let pairs = fmtp.dropFirst(fmtpPrefix.count).split(separator: ";")
+            var parameters: [String: String] = [:]
+            for pair in pairs {
+                let parts = pair.split(separator: "=", maxSplits: 1).map {
+                    $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+                }
+                guard parts.count == 2, parameters[parts[0]] == nil else { return false }
+                parameters[parts[0]] = parts[1]
+            }
+            return supportsAdaptive60(name: name, profileLevelID: parameters["profile-level-id"],
+                                      packetizationMode: parameters["packetization-mode"])
+        }
+        return false
+    }
+
+    #if DEBUG
+    /// Identify the selected primary codec without trusting advertised sender parameters.
+    static func labAnswerPrimaryCodec(answerSDP: String) -> String? {
+        guard answerSDP.utf8.count <= 1_000_000 else { return nil }
+        let lines = answerSDP.components(separatedBy: .newlines).map {
+            $0.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        let starts = lines.indices.filter { lines[$0].hasPrefix("m=video ") }
+        guard starts.count == 1, let start = starts.first else { return nil }
+        let media = lines[start].split(separator: " ")
+        guard media.count > 3, let port = Int(media[1]), port > 0, port <= 65_535,
+              Set(media.dropFirst(3)).count == media.count - 3 else { return nil }
+        let end = lines[(start + 1)...].firstIndex(where: { $0.hasPrefix("m=") }) ?? lines.endIndex
+        let section = lines[(start + 1)..<end]
+        guard !section.contains("a=inactive"), !section.contains("a=recvonly") else { return nil }
+        for payload in media.dropFirst(3) {
+            let prefix = "a=rtpmap:\(payload) "
+            let mappings = section.filter { $0.hasPrefix(prefix) }
+            guard mappings.count == 1, let mapping = mappings.first,
+                  let name = mapping.dropFirst(prefix.count).split(separator: "/").first else { return nil }
+            let codec = name.uppercased()
+            if ["RTX", "RED", "ULPFEC", "FLEXFEC-03"].contains(codec) { continue }
+            return codec
+        }
+        return nil
+    }
+
+    /// Lab-only: accept only the explicitly supported negotiated HEVC profile.
+    static func supportsLabHEVC60(answerSDP: String) -> Bool {
+        guard answerSDP.utf8.count <= 1_000_000 else { return false }
+        let lines = answerSDP.components(separatedBy: .newlines).map {
+            $0.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        let videoSections = lines.indices.filter { lines[$0].hasPrefix("m=video ") }
+        guard videoSections.count == 1, let videoStart = videoSections.first else { return false }
+        let media = lines[videoStart].split(separator: " ")
+        guard media.count > 3, let port = Int(media[1]), port > 0, port <= 65_535,
+              Set(media.dropFirst(3)).count == media.count - 3 else { return false }
+        let end = lines[(videoStart + 1)...].firstIndex(where: { $0.hasPrefix("m=") }) ?? lines.endIndex
+        let section = lines[(videoStart + 1)..<end]
+        guard !section.contains("a=inactive"), !section.contains("a=recvonly") else { return false }
+        for payload in media.dropFirst(3) {
+            let prefix = "a=rtpmap:\(payload) "
+            let mappings = section.filter { $0.hasPrefix(prefix) }
+            guard mappings.count == 1, let mapping = mappings.first else { return false }
+            let name = mapping.dropFirst(prefix.count).split(separator: "/").first.map(String.init) ?? ""
+            if ["RTX", "RED", "ULPFEC", "FLEXFEC-03"].contains(name.uppercased()) { continue }
+            let fmtpPrefix = "a=fmtp:\(payload) "
+            let formatParameters = section.filter { $0.hasPrefix(fmtpPrefix) }
+            guard formatParameters.count == 1, let fmtp = formatParameters.first else { return false }
+            let pairs = fmtp.dropFirst(fmtpPrefix.count).split(separator: ";")
+            var parameters: [String: String] = [:]
+            for pair in pairs {
+                let parts = pair.split(separator: "=", maxSplits: 1).map {
+                    $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+                }
+                guard parts.count == 2, parameters[parts[0]] == nil else { return false }
+                parameters[parts[0]] = parts[1]
+            }
+            return name.uppercased() == "H265" && parameters["profile-id"] == "1" &&
+                parameters["tier-flag"] == "0" && parameters["level-id"] == "153" &&
+                (parameters["tx-mode"] == nil || parameters["tx-mode"] == "srst")
+        }
+        return false
+    }
+
+    #endif
+
+    static let adaptivePolicy = SenderPolicy(maximumFramesPerSecond: adaptiveFramesPerSecond,
+                                             maximumBitrateBps: maximumBitrateBps,
+                                             degradationPreference: .maintainFramerate)
+
     static func senderPolicy(
         targetFramesPerSecond requestedFramesPerSecond: Int,
         maximumBitrateKbps requestedBitrateKbps: Int,
-        preference: String
+        preference: String,
+        maximumFramesPerSecond: Int = targetFramesPerSecond
     ) -> SenderPolicy {
         let framesPerSecond = requestedFramesPerSecond > 0
-            ? min(targetFramesPerSecond, max(10, requestedFramesPerSecond))
-            : targetFramesPerSecond
+            ? min(maximumFramesPerSecond, max(10, requestedFramesPerSecond))
+            : maximumFramesPerSecond
         let bitrateKbps = requestedBitrateKbps > 0
             ? min(maximumBitrateKbps, max(1_000, requestedBitrateKbps))
             : maximumBitrateKbps
@@ -152,11 +324,87 @@ enum DesktopVideoQuality {
 
 final class DesktopVideoEncoderFactory: NSObject, LKRTCVideoEncoderFactory {
     private let base = LKRTCDefaultVideoEncoderFactory()
+    private let f2Enabled: Bool
+    #if os(macOS)
+    private let defaultCBR: Bool
+    #endif
+    #if DEBUG && os(macOS)
+    private let frameByteObserver: ((Int) -> Void)?
+    private let keyframeControl: LatencyKeyframeControl?
+    private let cbrEnabled: Bool
+    private let cbrTrace: (([String: Any]) -> Void)?
+    #endif
+
+    init(f2Enabled: Bool = false, frameByteObserver: ((Int) -> Void)? = nil) {
+        #if os(macOS)
+        self.defaultCBR = false
+        #endif
+        #if DEBUG && os(macOS)
+        self.f2Enabled = f2Enabled
+        self.frameByteObserver = frameByteObserver
+        self.keyframeControl = nil
+        self.cbrEnabled = false
+        self.cbrTrace = nil
+        #else
+        self.f2Enabled = false
+        #endif
+        super.init()
+    }
+
+    #if os(macOS) && !DEBUG
+    init(defaultCBR: Bool) {
+        self.f2Enabled = false
+        self.defaultCBR = defaultCBR
+        super.init()
+    }
+    #endif
+
+    #if DEBUG && os(macOS)
+    init(f2Enabled: Bool, frameByteObserver: ((Int) -> Void)?, keyframeControl: LatencyKeyframeControl?, cbrEnabled: Bool = false, cbrTrace: (([String: Any]) -> Void)? = nil) {
+        self.defaultCBR = false
+        self.f2Enabled = f2Enabled
+        self.frameByteObserver = frameByteObserver
+        self.keyframeControl = keyframeControl
+        self.cbrEnabled = cbrEnabled && !f2Enabled
+        self.cbrTrace = cbrTrace
+        super.init()
+    }
+    #endif
 
     func createEncoder(
         _ info: LKRTCVideoCodecInfo
     ) -> (any LKRTCVideoEncoder)? {
-        base.createEncoder(info)
+        #if DEBUG && os(macOS)
+        guard let native = base.createEncoder(info) else { return nil }
+        let encoder: any LKRTCVideoEncoder
+        if (f2Enabled || cbrEnabled), DesktopVideoQuality.supportsExperimentalEncoder(
+            name: info.name, profileLevelID: info.parameters["profile-level-id"],
+            packetizationMode: info.parameters["packetization-mode"]) {
+            encoder = DesktopLowLatencyH264Encoder(fallback: native, cbr: cbrEnabled, trace: cbrTrace, observeBytes: cbrEnabled ? frameByteObserver : nil)
+        } else {
+            if cbrEnabled && info.name.uppercased() == "H264" {
+                cbrTrace?(["type": "encoder_cbr", "event": "unsupported_profile_fallback"])
+            }
+            encoder = native
+        }
+        // WebRTC unwraps native software encoders by concrete class; wrapping
+        // one would change its adapter path. Observe only the validated ObjC H.264 encoder.
+        if !f2Enabled, info.name.uppercased() == "H264", (frameByteObserver != nil || keyframeControl != nil),
+           let object = encoder as? NSObject,
+           NSStringFromClass(type(of: object)).hasSuffix("RTCVideoEncoderH264"),
+           !object.responds(to: NSSelectorFromString("build:")) {
+            return LatencyObservedVideoEncoder(base: encoder, observe: frameByteObserver ?? { _ in }, control: keyframeControl)
+        }
+        return encoder
+        #elseif os(macOS)
+        guard let native = base.createEncoder(info) else { return nil }
+        guard defaultCBR, DesktopVideoQuality.supportsExperimentalEncoder(
+            name: info.name, profileLevelID: info.parameters["profile-level-id"],
+            packetizationMode: info.parameters["packetization-mode"]) else { return native }
+        return DesktopLowLatencyH264Encoder(fallback: native, cbr: true)
+        #else
+        return base.createEncoder(info)
+        #endif
     }
 
     func supportedCodecs() -> [LKRTCVideoCodecInfo] {
@@ -164,8 +412,169 @@ final class DesktopVideoEncoderFactory: NSObject, LKRTCVideoEncoderFactory {
     }
 }
 
+#if DEBUG && os(macOS)
+/// A peer-local request latch. The event sink must enqueue only and must not
+/// synchronously call this control; it is invoked while generation state is locked.
+final class LatencyKeyframeControl: @unchecked Sendable {
+    enum RequestResult: String { case accepted, coalesced, unavailable }
+    enum Event: String { case delivered, encodeFailed, observed }
+    private struct Flight { var accepted = false; var observed = false }
+    private let lock = NSLock()
+    private let event: @Sendable (Event) -> Void
+    private var generation: UInt64 = 0
+    private var active = false
+    private var closed = false
+    private var pending = false
+    private var flights: [UInt32: Flight] = [:]
+    private var order: [UInt32] = []
+
+    init(event: @escaping @Sendable (Event) -> Void) { self.event = event }
+
+    func requestKeyframe() -> RequestResult {
+        lock.lock(); defer { lock.unlock() }
+        guard !closed, active else { return .unavailable }
+        guard !pending else { return .coalesced }
+        pending = true
+        return .accepted
+    }
+
+    func invalidate() {
+        lock.lock(); defer { lock.unlock() }
+        closed = true; active = false; pending = false; flights.removeAll(); order.removeAll()
+    }
+
+    fileprivate func beginEncoder() -> UInt64? {
+        lock.lock(); defer { lock.unlock() }
+        guard !closed else { return nil }
+        generation &+= 1
+        if generation == 0 { generation = 1 }
+        active = false; pending = false; flights.removeAll(); order.removeAll()
+        return generation
+    }
+    fileprivate func finishStart(_ token: UInt64?, succeeded: Bool) {
+        lock.lock(); defer { lock.unlock() }
+        guard let token, !closed, token == generation else { return }
+        active = succeeded
+    }
+    fileprivate func releaseEncoder(_ token: UInt64?) {
+        lock.lock(); defer { lock.unlock() }
+        guard let token, !closed, token == generation else { return }
+        active = false; pending = false; flights.removeAll(); order.removeAll()
+    }
+    fileprivate func takeRequest(_ token: UInt64?, timestamp: UInt32) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard let token, !closed, active, token == generation, pending,
+              flights[timestamp] == nil else { return false }
+        pending = false
+        order.append(timestamp)
+        flights[timestamp] = Flight()
+        if order.count > 8 { flights.removeValue(forKey: order.removeFirst()) }
+        return true
+    }
+    fileprivate func finishEncode(_ token: UInt64?, timestamp: UInt32, succeeded: Bool) {
+        lock.lock(); defer { lock.unlock() }
+        guard let token, !closed, active, token == generation, var flight = flights[timestamp] else { return }
+        if succeeded {
+            flight.accepted = true
+            event(.delivered)
+            if flight.observed {
+                flights.removeValue(forKey: timestamp); order.removeAll { $0 == timestamp }
+                event(.observed)
+            } else { flights[timestamp] = flight }
+        } else {
+            flights.removeValue(forKey: timestamp); order.removeAll { $0 == timestamp }
+            pending = true
+            event(.encodeFailed)
+        }
+    }
+    fileprivate func observe(_ token: UInt64?, timestamp: UInt32, isKeyframe: Bool) {
+        guard isKeyframe else { return }
+        lock.lock(); defer { lock.unlock() }
+        guard let token, !closed, active, token == generation, var flight = flights[timestamp] else { return }
+        if flight.accepted {
+            flights.removeValue(forKey: timestamp); order.removeAll { $0 == timestamp }
+            event(.observed)
+        } else { flight.observed = true; flights[timestamp] = flight }
+    }
+}
+
+/// Observes encoded byte counts and optionally forwards one peer-local request.
+final class LatencyObservedVideoEncoder: NSObject, LKRTCVideoEncoder {
+    private let base: any LKRTCVideoEncoder
+    private let observe: (Int) -> Void
+    private let control: LatencyKeyframeControl?
+    private let stateLock = NSLock()
+    private var generation: UInt64?
+    private var callback: RTCVideoEncoderCallback?
+    init(base: any LKRTCVideoEncoder, observe: @escaping (Int) -> Void, control: LatencyKeyframeControl?) {
+        self.base = base; self.observe = observe; self.control = control; super.init()
+    }
+    convenience init(base: any LKRTCVideoEncoder, observe: @escaping (Int) -> Void) {
+        self.init(base: base, observe: observe, control: nil)
+    }
+    private func installCallback(_ callback: RTCVideoEncoderCallback?, generation: UInt64?) {
+        guard let callback else { base.setCallback(nil); return }
+        let observe = self.observe, control = self.control
+        base.setCallback { frame, info in
+            observe(frame.buffer.count)
+            control?.observe(generation, timestamp: frame.timeStamp, isKeyframe: frame.frameType.rawValue == 3)
+            return callback(frame, info)
+        }
+    }
+    func setCallback(_ callback: RTCVideoEncoderCallback?) {
+        if control == nil {
+            guard let callback else { base.setCallback(nil); return }
+            let observe = self.observe
+            base.setCallback { frame, info in
+                observe(frame.buffer.count)
+                return callback(frame, info)
+            }
+            return
+        }
+        stateLock.lock(); self.callback = callback; let token = generation; stateLock.unlock()
+        installCallback(callback, generation: token)
+    }
+    func startEncode(with settings: LKRTCVideoEncoderSettings, numberOfCores: Int32) -> Int {
+        guard let control else { return base.startEncode(with: settings, numberOfCores: numberOfCores) }
+        let token = control.beginEncoder()
+        stateLock.lock(); generation = token; let callback = self.callback; stateLock.unlock()
+        installCallback(callback, generation: token)
+        let result = base.startEncode(with: settings, numberOfCores: numberOfCores)
+        control.finishStart(token, succeeded: result == 0)
+        return result
+    }
+    func release() -> Int {
+        guard let control else { return base.release() }
+        stateLock.lock(); let token = generation; generation = nil; stateLock.unlock()
+        control.releaseEncoder(token)
+        return base.release()
+    }
+    func encode(_ frame: LKRTCVideoFrame, codecSpecificInfo: (any LKRTCCodecSpecificInfo)?, frameTypes: [NSNumber]) -> Int {
+        guard let control else { return base.encode(frame, codecSpecificInfo: codecSpecificInfo, frameTypes: frameTypes) }
+        stateLock.lock(); let token = generation; stateLock.unlock()
+        let timestamp = UInt32(bitPattern: frame.timeStamp)
+        let force = control.takeRequest(token, timestamp: timestamp)
+        let requested = force && !frameTypes.contains(where: { $0.uintValue == 3 })
+            ? frameTypes + [NSNumber(value: 3)] : frameTypes
+        let result = base.encode(frame, codecSpecificInfo: codecSpecificInfo, frameTypes: requested)
+        if force { control.finishEncode(token, timestamp: timestamp, succeeded: result == 0) }
+        return result
+    }
+    func setBitrate(_ bitrateKbit: UInt32, framerate: UInt32) -> Int32 { base.setBitrate(bitrateKbit, framerate: framerate) }
+    func implementationName() -> String { base.implementationName() }
+    func scalingSettings() -> LKRTCVideoEncoderQpThresholds? { base.scalingSettings() }
+    var resolutionAlignment: Int { base.resolutionAlignment }
+    var applyAlignmentToAllSimulcastLayers: Bool { base.applyAlignmentToAllSimulcastLayers }
+    var supportsNativeHandle: Bool { base.supportsNativeHandle }
+}
+#endif
+
 final class DesktopVideoDecoderFactory: NSObject, LKRTCVideoDecoderFactory {
     private let base = LKRTCDefaultVideoDecoderFactory()
+    #if DEBUG
+    private let labHEVC: Bool
+    init(labHEVC: Bool = false) { self.labHEVC = labHEVC; super.init() }
+    #endif
 
     func createDecoder(
         _ info: LKRTCVideoCodecInfo
@@ -174,6 +583,19 @@ final class DesktopVideoDecoderFactory: NSObject, LKRTCVideoDecoderFactory {
     }
 
     func supportedCodecs() -> [LKRTCVideoCodecInfo] {
-        DesktopVideoQuality.upgradedCodecs(base.supportedCodecs())
+        let codecs = DesktopVideoQuality.upgradedCodecs(base.supportedCodecs())
+        #if DEBUG
+        guard labHEVC else { return codecs }
+        return codecs.map { codec in
+            guard codec.name.uppercased() == "H265" else { return codec }
+            var parameters = codec.parameters
+            parameters["profile-id"] = "1"
+            parameters["tier-flag"] = "0"
+            parameters["level-id"] = "153"
+            return LKRTCVideoCodecInfo(name: codec.name, parameters: parameters, scalabilityModes: codec.scalabilityModes)
+        }
+        #else
+        return codecs
+        #endif
     }
 }

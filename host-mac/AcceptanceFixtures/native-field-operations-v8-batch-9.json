@@ -1,0 +1,96 @@
+{
+  "schemaVersion": 1,
+  "scope": "Known 54-case regression comparison for unified typed field operations v8; combines 20 copy and 34 earlier literal/decline cases; not held-out qualification; preselected batch 9/11",
+  "cases": [
+    {
+      "id": "H507",
+      "prompt": "The literal text \"Project\" belongs in Tag.",
+      "fields": [
+        "Project",
+        "Tag"
+      ],
+      "expectedDisposition": "supported",
+      "allowedPlans": [
+        [
+          {
+            "field": 1,
+            "mode": "replaceAll",
+            "value": "Project"
+          }
+        ]
+      ]
+    },
+    {
+      "id": "H508",
+      "prompt": "Leave Title exactly as it is; replace Tag with \"north\".",
+      "fields": [
+        "Title",
+        "Tag"
+      ],
+      "expectedDisposition": "supported",
+      "allowedPlans": [
+        [
+          {
+            "field": 1,
+            "mode": "replaceAll",
+            "value": "north"
+          }
+        ]
+      ]
+    },
+    {
+      "id": "H509",
+      "prompt": "Replace Notes with \"  mañana é 🧭\nline 2  \".",
+      "fields": [
+        "Notes",
+        "Tag"
+      ],
+      "expectedDisposition": "supported",
+      "allowedPlans": [
+        [
+          {
+            "field": 0,
+            "mode": "replaceAll",
+            "value": "  mañana é 🧭\nline 2  "
+          }
+        ]
+      ]
+    },
+    {
+      "id": "H510",
+      "prompt": "Insert \"• \" at the caret in Notes.",
+      "fields": [
+        "Notes",
+        "Tag"
+      ],
+      "expectedDisposition": "supported",
+      "allowedPlans": [
+        [
+          {
+            "field": 0,
+            "mode": "insert",
+            "value": "• "
+          }
+        ]
+      ]
+    },
+    {
+      "id": "H511",
+      "prompt": "Put Zürich in Place, please.",
+      "fields": [
+        "Place",
+        "Notes"
+      ],
+      "expectedDisposition": "supported",
+      "allowedPlans": [
+        [
+          {
+            "field": 0,
+            "mode": "replaceAll",
+            "value": "Zürich"
+          }
+        ]
+      ]
+    }
+  ]
+}

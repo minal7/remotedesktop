@@ -9,7 +9,6 @@ required_variables=(
   SRCROOT
   TARGET_BUILD_DIR
   UNLOCALIZED_RESOURCES_FOLDER_PATH
-  EXPANDED_CODE_SIGN_IDENTITY
 )
 for variable in "${required_variables[@]}"; do
   if [[ -z "${!variable:-}" ]]; then
@@ -18,10 +17,19 @@ for variable in "${required_variables[@]}"; do
   fi
 done
 
-source_root="$SRCROOT/ThirdPartyRuntime/llama-b9992"
+# The unsigned path exists only so Xcode can compile and validate source
+# integration when signing credentials or embedded-product provisioning are
+# unavailable. It still verifies and copies the exact pinned payload below.
+if [[ "${CODE_SIGNING_ALLOWED:-YES}" != "NO" && -z "${EXPANDED_CODE_SIGN_IDENTITY:-}" ]]; then
+  echo "Missing required Xcode build variable: EXPANDED_CODE_SIGN_IDENTITY" >&2
+  exit 65
+fi
+
+runtime_name="llama-${LLAMA_RUNTIME_TAG:-b9992}"
+source_root="$SRCROOT/ThirdPartyRuntime/$runtime_name"
 manifest="$source_root/runtime-manifest.json"
 verifier="$SRCROOT/scripts/verify_llama_runtime.py"
-destination_root="$TARGET_BUILD_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH/ComputerUseRuntime/llama-b9992"
+destination_root="$TARGET_BUILD_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH/ComputerUseRuntime/$runtime_name"
 
 /usr/bin/python3 "$verifier" \
   --root "$source_root" \
@@ -37,6 +45,11 @@ destination_root="$TARGET_BUILD_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH/ComputerU
 /usr/bin/python3 "$verifier" \
   --root "$destination_root" \
   --manifest "$manifest"
+
+if [[ "${CODE_SIGNING_ALLOWED:-YES}" == "NO" ]]; then
+  echo "CODE_SIGNING_ALLOWED=NO: verified pinned llama runtime copied for compile-only unsigned build; code signing skipped."
+  exit 0
+fi
 
 signing_identity="$EXPANDED_CODE_SIGN_IDENTITY"
 if [[ "$signing_identity" == "-" ]]; then

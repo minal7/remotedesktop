@@ -3,6 +3,32 @@ import Combine
 import Foundation
 import os
 
+#if DEBUG
+struct LatencyF1RestartTicket {
+    let nonce: String
+    let senderID: String
+    let generation: UInt64
+    let expires: TimeInterval
+
+    func matches(nonce: String, senderID: String, generation: UInt64, now: TimeInterval) -> Bool {
+        self.nonce == nonce && self.senderID == senderID && self.generation == generation && now <= expires
+    }
+}
+#endif
+
+private final class TaskMemoryOwnerIdentityBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: String?
+
+    func set(_ value: String?) { lock.lock(); self.value = value; lock.unlock() }
+    func get() -> String? { lock.lock(); defer { lock.unlock() }; return value }
+}
+
+@MainActor
+private final class TaskMemoryManagerReference {
+    weak var value: HostComputerUseManager?
+}
+
 /// Top-level state holder for the host agent. Owns the private session binding,
 /// signaling client, capture, live WebRTC peer session, and input
 /// injector; exposes a small enum state that the menu bar UI renders.
@@ -43,7 +69,9 @@ final class HostSession: ObservableObject {
     @Published private(set) var state: State = .idle
     @Published private(set) var permissions = Permissions()
     @Published private(set) var optionalAudioError: String?
+    @Published private(set) var ownerMemory: PersonalMemoryViewModel?
     let computerUse: HostComputerUseManager
+    var hideOwnerMemoryWindow: (@MainActor () -> Void)?
 
     private struct ActiveWebRTCPeer {
         let senderID: String
@@ -56,24 +84,37 @@ final class HostSession: ObservableObject {
     private var signalingTask: Task<Void, Never>?
     private var peerSession: HostPeerSession?
     private var activeWebRTCPeer: ActiveWebRTCPeer?
+    #if DEBUG
+    private var latencyF1Restart: LatencyF1RestartTicket?
+    private var latencyF1ActiveNonce: String?
+    private var latencyF1EarlyICE: [[String: String]] = []
+    #endif
     private var nextWebRTCPeerGeneration: UInt64 = 0
     private var pendingPeerCaptureTeardown: Task<Void, Never>?
     private let advertiser = BonjourAdvertiser()
+    private var runLoopAcceptsPeerRelease = false
+    private var pendingPeerRelease: (generation: UInt64, reason: String)?
     private let injector: InputInjector
     private let capture = ScreenCapture()
     private let permissionsProvider: PermissionsProvider
     private let validateAudioInputEntitlements: @Sendable () throws -> Void
     private let deviceIdentityProvider: @Sendable () -> String
+    private let advertisedHostName: String?
     private let cloudAccountBindingProvider:
         @Sendable () async throws -> CloudKitAccountBinding
     private let signalingRunOverride: (@MainActor @Sendable (String) async -> Void)?
+    private let enablePersonalMemory: Bool
+    private let taskMemoryOwnerIdentity: TaskMemoryOwnerIdentityBox
+    private let taskMemoryContextSlot: TaskMemoryContextSlot?
+    private var personalMemorySession: MacPersonalMemorySession?
+    private var ownerMemoryScopeLease: OwnerMemoryScopeLease?
     private var pendingSignalingCleanupTasks: [Task<Void, Never>] = []
     private var pendingRemoteICEPayloads: [[String: String]] = []
     private var loggedPendingRemoteICE = false
     private var disconnecting = false
     private let iceConfigFetcher = ICEConfigFetcher(
         containerIdentifier: HostConfig.cloudKitContainerIdentifier)
-    private let localCredentialStore = LocalComputerUseCredentialStore()
+    private let localCredentialStore: LocalComputerUseCredentialStore
     private var localComputerUseServer: LocalComputerUseBrokerServer?
     private var localComputerUseChannel: LocalHostComputerUseChannel?
     /// Set by every CloudKit account-change notification, including ones that
@@ -93,6 +134,10 @@ final class HostSession: ObservableObject {
         deviceIdentityProvider: @escaping @Sendable () -> String = {
             DeviceIdentity.get()
         },
+        advertisedHostName: String? = nil,
+        localCredentialStore: LocalComputerUseCredentialStore =
+            LocalComputerUseCredentialStore(),
+        allowsAutomaticComputerUseSetup: Bool = true,
         cloudAccountBindingProvider: @escaping @Sendable () async throws
             -> CloudKitAccountBinding = {
                 try await CloudKitAccountBinding.current(
@@ -100,21 +145,76 @@ final class HostSession: ObservableObject {
             },
         computerUseExecutor: (any ComputerUseExecuting)? = nil,
         computerUseManager: HostComputerUseManager? = nil,
+        computerUseTaskLedger: ComputerUseTaskLedger? = nil,
         allowsExternalComputerUseServices: Bool =
             !HostRuntimeContext.isRunningUnitTests,
-        signalingRunOverride: (@MainActor @Sendable (String) async -> Void)? = nil
+        signalingRunOverride: (@MainActor @Sendable (String) async -> Void)? = nil,
+        enablePersonalMemory: Bool = false
     ) {
         let injector = InputInjector()
         self.injector = injector
-        self.computerUse = computerUseManager ?? HostComputerUseManager(
+        let composeTaskMemory = enablePersonalMemory && computerUseManager == nil
+            && computerUseExecutor == nil
+        let ownerIdentity = TaskMemoryOwnerIdentityBox()
+        let faraInputs = composeTaskMemory ? PersonalMemoryFaraRuntimeInputsCache() : nil
+        let leaseBox = TaskMemoryContextLeaseAuthorizationBox()
+        let contextSlot = composeTaskMemory
+            ? TaskMemoryContextSlot(leaseAuthorizationBox: leaseBox) : nil
+        let managerReference = TaskMemoryManagerReference()
+        let contextProvider: PersonalMemoryTaskContextProvider? = composeTaskMemory
+            ? PersonalMemoryTaskContextProvider(
+                enabled: true,
+                ownerID: { ownerIdentity.get() },
+                isLeaseCurrent: { lease in
+                    managerReference.value?.isTaskMemoryLeaseCurrent(lease) == true
+                },
+                isLeaseCurrentSynchronously: { leaseBox.isCurrent($0) },
+                faraRuntimeInputs: { faraInputs?.faraInputs() })
+            : nil
+        let manager = computerUseManager ?? HostComputerUseManager(
             injector: injector,
             executor: computerUseExecutor,
-            allowsExternalServices: allowsExternalComputerUseServices)
+            taskLedger: computerUseTaskLedger ?? ComputerUseTaskLedger(),
+            allowsExternalServices: allowsExternalComputerUseServices,
+            allowsAutomaticSetup: allowsAutomaticComputerUseSetup,
+            taskMemoryContextProvider: contextProvider,
+            taskMemoryContextSlot: contextSlot,
+            taskMemoryFaraRuntimeInputs: faraInputs)
+        self.computerUse = manager
+        managerReference.value = manager
+        self.taskMemoryOwnerIdentity = ownerIdentity
+        self.taskMemoryContextSlot = contextSlot
         self.permissionsProvider = permissionsProvider
         self.validateAudioInputEntitlements = validateAudioInputEntitlements
         self.deviceIdentityProvider = deviceIdentityProvider
+        self.advertisedHostName = advertisedHostName
+        self.localCredentialStore = localCredentialStore
         self.cloudAccountBindingProvider = cloudAccountBindingProvider
         self.signalingRunOverride = signalingRunOverride
+        self.enablePersonalMemory = enablePersonalMemory
+        if enablePersonalMemory {
+            let priorOwnerScopeRevocation = self.computerUse.didRevokeOwnerMemoryScope
+            self.computerUse.didRevokeOwnerMemoryScope = { [weak self] revokedScope in
+                if let self, self.ownerMemoryScopeLease == revokedScope {
+                    self.invalidatePersonalMemorySession()
+                    self.hideOwnerMemoryWindow?()
+                }
+                priorOwnerScopeRevocation?(revokedScope)
+            }
+            let priorAutomationHook = self.computerUse.willBeginAutomation
+            self.computerUse.willBeginAutomation = { [weak self] in
+                if let self, let session = self.personalMemorySession {
+                    let matchingErasure = self.ownerMemoryScopeLease.map {
+                        self.computerUse.isOwnerMemoryErasure($0)
+                    } == true
+                    if !matchingErasure || !session.willBeginAutomation() {
+                        self.invalidatePersonalMemorySession()
+                        self.hideOwnerMemoryWindow?()
+                    }
+                }
+                priorAutomationHook?()
+            }
+        }
     }
 
     private var allowsLocalCredentialAccess: Bool {
@@ -250,6 +350,17 @@ final class HostSession: ObservableObject {
         confirmedBinding != currentBinding
     }
 
+    /// A local computer-use peer is a visual sidecar for the already-advertised
+    /// LAN task session. Its lifetime must not withdraw that independent
+    /// discovery path. A primary remote-control peer still takes the host out
+    /// of advertising state after its offer is accepted.
+    static func shouldWithdrawAdvertisement(
+        afterAcceptedPeer classification:
+            HostComputerUseManager.WebRTCPeerClassification
+    ) -> Bool {
+        classification == .primaryRemoteControl
+    }
+
     /// Periodic defense for a missed or delayed CKAccountChanged notification.
     /// A short transient outage may continue only inside the bounded trust
     /// window established by a positive lookup in this process.
@@ -291,6 +402,9 @@ final class HostSession: ObservableObject {
     /// Tears down an authenticated generation immediately and serializes a
     /// fresh start behind its bounded CloudKit/task cleanup.
     private func restartAfterCloudAccountInvalidation(reason: String) {
+        taskMemoryOwnerIdentity.set(nil)
+        taskMemoryContextSlot?.clear()
+        invalidatePersonalMemorySession()
         requiresFreshCloudAccountResolution = true
         lastPositiveCloudAccountResolutionAt = nil
         lastPositivelyResolvedCloudAccountBinding = nil
@@ -386,6 +500,7 @@ final class HostSession: ObservableObject {
     /// Validates permissions, generates a new private session binding, and kicks
     /// off the signaling run-loop.
     private func startListening() {
+        invalidatePersonalMemorySession()
         refreshPermissions()
         computerUse.refreshModelState()
         guard permissions.ok else {
@@ -421,6 +536,9 @@ final class HostSession: ObservableObject {
     }
 
     func stop() {
+        taskMemoryOwnerIdentity.set(nil)
+        taskMemoryContextSlot?.clear()
+        invalidatePersonalMemorySession()
         let transportTeardown = computerUse.stop()
         pendingSignalingCleanupTasks.append(
             stageConnectionShutdown(after: transportTeardown))
@@ -430,6 +548,9 @@ final class HostSession: ObservableObject {
     /// AppKit uses this awaited path before process termination so the
     /// multi-gigabyte local model cannot outlive its owning host process.
     func shutdown() async {
+        taskMemoryOwnerIdentity.set(nil)
+        taskMemoryContextSlot?.clear()
+        invalidatePersonalMemorySession()
         // Keep every task we cancelled alive until its final CloudKit cleanup
         // has completed. The host advertisement has a stable record
         // name per Mac, so launching a replacement before this returns lets
@@ -465,6 +586,9 @@ final class HostSession: ObservableObject {
         let stoppedPeerSession = peerSession
         peerSession = nil
         activeWebRTCPeer = nil
+        #if DEBUG
+        latencyF1Restart = nil; latencyF1ActiveNonce = nil; latencyF1EarlyICE.removeAll()
+        #endif
         disconnecting = true
         advertiser.stop()
         resetPendingRemoteICE()
@@ -506,6 +630,8 @@ final class HostSession: ObservableObject {
         // session was stopped before the task received its first turn, do not
         // touch the Keychain or create any external signaling state.
         guard !Task.isCancelled else { return }
+        taskMemoryOwnerIdentity.set(nil)
+        taskMemoryContextSlot?.clear()
         resetPendingRemoteICE()
         let senderID = deviceIdentityProvider()
         guard !senderID.trimmingCharacters(
@@ -517,7 +643,9 @@ final class HostSession: ObservableObject {
             return
         }
         guard !Task.isCancelled else { return }
-        let hostName = Host.current().localizedName ?? ProcessInfo.processInfo.hostName
+        let hostName = advertisedHostName
+            ?? Host.current().localizedName
+            ?? ProcessInfo.processInfo.hostName
         let claimedComputerUseCapability = computerUse.capability
         let localChannel = LocalHostComputerUseChannel(
             hostID: senderID,
@@ -527,21 +655,98 @@ final class HostSession: ObservableObject {
         var localCredentialID: String?
         var localCredential: LocalComputerUseCredential?
         var localAccountBinding: CloudKitAccountBinding?
+        var activeMemoryCoordinator: PersonalMemoryCoordinator?
+        var activePersonalMemorySession: MacPersonalMemorySession?
+        defer {
+            taskMemoryOwnerIdentity.set(nil)
+            taskMemoryContextSlot?.clear()
+            if let activePersonalMemorySession {
+                invalidatePersonalMemorySession(ifOwnedBy: activePersonalMemorySession)
+            }
+        }
 
-        if let localIdentity = await resolveLocalComputerUseIdentity() {
+        let localIdentity = await resolveLocalComputerUseIdentity()
+        guard !Task.isCancelled else { return }
+        if let localIdentity {
+            taskMemoryOwnerIdentity.set(localIdentity.binding.rawValue)
             let credential = localIdentity.credential
             localCredential = credential
             localAccountBinding = localIdentity.binding
+            if enablePersonalMemory && computerUse.permitsOwnerMemorySession {
+                invalidatePersonalMemorySession()
+                if let ownerScope = computerUse.mintOwnerMemoryScope(scopeID: UUID()) {
+                    ownerMemoryScopeLease = ownerScope
+                    let boundary = MacPersonalMemoryErasureBoundary(
+                        authorizationGeneration: ownerScope.generation,
+                        isScopeCurrent: { [weak computerUse] in
+                            computerUse?.isOwnerMemoryScopeCurrent(ownerScope) == true
+                        },
+                        hasMatchingErasure: { [weak computerUse] in
+                            computerUse?.isOwnerMemoryErasure(ownerScope) == true
+                        },
+                        begin: { [weak computerUse] _ in
+                            computerUse?.beginOwnerMemoryErasure(ownerScope)
+                        },
+                        isQuiescent: { [weak computerUse] token in
+                            computerUse?.memoryErasureIsQuiescent(token) ?? false
+                        },
+                        end: { [weak computerUse] token in
+                            computerUse?.endMemoryErasure(token)
+                        },
+                        revokeScope: { [weak computerUse] in
+                            computerUse?.revokeOwnerMemoryScope(ownerScope)
+                        })
+                    let memorySession = MacPersonalMemorySession(
+                        enabled: true,
+                        ownerID: localIdentity.binding.rawValue,
+                        erasureBoundary: boundary)
+                    personalMemorySession = memorySession
+                    ownerMemory = memorySession.controller
+                    activePersonalMemorySession = memorySession
+                }
+            }
+            let memoryCoordinator = PersonalMemoryCoordinator(
+                enabled: enablePersonalMemory,
+                proposalsEnabled: false,
+                ownerID: localIdentity.binding.rawValue,
+                leaseProvider: { [weak computerUse] context, requiresTask in
+                    computerUse?.localMemoryLease(
+                        peerID: context.peerID,
+                        sessionID: context.sessionID,
+                        requiresTask: requiresTask)
+                },
+                beginErasure: { [weak computerUse] lease in
+                    computerUse?.beginMemoryErasure(lease)
+                },
+                isErasureQuiescent: { [weak computerUse] token in
+                    computerUse?.memoryErasureIsQuiescent(token) ?? false
+                },
+                endErasure: { [weak computerUse] token in
+                    computerUse?.endMemoryErasure(token)
+                })
+            activeMemoryCoordinator = memoryCoordinator
             let server = LocalComputerUseBrokerServer(
                 credential: credential,
                 hostID: senderID,
                 channel: localChannel,
+                memoryFeatureEnabled: enablePersonalMemory,
+                memoryHandler: { [weak memoryCoordinator] command, context in
+                    guard let memoryCoordinator else {
+                        return LocalComputerUseBrokerServer.disabledMemoryReply(for: command)
+                    }
+                    return await memoryCoordinator.handle(command, context: context)
+                },
                 authorizePeer: { [weak computerUse] senderID in
                     computerUse?.authorizeLocalPeer(senderID: senderID) ?? false
                 },
                 revokePeer: { [weak computerUse] senderID in
                     computerUse?.revokeLocalPeerAuthorization(
                         senderID: senderID)
+                },
+                bindSession: { [weak computerUse] senderID, sessionID in
+                    computerUse?.bindLocalMemorySession(
+                        peerID: senderID,
+                        sessionID: sessionID) ?? false
                 })
             do {
                 localPort = Int32(try await server.start())
@@ -559,6 +764,7 @@ final class HostSession: ObservableObject {
         }
         defer {
             activeLocalServer?.stop()
+            activeMemoryCoordinator?.close()
             if let activeLocalServer,
                localComputerUseServer === activeLocalServer {
                 localComputerUseServer = nil
@@ -686,8 +892,99 @@ final class HostSession: ObservableObject {
             advertiser.publishedMetadata == nil ? nil : publishedComputerUseCapability
         var nextAccountRevalidation = Date().addingTimeInterval(
             Self.cloudAccountRevalidationInterval)
+        var advertisingForLostPeer = false
+        var preflightDeadline: Date?
+        runLoopAcceptsPeerRelease = true
+        defer { runLoopAcceptsPeerRelease = false; pendingPeerRelease = nil }
+
+        /// Ends the remote-control peer but keeps this run, its pairing code and its
+        /// channels, so the Mac is listed again at once and an offer already on its way
+        /// to this code still lands. A running AI task takes the full restart instead,
+        /// because it must deliver a terminal result first.
+        func releasePeerInPlace(reason: String) async -> Bool {
+            guard case .idle = computerUse.activity, let owner = activeWebRTCPeer,
+                  owner.classification == .primaryRemoteControl else { return false }
+            _ = computerUse.endWebRTCPeer(senderID: owner.senderID, generation: owner.generation,
+                                          classification: owner.classification)
+            let oldPeer = peerSession
+            activeWebRTCPeer = nil
+            peerSession = nil
+            resetPendingRemoteICE()
+            await oldPeer?.close(reason: reason).value
+            guard !Task.isCancelled else { return true }
+            advertisingForLostPeer = false
+            await client.releaseOfferSender()
+            state = .advertising(code: code)
+            nextAdvertisementRefresh = .distantPast
+            advertiser.publish(
+                hostname: hostName,
+                code: code,
+                senderID: senderID,
+                computerUseCapability: computerUse.capability,
+                port: localPort,
+                localCredentialID: localCredentialID)
+            log.info("released the peer; listed again with the same pairing code")
+            return true
+        }
 
         while !Task.isCancelled {
+            if let release = pendingPeerRelease {
+                pendingPeerRelease = nil
+                if activeWebRTCPeer?.generation == release.generation,
+                   !(await releasePeerInPlace(reason: release.reason)) {
+                    handleDisconnect(reason: release.reason)
+                    return
+                }
+            }
+
+            // A preflight withdraws the advertisement. If its client never follows
+            // with an offer, this Mac must not stay hidden.
+            if let deadline = preflightDeadline, Date() >= deadline {
+                preflightDeadline = nil
+                if peerSession == nil {
+                    await client.releaseOfferSender()
+                    state = .advertising(code: code)
+                    nextAdvertisementRefresh = .distantPast
+                    advertiser.publish(
+                        hostname: hostName,
+                        code: code,
+                        senderID: senderID,
+                        computerUseCapability: computerUse.capability,
+                        port: localPort,
+                        localCredentialID: localCredentialID)
+                }
+            }
+
+            // A client that vanished without a bye (killed app, lost network)
+            // must not hide this Mac while ICE waits to fail. Advertise now, keep
+            // the old peer in case ICE recovers, and let a new offer replace it.
+            var computerUseIdle = false
+            if case .idle = computerUse.activity { computerUseIdle = true }
+            let lostPeer = peerSession?.isConnectionLost == true && computerUseIdle
+                && activeWebRTCPeer?.classification == .primaryRemoteControl
+            if lostPeer != advertisingForLostPeer {
+                advertisingForLostPeer = lostPeer
+                do {
+                    if lostPeer {
+                        log.info("peer connection lost; advertising for a new client")
+                        await client.releaseOfferSender()
+                        try await client.refreshAdvertisement()
+                        advertiser.publish(
+                            hostname: hostName,
+                            code: code,
+                            senderID: senderID,
+                            computerUseCapability: computerUse.capability,
+                            port: localPort,
+                            localCredentialID: localCredentialID)
+                    } else if peerSession != nil {
+                        advertiser.stop()
+                        await client.stopAdvertising()
+                    }
+                } catch {
+                    log.error("lost-peer advertisement failed: \(String(describing: error), privacy: .public)")
+                }
+            }
+
             if Date() >= nextAccountRevalidation,
                let localAccountBinding {
                 let accountStillMatches = await activeCloudAccountStillMatches(
@@ -768,6 +1065,14 @@ final class HostSession: ObservableObject {
                     guard let offerSenderID = env.senderID, !offerSenderID.isEmpty else {
                         continue
                     }
+                    // Another device can take over from a client that is gone. It sends
+                    // its offer once, so the old peer must not cause it to be dropped.
+                    if env.payload["sdp"] != nil, peerSession?.isConnectionLost == true,
+                       activeWebRTCPeer?.senderID != offerSenderID,
+                       await releasePeerInPlace(reason: "replaced") {
+                        guard !Task.isCancelled else { return }
+                        log.info("released a lost peer for a new device")
+                    }
                     guard let offeredClassification = computerUse
                         .classifyWebRTCPeer(senderID: offerSenderID) else {
                         // If account-enrolled LAN Computer Use already has a
@@ -782,13 +1087,56 @@ final class HostSession: ObservableObject {
                         log.warning("ignored offer from a second signaling sender")
                         continue
                     }
+                    #if DEBUG
+                    if let nonce = env.payload["latencyF1Restart"] {
+                        guard let pending = latencyF1Restart,
+                              let sdp = env.payload["sdp"], !sdp.isEmpty,
+                              let owner = activeWebRTCPeer,
+                              pending.matches(nonce: nonce, senderID: offerSenderID, generation: owner.generation,
+                                              now: ProcessInfo.processInfo.systemUptime),
+                              owner.senderID == offerSenderID, owner.classification == .primaryRemoteControl,
+                              let oldPeer = peerSession, !oldPeer.isEnded else { continue }
+                        guard computerUse.endWebRTCPeer(senderID: owner.senderID, generation: owner.generation,
+                                                       classification: owner.classification) else { continue }
+                        latencyF1Restart = nil
+                        latencyF1ActiveNonce = nonce
+                        peerSession = nil
+                        activeWebRTCPeer = nil
+                        resetPendingRemoteICE()
+                        let teardown = oldPeer.close(reason: "latency-f1-restart")
+                        await teardown.value
+                        guard !Task.isCancelled else { return }
+                    } else if latencyF1ActiveNonce != nil, peerSession != nil {
+                        // A delayed offer from the retired generation must not
+                        // renegotiate the replacement peer.
+                        continue
+                    } else if peerSession == nil {
+                        latencyF1Restart = nil; latencyF1ActiveNonce = nil; latencyF1EarlyICE.removeAll()
+                    }
+                    #endif
                     let clientName = env.payload["client"] ?? "iOS client"
                     if let sdp = env.payload["sdp"] {
+                        // The client side never restarts ICE, so an offer during a
+                        // lost connection is a new connection, not a renegotiation.
+                        if peerSession?.isConnectionLost == true,
+                           await releasePeerInPlace(reason: "replaced") {
+                            guard !Task.isCancelled else { return }
+                            // Release cleared the sender binding this offer just set.
+                            guard await client.acceptOfferSenderID(offerSenderID) else { continue }
+                            log.info("replaced a lost peer with a new client")
+                        }
+                        preflightDeadline = nil
                         if peerSession == nil {
                             // HostPeerSession shares one ScreenCapture. A
                             // replacement generation cannot install callbacks
                             // until the previous peer's stop has completed.
                             await pendingPeerCaptureTeardown?.value
+                            #if DEBUG
+                            if let nonce = env.payload["latencyF1Restart"] {
+                                guard !Task.isCancelled, latencyF1ActiveNonce == nonce,
+                                      peerSession == nil, activeWebRTCPeer == nil else { continue }
+                            }
+                            #endif
                             guard computerUse.classifyWebRTCPeer(
                                 senderID: offerSenderID)
                                     == offeredClassification else {
@@ -813,6 +1161,20 @@ final class HostSession: ObservableObject {
                                 senderID: offerSenderID,
                                 generation: generation,
                                 classification: offeredClassification)
+                            #if DEBUG
+                            let labNonce = env.payload["latencyF1Restart"] == latencyF1ActiveNonce
+                                ? env.payload["latencyF1Restart"] : nil
+                            let labF2 = labNonce != nil && env.payload["latencyF2Encoder"] == "1"
+                            let labF3 = labNonce != nil && env.payload["latencyF3Sender"] == "1"
+                            let lab60Requested = HostPeerSession.lab60OfferRequested(env.payload)
+                            let labHEVCRequested = env.payload["latencyLabHEVC"] == "1"
+                            #else
+                            let labNonce: String? = nil
+                            let labF2 = false
+                            let labF3 = false
+                            let lab60Requested = false
+                            let labHEVCRequested = false
+                            #endif
                             let computerUse = computerUse
                             peerSession = HostPeerSession(
                                 signaling: client,
@@ -821,12 +1183,14 @@ final class HostSession: ObservableObject {
                                 iceConfig: iceConfig,
                                 audioEnabled: permissions.audioEnabled,
                                 peerSenderID: offerSenderID,
+                                acceptedOrdinaryPeer: HostPeerSession.allowsPortMapping(for: offeredClassification),
+                                requestAdaptive60: env.payload["adaptiveVideo60"] == "1",
                                 onUserInput: { [weak computerUse] in
-                                    if computerUse?.blockActionsForUserIntervention() == true {
-                                        Task { @MainActor [weak computerUse] in
-                                            computerUse?.userIntervened()
-                                        }
+                                    guard let intervention = computerUse?.recordUserInputInInjectionTransaction() else { return false }
+                                    Task { @MainActor [weak computerUse] in
+                                        computerUse?.applyUserInputIntervention(intervention)
                                     }
+                                    return true
                                 },
                                 onPeerAuthorizationChanged: { [weak self, weak computerUse] update in
                                     guard let computerUse else { return }
@@ -849,6 +1213,27 @@ final class HostSession: ObservableObject {
                                             epoch: epoch)
                                     }
                                 },
+                                labInstrumentation: offeredClassification == .primaryRemoteControl,
+                                latencyF1Nonce: labNonce,
+                                latencyF2Enabled: labF2,
+                                latencyF3Enabled: labF3,
+                                lab60Requested: lab60Requested,
+                                labHEVCRequested: labHEVCRequested,
+                                onLatencyF1RestartRequest: { [weak self] nonce, ready in
+                                    #if DEBUG
+                                    Task { @MainActor [weak self] in
+                                        guard let self, let owner = self.activeWebRTCPeer,
+                                              owner.senderID == offerSenderID, owner.generation == generation,
+                                              owner.classification == .primaryRemoteControl,
+                                              self.peerSession != nil else { return }
+                                        self.latencyF1Restart = LatencyF1RestartTicket(
+                                            nonce: nonce, senderID: offerSenderID, generation: generation,
+                                            expires: ProcessInfo.processInfo.systemUptime + 30)
+                                        self.latencyF1EarlyICE.removeAll()
+                                        ready()
+                                    }
+                                    #endif
+                                },
                                 onEnded: { [weak self] reason in
                                     Task { @MainActor in
                                         self?.handlePeerEnded(
@@ -860,37 +1245,60 @@ final class HostSession: ObservableObject {
                                     }
                                 })
                         }
+                        guard let offeredPeer = peerSession,
+                              let offeredOwner = activeWebRTCPeer,
+                              offeredOwner.senderID == offerSenderID else { continue }
                         do {
-                            try await peerSession?.acceptOffer(sdp: sdp)
+                            try await offeredPeer.acceptOffer(sdp: sdp)
+                            guard !Task.isCancelled, peerSession === offeredPeer,
+                                  activeWebRTCPeer?.generation == offeredOwner.generation,
+                                  !offeredPeer.isEnded else { continue }
+                            #if DEBUG
+                            if let nonce = env.payload["latencyF1Restart"], nonce == latencyF1ActiveNonce {
+                                let early = latencyF1EarlyICE
+                                latencyF1EarlyICE.removeAll()
+                                for payload in early { offeredPeer.addRemoteIce(payload) }
+                            }
+                            #endif
                             flushPendingRemoteICEIfPossible()
-                            advertiser.stop()
-                            await client.stopAdvertising()
-                            state = .paired(clientDescription: clientName)
+                            if Self.shouldWithdrawAdvertisement(
+                                afterAcceptedPeer: offeredOwner.classification) {
+                                advertiser.stop()
+                                await client.stopAdvertising()
+                                guard !Task.isCancelled, peerSession === offeredPeer,
+                                      activeWebRTCPeer?.generation == offeredOwner.generation,
+                                      !offeredPeer.isEnded else { continue }
+                                state = .paired(clientDescription: clientName)
+                            }
                         } catch {
+                            // A capture deadline/close can retire this exact
+                            // peer while offer negotiation or advertisement
+                            // cleanup awaits. Old completion cannot act on a
+                            // successor or publish the retired peer as paired.
+                            guard !Task.isCancelled, peerSession === offeredPeer,
+                                  activeWebRTCPeer?.generation == offeredOwner.generation else { continue }
                             log.error("failed to accept WebRTC offer: \(String(describing: error), privacy: .public)")
-                            if let activeWebRTCPeer,
-                               activeWebRTCPeer.senderID == offerSenderID,
-                               activeWebRTCPeer.classification
-                                == .localComputerUseSidecar {
+                            if offeredOwner.classification == .localComputerUseSidecar {
                                 handlePeerEnded(
                                     reason: "error",
                                     senderID: offerSenderID,
-                                    generation:
-                                        activeWebRTCPeer.generation,
-                                    classification:
-                                        activeWebRTCPeer.classification)
+                                    generation: offeredOwner.generation,
+                                    classification: offeredOwner.classification)
                                 continue
                             }
                             state = .error("Couldn't start the WebRTC session.")
                             advertiser.stop()
                             await stopComputerUseBeforeTransportClosure()
+                            guard !Task.isCancelled, peerSession === offeredPeer,
+                                  activeWebRTCPeer?.generation == offeredOwner.generation else { continue }
                             activeWebRTCPeer = nil
-                            let captureTeardown = peerSession?.close(
-                                reason: "error")
+                            let captureTeardown = offeredPeer.close(reason: "error")
                             peerSession = nil
-                            await captureTeardown?.value
                             resetPendingRemoteICE()
+                            await captureTeardown.value
                             await client.cleanup()
+                            // One failed offer must not leave this Mac hidden until relaunch.
+                            handleDisconnect(reason: "offer-failed")
                             return
                         }
                     } else {
@@ -905,6 +1313,7 @@ final class HostSession: ObservableObject {
                             try await client.send(ack)
                             advertiser.stop()
                             await client.stopAdvertising()
+                            preflightDeadline = Date().addingTimeInterval(20)
                         } catch {
                             log.error("failed to send preflight answer: \(String(describing: error), privacy: .public)")
                             state = .error("Client reached the host, but the host couldn't reply over signaling.")
@@ -916,6 +1325,20 @@ final class HostSession: ObservableObject {
                         }
                     }
                 case .ice:
+                    #if DEBUG
+                    if let nonce = env.payload["latencyF1Restart"] {
+                        if let pending = latencyF1Restart, pending.nonce == nonce,
+                           pending.senderID == env.senderID,
+                           pending.expires >= ProcessInfo.processInfo.systemUptime {
+                            if latencyF1EarlyICE.count < 64 { latencyF1EarlyICE.append(env.payload) }
+                            continue
+                        }
+                        guard nonce == latencyF1ActiveNonce, let sender = env.senderID,
+                              let owner = activeWebRTCPeer, owner.senderID == sender else { continue }
+                    } else if latencyF1ActiveNonce != nil {
+                        continue
+                    }
+                    #endif
                     if let peerSession {
                         peerSession.addRemoteIce(env.payload)
                     } else {
@@ -925,6 +1348,12 @@ final class HostSession: ObservableObject {
                     // Host doesn't receive answers.
                     log.warning("unexpected answer from client")
                 case .bye:
+                    #if DEBUG
+                    if let nonce = latencyF1ActiveNonce {
+                        guard env.payload["latencyF1Restart"] == nonce, let sender = env.senderID,
+                              let owner = activeWebRTCPeer, owner.senderID == sender else { continue }
+                    }
+                    #endif
                     let reason = env.payload["reason"] ?? "user"
                     if let activeWebRTCPeer,
                        activeWebRTCPeer.classification
@@ -937,6 +1366,10 @@ final class HostSession: ObservableObject {
                             generation: activeWebRTCPeer.generation,
                             classification:
                                 activeWebRTCPeer.classification)
+                        continue
+                    }
+                    if await releasePeerInPlace(reason: reason) {
+                        guard !Task.isCancelled else { return }
                         continue
                     }
                     log.info("client said bye — will restart listening")
@@ -1035,7 +1468,11 @@ final class HostSession: ObservableObject {
         }
 
         guard classification == .localComputerUseSidecar else {
-            handleDisconnect(reason: reason)
+            if runLoopAcceptsPeerRelease {
+                pendingPeerRelease = (generation: generation, reason: reason)
+            } else {
+                handleDisconnect(reason: reason)
+            }
             return
         }
 
@@ -1074,7 +1511,10 @@ final class HostSession: ObservableObject {
             log.info("handleDisconnect re-entered (reason=\(reason, privacy: .public)) — skipping")
             return
         }
+        taskMemoryOwnerIdentity.set(nil)
+        taskMemoryContextSlot?.clear()
         disconnecting = true
+        invalidatePersonalMemorySession()
         log.info("connection ended (\(reason, privacy: .public)) — restarting listener")
         // A terminal peer failure is not a resumable pause. Persist and send
         // the terminal Computer Use result while the old task channel is still
@@ -1097,6 +1537,31 @@ final class HostSession: ObservableObject {
         // still blocks cached fallback on the next run.
         restartAfterCloudAccountInvalidation(
             reason: "cloud-account-changed")
+    }
+
+    /// Clears sensitive owner text when the settings window closes while
+    /// keeping this authenticated session reusable if the window is reopened.
+    func closeOwnerMemoryView() {
+        personalMemorySession?.controller.close()
+    }
+
+    private func invalidatePersonalMemorySession() {
+        guard let current = personalMemorySession else {
+            ownerMemory = nil
+            ownerMemoryScopeLease = nil
+            return
+        }
+        current.invalidate()
+        personalMemorySession = nil
+        ownerMemoryScopeLease = nil
+        ownerMemory = nil
+    }
+
+    private func invalidatePersonalMemorySession(
+        ifOwnedBy expected: MacPersonalMemorySession
+    ) {
+        guard personalMemorySession === expected else { return }
+        invalidatePersonalMemorySession()
     }
 
     /// MainActor bridge from the authenticated WebRTC hello into the

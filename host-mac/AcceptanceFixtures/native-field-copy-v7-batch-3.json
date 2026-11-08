@@ -1,0 +1,61 @@
+{
+  "schemaVersion": 1,
+  "scope": "First hand-authored typed field-copy capability corpus, frozen before any inference; full operation order and payload origin required; not general computer-use qualification; preselected batch 3/4 to bound temporary host storage",
+  "cases": [
+    {
+      "id": "C11",
+      "prompt": "Type the literal word \"Title\" in Tag.",
+      "fields": [
+        "Title",
+        "Tag"
+      ],
+      "expectedDisposition": "supported",
+      "allowedPlans": [
+        [
+          {
+            "field": 1,
+            "mode": "replaceAll",
+            "value": "Title"
+          }
+        ]
+      ]
+    },
+    {
+      "id": "C12",
+      "prompt": "Copy Title into Tag, then send the message.",
+      "fields": [
+        "Title",
+        "Tag"
+      ],
+      "expectedDisposition": "unsupported"
+    },
+    {
+      "id": "C13",
+      "prompt": "Write a short greeting in Notes.",
+      "fields": [
+        "Notes",
+        "Tag"
+      ],
+      "expectedDisposition": "unsupported"
+    },
+    {
+      "id": "C14",
+      "prompt": "Copy the title into Tag.",
+      "fields": [
+        "Name",
+        "Tag"
+      ],
+      "expectedDisposition": "clarification"
+    },
+    {
+      "id": "C15",
+      "prompt": "Copy Title into Tag.",
+      "fields": [
+        "Title",
+        "Title",
+        "Tag"
+      ],
+      "expectedDisposition": "clarification"
+    }
+  ]
+}

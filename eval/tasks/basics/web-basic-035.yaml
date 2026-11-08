@@ -1,0 +1,8 @@
+id: "web-basic-035"
+surface: web
+start: {"url":"http://127.0.0.1:8765/upload.html"}
+prompt: "Attach the provided sample.txt by dropping it onto the Drop a file here area."
+checker: {"type":"dom","url_prefix":"http://127.0.0.1:8765/","expect":[{"selector":"#file-name","text":"sample.txt"}]}
+max_steps: 10
+tags: ["file-upload","drag"]
+approval_policy: {"allow_fixture_interaction":true,"allow_fixture_commit":true}

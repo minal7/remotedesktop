@@ -1,0 +1,26 @@
+id: typing-duplicate-same-selection-001
+surface: web
+start:
+  url: http://127.0.0.1:8765/typing-identical.html
+prompt: Click the City field, select all of its existing text, and type San Diego once. Leave the form unsubmitted.
+checker:
+  type: dom
+  expect:
+    - selector: '#city'
+      value: San Diego
+      case_sensitive: true
+    - selector: '#input-count'
+      text: '1'
+      case_sensitive: true
+    - selector: '#submission-state'
+      text: Not submitted
+      case_sensitive: true
+  min_events:
+    - selector: '#city'
+      event: input
+      count: 1
+  url_prefix: http://127.0.0.1:8765/
+max_steps: 8
+tags: [typing, identical-selection, no-submit]
+approval_policy:
+  allow_fixture_interaction: true

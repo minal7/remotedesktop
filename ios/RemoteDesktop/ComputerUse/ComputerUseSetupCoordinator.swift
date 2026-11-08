@@ -1,20 +1,6 @@
 import CloudKit
 import Foundation
 
-protocol ComputerUseSetupChannel: Sendable {
-    @discardableResult
-    func send(
-        kind: ComputerUseEnvelope.Kind,
-        body: String,
-        to explicitTargetID: String?,
-        sessionID explicitSessionID: String?,
-        messageID explicitMessageID: String?
-    ) async throws -> ComputerUseEnvelope
-
-    func poll() async throws -> [ComputerUseEnvelope]
-    func acknowledge(_ envelopes: [ComputerUseEnvelope]) async throws
-}
-
 extension CloudKitComputerUseChannel: ComputerUseSetupChannel {}
 
 private actor UnavailableComputerUseSetupChannel:
@@ -276,9 +262,21 @@ final class ComputerUseSetupCoordinator: ObservableObject {
             }
 
             switch host.computerUseCapability.state {
-            case .ready, .busy, .paused:
-                tasksByHostKey.removeValue(forKey: key)?.task.cancel()
-                statesByHostKey[key] = .ready
+            case .ready:
+                if shouldRecreateTask, hasAuthenticatedRoute(host) {
+                    checkSetup(for: host)
+                }
+                // A usable capability may become ready before the remaining
+                // packages finish. Only direct terminal setup progress can
+                // finish this request or clear its failure, not discovery.
+                if tasksByHostKey[key] == nil, !isFailure(statesByHostKey[key]) {
+                    statesByHostKey[key] = .ready
+                }
+
+            case .busy, .paused:
+                if tasksByHostKey[key] == nil, !isFailure(statesByHostKey[key]) {
+                    statesByHostKey[key] = .ready
+                }
 
             case .installing:
                 if !isFailure(statesByHostKey[key]),
@@ -309,6 +307,16 @@ final class ComputerUseSetupCoordinator: ObservableObject {
     }
 
     func startSetup(for host: LocalHostAdvertisement) {
+        startSetup(for: host, includesReadyHost: false)
+    }
+
+    /// An explicit user request to check/finish setup, including a Mac with a
+    /// usable subset of capabilities. Never infer this from English detail.
+    func checkSetup(for host: LocalHostAdvertisement) {
+        startSetup(for: host, includesReadyHost: true)
+    }
+
+    private func startSetup(for host: LocalHostAdvertisement, includesReadyHost: Bool) {
         guard let key = HostAccountKey(host: host),
               hasAuthenticatedRoute(host),
               tasksByHostKey[key] == nil else {
@@ -318,7 +326,9 @@ final class ComputerUseSetupCoordinator: ObservableObject {
         switch host.computerUseCapability.state {
         case .setupRequired, .installing:
             break
-        case .unavailable, .ready, .busy, .paused:
+        case .ready:
+            guard includesReadyHost else { return }
+        case .unavailable, .busy, .paused:
             return
         }
 
@@ -582,6 +592,7 @@ enum ComputerUseRowAction: Equatable {
     case setup
     case progress(ComputerUseSetupProgress)
     case useAI
+    case useAIWithSetupFailure(String)
     case retry(String)
 
     static func resolve(
@@ -611,6 +622,10 @@ enum ComputerUseRowAction: Equatable {
             }
             return .useAI
         case .failed(let message):
+            if localPromptReady,
+               [.ready, .busy, .paused].contains(host.computerUseCapability.state) {
+                return .useAIWithSetupFailure(message)
+            }
             return .retry(message)
         }
     }

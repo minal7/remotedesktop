@@ -6,6 +6,10 @@ struct PairingView: View {
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @StateObject private var discovery = LocalHostDiscovery()
     @State private var aiHelpMessage: String?
+    @State private var discoveryAttempt = UUID()
+    #if DEBUG
+    @State private var latencyProbeConnected = false
+    #endif
     private let localCredentialStore = LocalComputerUseCredentialStore()
 
     var body: some View {
@@ -37,9 +41,17 @@ struct PairingView: View {
             )
                 .ignoresSafeArea()
         }
-        .onAppear { discovery.start() }
+        .onAppear {
+            discovery.start()
+            #if DEBUG
+            connectLatencyProbeHost(in: discovery.hosts)
+            #endif
+        }
         .onChange(of: discovery.hosts) { _, hosts in
             computerUseSetup.reconcile(hosts: hosts)
+            #if DEBUG
+            connectLatencyProbeHost(in: hosts)
+            #endif
         }
         .onDisappear { discovery.stop() }
         .alert(
@@ -97,8 +109,7 @@ struct PairingView: View {
             sectionHeader(
                 title: "Available devices",
                 count: discovery.hosts.isEmpty ? nil : discovery.hosts.count,
-                isLoading: discovery.hosts.isEmpty
-                    && discovery.accountPairingStatus == nil
+                isLoading: false
             )
 
             if discovery.hosts.isEmpty {
@@ -147,29 +158,18 @@ struct PairingView: View {
     }
 
     private var searchingDevicesState: some View {
-        HStack(alignment: .center, spacing: 14) {
-            ProgressView()
-                .controlSize(.regular)
-                .frame(width: 34, height: 34)
-
-            VStack(alignment: .leading, spacing: 3) {
-                Text("Searching for hosts")
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(.primary)
-                Text("Open Remote Desktop Host on a Mac signed into the same Apple Account.")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-
-            Spacer(minLength: 0)
-        }
-        .padding(16)
-        .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-        .overlay {
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .strokeBorder(Color.primary.opacity(0.06), lineWidth: 1)
-        }
+        ConnectionWaitNotice(
+            title: "Searching for hosts…",
+            recovery: Self.searchingRecoveryMessage,
+            retry: {
+                discovery.stop()
+                discovery.start()
+                discoveryAttempt = UUID()
+            })
+            .id(discoveryAttempt)
+            .frame(maxWidth: .infinity)
+            .padding(16)
+            .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
     }
 
     private func cloudAccountActionState(
@@ -437,7 +437,7 @@ struct PairingView: View {
                 computerUseSetup.startSetup(for: host)
             } label: {
                 computerUseButtonLabel(
-                    "Set up AI",
+                    "Set up Computer use (Beta)",
                     systemImage: "sparkles",
                     fillsWidth: fillsWidth)
             }
@@ -453,26 +453,34 @@ struct PairingView: View {
             setupProgress(progress, host: host, fillsWidth: fillsWidth)
 
         case .useAI:
-            Button {
-                connect(to: host, experience: .computerUse)
-            } label: {
-                computerUseButtonLabel(
-                    "Use AI",
-                    systemImage: "sparkles",
-                    fillsWidth: fillsWidth)
+            VStack(spacing: 8) {
+                useAIButton(host: host, fillsWidth: fillsWidth)
+                if host.computerUseCapability.state == .ready {
+                    Button("Check AI setup", systemImage: "arrow.down.circle") {
+                        computerUseSetup.checkSetup(for: host)
+                    }
+                    .font(.caption)
+                    .disabled(session.state == .connecting)
+                    .accessibilityLabel("Check and finish AI setup on \(host.accessibilityDisplayName)")
+                }
             }
-            .buttonStyle(.borderedProminent)
-            .buttonBorderShape(.roundedRectangle(radius: 14))
-            .tint(.indigo)
-            .disabled(session.state == .connecting)
-            .accessibilityLabel(
-                "Use AI Computer Use on \(host.accessibilityDisplayName)")
-            .accessibilityHint(
-                "Opens a secure local AI conversation")
+
+        case .useAIWithSetupFailure(let message):
+            VStack(spacing: 8) {
+                useAIButton(host: host, fillsWidth: fillsWidth)
+                Button("Retry additional setup", systemImage: "arrow.clockwise") {
+                    computerUseSetup.checkSetup(for: host)
+                }
+                .buttonStyle(.bordered)
+                .tint(.orange)
+                .disabled(session.state == .connecting || host.computerUseCapability.state != .ready)
+                .accessibilityLabel("Retry additional AI setup on \(host.accessibilityDisplayName)")
+                .accessibilityHint(message)
+            }
 
         case .retry(let message):
             Button {
-                computerUseSetup.startSetup(for: host)
+                computerUseSetup.checkSetup(for: host)
             } label: {
                 computerUseButtonLabel(
                     "Retry",
@@ -487,6 +495,20 @@ struct PairingView: View {
                 "Retry AI setup on \(host.accessibilityDisplayName)")
             .accessibilityHint(message)
         }
+    }
+
+    private func useAIButton(host: LocalHostAdvertisement, fillsWidth: Bool) -> some View {
+        Button {
+            connect(to: host, experience: .computerUse)
+        } label: {
+            computerUseButtonLabel("Computer use (Beta)", systemImage: "sparkles", fillsWidth: fillsWidth)
+        }
+        .buttonStyle(.borderedProminent)
+        .buttonBorderShape(.roundedRectangle(radius: 14))
+        .tint(.indigo)
+        .disabled(session.state == .connecting)
+        .accessibilityLabel("Use AI Computer Use on \(host.accessibilityDisplayName)")
+        .accessibilityHint("Opens a secure local AI conversation")
     }
 
     @ViewBuilder
@@ -569,8 +591,7 @@ struct PairingView: View {
     private func hostAvailabilityLabel(
         _ host: LocalHostAdvertisement
     ) -> String {
-        let readiness = host.source == .cloudKit
-            ? "Ready through iCloud" : "Ready nearby"
+        let readiness = host.availabilityTitle
         guard let discriminator = host.presentationDiscriminator else {
             return readiness
         }
@@ -615,7 +636,7 @@ struct PairingView: View {
                     .foregroundStyle(.orange)
                     .lineLimit(horizontalSizeClass == .compact ? 2 : 1)
             case .setup:
-                Label("AI setup available", systemImage: "sparkles")
+                Label("Computer use (Beta) setup available", systemImage: "sparkles")
                     .foregroundStyle(.indigo)
                     .lineLimit(1)
                     .minimumScaleFactor(0.78)
@@ -624,12 +645,13 @@ struct PairingView: View {
                     .foregroundStyle(.indigo)
                     .lineLimit(horizontalSizeClass == .compact ? 2 : 1)
             case .useAI:
-                Label("AI Computer Use available", systemImage: "checkmark.circle.fill")
+                Label(host.computerUseCapability.detail.isEmpty ? "Computer use (Beta) available" : host.computerUseCapability.detail,
+                      systemImage: "checkmark.circle.fill")
                     .foregroundStyle(.green)
                     .lineLimit(1)
                     .minimumScaleFactor(0.78)
                     .layoutPriority(1)
-            case .retry(let message):
+            case .retry(let message), .useAIWithSetupFailure(let message):
                 Label(message, systemImage: "exclamationmark.triangle.fill")
                     .foregroundStyle(.orange)
                     .lineLimit(horizontalSizeClass == .compact ? 2 : 1)
@@ -637,6 +659,33 @@ struct PairingView: View {
         }
         .font(.footnote.weight(.medium))
     }
+
+    private static var searchingRecoveryMessage: String {
+        let message = "Can’t find your computer. Open the host app, use the same Apple Account, and check that both devices are online."
+        #if DEBUG
+        // Debug uses CloudKit Development and Release uses Production. They never see each other.
+        return "This Debug build only finds a Mac running a Debug host. " + message
+        #else
+        return message
+        #endif
+    }
+
+    #if DEBUG
+    private func connectLatencyProbeHost(in hosts: [LocalHostAdvertisement]) {
+        let args = ProcessInfo.processInfo.arguments
+        guard LatencyStatsCollector.enabled, !latencyProbeConnected,
+              let index = args.firstIndex(of: "LatencyProbeHostID"),
+              args.indices.contains(index + 1), let requested = UUID(uuidString: args[index + 1]) else { return }
+        let matches = hosts.filter { host in
+            guard host.hasAuthenticatedCloudMatch, host.accountBinding != nil,
+                  let sender = host.senderID, let id = UUID(uuidString: sender) else { return false }
+            return id == requested
+        }
+        guard matches.count == 1 else { return }
+        latencyProbeConnected = true
+        connect(to: matches[0], experience: .remoteControl)
+    }
+    #endif
 
     private func connect(to host: LocalHostAdvertisement, experience: SessionModel.Experience) {
         session.connect(
@@ -646,7 +695,8 @@ struct PairingView: View {
             hostName: host.hostname,
             localComputerUseEndpoint: host.localEndpoint,
             localCredentialID: host.localCredentialID,
-            localCloudAccountBinding: host.accountBinding)
+            localCloudAccountBinding: host.accountBinding,
+            discoverySource: host.source)
     }
 
     private func hasLocalCredential(

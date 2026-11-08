@@ -5,74 +5,6 @@ import Foundation
 import ServiceManagement
 import SwiftUI
 
-/// Detects app-hosted XCTest runs before the host starts any production-only
-/// services. Xcode's test launcher does not consistently provide
-/// `XCTestConfigurationFilePath`, so relying on that one environment variable
-/// can let a test host advertise, register login items, or read the Keychain.
-enum HostRuntimeContext {
-    static var isRunningUnitTests: Bool {
-        detectsUnitTests(
-            environment: ProcessInfo.processInfo.environment,
-            arguments: ProcessInfo.processInfo.arguments,
-            loadedBundlePaths: (Bundle.allBundles + Bundle.allFrameworks).map(\.bundlePath),
-            xctestRuntimeAvailable: NSClassFromString("XCTestCase") != nil
-                || NSClassFromString("XCTest.XCTestCase") != nil)
-    }
-
-    /// App-hosted XCTest must remain visually inert. Even an `NSStatusItem`
-    /// is a real on-screen surface owned by Control Center, so creating the
-    /// normal host chrome would make hidden model acceptance visibly mutate
-    /// the user's menu bar.
-    static var shouldInstallVisibleChrome: Bool {
-        !isRunningUnitTests
-    }
-
-    static func detectsUnitTests(
-        environment: [String: String],
-        arguments: [String],
-        loadedBundlePaths: [String],
-        xctestRuntimeAvailable: Bool
-    ) -> Bool {
-        if xctestRuntimeAvailable {
-            return true
-        }
-
-        let injectionKeys = [
-            "XCTestConfigurationFilePath",
-            "XCTestBundlePath",
-            "XCTestSessionIdentifier",
-            "XCInjectBundle",
-            "XCInjectBundleInto",
-        ]
-        if injectionKeys.contains(where: { environment[$0] != nil }) {
-            return true
-        }
-
-        if environment["DYLD_INSERT_LIBRARIES"]?.localizedCaseInsensitiveContains("XCTest") == true {
-            return true
-        }
-
-        let hasXCTestLaunchMarker = arguments.contains { argument in
-            let marker = argument.lowercased()
-            return marker == "-xctest"
-                || marker.hasPrefix("-xctest")
-                || marker.hasSuffix(".xctest")
-                || marker.contains(".xctest/")
-        }
-        if hasXCTestLaunchMarker {
-            return true
-        }
-
-        return loadedBundlePaths.contains { path in
-            let marker = path.lowercased()
-            return marker.hasSuffix(".xctest")
-                || marker.contains(".xctest/")
-                || marker.hasSuffix("/xctest.framework")
-                || marker.contains("/xctest.framework/")
-        }
-    }
-}
-
 /// Owns the ordering contract for an in-app relaunch. A replacement host uses
 /// the same stable CloudKit sender identity as the old process, so it must not
 /// launch until the old signaling run has deleted its records and returned.
@@ -95,6 +27,25 @@ struct RemoteDesktopHostApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
 
     init() {
+#if DEBUG
+        if DebugResidentHostConfiguration.isSelected() {
+            // The resident evaluation candidate is launched directly from its
+            // staged bundle. Do not let ordinary relaunch or command handlers
+            // touch the installed Release process first.
+            return
+        }
+#else
+        if CommandLine.arguments.contains("--debug-r0-resident-host")
+            || ProcessInfo.processInfo.environment["REMOTE_DESKTOP_R0_HOST_ID"] != nil
+            || CommandLine.arguments.contains("--debug-latency-host")
+            || ProcessInfo.processInfo.environment["REMOTE_DESKTOP_LATENCY_HOST_ID"] != nil {
+            NSLog("RemoteDesktopHost Debug resident modes are unavailable in Release")
+            Darwin.exit(2)
+        }
+#endif
+        if let exitCode = HostRelaunch.runIfRequested() {
+            Darwin.exit(exitCode)
+        }
         if let exitCode = HostCommandLine.runIfNeeded() {
             Darwin.exit(exitCode)
         }
@@ -119,7 +70,43 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     // XCTest is injected after the application delegate is created. Defer the
     // session (and therefore the local model manager) until AppKit begins
     // launching so HostRuntimeContext can see that injection reliably.
-    private(set) lazy var session = HostSession()
+#if DEBUG
+    private var r0Configuration: DebugResidentHostConfiguration?
+    private var r0SingleInstanceLease: HostSingleInstanceLease?
+#endif
+    private(set) lazy var session: HostSession = {
+#if DEBUG
+        guard let configuration = r0Configuration else {
+            let hostSession = HostSession(
+                enablePersonalMemory: MemoryFeatureConfiguration.memoryV1CandidateEnabled)
+            hostSession.hideOwnerMemoryWindow = { [weak self] in
+                self?.settingsWindowController?.window?.orderOut(nil)
+            }
+            return hostSession
+        }
+        let hostSession = HostSession(
+            deviceIdentityProvider: { configuration.hostID },
+            advertisedHostName: configuration.hostDisplayName,
+            localCredentialStore: LocalComputerUseCredentialStore(
+                service: configuration.credentialServiceName),
+            allowsAutomaticComputerUseSetup: false,
+            computerUseTaskLedger: ComputerUseTaskLedger(
+                fileURL: configuration.taskLedgerURL),
+            allowsExternalComputerUseServices: configuration.allowsExternalComputerUseServices && !HostRuntimeContext.isRunningUnitTests,
+            enablePersonalMemory: configuration.allowsPersonalMemory && MemoryFeatureConfiguration.memoryV1CandidateEnabled)
+        hostSession.hideOwnerMemoryWindow = { [weak self] in
+            self?.settingsWindowController?.window?.orderOut(nil)
+        }
+        return hostSession
+#else
+        let hostSession = HostSession(
+            enablePersonalMemory: MemoryFeatureConfiguration.memoryV1CandidateEnabled)
+        hostSession.hideOwnerMemoryWindow = { [weak self] in
+            self?.settingsWindowController?.window?.orderOut(nil)
+        }
+        return hostSession
+#endif
+    }()
     private var statusItem: NSStatusItem!
     private var popover: NSPopover!
     private var setupWindowController: NSWindowController?
@@ -132,15 +119,84 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var terminationTask: Task<Void, Never>?
     private var terminationState: TerminationState = .idle
     private var relaunchAfterShutdown = false
+    private var rejectedDuplicateInstance = false
+    private var ownsSingleInstanceLease = false
+    // Keep the lock beyond applicationWillTerminate; the OS may still have the
+    // old process alive while the replacement helper waits for its exit.
+    private static var processSingleInstanceLease: HostSingleInstanceLease?
     private(set) var didEnterProductionLaunchPath = false
     private(set) var didInstallStatusItem = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+#if DEBUG
+        if DebugResidentHostConfiguration.isSelected() {
+            guard let configuration = DebugResidentHostConfiguration.parse() else {
+                NSLog("RemoteDesktopHost Debug resident selector or host UUID is malformed")
+                Darwin.exit(2)
+            }
+            r0Configuration = configuration
+            do {
+                guard let lease = try HostSingleInstance.acquire(
+                    bundleIdentifier: configuration.lockIdentity) else {
+                    NSLog("RemoteDesktopHost Debug resident candidate is already running")
+                    Darwin.exit(2)
+                }
+                r0SingleInstanceLease = lease
+            } catch {
+                NSLog("RemoteDesktopHost Debug resident candidate could not acquire its isolated lock: \(error)")
+                Darwin.exit(2)
+            }
+
+            NSApp.setActivationPolicy(.prohibited)
+            let permissions = SystemPermissionsProvider()
+            guard permissions.screenRecordingGranted(),
+                  permissions.accessibilityGranted() else {
+                NSLog("RemoteDesktopHost Debug resident candidate requires existing Screen Recording and Accessibility grants; no prompt was requested")
+                Darwin.exit(2)
+            }
+            configureTerminationSignalHandling()
+            session.refreshPermissions()
+            guard session.permissions.coreReady else {
+                NSLog("RemoteDesktopHost Debug resident candidate permissions changed during preflight; no prompt was requested")
+                Darwin.exit(2)
+            }
+            session.start()
+            return
+        }
+#endif
+#if DEBUG
+        if DebugAgentEvalCommand.shouldRun() {
+            NSApp.setActivationPolicy(.prohibited)
+            Task { @MainActor in
+                Darwin.exit(await DebugAgentEvalCommand.runIfRequested() ?? 2)
+            }
+            return
+        }
+        #endif
         guard HostRuntimeContext.shouldInstallVisibleChrome else {
             // XCTest still needs the application process as its bundle host,
             // but it must not create a status item, popover, setup window, or
-            // activate on the user's desktop.
+            // activate on the user's desktop. Explicit native UI tests may
+            // create their own isolated windows under one stable policy.
+            NSApp.setActivationPolicy(HostRuntimeContext.allowsNativeTestWindows ? .accessory : .prohibited)
+            return
+        }
+        do {
+            let bundleIdentifier = Bundle.main.bundleIdentifier ?? ""
+            guard let lease = try HostSingleInstance.acquire(bundleIdentifier: bundleIdentifier) else {
+                rejectedDuplicateInstance = true
+                NSLog("RemoteDesktopHost is already running for this user")
+                NSApp.setActivationPolicy(.prohibited)
+                NSApp.terminate(nil)
+                return
+            }
+            Self.processSingleInstanceLease = lease
+            ownsSingleInstanceLease = true
+        } catch {
+            rejectedDuplicateInstance = true
+            NSLog("RemoteDesktopHost could not acquire its single-instance lock: \(error)")
             NSApp.setActivationPolicy(.prohibited)
+            NSApp.terminate(nil)
             return
         }
         didEnterProductionLaunchPath = true
@@ -166,6 +222,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 self?.showSetupWindow()
             }, openSettings: { [weak self] in
                 self?.showSettingsWindow()
+            }, dismissPopover: { [weak self] in
+                self?.popover.close()
             }).environmentObject(session))
 
         // Re-read permissions whenever the app regains focus — this
@@ -198,7 +256,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        guard HostRuntimeContext.shouldInstallVisibleChrome else { return }
+#if DEBUG
+        if r0Configuration != nil {
+            terminationSignalSource?.cancel()
+            terminationSignalSource = nil
+            return
+        }
+#endif
+        guard HostRuntimeContext.shouldInstallVisibleChrome,
+              ownsSingleInstanceLease else { return }
         terminationSignalSource?.cancel()
         terminationSignalSource = nil
         Darwin.signal(SIGTERM, SIG_DFL)
@@ -215,7 +281,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     func applicationShouldTerminate(
         _ sender: NSApplication
     ) -> NSApplication.TerminateReply {
-        guard HostRuntimeContext.shouldInstallVisibleChrome else {
+        if rejectedDuplicateInstance { return .terminateNow }
+        var shouldShutDownSession = HostRuntimeContext.shouldInstallVisibleChrome
+#if DEBUG
+        shouldShutDownSession = shouldShutDownSession || r0Configuration != nil
+#endif
+        guard shouldShutDownSession else {
             return .terminateNow
         }
         switch terminationState {
@@ -238,7 +309,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             await HostTerminationSequence.finish(
                 session: self.session,
                 relaunchAfterShutdown: self.relaunchAfterShutdown,
-                launchReplacement: { self.launchReplacementHost() })
+                launchReplacement: { self.startReplacementHost() })
             self.terminationState = .readyToTerminate
             sender.terminate(nil)
         }
@@ -403,14 +474,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         NSApp.terminate(nil)
     }
 
-    private func launchReplacementHost() {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/open")
-        process.arguments = ["-n", Bundle.main.bundlePath]
+    private func startReplacementHost() {
         do {
-            try process.run()
+            try HostRelaunch.startAfterExit(bundleURL: Bundle.main.bundleURL)
         } catch {
-            NSLog("RemoteDesktopHost could not restart itself: \(error.localizedDescription)")
+            NSLog("RemoteDesktopHost could not schedule its restart: \(error.localizedDescription)")
         }
     }
 
@@ -431,6 +499,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         guard let closingWindow = notification.object as? NSWindow,
               closingWindow === setupWindowController?.window
                 || closingWindow === settingsWindowController?.window else { return }
+
+        if closingWindow === settingsWindowController?.window {
+            session.closeOwnerMemoryView()
+        }
 
         let otherWindowIsVisible: Bool
         if closingWindow === setupWindowController?.window {

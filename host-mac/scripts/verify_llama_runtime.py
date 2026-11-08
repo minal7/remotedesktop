@@ -30,6 +30,19 @@ PINNED_RELEASE = {
     "archiveSHA256": "b6021d0d6f87d58514d92a67c6fe2956638c242fc2aa30a11c370645246b90a0",
 }
 PINNED_DESTINATION = "Contents/Resources/ComputerUseRuntime/llama-b9992"
+# The local agent's models need a newer llama.cpp than the older features were tested on.
+PINNED_RUNTIMES = {
+    PINNED_DESTINATION: PINNED_RELEASE,
+    "Contents/Resources/ComputerUseRuntime/llama-b12144": {
+        "repository": "ggml-org/llama.cpp",
+        "tag": "b12144",
+        "revision": "69ee2ecc0150ba7d1204a7f7393dfd651569db8c",
+        "archiveName": "llama-b12144-bin-macos-arm64.tar.gz",
+        "archiveURL": "https://github.com/ggml-org/llama.cpp/releases/download/b12144/llama-b12144-bin-macos-arm64.tar.gz",
+        "archiveByteCount": 16_672_153,
+        "archiveSHA256": "2045e1d2dd7f06beed9a9a7594db1bb1c42e5b92bffcb3bd503679c8d7b6c8a9",
+    },
+}
 MACHO_64_MAGIC = 0xFEEDFACF
 CPU_TYPE_ARM64 = 0x0100000C
 
@@ -51,8 +64,8 @@ def load_manifest(path: pathlib.Path) -> dict[str, Any]:
         raise VerificationError(f"invalid runtime manifest: {error}") from error
     require(isinstance(value, dict), "manifest root must be an object")
     require(value.get("schemaVersion") == 1, "unsupported manifest schema")
-    require(value.get("destination") == PINNED_DESTINATION, "unexpected bundle destination")
-    require(value.get("release") == PINNED_RELEASE, "llama.cpp release provenance is not pinned b9992")
+    require(value.get("destination") in PINNED_RUNTIMES, "unexpected bundle destination")
+    require(value.get("release") == PINNED_RUNTIMES[value["destination"]], "llama.cpp release provenance is not pinned b9992")
     require(value.get("architecture") == "arm64", "only the pinned arm64 runtime is supported")
     require(isinstance(value.get("files"), list), "manifest files must be an array")
     require(isinstance(value.get("symlinks"), list), "manifest symlinks must be an array")
@@ -207,7 +220,7 @@ def main() -> int:
         print(f"llama runtime verification failed: {error}", file=sys.stderr)
         return 1
     mode = "signed bundle" if arguments.signed else "pinned source"
-    print(f"Verified llama.cpp b9992 {mode}: {arguments.root}")
+    print(f"Verified llama.cpp {arguments.root.name} {mode}: {arguments.root}")
     return 0
 
 

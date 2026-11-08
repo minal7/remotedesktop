@@ -1080,7 +1080,12 @@ final class LocalComputerUseTests: XCTestCase {
             createdAt: Date(),
             localAccountBinding: accountA,
             controlRevision: 7,
+            acknowledgedControlRevision: 5,
             lastControlKind: .resume,
+            lastControlRevision: 6,
+            hostControlEpoch: 4,
+            lastControlHostEpoch: 3,
+            hostControlPaused: true,
             interventionGuidance: "Sign in on the Mac")
         defer {
             store.remove(
@@ -1110,7 +1115,12 @@ final class LocalComputerUseTests: XCTestCase {
         XCTAssertEqual(restored.messageID, pending.messageID)
         XCTAssertEqual(restored.exactWireBody, pending.exactWireBody)
         XCTAssertEqual(restored.controlRevision, pending.controlRevision)
+        XCTAssertEqual(restored.acknowledgedControlRevision, pending.acknowledgedControlRevision)
         XCTAssertEqual(restored.lastControlKind, pending.lastControlKind)
+        XCTAssertEqual(restored.lastControlRevision, pending.lastControlRevision)
+        XCTAssertEqual(restored.hostControlEpoch, pending.hostControlEpoch)
+        XCTAssertEqual(restored.lastControlHostEpoch, pending.lastControlHostEpoch)
+        XCTAssertEqual(restored.hostControlPaused, pending.hostControlPaused)
         XCTAssertEqual(
             restored.interventionGuidance,
             pending.interventionGuidance)
@@ -1173,6 +1183,82 @@ final class LocalComputerUseTests: XCTestCase {
                 localAccountBinding: accountB)?.messageID,
             pendingB.messageID)
     }
+
+    func testBrokerHandshakeSendsOnlyExplicitSessionBind() async throws {
+        let probe = LocalComputerUseHandshakeProbe(accepted: true)
+        let client = try makeBrokerClient(probe: probe)
+
+        try await client.handshake()
+
+        let captured = await probe.capturedRequest()
+        let request = try XCTUnwrap(captured)
+        XCTAssertEqual(request.sessionID, "memory-handshake-session")
+        XCTAssertEqual(request.bindSession, true)
+        XCTAssertTrue(request.envelopes.isEmpty)
+        XCTAssertTrue(request.acknowledgedEnvelopeIDs.isEmpty)
+        XCTAssertNil(request.memoryCommand)
+    }
+
+    func testBrokerHandshakeRejectsExplicitSessionBindFailure() async throws {
+        let probe = LocalComputerUseHandshakeProbe(accepted: false)
+        let client = try makeBrokerClient(probe: probe)
+
+        do {
+            try await client.handshake()
+            XCTFail("An explicit session-bind rejection must fail the handshake")
+        } catch let error as LocalComputerUseRPCTransportError {
+            XCTAssertEqual(error, .responseMismatch)
+        }
+        let request = await probe.capturedRequest()
+        XCTAssertEqual(request?.bindSession, true)
+    }
+
+    func testBrokerHandshakeAcceptsLegacyHostWithoutBindAcknowledgement() async throws {
+        let probe = LocalComputerUseHandshakeProbe(accepted: nil)
+        let client = try makeBrokerClient(probe: probe)
+
+        try await client.handshake()
+
+        let request = await probe.capturedRequest()
+        XCTAssertEqual(request?.bindSession, true)
+    }
+
+    private func makeBrokerClient(
+        probe: LocalComputerUseHandshakeProbe
+    ) throws -> LocalComputerUseBrokerClient {
+        let credential = try LocalComputerUseCredential(
+            rawKey: Data(repeating: 0x5A, count: 32))
+        return LocalComputerUseBrokerClient(
+            endpoint: endpoint,
+            credential: credential,
+            pairingCode: "123456",
+            sessionID: "memory-handshake-session",
+            senderID: "7E288F3E-524D-4A10-9AE6-84B8124B7740",
+            targetID: hostID,
+            rpcExchange: { request in await probe.exchange(request) })
+    }
+}
+
+private actor LocalComputerUseHandshakeProbe {
+    private let accepted: Bool?
+    private var request: LocalComputerUseRPCRequest?
+
+    init(accepted: Bool?) {
+        self.accepted = accepted
+    }
+
+    func exchange(
+        _ request: LocalComputerUseRPCRequest
+    ) -> LocalComputerUseRPCResponse {
+        self.request = request
+        return LocalComputerUseRPCResponse(
+            requestID: request.requestID,
+            senderID: request.targetID,
+            targetID: request.senderID,
+            sessionBindingAccepted: accepted)
+    }
+
+    func capturedRequest() -> LocalComputerUseRPCRequest? { request }
 }
 
 private final class LocalComputerUsePairingTestClock: @unchecked Sendable {

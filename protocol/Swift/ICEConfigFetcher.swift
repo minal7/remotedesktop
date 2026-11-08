@@ -18,28 +18,18 @@ import os
 /// still work. The Dashboard record is authoritative when reachable.
 public struct ICEConfig: Sendable, Equatable {
     public let stunURLs: [String]
-    public let turnURLs: [String]
-    public let turnUsername: String?
-    public let turnCredential: String?
     public let updatedAt: Date?
 
     public init(
         stunURLs: [String],
-        turnURLs: [String] = [],
-        turnUsername: String? = nil,
-        turnCredential: String? = nil,
         updatedAt: Date? = nil
     ) {
         self.stunURLs = stunURLs
-        self.turnURLs = turnURLs
-        self.turnUsername = turnUsername
-        self.turnCredential = turnCredential
         self.updatedAt = updatedAt
     }
 
     /// Baked-in fallback. Keep short and well-known — these are only
-    /// used when the Public DB fetch fails. STUN-only; TURN requires
-    /// credentials from the CloudKit record.
+    /// used when the Public DB fetch fails.
     public static let fallback = ICEConfig(
         stunURLs: [
             "stun:stun.l.google.com:19302",
@@ -81,6 +71,18 @@ private final class ICEConfigContinuationBox<Value>: @unchecked Sendable {
 }
 
 public actor ICEConfigFetcher {
+    private enum Source: String {
+        case cloudKit = "cloudkit"
+        case fallbackUnavailable = "fallback_unavailable"
+        case fallbackEmpty = "fallback_empty_stun"
+        case fallbackFetchFailure = "fallback_fetch_failure"
+    }
+
+    private struct FetchedConfig {
+        let config: ICEConfig
+        let source: Source
+    }
+
     public init(containerIdentifier: String, recordName: String = "default") {
         self.containerIdentifier = containerIdentifier
         self.recordID = CKRecord.ID(recordName: recordName)
@@ -90,16 +92,20 @@ public actor ICEConfigFetcher {
     /// any error so callers always get a usable config. The first
     /// successful fetch in a process lifetime is memoized.
     public func get() async -> ICEConfig {
-        if let cached { return cached }
-        let config = await fetchOrFallback()
-        cached = config
-        return config
+        if let cached {
+            logConfiguration(cached, reused: true)
+            return cached.config
+        }
+        let fetched = await fetchOrFallback()
+        cached = fetched
+        logConfiguration(fetched, reused: false)
+        return fetched.config
     }
 
     /// Clears the cached config so the next `get()` re-fetches from
     /// CloudKit. Call when the network topology changes (e.g. VPN
     /// connect/disconnect, Wi-Fi → cellular handoff) and the cached
-    /// STUN/TURN list may no longer be appropriate.
+    /// STUN list may no longer be appropriate.
     public func reset() {
         cached = nil
     }
@@ -109,17 +115,22 @@ public actor ICEConfigFetcher {
     private let containerIdentifier: String
     private let recordID: CKRecord.ID
     private let log = Logger(subsystem: "com.threadmark.remotedesktop.signaling", category: "ice-config")
-    private var cached: ICEConfig?
+    private var cached: FetchedConfig?
     private var container: CKContainer?
     private var database: CKDatabase?
 
-    private func fetchOrFallback() async -> ICEConfig {
+    private func logConfiguration(_ fetched: FetchedConfig, reused: Bool) {
+        let config = fetched.config
+        log.notice("ICE configuration source=\(fetched.source.rawValue, privacy: .public) cached=\(reused, privacy: .public) stun_count=\(config.stunURLs.count, privacy: .public)")
+    }
+
+    private func fetchOrFallback() async -> FetchedConfig {
         let database: CKDatabase
         do {
             database = try publicDatabase()
         } catch {
-            log.info("ICEConfig fetch skipped because CloudKit isn't available (\(String(describing: error), privacy: .public)); using fallback")
-            return .fallback
+            log.info("ICEConfig fetch skipped because CloudKit is unavailable; using fallback")
+            return .init(config: .fallback, source: .fallbackUnavailable)
         }
 
         // Cap the fetch at 3 s. This uses a callback-based CloudKit wrapper
@@ -129,25 +140,22 @@ public actor ICEConfigFetcher {
                 withID: recordID,
                 from: database,
                 timeout: 3)
-            let urls = (record["stunURLs"] as? [String]) ?? []
-            guard !urls.isEmpty else {
+            guard let config = Self.config(from: record) else {
                 log.info("ICEConfig record present but stunURLs empty; using fallback")
-                return .fallback
+                return .init(config: .fallback, source: .fallbackEmpty)
             }
-            let turnURLs = (record["turnURLs"] as? [String]) ?? []
-            let turnUsername = record["turnUsername"] as? String
-            let turnCredential = record["turnCredential"] as? String
-            let updatedAt = record["updatedAt"] as? Date
-            return ICEConfig(
-                stunURLs: urls,
-                turnURLs: turnURLs,
-                turnUsername: turnUsername,
-                turnCredential: turnCredential,
-                updatedAt: updatedAt)
+            return .init(config: config, source: .cloudKit)
         } catch {
-            log.info("ICEConfig fetch failed (\(String(describing: error), privacy: .public)); using fallback")
-            return .fallback
+            log.info("ICEConfig fetch failed; using fallback")
+            return .init(config: .fallback, source: .fallbackFetchFailure)
         }
+    }
+
+    static func config(from record: CKRecord) -> ICEConfig? {
+        let urls = (record["stunURLs"] as? [String]) ?? []
+        guard !urls.isEmpty else { return nil }
+        let updatedAt = record["updatedAt"] as? Date
+        return ICEConfig(stunURLs: urls, updatedAt: updatedAt)
     }
 
     private func fetchRecordWithTimeout(

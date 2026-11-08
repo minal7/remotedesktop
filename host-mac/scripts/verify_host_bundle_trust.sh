@@ -5,6 +5,7 @@ configuration="Auto"
 expected_source_commit=""
 app_bundle=""
 expected_team_id="V9AX39SPJD"
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 usage() {
   cat >&2 <<USAGE
@@ -101,7 +102,12 @@ if [[ -L "$main_executable" || ! -x "$main_executable" ]]; then
 fi
 
 bundle_identifier="$(/usr/bin/plutil -extract CFBundleIdentifier raw -o - "$info_plist" 2>/dev/null || true)"
-if [[ "$bundle_identifier" != "com.threadmark.remotedesktop.host" ]]; then
+expected_bundle_identifier="com.threadmark.remotedesktop.host"
+if [[ "$configuration" == "Debug" \
+      || ( "$configuration" == "Auto" && "$bundle_identifier" == "com.threadmark.remotedesktop.host.debug" ) ]]; then
+  expected_bundle_identifier="com.threadmark.remotedesktop.host.debug"
+fi
+if [[ "$bundle_identifier" != "$expected_bundle_identifier" ]]; then
   echo "Host bundle has an unexpected bundle identifier: $bundle_identifier" >&2
   exit 65
 fi
@@ -111,6 +117,17 @@ if [[ "$configuration" == "Release" ]]; then
     2>/dev/null | /usr/bin/tr '[:upper:]' '[:lower:]' || true)"
   if [[ "$artifact_source_commit" != "$expected_source_commit" ]]; then
     echo "Release host source provenance mismatch: signed metadata='$artifact_source_commit', expected='$expected_source_commit'." >&2
+    exit 65
+  fi
+  expected_requirement_file="$script_dir/expected_designated_requirement.txt"
+  if [[ ! -s "$expected_requirement_file" ]]; then
+    echo "Release host designated requirement pin is missing: $expected_requirement_file" >&2
+    exit 65
+  fi
+  expected_requirement="$(cat "$expected_requirement_file")"
+  actual_requirement="$(/usr/bin/codesign -dr - "$app_bundle" 2>/dev/null)"
+  if [[ "$actual_requirement" != "$expected_requirement" ]]; then
+    echo "Release host designated requirement differs from the previous notarized host; refusing a permission-breaking upgrade." >&2
     exit 65
   fi
 fi
@@ -279,6 +296,10 @@ elif [[ "$signature_details" == *"Authority=Developer ID Application:"* ]]; then
     exit 68
   }
 elif [[ "$signature_details" == *"Authority=Apple Development:"* ]]; then
+  if [[ "$bundle_identifier" != "com.threadmark.remotedesktop.host.debug" ]]; then
+    echo "Apple Development builds must use the .debug bundle ID so they cannot replace the installed host's permissions." >&2
+    exit 69
+  fi
   if /usr/bin/xattr -p com.apple.quarantine "$app_bundle" >/dev/null 2>&1; then
     echo "A quarantined Apple Development build cannot be launched safely. Use Xcode or a notarized Developer ID build: $app_bundle" >&2
     exit 69

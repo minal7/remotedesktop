@@ -1,0 +1,8 @@
+id: "web-readonly-018"
+surface: web
+start: {"url":"https://en.wikipedia.org/wiki/Telescope"}
+prompt: "Read the public page about Telescope and report one fact stated there that includes the term light. Do not sign in or interact with forms."
+checker: {"type":"page_text","expect":{"contains":["light"],"url_prefix":"https://en.wikipedia.org/wiki/","answer_contains":["light"]}}
+max_steps: 12
+tags: ["read","public-web","read-only"]
+approval_policy: {"allow_start_interaction":true}

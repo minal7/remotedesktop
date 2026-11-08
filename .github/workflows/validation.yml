@@ -1,8 +1,9 @@
 name: Product validation
 
 # Secret-free validation for every change that reaches main and every pull
-# request. Signed macOS host XCTest remains in the Release workflow because
-# the host deliberately refuses to bundle an ad-hoc-signed llama.cpp runtime.
+# request. The full macOS host XCTest target runs in Debug with code signing
+# disabled so CI can compile and exercise deterministic host behavior without
+# provisioning. Signed release validation remains in the Release workflow.
 # This workflow never resolves a release version, signs distribution assets,
 # packages installers, creates tags, publishes releases, or writes repository
 # contents.
@@ -53,10 +54,18 @@ jobs:
         working-directory: host-windows
         run: cargo test --locked --all-targets
 
+      - name: Build Windows host Release without signing
+        working-directory: host-windows
+        run: cargo build --release --locked
+
   apple:
     name: macOS computer-use and iOS
     runs-on: macos-15
     timeout-minutes: 60
+    defaults:
+      run:
+        # XcodeGen includes the checkout folder name in shared-file group IDs.
+        working-directory: remote desktop
     env:
       # macos-15 defaults /Applications/Xcode.app to an older toolchain. Keep
       # FoundationModels enabled by using the same SDK as the Release gate.
@@ -69,6 +78,8 @@ jobs:
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           persist-credentials: false
+          fetch-depth: 0
+          path: remote desktop
 
       - name: Validate Xcode 26 toolchain
         run: |
@@ -101,14 +112,27 @@ jobs:
         run: |
           set -euo pipefail
 
+          project=host-mac/RemoteDesktopHost.xcodeproj/project.pbxproj
+          committed="$RUNNER_TEMP/committed.pbxproj"
+          cp "$project" "$committed"
           (cd host-mac && xcodegen generate)
-          if ! git diff --exit-code -- host-mac/RemoteDesktopHost.xcodeproj/project.pbxproj; then
-            echo "::error::host-mac/project.yml and the checked-in Xcode project differ. Regenerate the project with XcodeGen $XCODEGEN_VERSION and commit it."
+          # The project includes folders outside host-mac (../policy,
+          # ../protocol, ../shared), so XcodeGen derives object IDs from the
+          # checkout's absolute path. Compare everything except those IDs.
+          normalize() { sed -E 's/[0-9A-F]{24}/ID/g' "$1" | sort; }
+          if ! diff -u <(normalize "$committed") <(normalize "$project"); then
+            echo "::error::host-mac/project.yml and the checked-in Xcode project differ. Regenerate the project with XcodeGen $XCODEGEN_VERSION in a checkout folder named \"remote desktop\" and commit it."
             exit 1
           fi
 
+      - name: Prepare pinned universal SQLCipher for clean checkout
+        run: |
+          set -euo pipefail
+          python3 host-mac/scripts/bootstrap_memory_sqlcipher.py --download
+          host-mac/scripts/build_memory_sqlcipher.sh
+
       - name: Regenerate iOS project
-        working-directory: ios
+        working-directory: remote desktop/ios
         run: xcodegen generate
 
       - name: Validate paired Apple CloudKit configurations
@@ -118,8 +142,83 @@ jobs:
           ./script/verify_apple_configuration_pair.sh Debug Debug
           ./script/verify_apple_configuration_pair.sh Release Release
 
+      - name: Install Agent contract validator
+        run: python3 -m pip install -r host-mac/scripts/agent/requirements.txt
+
+      - name: Validate general Agent contracts
+        run: python3 -m unittest discover -s host-mac/scripts/agent -t host-mac/scripts -p 'test_*.py'
+
       - name: Run deterministic Computer Use harness tests
         run: python3 -m unittest discover -s host-mac/scripts/tests -p 'test_*.py'
+
+      - name: Check hardwiring lint self-test
+        run: ./scripts/lint_no_hardwiring.sh --self-test
+
+      - name: Reject new task, site, or app literals in shipping Swift
+        env:
+          HARDWIRING_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --depth=1 origin "$HARDWIRING_BASE_SHA"
+          ./scripts/lint_no_hardwiring.sh "$HARDWIRING_BASE_SHA"
+
+      - name: Validate reviewed Mac acceptance inventory
+        run: |
+          python3 host-mac/scripts/verify_test_inventory.py \
+            --manifest host-mac/AcceptanceFixtures/osatlas-deterministic-tests.json \
+            --source-root .
+
+      - name: Run full macOS host Debug tests without signing
+        run: |
+          set -euo pipefail
+          # Exercise the real app-hosted XCTest target. One test worker keeps
+          # process-wide Vision initialization stable; individual tests have
+          # a bounded 90-second execution allowance. The build phase verifies
+          # the pinned runtime but intentionally skips signing in this CI path.
+          xcodebuild test \
+            -project host-mac/RemoteDesktopHost.xcodeproj \
+            -scheme RemoteDesktopHost \
+            -configuration Debug \
+            -destination 'platform=macOS' \
+            -derivedDataPath "$RUNNER_TEMP/mac-host-derived-data-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            -resultBundlePath "$RUNNER_TEMP/mac-host-tests-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.xcresult" \
+            -disableAutomaticPackageResolution \
+            -onlyUsePackageVersionsFromResolvedFile \
+            -parallel-testing-enabled NO \
+            -jobs 1 \
+            -test-timeouts-enabled YES \
+            -maximum-test-execution-time-allowance 90 \
+            CODE_SIGNING_ALLOWED=NO \
+            -quiet
+
+      - name: Summarize failed macOS host tests
+        if: ${{ failure() }}
+        run: |
+          set -euo pipefail
+
+          result_bundle="$RUNNER_TEMP/mac-host-tests-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.xcresult"
+          summary_file="$RUNNER_TEMP/mac-host-tests-summary.json"
+          if [[ ! -d "$result_bundle" ]]; then
+            echo "No macOS host xcresult bundle was produced."
+            exit 0
+          fi
+          xcrun xcresulttool get test-results summary \
+            --path "$result_bundle" \
+            --format json > "$summary_file"
+          # Keep Actions logs readable; the complete summary and xcresult are
+          # uploaded below for diagnosis.
+          head -c 12000 "$summary_file"
+
+      - name: Upload macOS host test results
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: macos-host-xcresult-${{ github.sha }}-attempt-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/mac-host-tests-${{ github.run_id }}-${{ github.run_attempt }}.xcresult
+            ${{ runner.temp }}/mac-host-tests-summary.json
+          if-no-files-found: ignore
+          retention-days: 7
 
       - name: Select an available iPhone simulator
         id: simulator

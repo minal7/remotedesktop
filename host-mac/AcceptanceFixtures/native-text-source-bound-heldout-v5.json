@@ -1,0 +1,352 @@
+{
+  "schemaVersion": 1,
+  "scope": "20 new complete-plan cases frozen before any candidate inference on these prompts; hand-authored product coverage, not a random sample",
+  "cases": [
+    {
+      "id": "H501",
+      "prompt": "In Tag, put amber.",
+      "fields": [
+        "Tag",
+        "Title"
+      ],
+      "expectedDisposition": "supported",
+      "allowedPlans": [
+        [
+          {
+            "field": 0,
+            "mode": "replaceAll",
+            "value": "amber"
+          }
+        ]
+      ]
+    },
+    {
+      "id": "H502",
+      "prompt": "For Label use Delta; for Code use 47-B.",
+      "fields": [
+        "Label",
+        "Code"
+      ],
+      "expectedDisposition": "supported",
+      "allowedPlans": [
+        [
+          {
+            "field": 0,
+            "mode": "replaceAll",
+            "value": "Delta"
+          },
+          {
+            "field": 1,
+            "mode": "replaceAll",
+            "value": "47-B"
+          }
+        ],
+        [
+          {
+            "field": 1,
+            "mode": "replaceAll",
+            "value": "47-B"
+          },
+          {
+            "field": 0,
+            "mode": "replaceAll",
+            "value": "Delta"
+          }
+        ]
+      ]
+    },
+    {
+      "id": "H503",
+      "prompt": "Make both Pickup and Dropoff read \"Ghent\".",
+      "fields": [
+        "Pickup",
+        "Dropoff"
+      ],
+      "expectedDisposition": "supported",
+      "allowedPlans": [
+        [
+          {
+            "field": 0,
+            "mode": "replaceAll",
+            "value": "Ghent"
+          },
+          {
+            "field": 1,
+            "mode": "replaceAll",
+            "value": "Ghent"
+          }
+        ],
+        [
+          {
+            "field": 1,
+            "mode": "replaceAll",
+            "value": "Ghent"
+          },
+          {
+            "field": 0,
+            "mode": "replaceAll",
+            "value": "Ghent"
+          }
+        ]
+      ]
+    },
+    {
+      "id": "H504",
+      "prompt": "Start by replacing Notes with \"draft\". After that, add \" / checked\" at the end of the same field.",
+      "fields": [
+        "Notes",
+        "Tag"
+      ],
+      "expectedDisposition": "supported",
+      "allowedPlans": [
+        [
+          {
+            "field": 0,
+            "mode": "replaceAll",
+            "value": "draft"
+          },
+          {
+            "field": 0,
+            "mode": "append",
+            "value": " / checked"
+          }
+        ]
+      ]
+    },
+    {
+      "id": "H505",
+      "prompt": "Add \" +\" to Memo, then add \" +\" to Memo again.",
+      "fields": [
+        "Memo",
+        "Tag"
+      ],
+      "expectedDisposition": "supported",
+      "allowedPlans": [
+        [
+          {
+            "field": 0,
+            "mode": "append",
+            "value": " +"
+          },
+          {
+            "field": 0,
+            "mode": "append",
+            "value": " +"
+          }
+        ]
+      ]
+    },
+    {
+      "id": "H506",
+      "prompt": "Set \"Project\" to \"Aster\".",
+      "fields": [
+        "Project",
+        "Tag"
+      ],
+      "expectedDisposition": "supported",
+      "allowedPlans": [
+        [
+          {
+            "field": 0,
+            "mode": "replaceAll",
+            "value": "Aster"
+          }
+        ]
+      ]
+    },
+    {
+      "id": "H507",
+      "prompt": "The literal text \"Project\" belongs in Tag.",
+      "fields": [
+        "Project",
+        "Tag"
+      ],
+      "expectedDisposition": "supported",
+      "allowedPlans": [
+        [
+          {
+            "field": 1,
+            "mode": "replaceAll",
+            "value": "Project"
+          }
+        ]
+      ]
+    },
+    {
+      "id": "H508",
+      "prompt": "Leave Title exactly as it is; replace Tag with \"north\".",
+      "fields": [
+        "Title",
+        "Tag"
+      ],
+      "expectedDisposition": "supported",
+      "allowedPlans": [
+        [
+          {
+            "field": 1,
+            "mode": "replaceAll",
+            "value": "north"
+          }
+        ]
+      ]
+    },
+    {
+      "id": "H509",
+      "prompt": "Replace Notes with \"  mañana é 🧭\nline 2  \".",
+      "fields": [
+        "Notes",
+        "Tag"
+      ],
+      "expectedDisposition": "supported",
+      "allowedPlans": [
+        [
+          {
+            "field": 0,
+            "mode": "replaceAll",
+            "value": "  mañana é 🧭\nline 2  "
+          }
+        ]
+      ]
+    },
+    {
+      "id": "H510",
+      "prompt": "Insert \"• \" at the caret in Notes.",
+      "fields": [
+        "Notes",
+        "Tag"
+      ],
+      "expectedDisposition": "supported",
+      "allowedPlans": [
+        [
+          {
+            "field": 0,
+            "mode": "insert",
+            "value": "• "
+          }
+        ]
+      ]
+    },
+    {
+      "id": "H511",
+      "prompt": "Put Zürich in Place, please.",
+      "fields": [
+        "Place",
+        "Notes"
+      ],
+      "expectedDisposition": "supported",
+      "allowedPlans": [
+        [
+          {
+            "field": 0,
+            "mode": "replaceAll",
+            "value": "Zürich"
+          }
+        ]
+      ]
+    },
+    {
+      "id": "H512",
+      "prompt": "Set Tag to \"one\", then replace Tag with \"two\".",
+      "fields": [
+        "Tag",
+        "Title"
+      ],
+      "expectedDisposition": "supported",
+      "allowedPlans": [
+        [
+          {
+            "field": 0,
+            "mode": "replaceAll",
+            "value": "one"
+          },
+          {
+            "field": 0,
+            "mode": "replaceAll",
+            "value": "two"
+          }
+        ]
+      ]
+    },
+    {
+      "id": "H513",
+      "prompt": "Fill Subject with \"Update\" and send the message.",
+      "fields": [
+        "Subject",
+        "Notes"
+      ],
+      "expectedDisposition": "unsupported"
+    },
+    {
+      "id": "H514",
+      "prompt": "Put \"draft\" in Notes; after that, save the document.",
+      "fields": [
+        "Notes",
+        "Tag"
+      ],
+      "expectedDisposition": "unsupported"
+    },
+    {
+      "id": "H515",
+      "prompt": "Copy the current value of Title into Tag.",
+      "fields": [
+        "Title",
+        "Tag"
+      ],
+      "expectedDisposition": "unsupported"
+    },
+    {
+      "id": "H516",
+      "prompt": "Write a warm welcome in Notes.",
+      "fields": [
+        "Notes",
+        "Tag"
+      ],
+      "expectedDisposition": "unsupported"
+    },
+    {
+      "id": "H517",
+      "prompt": "Put Marseille in City.",
+      "fields": [
+        "Town",
+        "Country"
+      ],
+      "expectedDisposition": "clarification"
+    },
+    {
+      "id": "H518",
+      "prompt": "Change Code to \"B-9\".",
+      "fields": [
+        "Code",
+        "Code"
+      ],
+      "expectedDisposition": "clarification"
+    },
+    {
+      "id": "H519",
+      "prompt": "Set either Label or Tag to \"west\".",
+      "fields": [
+        "Label",
+        "Tag"
+      ],
+      "expectedDisposition": "clarification"
+    },
+    {
+      "id": "H520",
+      "prompt": "Do not type \"red\" in Tag. Instead, put \"blue\" in Tag.",
+      "fields": [
+        "Tag",
+        "Title"
+      ],
+      "expectedDisposition": "supported",
+      "allowedPlans": [
+        [
+          {
+            "field": 0,
+            "mode": "replaceAll",
+            "value": "blue"
+          }
+        ]
+      ]
+    }
+  ]
+}

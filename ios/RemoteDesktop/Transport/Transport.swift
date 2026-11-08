@@ -1,6 +1,41 @@
 import Foundation
 import LiveKitWebRTC
 
+/// Local presentation identity, distinct from successful input dispatch. A
+/// queued frame callback must match both the handshake and the installed renderer subscription.
+struct RemoteInputPresentationState {
+    struct FrameLease: Equatable { let inputID: UUID; let probeID: UUID }
+    private var inputID: UUID?
+    private var probeID: UUID?
+    private var acknowledgement: DirectInputAcknowledgement?
+
+    func matches(_ acknowledgement: DirectInputAcknowledgement?) -> Bool {
+        inputID != nil && self.acknowledgement == acknowledgement
+    }
+
+    mutating func begin(_ acknowledgement: DirectInputAcknowledgement?) {
+        inputID = UUID(); probeID = nil; self.acknowledgement = acknowledgement
+    }
+
+    mutating func invalidate() -> Bool {
+        let hadPresentation = inputID != nil
+        inputID = nil; probeID = nil; acknowledgement = nil
+        return hadPresentation
+    }
+
+    mutating func retireProbe() { probeID = nil }
+
+    mutating func armProbe() -> FrameLease? {
+        guard let inputID else { return nil }
+        let probeID = UUID(); self.probeID = probeID
+        return .init(inputID: inputID, probeID: probeID)
+    }
+
+    func acceptsFrame(_ lease: FrameLease) -> Bool {
+        inputID == lease.inputID && probeID == lease.probeID
+    }
+}
+
 /// Transport abstraction. The session model drives a `Transport`
 /// without caring whether it's a mock loopback, LAN Bonjour fast-path,
 /// or a full WebRTC peer connection. Callbacks fire on the main actor.
@@ -12,12 +47,23 @@ protocol Transport: AnyObject {
     // MainActor context.
     var onHostHello: (@MainActor (HostHello) -> Void)? { get set }
     var onDisplay: (@MainActor (DisplayInfo) -> Void)? { get set }
-    /// Fires once the transport has decoded an actual remote video frame.
-    /// A negotiated track or control-channel hello is not sufficient: the
-    /// macOS host can reach both while ScreenCaptureKit is still waiting for
-    /// the person to answer its secure recording-consent prompt.
+    /// Revokes the previous input/screen lifetime before a recovery handshake.
+    /// Consumers discard local holds; they must not send releases to a new lifetime.
+    var onInputUnavailable: (@MainActor () -> Void)? { get set }
+    /// The renderer attachment lost its local presentation readiness, while the
+    /// host input handshake/display remain valid. Release existing controls
+    /// under that scope before disabling local input; do not restart AI tasks.
+    var onVideoFrameUnavailable: (@MainActor () -> Void)? { get set }
+    /// WebRTC fires after successful GPU work and presentation of an exact
+    /// drawable in the current attachment/context. This is not host capture
+    /// freshness or an occlusion proof. Non-video fixtures synthesize it explicitly.
     var onFirstVideoFrame: (@MainActor () -> Void)? { get set }
     var onDisconnect: (@MainActor (String) -> Void)? { get set }
+    /// True when the session that just ended was live and nobody chose to end it,
+    /// so the client should connect again on its own.
+    var lastDisconnectIsRecoverable: Bool { get }
+    /// True when a slow or failed first attempt is worth repeating before telling anyone.
+    var retriesFailedFirstConnection: Bool { get }
 
     func connect(pairingCode: String, expectedHostID: String?) async throws
     func send(_ message: ControlMessage, seq: UInt32, ts: UInt64)
@@ -25,16 +71,22 @@ protocol Transport: AnyObject {
 }
 
 extension Transport {
+    var lastDisconnectIsRecoverable: Bool { false }
+    var retriesFailedFirstConnection: Bool { false }
+
     func connect(pairingCode: String) async throws {
         try await connect(pairingCode: pairingCode, expectedHostID: nil)
     }
 }
 
 @MainActor
-protocol VideoRenderingTransport: Transport {
-    func attachVideoRenderer(_ renderer: RTCVideoRenderer)
-    func detachVideoRenderer(_ renderer: RTCVideoRenderer)
+protocol VideoRendererTarget: AnyObject {
+    func attachVideoRenderer(_ renderer: any RemoteVideoSurface)
+    func detachVideoRenderer(_ renderer: any RemoteVideoSurface)
 }
+
+@MainActor
+protocol VideoRenderingTransport: Transport, VideoRendererTarget {}
 
 enum TransportError: LocalizedError {
     case badPairingCode

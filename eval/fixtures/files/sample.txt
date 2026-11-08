@@ -1,0 +1,2 @@
+Synthetic fixture file for local computer-use upload evaluation.
+No account or user information is included.

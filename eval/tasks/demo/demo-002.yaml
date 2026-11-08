@@ -1,0 +1,14 @@
+id: "demo-002"
+surface: web
+start: {url: "https://www.google.com/travel/flights"}
+prompt: "Search Google Flights for one-way flights from San Francisco to Lisbon on November 20 and tell me the cheapest price."
+checker:
+  type: manual_review
+  expect:
+    criteria:
+      - "Confirm the final observed page shows one-way flights from San Francisco to Lisbon for November 20."
+      - "Confirm the reported cheapest fare, including currency, appears verbatim in the final page text."
+      - "Review the recorded final screenshot/page evidence and this task's episode."
+max_steps: 18
+tags: ["demo", "web", "read", "real-site", "read-only"]
+approval_policy: {allow_start_interaction: true}

@@ -3,6 +3,10 @@ import Network
 
 @MainActor
 final class LocalComputerUseBrokerServer {
+    typealias MemoryCommandHandler = @MainActor @Sendable (
+        LocalMemoryRPCCommand, LocalMemoryRPCContext
+    ) async -> LocalMemoryRPCReply
+
     enum ServerError: LocalizedError {
         case listenerFailed(String)
         case unavailablePort
@@ -38,6 +42,10 @@ final class LocalComputerUseBrokerServer {
     private let channel: LocalHostComputerUseChannel
     private let authorizePeer: (String) -> Bool
     private let revokePeer: (String) -> Void
+    private let bindSession: ((String, String) -> Bool)?
+    private let loopbackOnly: Bool
+    private let memoryFeatureEnabled: Bool
+    private let memoryHandler: MemoryCommandHandler?
     private var listener: NWListener?
     private var connectionTasks: [UUID: Task<Void, Never>] = [:]
     private var authorizedPeerID: String?
@@ -48,14 +56,22 @@ final class LocalComputerUseBrokerServer {
         credential: LocalComputerUseCredential,
         hostID: String,
         channel: LocalHostComputerUseChannel,
+        loopbackOnly: Bool = false,
+        memoryFeatureEnabled: Bool = false,
+        memoryHandler: MemoryCommandHandler? = nil,
         authorizePeer: @escaping (String) -> Bool,
-        revokePeer: @escaping (String) -> Void
+        revokePeer: @escaping (String) -> Void,
+        bindSession: ((String, String) -> Bool)? = nil
     ) {
         self.credential = credential
         self.hostID = hostID
         self.channel = channel
+        self.loopbackOnly = loopbackOnly
+        self.memoryFeatureEnabled = memoryFeatureEnabled
+        self.memoryHandler = memoryHandler
         self.authorizePeer = authorizePeer
         self.revokePeer = revokePeer
+        self.bindSession = bindSession
     }
 
     func start() async throws -> UInt16 {
@@ -63,10 +79,11 @@ final class LocalComputerUseBrokerServer {
         didFinishStarting = false
         let listener: NWListener
         do {
-            listener = try NWListener(
-                using: LocalComputerUseTLS.serverParameters(
-                    credential: credential),
-                on: .any)
+            let parameters = LocalComputerUseTLS.serverParameters(credential: credential)
+            if loopbackOnly {
+                parameters.requiredLocalEndpoint = .hostPort(host: .ipv4(.loopback), port: .any)
+            }
+            listener = try NWListener(using: parameters, on: .any)
         } catch {
             throw ServerError.listenerFailed(error.localizedDescription)
         }
@@ -139,7 +156,9 @@ final class LocalComputerUseBrokerServer {
             connection.cancel()
             return
         }
-        guard Self.isPrivateLocalEndpoint(connection.endpoint) else {
+        guard loopbackOnly
+            ? Self.isLoopbackEndpoint(connection.endpoint)
+            : Self.isPrivateLocalEndpoint(connection.endpoint) else {
             // Reject before the TLS handshake and do not reveal whether the
             // local credential, host identity, or local AI service exists.
             connection.cancel()
@@ -176,7 +195,7 @@ final class LocalComputerUseBrokerServer {
         }
     }
 
-    private func handle(
+    func handle(
         _ request: LocalComputerUseRPCRequest
     ) async throws -> LocalComputerUseRPCResponse {
         try request.validate()
@@ -186,6 +205,9 @@ final class LocalComputerUseBrokerServer {
         guard Self.isValidPeerID(request.senderID),
               Self.isValidPeerID(request.targetID) else {
             throw LocalComputerUseRPCValidationError.invalidField("senderID")
+        }
+        guard Self.isValidSessionID(request.sessionID) else {
+            throw LocalComputerUseRPCValidationError.invalidField("sessionID")
         }
         if let authorizedPeerID,
            authorizedPeerID != request.senderID {
@@ -205,6 +227,49 @@ final class LocalComputerUseBrokerServer {
             }
             throw ServerError.busy
         }
+        if request.bindSession == true {
+            let accepted = bindSession?(request.senderID, request.sessionID) ?? false
+            if accepted {
+                touchAuthorization(for: request.senderID)
+            } else if reservedPeer, authorizedPeerID == request.senderID {
+                // Do not pin a peer that failed its first explicit session bind.
+                authorizedPeerID = nil
+                revokePeer(request.senderID)
+            }
+            return LocalComputerUseRPCResponse(
+                requestID: request.requestID,
+                senderID: hostID,
+                targetID: request.senderID,
+                sessionBindingAccepted: accepted)
+        }
+        if let command = request.memoryCommand {
+            touchAuthorization(for: request.senderID)
+            let context = LocalMemoryRPCContext(
+                peerID: request.senderID,
+                sessionID: request.sessionID)
+            let reply: LocalMemoryRPCReply
+            if memoryFeatureEnabled, let memoryHandler {
+                reply = await memoryHandler(command, context)
+            } else {
+                reply = Self.disabledMemoryReply(for: command)
+            }
+            let response = LocalComputerUseRPCResponse(
+                requestID: request.requestID,
+                senderID: hostID,
+                targetID: request.senderID,
+                memoryReply: reply)
+            do {
+                _ = try response.memoryResult(for: request)
+                try response.validate()
+                return response
+            } catch {
+                return LocalComputerUseRPCResponse(
+                    requestID: request.requestID,
+                    senderID: hostID,
+                    targetID: request.senderID,
+                    memoryReply: Self.unavailableMemoryReply(for: command))
+            }
+        }
         let accepted: [String]
         do {
             accepted = try await channel.applyClientFrame(
@@ -223,17 +288,73 @@ final class LocalComputerUseBrokerServer {
         let envelopes = try await channel.pollForClient(
             authenticatedSenderID: request.senderID,
             sessionID: request.sessionID)
-        return LocalComputerUseRPCResponse(
-            requestID: request.requestID,
-            senderID: hostID,
-            targetID: request.senderID,
-            envelopes: Array(envelopes.prefix(
-                LocalComputerUseRPCLimits.maximumEnvelopesPerFrame)),
-            acceptedEnvelopeIDs: accepted)
+        return try Self.boundedResponse(to: request, envelopes: envelopes, acceptedEnvelopeIDs: accepted)
+    }
+
+    static func disabledMemoryReply(
+        for command: LocalMemoryRPCCommand
+    ) -> LocalMemoryRPCReply {
+        .init(operation: command.operation,
+              commandID: command.commandID,
+              rememberKind: command.rememberKind,
+              status: .disabled,
+              generationReference: Self.requiresGenerationReference(command)
+                ? command.generationReference : nil)
+    }
+
+    static func unavailableMemoryReply(
+        for command: LocalMemoryRPCCommand
+    ) -> LocalMemoryRPCReply {
+        .init(operation: command.operation,
+              commandID: command.commandID,
+              rememberKind: command.rememberKind,
+              status: .unavailable,
+              generationReference: Self.requiresGenerationReference(command)
+                ? command.generationReference : nil)
+    }
+
+    private static func requiresGenerationReference(
+        _ command: LocalMemoryRPCCommand
+    ) -> Bool {
+        command.operation == .forgetEverything
+            || command.operation == .initializeMemoryGeneration
+    }
+
+    /// Count alone cannot bound JSON frames containing complete questions.
+    /// Select an ordered prefix by its actual encoded size; polling does not
+    /// remove any messages. Only a later authenticated acknowledgement does.
+    static func boundedResponse(to request: LocalComputerUseRPCRequest, envelopes: [ComputerUseEnvelope],
+                                acceptedEnvelopeIDs: [String]) throws -> LocalComputerUseRPCResponse {
+        func response(_ messages: [ComputerUseEnvelope]) -> LocalComputerUseRPCResponse {
+            .init(requestID: request.requestID, senderID: request.targetID, targetID: request.senderID,
+                envelopes: messages, acceptedEnvelopeIDs: acceptedEnvelopeIDs)
+        }
+        var selected = response([])
+        _ = try LocalComputerUseRPCCodec.encode(selected)
+        for envelope in envelopes.prefix(LocalComputerUseRPCLimits.maximumEnvelopesPerFrame) {
+            let candidate = response(selected.envelopes + [envelope])
+            do {
+                _ = try LocalComputerUseRPCCodec.encode(candidate)
+                selected = candidate
+            } catch LocalComputerUseRPCValidationError.frameTooLarge {
+                // A message that cannot fit by itself is an error, not a
+                // successful empty poll that would conceal a stuck queue.
+                guard !selected.envelopes.isEmpty else { throw LocalComputerUseRPCValidationError.frameTooLarge }
+                break
+            }
+        }
+        return selected
     }
 
     private static func isValidPeerID(_ value: String) -> Bool {
         value.utf8.count == 36 && UUID(uuidString: value) != nil
+    }
+
+    private static func isValidSessionID(_ value: String) -> Bool {
+        !value.isEmpty && value.utf8.count <= LocalHostComputerUseChannel.maximumSessionIDBytes
+            && value.unicodeScalars.allSatisfy {
+                !CharacterSet.controlCharacters.contains($0)
+            }
     }
 
     /// `NWListener(on: .any)` is needed for both Wi-Fi and wired Macs, but the
@@ -267,6 +388,21 @@ final class LocalComputerUseBrokerServer {
                 .trimmingCharacters(in: CharacterSet(charactersIn: "."))
             return normalized == "localhost" || normalized.hasSuffix(".local")
 
+        @unknown default:
+            return false
+        }
+    }
+
+    static func isLoopbackEndpoint(_ endpoint: NWEndpoint) -> Bool {
+        guard case .hostPort(let host, _) = endpoint else { return false }
+        switch host {
+        case .ipv4(let address):
+            return [UInt8](address.rawValue).first == 127
+        case .ipv6(let address):
+            let bytes = [UInt8](address.rawValue)
+            return bytes.count == 16 && bytes.dropLast().allSatisfy { $0 == 0 } && bytes.last == 1
+        case .name(let name, _):
+            return name.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: ".")) == "localhost"
         @unknown default:
             return false
         }

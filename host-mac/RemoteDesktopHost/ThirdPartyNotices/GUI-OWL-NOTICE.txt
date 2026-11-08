@@ -1,0 +1,18 @@
+GUI-Owl 1.5 4B Instruct model package
+
+Source checkpoint: mPLUG/GUI-Owl-1.5-4B-Instruct
+Source revision: 3f061c2c562cc860c42bf32542a70e07a7ff4840
+Source license: MIT; see GUI-OWL-DESKTOP-MIT-LICENSE.txt.
+Source model: https://huggingface.co/mPLUG/GUI-Owl-1.5-4B-Instruct/tree/3f061c2c562cc860c42bf32542a70e07a7ff4840
+
+Base model family: Qwen3-VL; Apache License 2.0.
+Base model: https://huggingface.co/Qwen/Qwen3-VL-4B-Instruct
+License source: https://huggingface.co/Qwen/Qwen3-VL-4B-Instruct/blob/main/LICENSE
+The Apache 2.0 license text is included in QWEN35-APACHE-2.0-LICENSE.txt; the bundled text is the same standard Apache License 2.0.
+
+Downloaded conversion: mradermacher/GUI-Owl-1.5-4B-Instruct-GGUF
+Conversion revision: f77e8a457158e773d9f3135ff0cac5811878d3b7
+Q4_K_M model SHA-256: 8e1793b69bb4064671ab6529b43f5b943850f73a9244ad139c16e93a44709232
+Q8_0 projector SHA-256: b705d940e9b7f212235a16c9c4b8cc9dd9053a1ccf549b99fc069a0ae694b073
+
+The converted GGUF files are data and add no executable code.

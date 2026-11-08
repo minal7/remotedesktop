@@ -70,7 +70,7 @@ Latest host release: [v0.2.0](https://github.com/minal7/remotedesktop/releases/t
 `PROGRESS.md` is the living migration tracker — CloudKit schema, pairing flow,
 and remaining out-of-band Apple Developer portal work.
 
-## Build status (v1)
+## Build status
 
 | Component | State |
 | --- | --- |
@@ -83,66 +83,60 @@ and remaining out-of-band Apple Developer portal work.
 WebRTC media (H.264 video, Opus audio, input over DataChannel) is wired across
 the iOS client and both hosts. Automatic same-account enrollment and the
 post-enrollment LAN TLS task channel are implemented and covered by component
-tests. A fresh signed Release macOS-host + iPhone Air Simulator run proving the
-complete enrollment, task, approval, and result path is still pending; this
-document is not that release-acceptance evidence. Remaining validation and
-out-of-band CloudKit work are tracked in `PROGRESS.md`.
+tests. A notarized Mac candidate and an iOS Release-configuration archive are
+prepared for the **Computer use (Beta)** feature; acceptance gates remain
+pending. The iOS archive is Apple Development-signed and has not been exported,
+uploaded, or installed. Its smoke, safety, and physical-device acceptance
+results are pending; this document does not claim that release validation has
+passed. See [release notes](RELEASE_NOTES.md). Pairing and remote desktop
+continue to use the CloudKit and WebRTC flows described above.
 
-## AI Computer Use
+## Computer use (Beta)
 
-AI Computer Use is MCP-first and stays local to the macOS host. On supported
-Macs, Apple's on-device Foundation Models framework turns eligible chat requests
-into typed calls within the reviewed planner surface: seven read-only helper
-operations plus the host's embedded Mail operation for contact-resolution
-flows. Fully specified Mail sends are deterministically pre-routed to that
-embedded operation before any planner/model call. The host—not the model—applies
-the allowlist, validates arguments, pauses for exact one-action approval, and
-records mutation attempts before execution. No API key or paid AI service is
-used. Windows AI Computer Use is not implemented; the Windows host remains a
-remote-desktop host only. GUI-only applications use a local hybrid. An AI-ready
-macOS host always installs the semantic router: it opens an explicitly named
-common app once before interacting, and can route bounded literal text and
-unambiguous current-app navigation without model inference. Remaining
-ordinary-language steps use Apple's on-device model to select one typed
-semantic action with bounded arguments. OS-Atlas-Pro-4B grounds visual pointer
-targets, and the host composes and validates the native Mac action. Non-pointer
-actions do not ask OS-Atlas to echo a verb, and a raw OS-Atlas verb can never
-override the typed plan. Deterministic host routes remain available when
-Apple's model is unavailable; an unrecognized step returns `unable to
-complete` without asking OS-Atlas for an executable action.
-For delivery quotes, the production typed semantic route performs direct app,
-text, and scroll steps; OS-Atlas is used only when a visual pointer must be
-grounded. Legacy raw delivery parsing remains in component-test configuration
-only and is not a production or ordinary-language fallback. Local Vision OCR
-extracts and validates itemized facts only inside the focused window. V1 loads
-Pro only and never Base and Pro at the same time. Macs with 8–15 GiB memory use
-a bounded
-4,096-token compact profile with smaller batches and a 4 GiB process ceiling;
-Macs with at least 16 GiB retain the 8,192-token standard profile. Both profiles
-recheck reclaimable memory before launch and every inference.
+Computer use lets you describe a task on your iPhone or iPad while a local
+agent on your Mac works through the browser and Mac apps the way you would.
+The Mac observes the screen, takes one action, and checks the next screen. The
+feature is in beta; its release-candidate smoke, safety, and physical-device
+results are pending.
 
-Mail requests use a separately reviewed MCP tool embedded in the signed host,
-not the downloaded helper's generic Mail tool. It can create a visible draft or
-send through Apple Mail's default account only after iOS states that the
-default account will be used and shows the exact To/CC/BCC, subject, and
-message for one-action approval. On the first approved Mail action, macOS may
-ask on the Mac whether Remote Desktop Host can automate Mail. Denying that
-prompt stops before an email is created or sent; enable
-**Remote Desktop Host → Mail** under **System Settings → Privacy & Security →
-Automation**, then make a new request.
+It runs two local models on the Mac: Fara 1.5 9B acts on the screen and LFM3 1.7B
+plans, both with 128K context, in the bundled llama.cpp b12144 runtime. An Apple
+silicon Mac with at least 24 GB of memory is required. The iPhone and Mac must be on the
+same local network for task traffic. Setup may use the account's private
+CloudKit database for bounded enrollment and model setup; after enrollment, prompts, task status,
+results, controls, and approvals use authenticated LAN TLS. Screen sharing and
+direct remote input continue over WebRTC. Ordinary task content is not sent to
+a developer-operated AI service.
 
-Setup is initiated from the iPhone or iPad; passive status checks never start a
-download. One progress bar reflects the real helper and visual-model bytes,
-verification, and runtime loading. Setup request/progress is the only AI
-lifecycle allowed to use private CloudKit before the LAN broker is ready;
-already verified components are reused. Once enrolled, prompts, conversation,
-task status/results, approvals, and controls use only authenticated LAN TLS.
-The live screen and direct intervention continue over WebRTC, while planning,
-visual grounding, and tool execution stay on the Mac. The host bundles the
-third-party notices for all local components.
-The phone-triggered model setup downloads only checksum-pinned OS-Atlas Pro 4B
-GGUF data; executable inference code remains inside the signed host. The public
-upstream checkpoint is Apache-2.0 licensed and needs no API key or paid service.
+Start model setup beside the Mac in the iPhone or iPad app. Setup shows download
+progress, verifies the model files, and can resume after an interruption. Allow
+about 9 GB of free disk space for setup (a 7.9 GB download).
+
+The iPhone shows brief progress narration, asks a question when information is
+missing, and presents an approval card before consequential actions such as
+sending, submitting, paying, purchasing, deleting, or sharing. You can deny an
+action, stop the task, or take over the live Mac view. A task may stop and ask
+for help rather than complete. Computer use is not available on the Windows
+host in this beta.
+
+Task screenshots and action records are stored locally on the Mac. They are
+pruned when recording starts if they are more than seven days old, and can be
+deleted from the host's Computer Use settings. See the [Privacy Policy](docs/privacy.html)
+and [Support](docs/support.html) for details and setup help.
+
+Computer Use (Beta) also includes **Memory** for owner-saved preferences and
+ordinary facts. A memory is saved only after you review it and choose Save;
+the model does not automatically save facts from screenshots or task activity.
+Saved memories are stored encrypted on the Mac and can be viewed, edited, or
+deleted from Memory. They remain until you delete them or choose Forget; this
+is separate from the seven-day task-episode cleanup. Do not save passwords or
+other secrets in Memory. Incognito tasks do not read or save Memory. See the
+[Privacy Policy](docs/privacy.html).
+
+Memory has not passed release privacy validation. Testing found that a page's
+instructions could cause an unrelated saved fact to appear in a task answer.
+Use synthetic test data only in this candidate. Local storage does not prevent
+saved facts from appearing in task responses or local task history.
 
 ## Getting started (developer)
 
@@ -253,6 +247,4 @@ cargo run --release
   not request, record, store, or transmit iPhone/iPad microphone or camera data.
 - The iOS client does not declare Location access. On the Mac,
   Screen Recording and Accessibility are required for remote control;
-  Microphone is optional and used only to enable the system-audio bridge. A
-  separately declared Apple Events permission is requested only after the user
-  approves an Apple Mail action on iOS.
+  Microphone is optional and used only to enable the system-audio bridge.

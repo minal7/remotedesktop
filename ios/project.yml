@@ -21,12 +21,27 @@ targets:
     type: application
     platform: iOS
     sources:
+      # Directory sources include the cursor overlay, trackpad controller, NAT64 synthesizer and Debug UDP probe.
       - path: RemoteDesktop
+        excludes:
+          - PrivacyInfo.xcprivacy
+      - path: ../shared/PersonalMemory
       - path: RemoteDesktop/Transport/WebRTCAliases.swift
+      # Shared protocol sources include ICECandidateDiagnostics.
       - path: ../protocol/Swift
+      - path: RemoteDesktop/PrivacyInfo.xcprivacy
+        buildPhase: resources
     dependencies:
       - package: LiveKitWebRTC
         product: LiveKitWebRTC
+    postBuildScripts:
+      - name: Enable high refresh for latency lab
+        script: |
+          if [ "$CONFIGURATION" = "Debug" ]; then
+            /usr/libexec/PlistBuddy -c 'Set :CADisableMinimumFrameDurationOnPhone true' "$TARGET_BUILD_DIR/$INFOPLIST_PATH" 2>/dev/null || \
+              /usr/libexec/PlistBuddy -c 'Add :CADisableMinimumFrameDurationOnPhone bool true' "$TARGET_BUILD_DIR/$INFOPLIST_PATH"
+          fi
+        basedOnDependencyAnalysis: false
     entitlements:
       path: RemoteDesktop/RemoteDesktop.entitlements
       properties:
@@ -73,8 +88,8 @@ targets:
       base:
         CODE_SIGN_STYLE: Automatic
         DEVELOPMENT_TEAM: V9AX39SPJD
-        MARKETING_VERSION: "1.1"
-        CURRENT_PROJECT_VERSION: "5"
+        MARKETING_VERSION: "1.2.1"
+        CURRENT_PROJECT_VERSION: "6"
         PRODUCT_BUNDLE_IDENTIFIER: com.threadmark.remotedesktop.client
         TARGETED_DEVICE_FAMILY: "1,2"
         SUPPORTS_MACCATALYST: NO
@@ -85,6 +100,10 @@ targets:
         # officially distributed macOS host.
         ICLOUD_CONTAINER_ENVIRONMENT: Development
       configs:
+        Debug:
+          # This Debug-only script updates the processed plist after Xcode's
+          # plist phase; Release retains the normal script sandbox setting.
+          ENABLE_USER_SCRIPT_SANDBOXING: NO
         Release:
           ICLOUD_CONTAINER_ENVIRONMENT: Production
 
@@ -92,12 +111,26 @@ targets:
     type: bundle.unit-test
     platform: iOS
     sources:
+      # Directory sources include the ICE, cursor, trackpad and NAT64 tests.
       - path: RemoteDesktopTests
     dependencies:
       - target: RemoteDesktop
     settings:
+      base:
+        DEVELOPMENT_TEAM: V9AX39SPJD
+        PRODUCT_BUNDLE_IDENTIFIER: com.threadmark.remotedesktop.client.tests
+        GENERATE_INFOPLIST_FILE: YES
+
+  RemoteDesktopLatencyQualityTests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - path: RemoteDesktopLatencyQualityTests
+    dependencies:
+      - target: RemoteDesktop
+    settings:
       DEVELOPMENT_TEAM: V9AX39SPJD
-      PRODUCT_BUNDLE_IDENTIFIER: com.threadmark.remotedesktop.client.tests
+      PRODUCT_BUNDLE_IDENTIFIER: com.threadmark.remotedesktop.client.latency-quality-tests
       GENERATE_INFOPLIST_FILE: YES
 
   RemoteDesktopLiveE2ETests:
@@ -125,6 +158,23 @@ schemes:
       targets:
         - RemoteDesktopTests
 
+  RemoteDesktopLatencyQuality:
+    build:
+      targets:
+        RemoteDesktop: all
+        RemoteDesktopLatencyQualityTests: [test]
+    test:
+      config: Debug
+      captureScreenshotsAutomatically: false
+      preferredScreenCaptureFormat: screenshots
+      targets:
+        - RemoteDesktopLatencyQualityTests
+      environmentVariables:
+        RUN_LATENCY_QUALITY_E2E: "$(RUN_LATENCY_QUALITY_E2E)"
+        LATENCY_QUALITY_NOT_BEFORE: "$(LATENCY_QUALITY_NOT_BEFORE)"
+        LATENCY_QUALITY_REFERENCE_PIXELS: "$(LATENCY_QUALITY_REFERENCE_PIXELS)"
+        LATENCY_QUALITY_REFERENCE_CROP: "$(LATENCY_QUALITY_REFERENCE_CROP)"
+
   RemoteDesktopLiveE2E:
     build:
       targets:
@@ -139,6 +189,8 @@ schemes:
         - RemoteDesktopLiveE2ETests
       environmentVariables:
         RUN_COMPUTER_USE_LIVE_E2E: "1"
+        RUN_EOD_SIMPLE_LIVE_E2E: "$(RUN_EOD_SIMPLE_LIVE_E2E)"
+        RUN_LOCAL_AGENT_RELEASE_E2E: "$(RUN_LOCAL_AGENT_RELEASE_E2E)"
         RUN_COMPUTER_USE_TYPED_OUTCOME_SIMULATOR_E2E: "$(RUN_COMPUTER_USE_TYPED_OUTCOME_SIMULATOR_E2E)"
         # DoorDash/OS-Atlas is independently gated. Values are command-line
         # build settings expanded into the test process only for an explicit
@@ -152,6 +204,8 @@ schemes:
         RUN_OSATLAS_LOCAL_BROWSER_SEARCH_SIMULATOR_E2E: "$(RUN_OSATLAS_LOCAL_BROWSER_SEARCH_SIMULATOR_E2E)"
         RUN_OSATLAS_LOCAL_BROWSER_SPINNER_SIMULATOR_E2E: "$(RUN_OSATLAS_LOCAL_BROWSER_SPINNER_SIMULATOR_E2E)"
         RUN_OSATLAS_LOCAL_BROWSER_EDGE_SIMULATOR_E2E: "$(RUN_OSATLAS_LOCAL_BROWSER_EDGE_SIMULATOR_E2E)"
+        RUN_OSATLAS_AGENT_DENY_SIMULATOR_E2E: "$(RUN_OSATLAS_AGENT_DENY_SIMULATOR_E2E)"
+        OSATLAS_DENY_FIXTURE_TOKEN: "$(OSATLAS_DENY_FIXTURE_TOKEN)"
         OSATLAS_STALE_APPROVAL_COORDINATOR: "$(OSATLAS_STALE_APPROVAL_COORDINATOR)"
         RUN_OSATLAS_DOORDASH_SIMULATOR_E2E: "$(RUN_OSATLAS_DOORDASH_SIMULATOR_E2E)"
         RUN_OSATLAS_DOORDASH_GUEST_HANDOFF_SIMULATOR_E2E: "$(RUN_OSATLAS_DOORDASH_GUEST_HANDOFF_SIMULATOR_E2E)"

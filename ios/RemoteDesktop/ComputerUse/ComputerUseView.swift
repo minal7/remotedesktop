@@ -50,9 +50,18 @@ struct ComputerUseView: View {
     @StateObject private var accessories = AccessoryMonitor()
     @StateObject private var zoom = RemoteScreenZoomController()
     @State private var draft = ""
+    @State private var composerMemorySheet: ComposerMemoryDestination?
+    @State private var composerMemoryAlert: String?
+    @State private var composerRememberOrigin: (memory: ObjectIdentifier, text: String)?
     @State private var remoteKeyboardOpen = false
     @State private var didExplicitlyResumeAI = false
     @FocusState private var composerFocused: Bool
+
+    private struct ComposerMemoryDestination: Identifiable {
+        let id = UUID()
+        let memory: PersonalMemoryViewModel
+        let originalText: String
+    }
 
     var body: some View {
         GeometryReader { proxy in
@@ -90,6 +99,29 @@ struct ComputerUseView: View {
             .animation(.easeOut(duration: 0.2), value: isAwaitingApproval)
         }
         .persistentSystemOverlays(.visible)
+        .sheet(item: $composerMemorySheet) { destination in
+            PersonalMemoryComposerRememberSheet(model: destination.memory,
+                originalText: destination.originalText) {
+                    if let origin = composerRememberOrigin,
+                       origin.memory == ObjectIdentifier(destination.memory), draft == origin.text {
+                        draft = ""
+                    }
+                    composerRememberOrigin = nil
+                }
+        }
+        .alert("Couldn’t open memory", isPresented: Binding(
+            get: { composerMemoryAlert != nil },
+            set: { if !$0 { composerMemoryAlert = nil } })) {
+                Button("OK", role: .cancel) { composerMemoryAlert = nil }
+            } message: {
+                Text(composerMemoryAlert ?? "")
+            }
+        .onChange(of: model.ownerMemory.map { ObjectIdentifier($0) }) { oldValue, newValue in
+            if oldValue != newValue { composerMemorySheet = nil }
+        }
+        .onChange(of: model.isConnected) { _, connected in
+            if !connected { composerMemorySheet = nil }
+        }
         .overlay(alignment: .topLeading) {
             if didExplicitlyResumeAI {
                 // Fixed, non-secret proof for the credential-safe UI test.
@@ -135,7 +167,7 @@ struct ComputerUseView: View {
                                 ? "Ready"
                                 : "Paused")
 
-                    if session.hasInteractiveRemoteScreen {
+                    if session.isRemoteScreenSessionReady {
                         // The visible placeholder owns this identifier before
                         // the sidecar has a fresh frame. Keep it queryable once
                         // live pixels replace that placeholder.
@@ -155,15 +187,17 @@ struct ComputerUseView: View {
                remoteKeyboardOpen,
                model.isConnected {
                 SoftKeyboardCapture(isOpen: $remoteKeyboardOpen)
+                    .id(session.remoteKeyboardCaptureIdentity)
                     .frame(width: 1, height: 1)
                     .opacity(0.001)
                     .allowsHitTesting(false)
             }
             if isTakingControl,
                model.isConnected,
-               accessories.hasHardwareKeyboard,
+               accessories.keyboardListed,
                !remoteKeyboardOpen {
-                KeyboardCapture()
+                KeyboardCapture(onPhysicalKeyPress: accessories.noteHardwareKeyPress)
+                    .id(session.remoteKeyboardCaptureIdentity)
                     .frame(width: 0, height: 0)
             }
         }
@@ -183,6 +217,12 @@ struct ComputerUseView: View {
             }
             composerFocused = false
         }
+        .onChange(of: model.restoredClarificationDraft, initial: true) { _, restored in
+            guard let restored, draft.isEmpty else { return }
+            draft = restored
+            composerFocused = true
+        }
+        .onChange(of: draft) { _, value in model.updateQuestionDraft(value) }
         .onChange(of: accessories.hasHardwareKeyboard) { _, connected in
             if connected { remoteKeyboardOpen = false }
         }
@@ -197,19 +237,26 @@ struct ComputerUseView: View {
             remoteKeyboardOpen = false
             session.releaseSoftModifiers()
         }
+        .onChange(of: session.remoteInputGeneration) { _, _ in
+            remoteKeyboardOpen = false
+        }
     }
 
     private var header: some View {
-        HStack(spacing: 12) {
+        let layout = dynamicTypeSize.isAccessibilitySize
+            ? AnyLayout(VStackLayout(alignment: .leading, spacing: 8))
+            : AnyLayout(HStackLayout(spacing: 12))
+        return layout {
             VStack(alignment: .leading, spacing: 2) {
-                Label("AI Computer Use", systemImage: "sparkles")
+                Label("Computer use (Beta)", systemImage: "sparkles")
                     .font(.headline)
                 Text(session.hostName ?? model.hostName)
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
             }
-            Spacer()
+            if !dynamicTypeSize.isAccessibilitySize { Spacer() }
+            PersonalMemoryButton(model: model)
             if case .connecting = session.state {
                 ProgressView()
                     .controlSize(.small)
@@ -222,22 +269,24 @@ struct ComputerUseView: View {
                     .labelStyle(.titleAndIcon)
             }
             .buttonStyle(.bordered)
-            .accessibilityHint("Ends AI Computer Use and returns to Devices")
+            .accessibilityHint("Ends Computer use (Beta) and returns to Devices")
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .background(.regularMaterial)
     }
 
     private func liveScreen(height: CGFloat) -> some View {
         ZStack(alignment: .topLeading) {
-            if session.hasInteractiveRemoteScreen {
+            if session.shouldPrepareRemoteScreenRenderer {
                 RemoteScreenView(accessories: accessories, zoom: zoom)
                     .background(.black)
                     .allowsHitTesting(
-                        model.isConnected && !model.isLiveScreenPrivacyShielded)
-                    .accessibilityHidden(model.isLiveScreenPrivacyShielded)
-            } else {
+                        session.hasInteractiveRemoteScreen && model.isConnected)
+                    .accessibilityHidden(!session.hasInteractiveRemoteScreen)
+            }
+            if !session.mayRevealRemoteScreenPixels {
                 Color(uiColor: .secondarySystemGroupedBackground)
                     .overlay {
                         VStack(spacing: 10) {
@@ -260,30 +309,15 @@ struct ComputerUseView: View {
                     .accessibilityIdentifier("computer-use-local-connection")
             }
 
-            if session.hasInteractiveRemoteScreen,
-               !session.hasReceivedVideoFrame {
-                VStack(spacing: 8) {
-                    Label(
-                        session.state == .connecting
-                            ? "Connecting to live screen…"
-                            : "Waiting for the Mac screen…",
-                        systemImage: "display")
-                        .font(.callout.weight(.semibold))
-                    Text("If macOS asks, choose Allow on the Mac for RemoteDesktopHost Screen & System Audio Recording. This secure approval can only be completed on the Mac.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .multilineTextAlignment(.center)
-                }
-                .padding(.horizontal, 18)
-                .padding(.vertical, 12)
-                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16))
-                .padding(18)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .accessibilityElement(children: .combine)
-                .accessibilityIdentifier("computer-use-live-screen-waiting")
+            if session.mayRevealRemoteScreenPixels && !session.isRemoteScreenSessionReady {
+                localVisualSidecarStatus
+                    .padding(12)
+                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10))
+                    .padding(12)
+                    .allowsHitTesting(false)
             }
 
-            if session.hasInteractiveRemoteScreen,
+            if session.shouldPrepareRemoteScreenRenderer,
                model.isLiveScreenPrivacyShielded {
                 postMailPrivacyShield
             } else if session.hasInteractiveRemoteScreen {
@@ -307,7 +341,7 @@ struct ComputerUseView: View {
                 .foregroundStyle(.secondary)
         case .waitingForFreshFrame:
             Label(
-                "Waiting for a fresh Mac screen frame…",
+                "Waiting for the Mac screen…",
                 systemImage: "display")
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(.secondary)
@@ -323,16 +357,19 @@ struct ComputerUseView: View {
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
         case .live:
-            EmptyView()
+            if !session.inputActivity.allowsInput {
+                Text("Return to this window to control your Mac.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
         }
     }
 
     private var screenAccessibilityLabel: String {
-        if !session.hasInteractiveRemoteScreen {
+        if model.isLiveScreenPrivacyShielded { return "Mac screen hidden for this Mail task" }
+        if session.mayRevealRemoteScreenPixels && !session.isRemoteScreenSessionReady { return "Mac screen loading; input unavailable" }
+        if !session.isRemoteScreenSessionReady {
             return "Secure local AI connection to \(session.hostName ?? model.hostName)"
-        }
-        if model.isLiveScreenPrivacyShielded {
-            return "Mac screen hidden for this Mail task"
         }
         if session.hasReceivedVideoFrame {
             return "Live interactive screen for \(session.hostName ?? model.hostName)"
@@ -341,11 +378,10 @@ struct ComputerUseView: View {
     }
 
     private var screenAccessibilityHint: String {
-        if !session.hasInteractiveRemoteScreen {
+        if model.isLiveScreenPrivacyShielded { return "Choose Show Mac to reveal the desktop before control becomes available." }
+        if session.mayRevealRemoteScreenPixels && !session.isRemoteScreenSessionReady { return "Wait for the screen before controlling your Mac." }
+        if !session.isRemoteScreenSessionReady {
             return "Prompts and results use the secure local connection. Use the Mac directly if AI asks for help."
-        }
-        if model.isLiveScreenPrivacyShielded {
-            return "Choose Show Mac when you are ready to reveal the live desktop."
         }
         return "Turn on Zoom and move to pinch or drag the view without controlling the Mac. Turn it off to control the Mac."
     }
@@ -448,9 +484,11 @@ struct ComputerUseView: View {
     private var takeoverInputStrip: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 12) {
-                Label("You’re controlling the Mac", systemImage: "hand.point.up.left.fill")
+                Label(model.pauseAcknowledgementLabel, systemImage: "hand.point.up.left.fill")
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(.orange)
+                    .accessibilityIdentifier("computer-use-pause-acknowledgement")
+                    .accessibilityValue(model.hasHostPauseAcknowledgement ? "Acknowledged" : "Unconfirmed")
 
                 if !accessories.hasHardwareKeyboard || remoteKeyboardOpen {
                     ModifierBar()
@@ -468,6 +506,7 @@ struct ComputerUseView: View {
                     .buttonStyle(.borderedProminent)
                     .controlSize(.small)
                     .accessibilityHint("Types directly into the Mac, not into AI chat")
+                    .accessibilityIdentifier(remoteKeyboardOpen ? "computer-use-hide-remote-keyboard" : "computer-use-remote-keyboard")
                 }
 
                 if accessories.hasHardwareKeyboard {
@@ -532,7 +571,7 @@ struct ComputerUseView: View {
     private var statusLabel: some View {
         HStack(spacing: 7) {
             statusIcon
-            Text(model.interventionGuidance == nil
+            Text(model.interventionGuidance == nil || !model.hasHostPauseAcknowledgement
                 ? model.statusText
                 : "Waiting for you")
                 .foregroundStyle(.secondary)
@@ -609,10 +648,10 @@ struct ComputerUseView: View {
             .safeAreaInset(edge: .bottom, spacing: 0) {
                 composer
             }
-            .onChange(of: model.messages) { _, messages in
-                guard let last = messages.last else { return }
+            .onChange(of: model.messages.last?.id) { _, lastID in
+                guard let lastID else { return }
                 withAnimation(.easeOut(duration: 0.2)) {
-                    proxy.scrollTo(last.id, anchor: .bottom)
+                    proxy.scrollTo(lastID, anchor: .bottom)
                 }
             }
         }
@@ -620,60 +659,22 @@ struct ComputerUseView: View {
 
     private func approvalCard(_ request: ComputerUseApprovalRequest) -> some View {
         VStack(spacing: 0) {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 12) {
-                    Label("Approve before AI continues", systemImage: "checkmark.shield.fill")
-                        .font(.headline)
-                        .foregroundStyle(.orange)
-                    Text(terminalOutcomeAccessibilityValue)
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(.orange)
-                        .accessibilityIdentifier(
-                            "computer-use-approval-outcome")
-                    Text(request.message)
-                        .font(.callout)
-                        .fixedSize(horizontal: false, vertical: true)
-                    if let details = request.details, !details.isEmpty {
-                        VStack(alignment: .leading, spacing: 10) {
-                            ForEach(details) { detail in
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(detail.label)
-                                        .font(.caption.weight(.semibold))
-                                        .foregroundStyle(.secondary)
-                                    Text(detail.value.isEmpty ? "None" : detail.value)
-                                        .font(.callout)
-                                        .textSelection(.enabled)
-                                        .fixedSize(horizontal: false, vertical: true)
-                                }
-                                .accessibilityElement(children: .combine)
-                            }
-                        }
-                        .padding(12)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(
-                            Color(uiColor: .secondarySystemGroupedBackground),
-                            in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-                    }
+            if dynamicTypeSize.isAccessibilitySize {
+                ScrollView {
+                    approvalDetails(request)
+                    Divider()
+                    approvalFooter(request)
                 }
-                .padding(14)
-                .frame(maxWidth: .infinity, alignment: .leading)
+                .scrollIndicators(.visible)
+            } else {
+                ScrollView { approvalDetails(request) }
+                    .scrollIndicators(.visible)
+                Divider()
+                approvalFooter(request)
             }
-            .scrollIndicators(.visible)
-
-            Divider()
-
-            VStack(alignment: .leading, spacing: 10) {
-                Text("Nothing in this step will happen unless you approve it.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-
-                approvalActions(request)
-            }
-            .padding(14)
-            .background(.regularMaterial)
         }
         .background(Color.orange.opacity(0.1))
+        .background(Color(uiColor: .secondarySystemGroupedBackground))
         .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
         .overlay {
             RoundedRectangle(cornerRadius: 18, style: .continuous)
@@ -683,6 +684,7 @@ struct ComputerUseView: View {
         .frame(maxWidth: 720)
         .accessibilityElement(children: .contain)
         .accessibilityAddTraits(.isModal)
+        .accessibilityIdentifier("computer-use-approval-card")
         .accessibilityAction(.escape) {
             if model.isConnected {
                 model.respondToApproval(request, approved: false)
@@ -690,32 +692,98 @@ struct ComputerUseView: View {
         }
     }
 
+    private func approvalDetails(_ request: ComputerUseApprovalRequest) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Label("Approve before AI continues", systemImage: "checkmark.shield.fill")
+                .font(.headline)
+                .foregroundStyle(.orange)
+            Text(terminalOutcomeAccessibilityValue)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.orange)
+                .accessibilityIdentifier("computer-use-approval-outcome")
+            Text(request.message)
+                .font(.callout)
+                .fixedSize(horizontal: false, vertical: true)
+                .accessibilityIdentifier("computer-use-approval-reason")
+            if let details = request.details, !details.isEmpty {
+                VStack(alignment: .leading, spacing: 10) {
+                    ForEach(details) { detail in
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(detail.label)
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(.secondary)
+                            Text(detail.value.isEmpty ? "None" : detail.value)
+                                .font(.callout)
+                                .textSelection(.enabled)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        .accessibilityElement(children: .combine)
+                        .accessibilityIdentifier(detail.label == "Action" ? "computer-use-approval-action" : "computer-use-approval-detail")
+                    }
+                }
+                .padding(12)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color(uiColor: .secondarySystemGroupedBackground),
+                    in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            }
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func approvalFooter(_ request: ComputerUseApprovalRequest) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Nothing in this step will happen unless you approve it.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            approvalActions(request)
+        }
+        .padding(14)
+        .background(.regularMaterial)
+    }
+
     private func approvalActions(_ request: ComputerUseApprovalRequest) -> some View {
         let layout = dynamicTypeSize.isAccessibilitySize
             ? AnyLayout(VStackLayout(spacing: 10))
             : AnyLayout(HStackLayout(spacing: 10))
 
-        return layout {
+        return VStack(spacing: 10) {
+            layout {
+                Button(role: .destructive) {
+                    model.respondToApproval(request, approved: false)
+                } label: {
+                    Text("Deny")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.bordered)
+                .accessibilityHint("Denies this action without making the proposed change")
+                .accessibilityIdentifier("computer-use-approval-deny")
+                .disabled(!model.isConnected)
+
+                Button {
+                    model.respondToApproval(request, approved: true)
+                } label: {
+                    Label(request.confirmLabel ?? "Approve once", systemImage: "checkmark")
+                        .lineLimit(2)
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .accessibilityHint("Approves only the exact action shown above")
+                .accessibilityIdentifier("computer-use-approval-approve")
+                .disabled(!model.isConnected)
+            }
+
             Button(role: .destructive) {
-                model.respondToApproval(request, approved: false)
+                model.stopCurrentTask()
             } label: {
-                Text("Cancel")
+                Label("Stop task", systemImage: "stop.fill")
                     .frame(maxWidth: .infinity)
             }
             .buttonStyle(.bordered)
-            .accessibilityHint("Cancels this action without making the proposed change")
-            .disabled(!model.isConnected)
-
-            Button {
-                model.respondToApproval(request, approved: true)
-            } label: {
-                Label(request.confirmLabel ?? "Approve once", systemImage: "checkmark")
-                    .lineLimit(2)
-                    .frame(maxWidth: .infinity)
-            }
-            .buttonStyle(.borderedProminent)
-            .accessibilityHint("Approves only the exact action shown above")
-            .disabled(!model.isConnected)
+            .accessibilityHint("Stops the current task without approving this action")
+            .accessibilityIdentifier("computer-use-stop-task")
+            .disabled(!model.isConnected || model.isCancellationPending)
         }
     }
 
@@ -727,41 +795,32 @@ struct ComputerUseView: View {
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
-
-            VStack(alignment: .leading, spacing: 8) {
-                suggestion("Open Safari and find my next calendar event")
-                suggestion("Organize the files on my desktop")
-            }
         }
         .padding(16)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
     }
 
-    private func suggestion(_ text: String) -> some View {
-        Button {
-            draft = text
-            composerFocused = true
-        } label: {
-            HStack {
-                Text(text)
-                    .font(.callout)
-                    .multilineTextAlignment(.leading)
-                Spacer()
-                Image(systemName: "arrow.up.left")
-                    .font(.caption.weight(.semibold))
-            }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 10)
-            .background(Color.accentColor.opacity(0.1), in: RoundedRectangle(cornerRadius: 12))
-        }
-        .buttonStyle(.plain)
-    }
-
     private func messageBubble(_ message: ComputerUseSessionModel.ChatMessage) -> some View {
         HStack {
             if message.author == .user { Spacer(minLength: 44) }
-            Text(message.text)
+            VStack(alignment: .leading, spacing: 8) {
+                Text(message.text)
+                    .textSelection(.enabled)
+                    .accessibilityLabel(message.author == .user ? "You: \(message.text)" : "AI: \(message.text)")
+                if let evidence = message.approvedActionEvidence {
+                    Divider()
+                    VStack(alignment: .leading, spacing: 4) {
+                        Label(evidence.state == .confirmed ? "Action confirmed on Mac" : "Action result not confirmed",
+                            systemImage: evidence.state == .confirmed ? "checkmark.circle" : "questionmark.circle")
+                            .font(.caption.weight(.semibold))
+                        Text(evidence.summary ?? "The approved action may have occurred. Its result has not been confirmed.")
+                            .font(.callout)
+                    }
+                    .accessibilityElement(children: .combine)
+                    .accessibilityIdentifier("computer-use-action-evidence-\(message.id)")
+                }
+            }
                 .font(.body)
                 .foregroundStyle(message.author == .user ? Color.white : Color.primary)
                 .padding(.horizontal, 14)
@@ -771,14 +830,56 @@ struct ComputerUseView: View {
                         ? Color.accentColor
                         : Color(uiColor: .secondarySystemGroupedBackground),
                     in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-                .accessibilityLabel(message.author == .user ? "You: \(message.text)" : "AI: \(message.text)")
             if message.author != .user { Spacer(minLength: 44) }
         }
         .frame(maxWidth: .infinity)
     }
 
+    /// A retry here only restores text for review. It never repeats host actions.
+    private var memoryRetryPrompt: String? {
+        guard model.state == .ready, model.composerMode == .request,
+              model.latestTerminalOutcome == .unableToComplete,
+              model.retryPrompt == nil, draft.isEmpty,
+              let reply = model.messages.last, reply.author == .assistant,
+              reply.text.contains("not enough available memory for AI Computer Use")
+                || reply.text.contains("could not verify that enough memory is available for AI Computer Use"),
+              let prompt = model.messages.last(where: { $0.author == .user })?.text else { return nil }
+        return prompt
+    }
+
     private var composer: some View {
         VStack(spacing: 8) {
+            if model.showsTaskMemoryControls {
+                HStack {
+                    ComputerUseTaskMemoryControls(model: model)
+                    Spacer(minLength: 0)
+                }
+            }
+            if model.canStartNewRequest {
+                HStack {
+                    Text(model.composerMode == .recoveringAnswer ? "Saved question"
+                        : model.composerMode == .expiredAnswer ? "Question unavailable" : "Replying to your Mac")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    if model.canRetryQuestionRecovery {
+                        Button("Check again") { model.retryQuestionRecovery() }
+                            .font(.caption.weight(.semibold))
+                            .accessibilityIdentifier("computer-use-check-question")
+                    }
+                    Spacer()
+                    Button("Start a new request") {
+                        if model.startNewRequest() { draft = ""; composerFocused = true }
+                    }
+                    .font(.caption.weight(.semibold))
+                    .accessibilityIdentifier("computer-use-new-request")
+                }
+            }
+            if !draft.isEmpty, let message = model.promptValidationMessage(draft) {
+                Text(message)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
             if model.retryPrompt != nil {
                 Button {
                     model.retryLastPrompt()
@@ -787,6 +888,17 @@ struct ComputerUseView: View {
                         .font(.caption.weight(.semibold))
                 }
                 .buttonStyle(.bordered)
+                .disabled(!model.isConnected)
+            }
+            if let prompt = memoryRetryPrompt {
+                Button("Retry") {
+                    draft = prompt
+                    composerFocused = true
+                }
+                .font(.caption.weight(.semibold))
+                .buttonStyle(.bordered)
+                .accessibilityIdentifier("computer-use-review-memory-retry")
+                .accessibilityHint("Restores the request for you to review before sending it again")
                 .disabled(!model.isConnected)
             }
 
@@ -803,12 +915,51 @@ struct ComputerUseView: View {
                 .disabled(!model.isConnected)
             }
 
+            if let choices = model.clarificationChoices, !choices.isEmpty {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Choose an option, or enter another answer")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    ScrollView(.vertical) {
+                        VStack(alignment: .leading, spacing: 6) {
+                            ForEach(choices.indices, id: \.self) { index in
+                                let choice = choices[index]
+                                Button {
+                                    if sendClarificationChoice(choice.id) { draft = ""; composerFocused = false }
+                                } label: {
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(choice.label).font(.body.weight(.medium))
+                                        if let detail = choice.detail, !detail.isEmpty {
+                                            Text(detail).font(.caption).foregroundStyle(.secondary)
+                                        }
+                                    }
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .contentShape(Rectangle())
+                                }
+                                .buttonStyle(.bordered)
+                                .disabled(!canSendChoice(choice.id))
+                                .accessibilityIdentifier("computer-use-clarification-choice-\(index)")
+                            }
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .frame(maxHeight: 164)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+
             HStack(alignment: .bottom, spacing: 10) {
                 TextField(
                     isTakingControl
                         ? "Resume AI to send another request"
                         : model.hasActivePrompt
                             ? "Waiting for the current request"
+                        : model.isAnsweringClarification
+                            ? "Answer your Mac's question"
+                        : model.composerMode == .expiredAnswer
+                            ? "Start a new request to continue"
+                        : model.composerMode == .recoveringAnswer
+                            ? "Checking your saved question"
                         : "Tell your Mac what to do",
                     text: $draft,
                     axis: .vertical)
@@ -821,6 +972,8 @@ struct ComputerUseView: View {
                         isTakingControl
                             || isAwaitingApproval
                             || model.hasActivePrompt
+                            || model.composerMode == .expiredAnswer
+                            || model.composerMode == .recoveringAnswer
                             || !model.isConnected
                             || !session.isComputerUsePromptTransportReady)
                     .padding(.horizontal, 14)
@@ -837,7 +990,7 @@ struct ComputerUseView: View {
                 .buttonStyle(.plain)
                 .disabled(!canSend)
                 .opacity(canSend ? 1 : 0.45)
-                .accessibilityLabel("Send request")
+                .accessibilityLabel(model.isAnsweringClarification ? "Send answer" : "Send request")
             }
         }
         .padding(.horizontal, 14)
@@ -848,6 +1001,7 @@ struct ComputerUseView: View {
     }
 
     private var canSend: Bool {
+        guard composerMemorySheet == nil else { return false }
         guard case .connected = session.state,
               model.isConnected,
               session.isComputerUsePromptTransportReady else { return false }
@@ -858,15 +1012,52 @@ struct ComputerUseView: View {
             return false
         }
         guard !model.hasActivePrompt else { return false }
-        return !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        return model.promptValidationMessage(draft) == nil
+    }
+
+    private func canSendChoice(_ id: String) -> Bool {
+        guard !isTakingControl, !isAwaitingApproval,
+              case .connected = session.state, session.isComputerUsePromptTransportReady else { return false }
+        return model.canSendClarificationChoice(id)
+    }
+
+    private func sendClarificationChoice(_ id: String) -> Bool {
+        guard canSendChoice(id) else { return false }
+        return model.sendClarificationChoice(id)
     }
 
     private func sendDraft() {
         guard canSend else { return }
         let prompt = draft
-        draft = ""
-        composerFocused = false
-        model.sendPrompt(prompt)
+        switch PersonalMemoryComposerRoute.decide(
+            text: prompt,
+            isRequestMode: model.composerMode == .request,
+            memoryAvailable: model.ownerMemory != nil,
+            incognito: model.incognitoForNextTask) {
+        case .sendTask:
+            break
+        case .openRemember(let originalText):
+            guard let memory = model.ownerMemory else {
+                composerMemoryAlert = "Memory isn’t available for this connection. Your text is still in the composer."
+                return
+            }
+            if memory.rememberState != .unknown && memory.rememberState != .saving {
+                composerRememberOrigin = (ObjectIdentifier(memory), prompt)
+            }
+            composerMemorySheet = ComposerMemoryDestination(memory: memory, originalText: originalText)
+            composerFocused = false
+            return
+        case .refuseUnavailable:
+            composerMemoryAlert = "Memory isn’t available for this connection. Your text is still in the composer."
+            return
+        case .refuseIncognito:
+            composerMemoryAlert = "Memory can’t be saved while Incognito task is on. Turn it off to continue. Your text is still in the composer."
+            return
+        }
+        if model.sendPrompt(prompt) {
+            draft = ""
+            composerFocused = false
+        }
     }
 
     private func screenHeight(for size: CGSize) -> CGFloat {

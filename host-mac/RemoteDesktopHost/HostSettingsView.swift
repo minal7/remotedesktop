@@ -7,6 +7,8 @@ import SwiftUI
 struct HostSettingsView: View {
     @ObservedObject var session: HostSession
     let openSetup: () -> Void
+    @State private var historyMessage: String?
+    @AppStorage("allowRouterPortMapping") private var allowRouterPortMapping = true
 
     var body: some View {
         TabView {
@@ -14,7 +16,13 @@ struct HostSettingsView: View {
                 .tabItem { Label("General", systemImage: "gearshape") }
 
             computerUseTab
-                .tabItem { Label("Computer Use", systemImage: "sparkles") }
+                .tabItem { Label("Computer use (Beta)", systemImage: "sparkles") }
+
+            if let ownerMemory = session.ownerMemory {
+                HostMemoryView(model: ownerMemory)
+                    .id(ObjectIdentifier(ownerMemory))
+                    .tabItem { Label("Memory", systemImage: "brain.head.profile") }
+            }
 
             licensesTab
                 .tabItem { Label("Licenses", systemImage: "doc.text") }
@@ -54,6 +62,8 @@ struct HostSettingsView: View {
                 .padding(6)
             }
 
+            Toggle("Allow connections from other networks (router port mapping)", isOn: $allowRouterPortMapping)
+
             HStack {
                 Text("macOS manages these permissions in System Settings.")
                     .font(.caption)
@@ -73,20 +83,20 @@ struct HostSettingsView: View {
     private var computerUseTab: some View {
         settingsScroll {
             settingsHeader(
-                title: "AI Computer Use",
+                title: "Computer use (Beta)",
                 subtitle: computerUseStatusDetail)
 
-            GroupBox("Visual Fallback") {
+            GroupBox("Local Computer Use") {
                 VStack(alignment: .leading, spacing: 10) {
                     HStack {
-                        Label("OS-Atlas Pro 4B", systemImage: "eye")
+                        Label("Fara 1.5 9B + LFM3 1.7B", systemImage: "globe")
                             .font(.headline)
                         Spacer()
                         Text(modelStatus)
                             .font(.caption.weight(.semibold))
                             .foregroundStyle(modelStatusColor)
                     }
-                    Text("Used locally when a task needs visual control that the Mac’s structured tools cannot complete.")
+                    Text("Uses this Mac's apps and browser the way you would, on this Mac only. Requires a Mac with at least 24 GB of memory.")
                         .font(.callout)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -104,19 +114,18 @@ struct HostSettingsView: View {
                 .padding(6)
             }
 
-            GroupBox("Local Mac Tools") {
-                HStack {
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text("mac-control-mcp")
-                            .font(.headline)
-                        Text("Version \(MacControlMCPArtifactManifest.current.version)")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+            GroupBox("Task History") {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Task screenshots and actions stay on this Mac. Episodes older than seven days are removed when a new task recording starts.")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Button("Delete task history", role: .destructive) {
+                        do { try TrajectoryRecorder.deleteHistory(); historyMessage = "Local task history deleted." }
+                        catch { historyMessage = "Could not delete local task history: \(error.localizedDescription)" }
                     }
-                    Spacer()
-                    Image(systemName: "checkmark.seal.fill")
-                        .foregroundStyle(.green)
-                        .accessibilityLabel("Verified")
+                    .disabled(session.computerUse.activity != .idle || session.computerUse.hasRetainedAgentTask)
+                    if let historyMessage { Text(historyMessage).font(.caption).foregroundStyle(.secondary) }
                 }
                 .padding(6)
             }
@@ -136,14 +145,23 @@ struct HostSettingsView: View {
             GroupBox {
                 VStack(spacing: 0) {
                     licenseRow(
-                        name: "OS-Atlas Pro 4B",
-                        license: "Apache License 2.0",
-                        destination: ComputerUseArtifactManifest.displayedOSAtlasLicenseURL)
+                        name: "Fara 1.5 9B",
+                        license: "MIT License",
+                        destination: ComputerUseArtifactManifest.displayedFaraLicenseURL)
                     Divider().padding(.vertical, 10)
                     licenseRow(
-                        name: "Granite 4.0 1B candidate selector",
+                        name: "LFM3 1.7B (Liquid AI)",
+                        license: "LFM Open License v1.0",
+                        destination: ComputerUseArtifactManifest.bundledLegalDocumentURL(
+                            ComputerUseArtifactManifest.lfmLicense)
+                            ?? ComputerUseArtifactManifest.lfmLicenseURL)
+                    Divider().padding(.vertical, 10)
+                    licenseRow(
+                        name: "Qwen 3.5 base model license",
                         license: "Apache License 2.0",
-                        destination: ComputerUseArtifactManifest.displayedGraniteLicenseURL)
+                        destination: ComputerUseArtifactManifest.bundledLegalDocumentURL(
+                            ComputerUseArtifactManifest.qwen35License)
+                            ?? ComputerUseArtifactManifest.qwen35LicenseURL)
                     Divider().padding(.vertical, 10)
                     licenseRow(
                         name: "llama.cpp",
@@ -151,17 +169,16 @@ struct HostSettingsView: View {
                         destination: ComputerUseArtifactManifest.bundledLegalDocumentURL(
                             ComputerUseArtifactManifest.llamaCPPLicense)
                             ?? ComputerUseArtifactManifest.llamaCPPLicenseURL)
-                    Divider().padding(.vertical, 10)
-                    licenseRow(
-                        name: "mac-control-mcp",
-                        license: "MIT License",
-                        destination: bundledDocument(
-                            named: "MAC-CONTROL-MCP-LICENSE",
-                            fallback: URL(string: "https://github.com/AdelElo13/mac-control-mcp/blob/v0.8.2/LICENSE")!))
                 }
                 .padding(6)
             }
 
+            if let noticeURL = ComputerUseArtifactManifest.bundledLegalDocumentURL(
+                ComputerUseArtifactManifest.localAgentNotice) {
+                Link(destination: noticeURL) {
+                    Label("View model attribution notice", systemImage: "doc.plaintext")
+                }
+            }
             if let noticeURL = Bundle.main.url(forResource: "NOTICE", withExtension: "txt") {
                 Link(destination: noticeURL) {
                     Label("View attribution notice", systemImage: "doc.plaintext")
@@ -229,8 +246,8 @@ struct HostSettingsView: View {
 
     private var computerUseStatusDetail: String {
         switch session.computerUse.capability.state {
-        case .ready: return "AI Computer Use is ready on this Mac."
-        case .busy: return "AI Computer Use is working on a task."
+        case .ready: return session.computerUse.capability.detail
+        case .busy: return "Computer use (Beta) is working on a task."
         case .paused: return session.computerUse.capability.detail
         case .installing: return session.computerUse.capability.detail
         case .setupRequired: return "Finish setup from your iPhone or iPad."

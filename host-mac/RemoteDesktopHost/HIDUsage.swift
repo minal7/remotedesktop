@@ -4,7 +4,7 @@ import CoreGraphics
 /// keyboard events — into macOS Carbon virtual keycodes used by
 /// `CGEvent(keyboardEventSource:virtualKey:keyDown:)`.
 ///
-/// Covers letters, digits, common punctuation, arrows, nav, F1–F12,
+/// Covers letters, digits, common punctuation, arrows, nav, F1–F20,
 /// and modifiers. Deadkeys and numeric keypad aren't mapped yet —
 /// they fall through to `nil` and the injector ignores them (clients
 /// can work around by sending the composed `text` message instead).
@@ -52,6 +52,8 @@ enum HIDUsage {
         0x3A: 0x7A, 0x3B: 0x78, 0x3C: 0x63, 0x3D: 0x76,   // F1-F4
         0x3E: 0x60, 0x3F: 0x61, 0x40: 0x62, 0x41: 0x64,   // F5-F8
         0x42: 0x65, 0x43: 0x6D, 0x44: 0x67, 0x45: 0x6F,   // F9-F12
+        0x68: 0x69, 0x69: 0x6B, 0x6A: 0x71, 0x6B: 0x6A,   // F13-F16
+        0x6C: 0x40, 0x6D: 0x4F, 0x6E: 0x50, 0x6F: 0x5A,   // F17-F20
 
         // Nav
         0x4A: 0x73,   // Home

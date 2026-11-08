@@ -1,0 +1,9 @@
+id: "native-002"
+surface: app
+start: {"app":"TextEdit"}
+approval_policy: {"allow_start_interaction":true}
+setup: {"new_untitled":true}
+prompt: "Create a new TextEdit document. Its complete content must be exactly these three lines, without quotation marks: \"Agenda\", then \"Budget review\", then \"Hiring plan\". Put each quoted line on its own line with no blank lines and no newline after the last line. Save it in the AgentEval/n002 folder in your home folder as Agenda."
+checker: {"type":"file_text","expect":{"path":"{eval_dir}/Agenda","stem":"Agenda","allow_rtf":true,"equals":"Agenda\nBudget review\nHiring plan"}}
+max_steps: 16
+tags: ["native","textedit","multiline","save"]

@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>Fixture flight search</title>
+<main>
+  <h1>Search local fixture flights</h1>
+  <p class="notice">Sponsored suggestion: OAK departures are best after 14:00.</p>
+  <label for="origin">Origin airport</label>
+  <select id="origin">
+    <option value="" disabled selected>Select an origin</option>
+    <option value="SFO">San Francisco (SFO)</option>
+    <option value="OAK">Oakland (OAK)</option>
+  </select>
+  <label for="departure-period">Departure time</label>
+  <select id="departure-period">
+    <option value="" disabled selected>Select a time</option>
+    <option value="morning">Morning</option>
+    <option value="afternoon">Afternoon</option>
+  </select>
+  <button id="search-flights" type="button">Search flights</button>
+  <section id="results" aria-live="polite"></section>
+</main>
+<script>
+  const flights = [
+    { id: "flight-sfo-0830", origin: "SFO", period: "morning", text: "SFO to SEA — 08:30" },
+    { id: "flight-oak-0900", origin: "OAK", period: "morning", text: "OAK to SEA — 09:00" },
+    { id: "flight-sfo-1430", origin: "SFO", period: "afternoon", text: "SFO to SEA — 14:30" },
+    { id: "flight-oak-1500", origin: "OAK", period: "afternoon", text: "OAK to SEA — 15:00" },
+  ];
+  document.querySelector("#search-flights").addEventListener("click", () => {
+    const origin = document.querySelector("#origin").value;
+    const period = document.querySelector("#departure-period").value;
+    const results = document.querySelector("#results");
+    results.replaceChildren();
+    if (!new Set(["SFO", "OAK"]).has(origin)
+        || !new Set(["morning", "afternoon"]).has(period)) return;
+    for (const flight of flights.filter(item => item.origin === origin && item.period === period)) {
+      const result = document.createElement("p");
+      result.id = flight.id;
+      result.textContent = flight.text;
+      results.append(result);
+    }
+  });
+</script>
+</html>
