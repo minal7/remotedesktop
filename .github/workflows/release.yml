@@ -678,9 +678,16 @@ jobs:
         run: |
           set -euo pipefail
 
+          project=host-mac/RemoteDesktopHost.xcodeproj/project.pbxproj
+          committed="$RUNNER_TEMP/committed.pbxproj"
+          cp "$project" "$committed"
           (cd host-mac && xcodegen generate)
-          if ! git diff --exit-code -- host-mac/RemoteDesktopHost.xcodeproj/project.pbxproj; then
-            echo "::error::host-mac/project.yml and the checked-in Xcode project differ. Regenerate the project with XcodeGen $XCODEGEN_VERSION and commit it."
+          # The project includes folders outside host-mac (../policy,
+          # ../protocol, ../shared), so XcodeGen derives object IDs from the
+          # checkout's absolute path. Compare everything except those IDs.
+          normalize() { sed -E 's/[0-9A-F]{24}/ID/g' "$1" | sort; }
+          if ! diff -u <(normalize "$committed") <(normalize "$project"); then
+            echo "::error::host-mac/project.yml and the checked-in Xcode project differ. Regenerate the project with XcodeGen $XCODEGEN_VERSION in a checkout named remotedesktop and commit it."
             exit 1
           fi
 
