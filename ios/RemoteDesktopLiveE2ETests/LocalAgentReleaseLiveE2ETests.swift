@@ -17,7 +17,8 @@ final class LocalAgentReleaseLiveE2ETests: XCTestCase {
     /// A read-only lookup that has to end with an answer.
     func test1_AnswersALookup() throws {
         let run = try send("Find the cheapest nonstop flight to Seattle on Dec 12 at \(base)/flights and tell me the airline and price.")
-        let result = try waitForEnd(run, denyApprovals: true, seconds: 420)
+        // The page has no departure city, so the agent may ask; answer like a person would.
+        let result = try waitForEnd(run, denyApprovals: true, seconds: 420, answer: "From San Francisco")
         XCTAssertEqual(result.status, "Task completed", result.answer)
         XCTAssertTrue(result.answer.contains("$"), "Expected a price in the answer: \(result.answer)")
     }
@@ -68,6 +69,7 @@ final class LocalAgentReleaseLiveE2ETests: XCTestCase {
         var answer = ""
         var denied = 0
         var paused = false
+        var questions: [String] = []
     }
 
     private func send(_ prompt: String) throws -> Run {
@@ -111,8 +113,10 @@ final class LocalAgentReleaseLiveE2ETests: XCTestCase {
     }
 
     private func waitForEnd(_ run: Run, denyApprovals: Bool, seconds: TimeInterval,
-                            stopIfPaused: Bool = false) throws -> Result {
+                            stopIfPaused: Bool = false, answer: String? = nil) throws -> Result {
         let app = run.app
+        var prior = run.priorAssistant
+        var quietSince: Date?
         let status = app.descendants(matching: .any)["computer-use-status"]
         let assistant = app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", "AI: "))
         let started = Date()
@@ -138,18 +142,41 @@ final class LocalAgentReleaseLiveE2ETests: XCTestCase {
                 }
                 break
             }
-            if assistant.count > run.priorAssistant, let value = status.value as? String,
+            if assistant.count > prior, let value = status.value as? String,
                ["Task completed", "Unable to complete", "User intervention required"].contains(value) {
                 result.status = value
                 break
             }
+            // A question is a new message with no task running and no outcome.
+            let stop = app.buttons["computer-use-stop-task"]
+            if assistant.count > prior, (status.value as? String ?? "").isEmpty, !stop.exists,
+               VisualDiagnosticComposer.readyField(in: app).exists {
+                quietSince = quietSince ?? Date()
+                if Date().timeIntervalSince(quietSince!) > 3 {
+                    let question = assistant.element(boundBy: assistant.count - 1).label
+                    result.questions.append(question)
+                    attach("question-\(result.questions.count)", app)
+                    print("LOCAL_AGENT_E2E question=\(question)")
+                    guard let answer, result.questions.count <= 2 else { result.status = "Question"; break }
+                    prior = assistant.count
+                    quietSince = nil
+                    let composer = VisualDiagnosticComposer.readyField(in: app)
+                    composer.tap()
+                    composer.typeText(answer)
+                    app.buttons["Send request"].tap()
+                    print("LOCAL_AGENT_E2E answered=\(answer)")
+                    continue
+                }
+            } else {
+                quietSince = nil
+            }
             RunLoop.current.run(until: Date().addingTimeInterval(0.5))
         } while Date() < deadline
-        if assistant.count > run.priorAssistant {
+        if assistant.count > prior {
             result.answer = assistant.element(boundBy: assistant.count - 1).label
         }
         attach("end", app)
-        print("LOCAL_AGENT_E2E end seconds=\(Int(Date().timeIntervalSince(started))) status=\(result.status) paused=\(result.paused) denied=\(result.denied) answer=\(result.answer)")
+        print("LOCAL_AGENT_E2E end seconds=\(Int(Date().timeIntervalSince(started))) status=\(result.status) paused=\(result.paused) denied=\(result.denied) questions=\(result.questions.count) answer=\(result.answer)")
         if result.status.isEmpty && !result.paused {
             let stop = app.buttons["computer-use-stop-task"]
             if stop.exists && stop.isHittable { stop.tap() }
