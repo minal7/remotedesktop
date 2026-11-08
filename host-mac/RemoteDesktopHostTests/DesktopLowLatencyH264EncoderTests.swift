@@ -140,8 +140,9 @@ final class DesktopLowLatencyH264EncoderTests: XCTestCase {
         XCTAssertEqual(firstSizes, [8]); XCTAssertEqual(secondSizes, [8])
     }
 
-    @available(macOS 26.0, *)
-    func testCBRPropertiesAndLiveRateUpdateAreIsolatedFromF2() {
+    func testCBRPropertiesAndLiveRateUpdateAreIsolatedFromF2() throws {
+        // Uses VideoToolbox keys that macOS 15 lacks; the release runner is macOS 15.
+        guard #available(macOS 26.0, *) else { throw XCTSkip("Needs macOS 26") }
         let spec = DesktopCBRConfiguration.specification()
         XCTAssertNil(spec[kVTVideoEncoderSpecification_EnableLowLatencyRateControl])
         let properties = Dictionary(uniqueKeysWithValues: DesktopCBRConfiguration.properties(fps: 60, bitrateKbps: 5_000).map { ($0.0 as String, $0.1) })
@@ -175,15 +176,17 @@ final class DesktopLowLatencyH264EncoderTests: XCTestCase {
         XCTAssertFalse(DesktopLowLatencyH264Encoder.acceptsCBRFrame(cropped, frameWidth: 32, frameHeight: 32, settings: settings))
     }
 
-    @available(macOS 26.0, *)
-    func testCBRReadbackTolerance() {
+    func testCBRReadbackTolerance() throws {
+        // Uses VideoToolbox keys that macOS 15 lacks; the release runner is macOS 15.
+        guard #available(macOS 26.0, *) else { throw XCTSkip("Needs macOS 26") }
         XCTAssertTrue(DesktopCBRConfiguration.rateMatches(requested: 5_000_000, readback: 5_050_000))
         XCTAssertFalse(DesktopCBRConfiguration.rateMatches(requested: 5_000_000, readback: 5_050_001))
         XCTAssertFalse(DesktopCBRConfiguration.rateMatches(requested: 0, readback: 1))
     }
 
-    @available(macOS 26.0, *)
     func testCBRRejectedConfigurationStartsNativeFallback() throws {
+        // Uses VideoToolbox keys that macOS 15 lacks; the release runner is macOS 15.
+        guard #available(macOS 26.0, *) else { throw XCTSkip("Needs macOS 26") }
         let fallback = RecordingFallbackEncoder()
         var reachedVBV = false
         let encoder = DesktopLowLatencyH264Encoder(fallback: fallback, cbr: true, propertySetter: { _, key, _ in
@@ -198,8 +201,9 @@ final class DesktopLowLatencyH264EncoderTests: XCTestCase {
         XCTAssertEqual(encoder.release(), 0)
     }
 
-    @available(macOS 26.0, *)
     func testCBRRejectedLiveRateFallsBackOnNextFrame() throws {
+        // Uses VideoToolbox keys that macOS 15 lacks; the release runner is macOS 15.
+        guard #available(macOS 26.0, *) else { throw XCTSkip("Needs macOS 26") }
         let fallback = RecordingFallbackEncoder()
         var rejectRate = false, sawRejectedUpdate = false
         let encoder = DesktopLowLatencyH264Encoder(fallback: fallback, cbr: true, propertySetter: { session, key, value in
@@ -277,14 +281,16 @@ final class DesktopLowLatencyH264EncoderTests: XCTestCase {
         unblock.signal()
     }
 
-    @available(macOS 26.0, *)
-    func testHEVCMetadataFailsClosedWhenClassMissing() {
+    func testHEVCMetadataFailsClosedWhenClassMissing() throws {
+        // Uses VideoToolbox keys that macOS 15 lacks; the release runner is macOS 15.
+        guard #available(macOS 26.0, *) else { throw XCTSkip("Needs macOS 26") }
         XCTAssertNil(LabHEVCEncoder.makeInfo(lookup: { _ in nil }))
         XCTAssertNotNil(LabHEVCEncoder.makeInfo())
     }
 
-    @available(macOS 26.0, *)
-    func testHEVCSPSRejectsWrongProfileTierAndLevel() {
+    func testHEVCSPSRejectsWrongProfileTierAndLevel() throws {
+        // Uses VideoToolbox keys that macOS 15 lacks; the release runner is macOS 15.
+        guard #available(macOS 26.0, *) else { throw XCTSkip("Needs macOS 26") }
         var rbsp = [UInt8](repeating: 0, count: 13); rbsp[1] = 1; rbsp[12] = 153
         func sps() -> Data { Data([0x42, 0x01] + rbsp) }
         XCTAssertTrue(LabHEVCEncoder.acceptsSPS(sps()))
@@ -301,8 +307,9 @@ final class DesktopLowLatencyH264EncoderTests: XCTestCase {
         XCTAssertFalse(LabHEVCEncoder.annexBContainsAcceptedSPS(Data([0, 0, 0, 1, 0x40, 0x01])))
     }
 
-    @available(macOS 26.0, *)
     func testHEVCCroppedFrameEncodesAndDecodes() throws {
+        // Uses VideoToolbox keys that macOS 15 lacks; the release runner is macOS 15.
+        guard #available(macOS 26.0, *) else { throw XCTSkip("Needs macOS 26") }
         guard LabHEVCEncoder.preflight(), let info = LabHEVCEncoder.makeInfo(),
               let native = LKRTCDefaultVideoEncoderFactory().createEncoder(LKRTCVideoCodecInfo(name: "H265")),
               let decoder = LKRTCDefaultVideoDecoderFactory().createDecoder(LKRTCVideoCodecInfo(name: "H265")) else {
